@@ -1131,9 +1131,11 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
                 t = tasks.get(task_id)
                 if t:
                     t.setdefault("_tools_used", []).append(tool_name)
+                    task_reasoning = t.get("reasoning", "")
             msg_entry = {
                 "role": "assistant",
                 "content": "Here is your generated image:",
+                "_reasoning": task_reasoning,
                 "_tools_used": tu + [tool_name],
                 "_image_url": image_url,
                 "_gen_prompt": args.get("prompt", ""),
@@ -1152,6 +1154,7 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
                 gen_prompt=args.get("prompt", ""),
                 image_model=None,
                 sid=sid,
+                reasoning=task_reasoning,
             )
         else:
             _event_post(
@@ -1193,9 +1196,11 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
                     t = tasks.get(task_id)
                     if t:
                         t.setdefault("_tools_used", []).append(tool_name)
+                        task_reasoning = t.get("reasoning", "")
                 msg_entry = {
                     "role": "assistant",
                     "content": "Here is your generated image:",
+                    "_reasoning": task_reasoning,
                     "_tools_used": tu + [tool_name],
                     "_image_url": image_url,
                     "_gen_prompt": args.get("prompt", ""),
@@ -1214,6 +1219,7 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
                     gen_prompt=args.get("prompt", ""),
                     image_model=image_model_s,
                     sid=sid,
+                    reasoning=task_reasoning,
                 )
             else:
                 _event_post(
@@ -1403,12 +1409,25 @@ def _event_loop():
                     if tt:
                         tt.setdefault("_tools_used", [])
                         tt.setdefault("_search_details", [])
+                        rc = msg.get("reasoning_content", "")
+                        if rc:
+                            tt["reasoning"] = rc
                 pending = len(msg["tool_calls"])
                 with _data_lock:
                     tt = tasks.get(task_id)
                     if tt:
                         tt["_state"] = "tools_running"
                         tt["_pending_tools"] = pending
+                with _data_lock:
+                    if sid in sessions:
+                        assistant_msg = {"role": "assistant"}
+                        if msg.get("content"):
+                            assistant_msg["content"] = msg["content"]
+                        if msg.get("tool_calls"):
+                            assistant_msg["tool_calls"] = msg["tool_calls"]
+                        sessions[sid].append(assistant_msg)
+                        sessions_meta.setdefault(sid, {})["updated"] = time.time()
+                save_sessions()
                 for i, tc in enumerate(msg["tool_calls"]):
                     _tool_pool.submit(
                         _tool_worker,
@@ -1493,6 +1512,7 @@ def _event_loop():
             tools_used = data["tools_used"]
             gen_prompt = data["gen_prompt"]
             image_model = data.get("image_model")
+            reasoning = data.get("reasoning", "")
             with _data_lock:
                 if task_id in tasks:
                     tasks[task_id] = {
@@ -1504,6 +1524,7 @@ def _event_loop():
                         "tools_used": tools_used,
                         "gen_prompt": gen_prompt,
                         "_image_model": image_model,
+                        "reasoning": reasoning,
                     }
 
 
