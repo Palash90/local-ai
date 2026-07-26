@@ -595,6 +595,8 @@ html, body {
 .msg-content h3 { font-size: 1.05em; }
 .msg-content hr { border: none; border-top: 1px solid rgba(255, 255, 255, 0.06); margin: 12px 0; }
 
+.msg-content.empty-response { color: #666; font-size: 13px; padding: 4px 0; }
+
 /* ---- Input Bar ---- */
 #input-bar {
   display: flex;

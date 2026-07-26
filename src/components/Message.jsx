@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useCallback, useEffect } from 'react'
+import { useMemo, useRef, useState, useCallback } from 'react'
 import { marked } from 'marked'
 import StatusBox from './StatusBox'
 
@@ -63,13 +63,7 @@ export default function Message({ msg, pending, onImageOpen }) {
   const chatEl = useRef(null)
   const [popupVisible, setPopupVisible] = useState(null)
   const hideTimer = useRef(null)
-
-  useEffect(() => {
-    if (elRef.current) {
-      const chat = elRef.current.closest('#chat')
-      if (chat) chat.scrollTop = chat.scrollHeight
-    }
-  }, [])
+  const [reasoningOpen, setReasoningOpen] = useState(true)
 
   const showPopup = useCallback((idx) => {
     if (hideTimer.current) clearTimeout(hideTimer.current)
@@ -84,15 +78,11 @@ export default function Message({ msg, pending, onImageOpen }) {
 
   const MAX_REASONING = 2000
 
-  function ReasoningBlock({ text, autoOpen }) {
-    const ref = useRef(null)
-    useEffect(() => {
-      if (ref.current) ref.current.open = autoOpen
-    }, [])
+  function ReasoningBlock({ text, open, onToggle }) {
     if (!text) return null
     const capped = text.length > MAX_REASONING ? text.slice(0, MAX_REASONING) + '...' : text
     return (
-      <details className="reasoning-block" ref={ref}>
+      <details className="reasoning-block" open={open} onToggle={(e) => onToggle(e.target.open)}>
         <summary>Reasoning</summary>
         <pre className="reasoning-text">{capped}</pre>
       </details>
@@ -104,7 +94,7 @@ export default function Message({ msg, pending, onImageOpen }) {
       <div className={`msg bot`} ref={elRef}>
         <div className="msg-content">
           <StatusBox message={pending.message} />
-          <ReasoningBlock text={pending.reasoning} autoOpen={true} />
+          <ReasoningBlock text={pending.reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
         </div>
       </div>
     )
@@ -141,10 +131,14 @@ export default function Message({ msg, pending, onImageOpen }) {
   const html = useMemo(() => {
     if (!text) return ''
     if (text.indexOf('class="status-box"') !== -1) return text
-    return marked.parse(text)
+    try {
+      return marked.parse(text)
+    } catch {
+      return escHtml(text)
+    }
   }, [text])
 
-  if (!text && !imageUrl && !userImg && !genPrompt) return null
+  if (role === 'user' && !text && !imageUrl && !userImg && !genPrompt) return null
 
   return (
     <div className={`msg ${role}`} ref={elRef}>
@@ -191,13 +185,17 @@ export default function Message({ msg, pending, onImageOpen }) {
           Prompt: {genPrompt}
         </div>
       )}
-      <ReasoningBlock text={msg._reasoning} autoOpen={false} />
-      {text && (
+      <ReasoningBlock text={msg._reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
+      {text ? (
         <div
           className="msg-content"
           dangerouslySetInnerHTML={{ __html: html }}
         />
-      )}
+      ) : !imageUrl && !userImg ? (
+        <div className="msg-content empty-response">
+          <em>(No response text generated)</em>
+        </div>
+      ) : null}
     </div>
   )
 }

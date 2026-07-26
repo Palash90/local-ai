@@ -420,6 +420,8 @@ def _finalize_task(task_id, sid, msg_content, body):
     reasoning = (
         body.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
     )
+    if not msg_content and reasoning:
+        msg_content = "(No response content generated)"
     msg_entry = {
         "role": "assistant",
         "content": msg_content,
@@ -1003,6 +1005,7 @@ def _llm_worker(task_id, sid, payload, round_num):
         r.encoding = "utf-8"
         reasoning_buf = ""
         content_buf = ""
+        tool_calls_map = {}
         for line in r.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
@@ -1026,17 +1029,39 @@ def _llm_worker(task_id, sid, payload, round_num):
             c = delta.get("content")
             if c:
                 content_buf += c
-        body = {
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": content_buf,
-                        "reasoning_content": reasoning_buf,
-                    }
-                }
-            ]
+            tc_list = delta.get("tool_calls")
+            if tc_list:
+                for tc in tc_list:
+                    idx = tc.get("index", 0)
+                    if idx not in tool_calls_map:
+                        fn = tc.get("function", {})
+                        tool_calls_map[idx] = {
+                            "index": idx,
+                            "id": tc.get("id", ""),
+                            "type": tc.get("type", "function"),
+                            "function": {
+                                "name": fn.get("name", ""),
+                                "arguments": fn.get("arguments", ""),
+                            },
+                        }
+                    else:
+                        existing = tool_calls_map[idx]
+                        if tc.get("id"):
+                            existing["id"] = tc["id"]
+                        fn = tc.get("function")
+                        if fn:
+                            if fn.get("name"):
+                                existing["function"]["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                existing["function"]["arguments"] += fn["arguments"]
+        msg = {
+            "role": "assistant",
+            "content": content_buf,
+            "reasoning_content": reasoning_buf,
         }
+        if tool_calls_map:
+            msg["tool_calls"] = list(tool_calls_map.values())
+        body = {"choices": [{"message": msg}]}
         with _data_lock:
             if task_id in tasks:
                 tasks[task_id].pop("reasoning", None)
@@ -1395,7 +1420,7 @@ def _event_loop():
                         i,
                     )
             else:
-                _finalize_task(task_id, sid, msg.get("content", ""), body)
+                _finalize_task(task_id, sid, (msg.get("content") or ""), body)
 
         elif ev_type == "llm_err":
             if t.get("_state") != "llm_waiting":
