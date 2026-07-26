@@ -30,6 +30,16 @@ export default function App() {
 
 
   useEffect(() => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
+        () => {},
+        { timeout: 10000 }
+      )
+    }
+  }, [])
+
+  useEffect(() => {
   const token = localStorage.getItem('auth_token') // or whatever key api.login uses
   if (token) {
     api.checkAuth()
@@ -45,6 +55,8 @@ export default function App() {
               switchSession(list[0].session_id)
             }
           })
+        } else {
+          localStorage.removeItem('auth_token')
         }
       })
       .catch(() => setAuthenticated(false))
@@ -54,6 +66,20 @@ export default function App() {
   useEffect(() => {
     pendingRef.current = pendingMessages
   }, [pendingMessages])
+
+  useEffect(() => {
+    const handler = () => {
+      setAuthenticated(false);
+      setUsername('');
+      setSessions([]);
+      setCurrentSessionId(null);
+      setMessages([]);
+      setPendingMessages({});
+      setSidebarOpen(false);
+    };
+    window.addEventListener('auth:unauthorized', handler);
+    return () => window.removeEventListener('auth:unauthorized', handler);
+  }, [])
 
   const hasPendingForCurrent = Object.values(pendingMessages).some(
     p => p.sessionId === currentSessionId
@@ -345,6 +371,13 @@ export default function App() {
     try {
       await handleLogin(username, password)
       console.log('[loginWrapper] after handleLogin, authenticated should be true')
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
+          () => {},
+          { timeout: 10000 }
+        )
+      }
       console.log('[loginWrapper] loading sessions...')
       const list = await loadSessions()
       console.log('[loginWrapper] sessions loaded', list.length)

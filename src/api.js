@@ -11,6 +11,10 @@ async function authFetch(url, options = {}) {
     options.headers['X-Auth-Token'] = token;
   }
   const r = await fetch(url, options);
+  if (r.status === 401) {
+    localStorage.removeItem(TOKEN_KEY);
+    window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+  }
   return r;
 }
 
@@ -41,16 +45,8 @@ export async function checkAuth() {
 }
 
 export async function fetchSessions() {
-  const token = localStorage.getItem('opencode_token')
-  const res = await fetch('/api/sessions', {
-    headers: {
-      'X-Auth-Token': token
-    }
-  })
-  if (res.status === 401) {
-    console.log("Fetching session failed");
-  }
-  return res.json();
+  const r = await authFetch('/api/sessions');
+  return r.json();
 }
 
 export async function fetchMessages(sessionId) {
@@ -103,6 +99,14 @@ export async function getTaskStatus(taskId) {
 export async function getModelStatus() {
   const r = await fetch('/api/model-status');
   return r.json();
+}
+
+export async function sendLocation(latitude, longitude) {
+  await fetch('/api/location', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ latitude, longitude }),
+  });
 }
 
 export async function extractFile(name, dataB64) {

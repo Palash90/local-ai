@@ -235,6 +235,7 @@ tasks = {}
 model_status = "unloaded"
 _last_tps = None
 _last_llm_use = time.time()
+_client_location = None
 
 _data_lock = threading.Lock()
 
@@ -544,6 +545,9 @@ def restart_servers():
 
 
 def location_str():
+    global _client_location
+    if _client_location:
+        return _client_location
     return "Unknown"
 
 
@@ -1152,7 +1156,10 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None):
             user = t.get("_user", "")
     user_context = read_user_context(user) if user else ""
     context_block = f"\n\n## User Context\n{user_context}" if user_context else ""
+    now = datetime.now()
     full_sys_content = f"{SYS_CONTENT}\n\n{date_loc_context}{context_block}"
+    full_sys_content = full_sys_content.replace("%current_time%", now.strftime('%Y-%m-%d %A %H:%M'))
+    full_sys_content = full_sys_content.replace("%current_location%", location_str())
     if user_context:
         print(f"[context] Injected {len(user_context)} chars of context for user '{user}'")
     with _data_lock:
@@ -1183,7 +1190,7 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None):
                     "audio_url": {"url": f"data:audio/webm;base64,{audio_b64}"},
                 }
             )
-        content.append({"type": "text", "text": user_message})
+        content.append({"type": "text", "text": f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {user_message}"})
         sessions[sid].append({"role": "user", "content": content})
         if sessions_meta[sid]["name"] in ("New Chat", ""):
             sessions_meta[sid]["name"] = user_message[:50] + (
@@ -1875,7 +1882,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             global _client_location
-            _client_location = body
+            lat = body.get("latitude")
+            lng = body.get("longitude")
+            if lat is not None and lng is not None:
+                try:
+                    geo = requests.get(
+                        "https://nominatim.openstreetmap.org/reverse",
+                        params={"format": "json", "lat": lat, "lon": lng},
+                        headers={"User-Agent": "LocalAI/1.0"},
+                        timeout=5,
+                    ).json()
+                    display = geo.get("display_name", "")
+                    _client_location = display
+                except Exception:
+                    _client_location = f"{lat:.4f}, {lng:.4f}"
             self.send_json({"ok": True})
         else:
             self.send_error(404)
