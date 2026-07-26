@@ -1,0 +1,2 @@
+sudo ufw allow in on wlan0
+sudo ufw allow out on wlan0

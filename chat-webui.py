@@ -9,16 +9,18 @@ from concurrent.futures import ThreadPoolExecutor
 LLAMA_BASE = "http://localhost:8081"
 LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
 
+
+COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = "http://localhost:8080/search"
 COMFYUI_URL = "http://localhost:8188"
-HOST, PORT = "0.0.0.0", 3000
+HOST, PORT = "0.0.0.0", 3001
 
 with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
     MODEL_ID = file.read()
 
 import sys
 
-COMFYUI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ComfyUI")
+
 sys.path.insert(0, COMFYUI_DIR)
 COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-server")
@@ -938,20 +940,31 @@ def _event_post(ev_type, task_id, **data):
 
 def _llm_worker(task_id, sid, payload, round_num):
     try:
+        has_image = any(
+            isinstance(m.get("content"), list)
+            and any(p.get("type") == "image_url" for p in m["content"])
+            for m in payload.get("messages", [])
+        )
         r = requests.post(LLAMA_URL, json=payload, timeout=600)
         body = r.json()
         if "choices" in body:
             _event_post("llm_ok", task_id, body=body, round=round_num, sid=sid)
         else:
+            err_text = str(body)[:300]
+            if has_image and ("image" in err_text.lower() or "vision" in err_text.lower() or "multimodal" in err_text.lower() or "does not support" in err_text.lower()):
+                err_text = "The current model does not support image input. Please use a vision-capable model or send text-only messages."
             _event_post(
                 "llm_err",
                 task_id,
-                error=f"Unexpected response ({r.status_code}): {str(body)[:300]}",
+                error=f"Unexpected response ({r.status_code}): {err_text}",
                 round=round_num,
                 sid=sid,
             )
     except Exception as e:
-        _event_post("llm_err", task_id, error=str(e), round=round_num, sid=sid)
+        err_text = str(e)
+        if "image" in err_text.lower() or "vision" in err_text.lower():
+            err_text = "The current model does not support image input. Please use a vision-capable model or send text-only messages."
+        _event_post("llm_err", task_id, error=err_text, round=round_num, sid=sid)
 
 
 def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
@@ -1498,12 +1511,13 @@ def _thermal_monitor():
                 _evacuate_ram()
 
 
-HTML_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
-try:
-    with open(HTML_FILE) as f:
-        HTML = f.read()
-except:
-    HTML = "<html><body><h1>index.html missing</h1></body></html>"
+def read_index_html():
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist", "index.html")
+    try:
+        with open(p) as f:
+            return f.read()
+    except:
+        return "<html><body><h1>index.html missing</h1></body></html>"
 
 
 def extract_file_text(name, data_b64):
@@ -1664,10 +1678,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         elif self.path == "/":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            self.wfile.write(HTML.encode())
+            self.wfile.write(read_index_html().encode())
         else:
-            self.send_error(404)
+            DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
+            fpath = os.path.abspath(os.path.join(DIST_DIR, self.path.lstrip("/")))
+            if fpath.startswith(os.path.abspath(DIST_DIR)) and os.path.isfile(fpath):
+                ctype, _ = mimetypes.guess_type(fpath)
+                self.send_response(200)
+                self.send_header("Content-Type", ctype or "application/octet-stream")
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+                self.end_headers()
+                with open(fpath, "rb") as f:
+                    self.wfile.write(f.read())
+            elif self.path.startswith("/api/") or '.' in os.path.basename(self.path):
+                self.send_error(404)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(read_index_html().encode())
 
     def do_DELETE(self):
         if self.path.startswith("/api/sessions/"):
