@@ -490,6 +490,31 @@ html, body {
 .status-box[data-state="edit-image"] { border-color: #1a4a2a; }
 .status-box[data-state="edit-image"] .spinner { color: #34d399; }
 
+.reasoning-block {
+  margin-top: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.reasoning-block summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #888;
+  user-select: none;
+}
+.reasoning-text {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #999;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 /* ---- Message Content ---- */
 .msg-content p { margin: 4px 0; }
 

@@ -82,11 +82,29 @@ export default function Message({ msg, pending, onImageOpen }) {
 
   const role = pending ? 'bot' : msg.role === 'user' ? 'user' : 'bot'
 
+  const MAX_REASONING = 2000
+
+  function ReasoningBlock({ text, autoOpen }) {
+    const ref = useRef(null)
+    useEffect(() => {
+      if (ref.current) ref.current.open = autoOpen
+    }, [])
+    if (!text) return null
+    const capped = text.length > MAX_REASONING ? text.slice(0, MAX_REASONING) + '...' : text
+    return (
+      <details className="reasoning-block" ref={ref}>
+        <summary>Reasoning</summary>
+        <pre className="reasoning-text">{capped}</pre>
+      </details>
+    )
+  }
+
   if (pending) {
     return (
       <div className={`msg bot`} ref={elRef}>
         <div className="msg-content">
           <StatusBox message={pending.message} />
+          <ReasoningBlock text={pending.reasoning} autoOpen={true} />
         </div>
       </div>
     )
@@ -173,6 +191,7 @@ export default function Message({ msg, pending, onImageOpen }) {
           Prompt: {genPrompt}
         </div>
       )}
+      <ReasoningBlock text={msg._reasoning} autoOpen={false} />
       {text && (
         <div
           className="msg-content"

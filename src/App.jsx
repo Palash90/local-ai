@@ -197,7 +197,7 @@ export default function App() {
 
       setPendingMessages(prev => ({
         ...prev,
-        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId },
+        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '' },
       }))
 
       const stored = getStoredPending()
@@ -271,7 +271,7 @@ export default function App() {
       const taskId = data.task_id
       setPendingMessages(prev => ({
         ...prev,
-        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId },
+        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '' },
       }))
       const stored = getStoredPending()
       stored.push({ task_id: taskId, sid: taskSid })
@@ -309,6 +309,7 @@ export default function App() {
               const msg = {
                 role: 'assistant',
                 content: st.response || '',
+                _reasoning: st.reasoning || '',
                 _image_url: st.image || st._image_url,
                 _gen_prompt: st.gen_prompt,
                 _tools_used: st.tools_used || [],
@@ -326,7 +327,7 @@ export default function App() {
           } else {
             setPendingMessages(prev => ({
               ...prev,
-              [taskId]: { ...prev[taskId], status: st.status, message: st.message || 'Working...' },
+              [taskId]: { ...prev[taskId], status: st.status, message: st.message || 'Working...', reasoning: st.reasoning || prev[taskId]?.reasoning },
             }))
           }
         } catch {
@@ -359,7 +360,7 @@ export default function App() {
     if (stored.length > 0) {
       const pMap = {}
       stored.forEach(item => {
-        pMap[item.task_id] = { sessionId: item.sid, status: 'working', message: 'Thinking...', taskId: item.task_id }
+        pMap[item.task_id] = { sessionId: item.sid, status: 'working', message: 'Thinking...', taskId: item.task_id, reasoning: '' }
       })
       setPendingMessages(pMap)
     }

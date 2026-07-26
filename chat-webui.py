@@ -14,12 +14,12 @@ COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = "http://localhost:8080/search"
 COMFYUI_URL = "http://localhost:8188"
 HOST, PORT = "0.0.0.0", 3001
+REASONING_BUDGET = 1120  # 560 for medium, you don't need short reasoning
 
 with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
     MODEL_ID = file.read()
 
 import sys
-
 
 sys.path.insert(0, COMFYUI_DIR)
 COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
@@ -38,6 +38,8 @@ LLAMA_SERVER_ARGS = [
     "--no-kv-offload",
     "--ctx-size",
     "32768",
+    "--reasoning-budget",
+    str(REASONING_BUDGET),
 ]
 
 LLAMA_QWEN_ARGS = [
@@ -140,10 +142,10 @@ TOOLS = [
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The new information to append to the user's context. Keep it concise and focused on what's new."
+                        "description": "The new information to append to the user's context. Keep it concise and focused on what's new.",
                     }
                 },
-                "required": ["content"]
+                "required": ["content"],
             },
         },
     },
@@ -415,9 +417,13 @@ def _finalize_task(task_id, sid, msg_content, body):
     image_url = f"/output/{image_filename}" if image_filename else None
     timings = body.get("timings", {})
     predicted_per_second = timings.get("predicted_per_second")
+    reasoning = (
+        body.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
+    )
     msg_entry = {
         "role": "assistant",
         "content": msg_content,
+        "_reasoning": reasoning,
         "_tools_used": tools_used,
         "_image_url": image_url,
         "_gen_prompt": gen_prompt,
@@ -445,6 +451,7 @@ def _finalize_task(task_id, sid, msg_content, body):
                 "gen_prompt": gen_prompt,
                 "_image_model": image_model,
                 "_search_details": search_details,
+                "reasoning": reasoning,
             }
 
 
@@ -542,6 +549,46 @@ def restart_servers():
             pass
     print("[restart] llama-server did not respond within 2 minutes — killing")
     kill_llama_server()
+
+
+def ensure_comfyui_running():
+    try:
+        r = requests.get(f"{COMFYUI_URL}/prompt", timeout=3)
+        if r.status_code < 500:
+            return
+    except Exception:
+        pass
+    print("[comfyui] Not reachable — starting...")
+    kill_comfyui()
+    time.sleep(1)
+    log_dir = os.path.expanduser("~/local-ai")
+    comfy_log = open(os.path.join(log_dir, "comfyui.log"), "a")
+    subprocess.Popen(
+        [
+            os.path.join(COMFYUI_DIR, "venv/bin/python"),
+            "main.py",
+            "--output-directory",
+            COMFYUI_OUTPUT,
+            "--input-directory",
+            COMFYUI_INPUT,
+            "--lowvram",
+        ],
+        cwd=COMFYUI_DIR,
+        stdout=comfy_log,
+        stderr=comfy_log,
+        start_new_session=True,
+    )
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        time.sleep(2)
+        try:
+            r = requests.get(f"{COMFYUI_URL}/prompt", timeout=3)
+            if r.status_code < 500:
+                print("[comfyui] Healthy")
+                return
+        except Exception:
+            pass
+    print("[comfyui] Did not respond within 2 minutes")
 
 
 def location_str():
@@ -701,6 +748,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
         tasks[task_id]["gen_prompt"] = prompt
         tasks[task_id]["_image_model"] = model
         tasks[task_id]["negative_prompt"] = negative_prompt
+    ensure_comfyui_running()
     p_short = prompt[:200] + ("..." if len(prompt) > 200 else "")
     set_status(task_id, f"Generating image with ComfyUI... Prompt: {p_short}")
     try:
@@ -885,6 +933,7 @@ def edit_image(
         tasks[task_id]["_image_model"] = model
         tasks[task_id]["negative_prompt"] = negative_prompt
 
+    ensure_comfyui_running()
     set_status(task_id, f"Editing image with ComfyUI... Prompt: {prompt[:150]}")
 
     try:
@@ -949,18 +998,55 @@ def _llm_worker(task_id, sid, payload, round_num):
             and any(p.get("type") == "image_url" for p in m["content"])
             for m in payload.get("messages", [])
         )
-        r = requests.post(LLAMA_URL, json=payload, timeout=600)
-        body = r.json()
+        payload["stream"] = True
+        r = requests.post(LLAMA_URL, json=payload, stream=True, timeout=600)
+        r.encoding = "utf-8"
+        reasoning_buf = ""
+        content_buf = ""
+        for line in r.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[6:]
+            if data_str.strip() == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            choices = chunk.get("choices", [])
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            rc = delta.get("reasoning_content")
+            if rc:
+                reasoning_buf += rc
+                with _data_lock:
+                    if task_id in tasks:
+                        tasks[task_id]["reasoning"] = reasoning_buf
+            c = delta.get("content")
+            if c:
+                content_buf += c
+        body = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": content_buf,
+                        "reasoning_content": reasoning_buf,
+                    }
+                }
+            ]
+        }
+        with _data_lock:
+            if task_id in tasks:
+                tasks[task_id].pop("reasoning", None)
         if "choices" in body:
             _event_post("llm_ok", task_id, body=body, round=round_num, sid=sid)
         else:
-            err_text = str(body)[:300]
-            if has_image and ("image" in err_text.lower() or "vision" in err_text.lower() or "multimodal" in err_text.lower() or "does not support" in err_text.lower()):
-                err_text = "The current model does not support image input. Please use a vision-capable model or send text-only messages."
             _event_post(
                 "llm_err",
                 task_id,
-                error=f"Unexpected response ({r.status_code}): {err_text}",
+                error="Unexpected response",
                 round=round_num,
                 sid=sid,
             )
@@ -1158,10 +1244,14 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None):
     context_block = f"\n\n## User Context\n{user_context}" if user_context else ""
     now = datetime.now()
     full_sys_content = f"{SYS_CONTENT}\n\n{date_loc_context}{context_block}"
-    full_sys_content = full_sys_content.replace("%current_time%", now.strftime('%Y-%m-%d %A %H:%M'))
+    full_sys_content = full_sys_content.replace(
+        "%current_time%", now.strftime("%Y-%m-%d %A %H:%M")
+    )
     full_sys_content = full_sys_content.replace("%current_location%", location_str())
     if user_context:
-        print(f"[context] Injected {len(user_context)} chars of context for user '{user}'")
+        print(
+            f"[context] Injected {len(user_context)} chars of context for user '{user}'"
+        )
     with _data_lock:
         if sid not in sessions or not sessions[sid]:
             sessions[sid] = [{"role": "system", "content": full_sys_content}]
@@ -1190,7 +1280,12 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None):
                     "audio_url": {"url": f"data:audio/webm;base64,{audio_b64}"},
                 }
             )
-        content.append({"type": "text", "text": f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {user_message}"})
+        content.append(
+            {
+                "type": "text",
+                "text": f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {user_message}",
+            }
+        )
         sessions[sid].append({"role": "user", "content": content})
         if sessions_meta[sid]["name"] in ("New Chat", ""):
             sessions_meta[sid]["name"] = user_message[:50] + (
@@ -1218,6 +1313,8 @@ def _start_llm_round(task_id, sid, round_num):
         "tools": TOOLS,
         "tool_choice": "auto",
         "max_tokens": 4096,
+        "reasoning_budget": REASONING_BUDGET,
+        "reasoning_effort": "medium",
     }
     set_status(
         task_id, "Thinking..." if round_num == 0 else f"Thinking (round {round_num})..."
@@ -1600,7 +1697,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
             context = read_user_context(user)
-            self.send_json({"context": context, "username": user, "context_file": get_user_context_path(user)})
+            self.send_json(
+                {
+                    "context": context,
+                    "username": user,
+                    "context_file": get_user_context_path(user),
+                }
+            )
         elif self.path == "/api/check-auth":
             user = get_current_user(self.headers)
             if user:
@@ -1699,7 +1802,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 with open(fpath, "rb") as f:
                     self.wfile.write(f.read())
-            elif self.path.startswith("/api/") or '.' in os.path.basename(self.path):
+            elif self.path.startswith("/api/") or "." in os.path.basename(self.path):
                 self.send_error(404)
             else:
                 self.send_response(200)
@@ -1776,7 +1879,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 token = str(uuid.uuid4())
                 with _tokens_lock:
                     _active_tokens[token] = username
-                self.send_json({"token": token, "username": username, "context_file": get_user_context_path(username)})
+                self.send_json(
+                    {
+                        "token": token,
+                        "username": username,
+                        "context_file": get_user_context_path(username),
+                    }
+                )
             else:
                 self.send_json({"error": "Invalid credentials"}, status=401)
         elif self.path == "/api/logout":
@@ -1806,7 +1915,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"status": "ok", "username": user})
             else:
                 context = read_user_context(user)
-                self.send_json({"context": context, "username": user, "context_file": get_user_context_path(user)})
+                self.send_json(
+                    {
+                        "context": context,
+                        "username": user,
+                        "context_file": get_user_context_path(user),
+                    }
+                )
         elif self.path == "/api/chat":
             user = get_current_user(self.headers)
             if not user:
