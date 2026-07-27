@@ -46,19 +46,110 @@ function SearchPopup({ details }) {
   )
 }
 
-function CopyButton({ text, genPrompt }) {
+function CopyButton({ text, genPrompt, imageUrl, forceShow }) {
   const [label, setLabel] = useState('Copy')
 
-  function handleCopy() {
-    let copyText = text || ''
-    if (genPrompt) copyText = 'Prompt: ' + genPrompt + '\n\n' + copyText
-    navigator.clipboard.writeText(copyText).then(() => {
+  async function handleCopy() {
+    setLabel('Copying...')
+    try {
+      await copyWithImage()
+    } catch {
+      copyTextOnly()
+    }
+  }
+
+  async function copyWithImage() {
+    let textContent = text || ''
+    if (genPrompt) textContent = 'Prompt: ' + genPrompt + '\n\n' + textContent
+
+    if (imageUrl && navigator.clipboard && navigator.clipboard.write) {
+      const url = imageUrl.startsWith('http') ? imageUrl : window.location.origin + imageUrl
+      try {
+        const res = await fetch(url)
+        const blob = await res.blob()
+        const b64 = await blobToBase64(blob)
+        const escaped = textContent.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        const cleanHtml = '<html><body>' + escaped.replace(/\n/g, '<br>') + '<br><br><img src="' + b64 + '"></body></html>'
+
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            'text/html': new Blob([cleanHtml], { type: 'text/html' }),
+            'text/plain': new Blob([escaped + '\n\n' + url], { type: 'text/plain' }),
+          }),
+          new ClipboardItem({ [blob.type]: blob }),
+        ])
+        setLabel('Copied!')
+        setTimeout(() => setLabel('Copy'), 2000)
+        return
+      } catch {}
+    }
+
+    let copyText = textContent
+    if (imageUrl) {
+      const url = imageUrl.startsWith('http') ? imageUrl : window.location.origin + imageUrl
+      copyText = (copyText ? copyText + '\n\n' : '') + url
+    }
+
+    if (copyText && navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(copyText)
       setLabel('Copied!')
       setTimeout(() => setLabel('Copy'), 2000)
+      return
+    }
+
+    throw new Error('no clipboard method available')
+  }
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve(reader.result)
+      reader.onerror = reject
+      reader.readAsDataURL(blob)
     })
   }
 
-  return <button className="copy-btn" onClick={handleCopy}>{label}</button>
+  function copyTextOnly() {
+    let copyText = text || ''
+    if (imageUrl) {
+      const url = imageUrl.startsWith('http') ? imageUrl : window.location.origin + imageUrl
+      copyText = (copyText ? copyText + '\n\n' : '') + url
+    }
+    if (genPrompt) copyText = 'Prompt: ' + genPrompt + '\n\n' + copyText
+
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(copyText).then(() => {
+          setLabel('Copied!')
+          setTimeout(() => setLabel('Copy'), 2000)
+        }).catch(() => fallbackExecCopy(copyText))
+      } else {
+        fallbackExecCopy(copyText)
+      }
+    } catch {
+      fallbackExecCopy(copyText)
+    }
+  }
+
+  function fallbackExecCopy(text) {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    try {
+      document.execCommand('copy')
+      setLabel('Copied!')
+      setTimeout(() => setLabel('Copy'), 2000)
+    } catch {
+      setLabel('Failed')
+      setTimeout(() => setLabel('Copy'), 2000)
+    }
+    document.body.removeChild(ta)
+  }
+
+  return <button className={'copy-btn' + (forceShow ? ' force-show' : '')} onClick={handleCopy}>{label}</button>
 }
 
 const MAX_REASONING = 2000
@@ -197,7 +288,7 @@ export default function Message({ msg, pending, onImageOpen }) {
             )}
           </span>
         ))}
-        <CopyButton text={text} genPrompt={genPrompt} />
+        <CopyButton text={text} genPrompt={genPrompt} imageUrl={imageUrl} />
       </div>
       {imageUrl && (
         <img

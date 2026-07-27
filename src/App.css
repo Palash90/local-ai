@@ -397,7 +397,8 @@ html, body {
   font-family: inherit;
 }
 
-.copy-btn:hover {
+.copy-btn:hover,
+.copy-btn.force-show {
   color: #e0e0e0;
   background: rgba(255, 255, 255, 0.06);
 }
@@ -922,6 +923,10 @@ input[type=file] {
   }
 
   .session-actions {
+    opacity: 1;
+  }
+
+  .copy-btn {
     opacity: 1;
   }
 
