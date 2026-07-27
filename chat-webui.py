@@ -473,7 +473,7 @@ def free_comfyui_vram():
     except Exception as e:
         print(f"[comfyui] Free error: {e}")
     finally:
-        time.sleep(5)
+        time.sleep(10)
     return False
 
 
