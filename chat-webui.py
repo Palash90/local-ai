@@ -415,6 +415,8 @@ def _finalize_task(task_id, sid, msg_content, body):
         gen_prompt = t.get("gen_prompt")
         image_model = t.get("_image_model")
     image_url = f"/output/{image_filename}" if image_filename else None
+    if image_url:
+        print(f"[finalize] image_file='{image_filename}' → image_url='{image_url}' for task {task_id}")  # DEBUG
     timings = body.get("timings", {})
     predicted_per_second = timings.get("predicted_per_second")
     reasoning = (
@@ -802,8 +804,10 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
             if found_file:
                 tasks[task_id]["image_file"] = found_file
                 set_status(task_id, f"Image saved as {found_file}")
+                print(f"[generate_image] SUCCESS: {found_file}")  # DEBUG
                 result = json.dumps({"prompt_id": prompt_id, "file": found_file})
             else:
+                print(f"[generate_image] TIMEOUT for task {task_id} after 120s")  # DEBUG
                 result = json.dumps({"error": "Image generation timeout"})
     except Exception as e:
         result = json.dumps({"error": str(e)})
@@ -1150,35 +1154,28 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
         )
         res_data = json.loads(result)
         if "file" in res_data:
-            image_url = f"/output/{os.path.basename(res_data['file'])}"
+            fn = os.path.basename(res_data['file'])
+            image_url = f"/output/{fn}"
             with _data_lock:
                 t = tasks.get(task_id)
                 if t:
                     t.setdefault("_tools_used", []).append(tool_name)
-                    task_reasoning = t.get("reasoning", "")
-            msg_entry = {
-                "role": "assistant",
-                "content": "Here is your generated image:",
-                "_reasoning": task_reasoning,
-                "_tools_used": tu + [tool_name],
-                "_image_url": image_url,
-                "_gen_prompt": args.get("prompt", ""),
-                "_image_model": None,
-            }
-            with _data_lock:
-                if sid in sessions:
-                    sessions[sid].append(msg_entry)
-                    sessions_meta.setdefault(sid, {})["updated"] = time.time()
-            save_sessions()
+                    t["image_file"] = fn
+                    t["gen_prompt"] = args.get("prompt", "")
+                    t["_image_model"] = None
+            tool_result = json.dumps({
+                "image_url": image_url,
+                "prompt": args.get("prompt", ""),
+                "model": None,
+            })
             _event_post(
-                "img_done",
+                "tool_ok",
                 task_id,
-                image_url=image_url,
-                tools_used=tu + [tool_name],
-                gen_prompt=args.get("prompt", ""),
-                image_model=None,
+                tc_id=tc["id"],
+                result=tool_result,
                 sid=sid,
-                reasoning=task_reasoning,
+                round=round_num,
+                tool_index=tool_index,
             )
         else:
             _event_post(
@@ -1214,38 +1211,34 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
             )
             res_data = json.loads(result)
             if "file" in res_data:
-                image_url = f"/output/{os.path.basename(res_data['file'])}"
+                fn = os.path.basename(res_data['file'])
+                image_url = f"/output/{fn}"
                 image_model_s = args.get("model") or "sd3_5_medium"
+                print(f"[tool_worker] Image file: {res_data['file']}, basename: {fn}, url: {image_url}")  # DEBUG
                 with _data_lock:
                     t = tasks.get(task_id)
                     if t:
                         t.setdefault("_tools_used", []).append(tool_name)
-                        task_reasoning = t.get("reasoning", "")
-                msg_entry = {
-                    "role": "assistant",
-                    "content": "Here is your generated image:",
-                    "_reasoning": task_reasoning,
-                    "_tools_used": tu + [tool_name],
-                    "_image_url": image_url,
-                    "_gen_prompt": args.get("prompt", ""),
-                    "_image_model": image_model_s,
-                }
-                with _data_lock:
-                    if sid in sessions:
-                        sessions[sid].append(msg_entry)
-                        sessions_meta.setdefault(sid, {})["updated"] = time.time()
-                save_sessions()
+                        t["image_file"] = fn
+                        t["gen_prompt"] = args.get("prompt", "")
+                        t["_image_model"] = image_model_s
+                        print(f"[tool_worker] Stored image_file='{fn}' in task {task_id}")  # DEBUG
+                tool_result = json.dumps({
+                    "image_url": image_url,
+                    "prompt": args.get("prompt", ""),
+                    "model": image_model_s,
+                })
                 _event_post(
-                    "img_done",
+                    "tool_ok",
                     task_id,
-                    image_url=image_url,
-                    tools_used=tu + [tool_name],
-                    gen_prompt=args.get("prompt", ""),
-                    image_model=image_model_s,
+                    tc_id=tc["id"],
+                    result=tool_result,
                     sid=sid,
-                    reasoning=task_reasoning,
+                    round=round_num,
+                    tool_index=tool_index,
                 )
             else:
+                print(f"[tool_worker] generate_image FAILED for task {task_id}: {result[:200]}")  # DEBUG
                 _event_post(
                     "tool_ok",
                     task_id,
@@ -1361,6 +1354,10 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
 
 
 def _start_llm_round(task_id, sid, round_num):
+    with _data_lock:
+        ms = model_status
+    if ms != "chat_loaded":
+        load_llama_model()
     with _data_lock:
         t = tasks.get(task_id)
         if not t:
@@ -1546,30 +1543,6 @@ def _event_loop():
                     _start_llm_round(task_id, data["sid"], round_num)
                 else:
                     _set_task_error(task_id, "Max tool rounds exceeded", data["sid"])
-
-        elif ev_type == "img_done":
-            image_url = data["image_url"]
-            sid = data["sid"]
-            tools_used = data["tools_used"]
-            gen_prompt = data["gen_prompt"]
-            image_model = data.get("image_model")
-            reasoning = data.get("reasoning", "")
-            with _data_lock:
-                t = tasks.get(task_id)
-                if t:
-                    existing_search_details = list(t.get("_search_details", []))
-                    tasks[task_id] = {
-                        "status": "done",
-                        "response": "Here is your generated image:",
-                        "session_id": sid,
-                        "image": image_url,
-                        "_image_url": image_url,
-                        "tools_used": tools_used,
-                        "gen_prompt": gen_prompt,
-                        "_image_model": image_model,
-                        "reasoning": reasoning,
-                        "_search_details": existing_search_details,
-                    }
 
 
 def _queue_worker():

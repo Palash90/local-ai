@@ -3,7 +3,7 @@ import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import StatusBox from './StatusBox'
 
-marked.use(markedKatex({ throwOnError: false }))
+marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
 
 function escHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
