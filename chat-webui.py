@@ -1006,6 +1006,8 @@ def _llm_worker(task_id, sid, payload, round_num):
         reasoning_buf = ""
         content_buf = ""
         tool_calls_map = {}
+        with _data_lock:
+            prev_reasoning = tasks.get(task_id, {}).get("reasoning", "")
         for line in r.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
@@ -1025,7 +1027,7 @@ def _llm_worker(task_id, sid, payload, round_num):
                 reasoning_buf += rc
                 with _data_lock:
                     if task_id in tasks:
-                        tasks[task_id]["reasoning"] = reasoning_buf
+                        tasks[task_id]["reasoning"] = prev_reasoning + reasoning_buf
             c = delta.get("content")
             if c:
                 content_buf += c
@@ -1057,14 +1059,11 @@ def _llm_worker(task_id, sid, payload, round_num):
         msg = {
             "role": "assistant",
             "content": content_buf,
-            "reasoning_content": reasoning_buf,
+            "reasoning_content": prev_reasoning + reasoning_buf,
         }
         if tool_calls_map:
             msg["tool_calls"] = list(tool_calls_map.values())
         body = {"choices": [{"message": msg}]}
-        with _data_lock:
-            if task_id in tasks:
-                tasks[task_id].pop("reasoning", None)
         if "choices" in body:
             _event_post("llm_ok", task_id, body=body, round=round_num, sid=sid)
         else:
