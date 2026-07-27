@@ -188,7 +188,7 @@ export default function App() {
     const taskSid = currentSessionId
     setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
 
-    const userMsg = { role: 'user', content: text || (attachedFileLabel(image)) }
+    const userMsg = { role: 'user', content: text || (attachedFileLabel(image)), _timestamp: new Date().toISOString() }
 
     try {
       const data = await api.sendMessage(currentSessionId, text || '', image || undefined)
@@ -263,7 +263,7 @@ export default function App() {
     if (!currentSessionId) return
     const taskSid = currentSessionId
     setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
-    const userMsg = { role: 'user', content: '\uD83C\uDFA4 Audio message' }
+    const userMsg = { role: 'user', content: '\uD83C\uDFA4 Audio message', _timestamp: new Date().toISOString() }
 
     try {
       const data = await api.sendMessage(currentSessionId, '', undefined, audioB64)

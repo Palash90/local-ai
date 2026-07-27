@@ -1314,10 +1314,10 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None):
         content.append(
             {
                 "type": "text",
-                "text": f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] {user_message}",
+                "text": user_message,
             }
         )
-        sessions[sid].append({"role": "user", "content": content})
+        sessions[sid].append({"role": "user", "content": content, "_timestamp": datetime.now().isoformat()})
         if sessions_meta[sid]["name"] in ("New Chat", ""):
             sessions_meta[sid]["name"] = user_message[:50] + (
                 "..." if len(user_message) > 50 else ""

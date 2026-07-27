@@ -166,7 +166,7 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
         onInput={handleInput}
       />
       <button id="mic-btn" className={micRecording ? 'recording' : ''} onClick={onMicToggle}>&#127908;</button>
-      <button id="send-btn" onClick={handleSend}>{hasPending ? 'Queue' : 'Send'}</button>
+      <button id="send-btn" onClick={handleSend}><span className="send-icon">&#10148;</span><span className="send-text">{hasPending ? 'Queue' : 'Send'}</span></button>
     </div>
   )
 }

@@ -327,6 +327,17 @@ html, body {
   animation: fadeIn .25s ease;
 }
 
+.msg-timestamp {
+  position: absolute;
+  top: 4px;
+  right: 10px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.3);
+  pointer-events: none;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
@@ -662,6 +673,10 @@ html, body {
   box-shadow: none;
 }
 
+#send-btn .send-icon {
+  display: none;
+}
+
 #attach-btn {
   background: rgba(255, 255, 255, 0.04);
   color: #888;
@@ -883,5 +898,33 @@ input[type=file] {
 
   .msg {
     max-width: 90%;
+  }
+
+  #attach-btn {
+    font-size: 16px;
+    padding: 8px 10px;
+  }
+
+  #mic-btn {
+    font-size: 14px;
+    padding: 8px 10px;
+  }
+
+  #send-btn .send-icon {
+    display: inline;
+  }
+
+  #send-btn .send-text {
+    display: none;
+  }
+
+  #send-btn {
+    padding: 8px 12px;
+    font-size: 16px;
+  }
+
+  #msg-input {
+    padding: 8px 12px;
+    font-size: 13px;
   }
 }

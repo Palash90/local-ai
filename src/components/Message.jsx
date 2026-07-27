@@ -105,12 +105,15 @@ export default function Message({ msg, pending, onImageOpen }) {
 
   if (pending) {
     return (
-      <div className={`msg bot`} ref={elRef}>
-        <div className="msg-content">
-          <StatusBox message={pending.message} />
-          <ReasoningBlock text={pending.reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
+      <>
+        {pending._userMsg && <Message msg={pending._userMsg} onImageOpen={onImageOpen} />}
+        <div className={`msg bot`} ref={elRef}>
+          <div className="msg-content">
+            <StatusBox message={pending.message} />
+            <ReasoningBlock text={pending.reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
+          </div>
         </div>
-      </div>
+      </>
     )
   }
 
@@ -124,6 +127,7 @@ export default function Message({ msg, pending, onImageOpen }) {
 
   let text = ''
   let userImg = null
+  let timestamp = null
 
   if (role === 'user') {
     if (typeof msg.content === 'string') {
@@ -137,6 +141,12 @@ export default function Message({ msg, pending, onImageOpen }) {
           if (url.startsWith('data:')) userImg = url.split(',')[1]
         }
       })
+    }
+    if (msg._timestamp) {
+      try {
+        const d = new Date(msg._timestamp)
+        timestamp = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
+      } catch {}
     }
   } else {
     text = typeof msg.content === 'string' ? msg.content : ''
@@ -156,6 +166,7 @@ export default function Message({ msg, pending, onImageOpen }) {
 
   return (
     <div className={`msg ${role}`} ref={elRef}>
+      {timestamp && <span className="msg-timestamp">{timestamp}</span>}
       <div className="msg-header">
         {role === 'bot' && toolsUsed.length > 0 && toolsUsed.map((t, i) => (
           <span
