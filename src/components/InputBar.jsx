@@ -115,7 +115,10 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
     }
   }
 
+  const isMobile = window.matchMedia('(pointer: coarse)').matches;
+
   function handleKeyDown(e) {
+    if (isMobile) return;
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
       e.preventDefault()
       handleSend()
