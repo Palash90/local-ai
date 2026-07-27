@@ -61,20 +61,20 @@ with open(
     IMAGE_MODELS = json.load(file)
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The search query"}
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query — include location if relevant (e.g. 'weather in Bengaluru' not just 'weather')"}
+                    },
+                    "required": ["query"],
                 },
-                "required": ["query"],
             },
         },
-    },
     {
         "type": "function",
         "function": {
@@ -258,7 +258,7 @@ _gpu_temp = None
 TEMP_THRESHOLD_ON = 85
 TEMP_THRESHOLD_OFF = 65
 RAM_EVAC_THRESHOLD = 95
-RAM_RESUME_THRESHOLD = 50
+RAM_RESUME_THRESHOLD = 70
 _ram_evacuating = False
 
 
@@ -600,12 +600,29 @@ def location_str():
     return "Unknown"
 
 
-def web_search(query):
+def extract_city(loc):
+    parts = [p.strip() for p in loc.split(",")]
+    if len(parts) >= 3:
+        return f"{parts[0]}, {parts[-3]}".strip(", ")
+    if len(parts) >= 2:
+        return parts[0].strip()
+    return loc
+
+
+def web_search(query, client_ts=None):
+    try:
+        if client_ts:
+            ts = datetime.fromisoformat(client_ts.replace("Z", "+00:00"))
+        else:
+            ts = datetime.now()
+    except Exception:
+        ts = datetime.now()
     loc_str = location_str()
-    ctx = f"[Date: {datetime.now().strftime('%Y-%m-%d %A')}] [Location: {loc_str}] {query}"
+    city = extract_city(loc_str) if loc_str != "Unknown" else ""
+    clean_query = f"{query} {city}".strip() if city and city not in query else query
     from urllib.parse import urlencode
 
-    params = {"q": ctx, "format": "json"}
+    params = {"q": clean_query, "format": "json"}
     search_url = f"{SEARXNG_URL}?{urlencode(params)}"
     print("Performing web search", search_url)
     r = requests.get(SEARXNG_URL, params=params, timeout=10)
@@ -624,7 +641,7 @@ def web_search(query):
     return json.dumps(
         {
             "results": formatted,
-            "search_date": datetime.now().strftime("%Y-%m-%d %A"),
+            "search_date": ts.strftime("%Y-%m-%d %A"),
             "query": query,
             "search_url": search_url,
         }
@@ -1094,7 +1111,10 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
 
     if tool_name == "web_search":
         set_status(task_id, f"Searching web for: {args.get('query')}...")
-        result = web_search(args["query"])
+        with _data_lock:
+            client_ts = tasks.get(task_id, {}).get("_client_timestamp")
+        result = web_search(args["query"], client_ts)
+        print(f"[web_search] RAW result for task {task_id}: {result[:300]}...")  # DEBUG
         with _data_lock:
             t = tasks.get(task_id)
             if t:
@@ -1103,11 +1123,16 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
                     t.setdefault("_search_details", []).append(json.loads(result))
                 except Exception:
                     pass
+        llm_result = (
+            f"Web search results for query '{args.get('query')}'. "
+            f"Analyze these search results thoroughly and provide a clear, accurate response based on the findings:\n\n{result}"
+        )
+        print(f"[web_search] LLM-bound result (with analysis instruction) for task {task_id}: {llm_result[:400]}...")  # DEBUG
         _event_post(
             "tool_ok",
             task_id,
             tc_id=tc["id"],
-            result=result,
+            result=llm_result,
             sid=sid,
             round=round_num,
             tool_index=tool_index,
@@ -1263,8 +1288,15 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
         )
 
 
-def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None):
-    date_loc_context = f"[Current date: {datetime.now().strftime('%Y-%m-%d %A %H:%M')}] [User location: {location_str()}]"
+def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, client_ts=None):
+    try:
+        if client_ts:
+            ts = datetime.fromisoformat(client_ts.replace("Z", "+00:00"))
+        else:
+            ts = datetime.now()
+    except Exception:
+        ts = datetime.now()
+    date_loc_context = f"[Current date: {ts.strftime('%Y-%m-%d %A %H:%M')}] [User location: {location_str()}]"
     user = ""
     with _data_lock:
         t = tasks.get(task_id)
@@ -1272,10 +1304,9 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None):
             user = t.get("_user", "")
     user_context = read_user_context(user) if user else ""
     context_block = f"\n\n## User Context\n{user_context}" if user_context else ""
-    now = datetime.now()
     full_sys_content = f"{SYS_CONTENT}\n\n{date_loc_context}{context_block}"
     full_sys_content = full_sys_content.replace(
-        "%current_time%", now.strftime("%Y-%m-%d %A %H:%M")
+        "%current_time%", ts.strftime("%Y-%m-%d %A %H:%M")
     )
     full_sys_content = full_sys_content.replace("%current_location%", location_str())
     if user_context:
@@ -1337,6 +1368,10 @@ def _start_llm_round(task_id, sid, round_num):
         t["_state"] = "llm_waiting"
         t["_round"] = round_num
         messages = trim_messages_for_context(sessions.get(sid, []))
+    print(f"[llm_round] Starting round {round_num} for task {task_id} with {len(messages)} messages")  # DEBUG
+    tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+    if tool_msgs:
+        print(f"[llm_round] Round {round_num} includes {len(tool_msgs)} tool message(s) with search results")  # DEBUG
     payload = {
         "model": MODEL_ID,
         "messages": messages,
@@ -1377,6 +1412,7 @@ def _event_loop():
             image_b64 = data.get("image")
             audio_b64 = data.get("audio")
             user = data.get("user", "")
+            client_ts = data.get("client_timestamp")
             with _data_lock:
                 tasks[task_id] = {
                     "status": "working",
@@ -1388,9 +1424,10 @@ def _event_loop():
                     "_original_image": image_b64,
                     "_audio": audio_b64,
                     "_user": user,
+                    "_client_timestamp": client_ts,
                 }
             _current_task_id = task_id
-            _prepare_session(task_id, sid, user_message, image_b64, audio_b64)
+            _prepare_session(task_id, sid, user_message, image_b64, audio_b64, client_ts)
             _start_llm_round(task_id, sid, 0)
 
         elif ev_type == "llm_ok":
@@ -1412,6 +1449,7 @@ def _event_loop():
                         if rc:
                             tt["reasoning"] = rc
                 pending = len(msg["tool_calls"])
+                print(f"[llm_ok] Round {round_num}: LLM requested {pending} tool(s) for task {task_id}")  # DEBUG
                 with _data_lock:
                     tt = tasks.get(task_id)
                     if tt:
@@ -1438,6 +1476,7 @@ def _event_loop():
                         i,
                     )
             else:
+                print(f"[llm_ok] Round {round_num}: LLM generated final response (no tool calls) for task {task_id}")  # DEBUG
                 _finalize_task(task_id, sid, (msg.get("content") or ""), body)
 
         elif ev_type == "llm_err":
@@ -1455,6 +1494,7 @@ def _event_loop():
                         {"role": "tool", "tool_call_id": tc_id, "content": result}
                     )
                     sessions_meta.setdefault(sid, {})["updated"] = time.time()
+                    print(f"[tool_ok] Appended tool result to session {sid} for task {task_id}")  # DEBUG
                 tt = tasks.get(task_id)
                 if not tt or tt.get("status") in ("done", "error"):
                     continue
@@ -1462,8 +1502,10 @@ def _event_loop():
                 if tt:
                     tt["_pending_tools"] = pending
             save_sessions()
+            print(f"[tool_ok] Pending tools left for task {task_id}: {pending}")  # DEBUG
             if pending <= 0:
                 round_num = data.get("round", 0) + 1
+                print(f"[tool_ok] All tools done for task {task_id}. Starting LLM round {round_num} with search results in context.")  # DEBUG
                 with _data_lock:
                     tt = tasks.get(task_id)
                     if tt:
@@ -1513,7 +1555,9 @@ def _event_loop():
             image_model = data.get("image_model")
             reasoning = data.get("reasoning", "")
             with _data_lock:
-                if task_id in tasks:
+                t = tasks.get(task_id)
+                if t:
+                    existing_search_details = list(t.get("_search_details", []))
                     tasks[task_id] = {
                         "status": "done",
                         "response": "Here is your generated image:",
@@ -1524,6 +1568,7 @@ def _event_loop():
                         "gen_prompt": gen_prompt,
                         "_image_model": image_model,
                         "reasoning": reasoning,
+                        "_search_details": existing_search_details,
                     }
 
 
@@ -1558,6 +1603,7 @@ def _queue_worker():
             image=item.get("image"),
             audio=item.get("audio"),
             user=item.get("user", ""),
+            client_timestamp=item.get("client_timestamp"),
         )
         # Wait for this task to finish (status becomes "done" or "error") before dequeuing the next
         while True:
@@ -1997,6 +2043,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "image": body.get("image"),
                 "audio": body.get("audio"),
                 "user": user,
+                "client_timestamp": body.get("client_timestamp"),
             }
             with _queue_lock:
                 if len(_task_queue) >= MAX_QUEUE_SIZE:

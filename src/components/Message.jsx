@@ -1,6 +1,9 @@
 import { useMemo, useRef, useState, useCallback, useEffect } from 'react'
 import { marked } from 'marked'
+import markedKatex from 'marked-katex-extension'
 import StatusBox from './StatusBox'
+
+marked.use(markedKatex({ throwOnError: false }))
 
 function escHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -77,10 +80,17 @@ function ReasoningBlock({ text, open, onToggle }) {
   if (!text) return null
   const capped = text.length > MAX_REASONING ? text.slice(0, MAX_REASONING) + '...' : text
 
+  let html
+  try {
+    html = marked.parse(capped)
+  } catch {
+    html = escHtml(capped)
+  }
+
   return (
     <details className="reasoning-block" open={open} onToggle={(e) => onToggle(e.target.open)}>
       <summary>Reasoning</summary>
-      <pre className="reasoning-text" ref={preRef}>{capped}</pre>
+      <div className="reasoning-text" ref={preRef} dangerouslySetInnerHTML={{ __html: html }} />
     </details>
   )
 }
@@ -90,7 +100,7 @@ export default function Message({ msg, pending, onImageOpen }) {
   const chatEl = useRef(null)
   const [popupVisible, setPopupVisible] = useState(null)
   const hideTimer = useRef(null)
-  const [reasoningOpen, setReasoningOpen] = useState(true)
+  const [reasoningOpen, setReasoningOpen] = useState(false)
 
   const showPopup = useCallback((idx) => {
     if (hideTimer.current) clearTimeout(hideTimer.current)

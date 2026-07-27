@@ -191,7 +191,7 @@ export default function App() {
     const userMsg = { role: 'user', content: text || (attachedFileLabel(image)), _timestamp: new Date().toISOString() }
 
     try {
-      const data = await api.sendMessage(currentSessionId, text || '', image || undefined)
+      const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined, new Date().toISOString())
       const taskId = data.task_id
 
       setPendingMessages(prev => ({

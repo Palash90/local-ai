@@ -75,8 +75,8 @@ export async function renameSession(sessionId, name) {
   });
 }
 
-export async function sendMessage(sessionId, message, image, audio) {
-  const body = { session_id: sessionId, message };
+export async function sendMessage(sessionId, message, image, audio, clientTimestamp) {
+  const body = { session_id: sessionId, message, client_timestamp: clientTimestamp || new Date().toISOString() };
   if (image) body.image = image;
   if (audio) body.audio = audio;
   const r = await authFetch('/api/chat', {
