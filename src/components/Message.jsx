@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useCallback } from 'react'
+import { useMemo, useRef, useState, useCallback, useEffect } from 'react'
 import { marked } from 'marked'
 import StatusBox from './StatusBox'
 
@@ -58,6 +58,33 @@ function CopyButton({ text, genPrompt }) {
   return <button className="copy-btn" onClick={handleCopy}>{label}</button>
 }
 
+const MAX_REASONING = 2000
+
+function ReasoningBlock({ text, open, onToggle }) {
+  const preRef = useRef(null)
+  const prevLenRef = useRef(0)
+
+  useEffect(() => {
+    if (!preRef.current || !text) return
+    if (text.length > prevLenRef.current) {
+      const el = preRef.current
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+      if (atBottom) el.scrollTop = el.scrollHeight
+    }
+    prevLenRef.current = text.length
+  }, [text])
+
+  if (!text) return null
+  const capped = text.length > MAX_REASONING ? text.slice(0, MAX_REASONING) + '...' : text
+
+  return (
+    <details className="reasoning-block" open={open} onToggle={(e) => onToggle(e.target.open)}>
+      <summary>Reasoning</summary>
+      <pre className="reasoning-text" ref={preRef}>{capped}</pre>
+    </details>
+  )
+}
+
 export default function Message({ msg, pending, onImageOpen }) {
   const elRef = useRef(null)
   const chatEl = useRef(null)
@@ -75,19 +102,6 @@ export default function Message({ msg, pending, onImageOpen }) {
   }, [])
 
   const role = pending ? 'bot' : msg.role === 'user' ? 'user' : 'bot'
-
-  const MAX_REASONING = 2000
-
-  function ReasoningBlock({ text, open, onToggle }) {
-    if (!text) return null
-    const capped = text.length > MAX_REASONING ? text.slice(0, MAX_REASONING) + '...' : text
-    return (
-      <details className="reasoning-block" open={open} onToggle={(e) => onToggle(e.target.open)}>
-        <summary>Reasoning</summary>
-        <pre className="reasoning-text">{capped}</pre>
-      </details>
-    )
-  }
 
   if (pending) {
     return (

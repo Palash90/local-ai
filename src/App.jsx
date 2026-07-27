@@ -189,7 +189,6 @@ export default function App() {
     setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
 
     const userMsg = { role: 'user', content: text || (attachedFileLabel(image)) }
-    setMessages(prev => [...prev, userMsg])
 
     try {
       const data = await api.sendMessage(currentSessionId, text || '', image || undefined)
@@ -197,14 +196,14 @@ export default function App() {
 
       setPendingMessages(prev => ({
         ...prev,
-        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '' },
+        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg },
       }))
 
       const stored = getStoredPending()
       stored.push({ task_id: taskId, sid: taskSid })
       setStoredPending(stored)
     } catch (err) {
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Error: ' + err.message }])
+      setMessages(prev => [...prev, userMsg, { role: 'assistant', content: 'Error: ' + err.message }])
     }
 
     setLoadingSessions(prev => {
@@ -264,20 +263,20 @@ export default function App() {
     if (!currentSessionId) return
     const taskSid = currentSessionId
     setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
-    setMessages(prev => [...prev, { role: 'user', content: '\uD83C\uDFA4 Audio message' }])
+    const userMsg = { role: 'user', content: '\uD83C\uDFA4 Audio message' }
 
     try {
       const data = await api.sendMessage(currentSessionId, '', undefined, audioB64)
       const taskId = data.task_id
       setPendingMessages(prev => ({
         ...prev,
-        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '' },
+        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg },
       }))
       const stored = getStoredPending()
       stored.push({ task_id: taskId, sid: taskSid })
       setStoredPending(stored)
     } catch (err) {
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Error: ' + err.message }])
+      setMessages(prev => [...prev, userMsg, { role: 'assistant', content: 'Error: ' + err.message }])
     }
 
     setLoadingSessions(prev => {

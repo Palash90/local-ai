@@ -23,6 +23,7 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
   const fileInputRef = useRef(null)
   const textareaRef = useRef(null)
   const imagePreviewRef = useRef(null)
+  const sendingRef = useRef(false)
 
   function clearAttachments() {
     setAttachedImage(null)
@@ -100,14 +101,20 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
     }
   }, [])
 
-  function handleSend() {
+  async function handleSend() {
+    if (sendingRef.current) return
     const msg = text.trim()
     if (!msg && !attachedImage && !attachedFileText) return
+    sendingRef.current = true
     let finalText = msg
     if (attachedFileText) {
       finalText = '[FILE: ' + attachedFile + ']\n```\n' + attachedFileText + '\n```\n[END FILE]\n\n' + (msg || 'See attached file above.')
     }
-    onSend(finalText, attachedImage)
+    try {
+      await onSend(finalText, attachedImage)
+    } finally {
+      sendingRef.current = false
+    }
     setText('')
     clearAttachments()
     if (textareaRef.current) {
