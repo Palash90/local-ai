@@ -179,7 +179,7 @@ sudo tee /etc/avahi/services/chat.service > /dev/null << 'AVAHIEOF'
 <name>Chat AI</name>
 <service>
     <type>_http._tcp</type>
-    <port>3001</port>
+    <port>80</port>
     <host-name>chat.local</host-name>
 </service>
 </service-group>
@@ -192,8 +192,8 @@ sudo systemctl restart avahi-daemon
 # ──────────────────────────────────────────────
 if command -v ufw &>/dev/null; then
     echo "==> Configuring UFW..."
-    sudo ufw allow in on wlan0 2>/dev/null || true
-    sudo ufw allow out on wlan0 2>/dev/null || true
+    sudo ufw allow in on wlp2s0 2>/dev/null || true
+    sudo ufw allow out on wlp2s0 2>/dev/null || true
 fi
 
 # ──────────────────────────────────────────────

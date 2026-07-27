@@ -752,7 +752,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
         tasks[task_id]["negative_prompt"] = negative_prompt
     ensure_comfyui_running()
     p_short = prompt[:200] + ("..." if len(prompt) > 200 else "")
-    set_status(task_id, f"Generating image with ComfyUI... Prompt: {p_short}")
+    set_status(task_id, f"Generating image ({model})... Prompt: {p_short}")
     try:
         r = requests.post(
             f"{COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
@@ -936,7 +936,7 @@ def edit_image(
         tasks[task_id]["negative_prompt"] = negative_prompt
 
     ensure_comfyui_running()
-    set_status(task_id, f"Editing image with ComfyUI... Prompt: {prompt[:150]}")
+    set_status(task_id, f"Editing image ({model})... Prompt: {prompt[:150]}")
 
     try:
         r = requests.post(
