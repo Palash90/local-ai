@@ -299,13 +299,15 @@ export default function App() {
         try {
           const st = await api.getTaskStatus(taskId)
           if (st.status === 'done' || st.status === 'error') {
+            const pendingEntry = pends[taskId]
             setPendingMessages(prev => {
               const next = { ...prev }
               delete next[taskId]
               return next
             })
             if (st.status === 'done') {
-              const msg = {
+              const userMsg = pendingEntry?._userMsg
+              const assistantMsg = {
                 role: 'assistant',
                 content: st.response || '',
                 _reasoning: st.reasoning || '',
@@ -315,7 +317,7 @@ export default function App() {
                 _image_model: st._image_model,
                 _search_details: st._search_details || [],
               }
-              setMessages(prev => [...prev, msg])
+              setMessages(prev => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg])
               if (st.token_estimate != null) setTokenEstimate(st.token_estimate)
               if (st.predicted_per_second != null) setModelTps(st.predicted_per_second)
             } else {
