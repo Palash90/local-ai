@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "dompurify": "^3.4.12",
     "katex": "^0.17.0",
     "marked": "^15.0.7",
     "marked-katex-extension": "^5.1.10",

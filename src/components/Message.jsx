@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, useCallback, useEffect } from 'react'
 import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
+import DOMPurify from 'dompurify'
 import StatusBox from './StatusBox'
 
 marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
@@ -173,7 +174,7 @@ function ReasoningBlock({ text, open, onToggle }) {
 
   let html
   try {
-    html = marked.parse(capped)
+    html = DOMPurify.sanitize(marked.parse(capped))
   } catch {
     html = escHtml(capped)
   }
@@ -255,9 +256,8 @@ export default function Message({ msg, pending, onImageOpen }) {
 
   const html = useMemo(() => {
     if (!text) return ''
-    if (text.indexOf('class="status-box"') !== -1) return text
     try {
-      return marked.parse(text)
+      return DOMPurify.sanitize(marked.parse(text))
     } catch {
       return escHtml(text)
     }
