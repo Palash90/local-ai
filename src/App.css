@@ -572,6 +572,28 @@ html, body {
   padding: 0;
 }
 
+.msg-content .mermaid {
+  background: rgba(255,255,255,0.04);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 8px 0;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.msg-content .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.reasoning-text .mermaid {
+  background: rgba(255,255,255,0.04);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 8px 0;
+  overflow-x: auto;
+}
+
 .msg-content ul,
 .msg-content ol {
   padding-left: 20px;
@@ -1125,7 +1147,7 @@ input[type=file] {
 
 /* ---- Responsive ---- */
 @media (max-width: 600px) {
-  #model-tps, #token-indicator {
+  #model-tps {
     display: none;
   }
 
@@ -1177,5 +1199,10 @@ input[type=file] {
   #msg-input {
     padding: 8px 12px;
     font-size: 13px;
+  }
+
+  #task-panel {
+    width: 100%;
+    max-width: 320px;
   }
 }

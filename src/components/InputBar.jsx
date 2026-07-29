@@ -47,12 +47,28 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
     if (IMAGE_EXTS.has(ext)) {
       const reader = new FileReader()
       reader.onload = (ev) => {
-        const b64 = ev.target.result.split(',')[1]
-        setAttachedImage(b64)
-        if (imagePreviewRef.current) {
-          imagePreviewRef.current.src = ev.target.result
-          imagePreviewRef.current.style.display = 'block'
+        const img = new Image()
+        img.onload = () => {
+          let w = img.naturalWidth
+          let h = img.naturalHeight
+          const MAX_DIM = 1920
+          if (w > MAX_DIM || h > MAX_DIM) {
+            if (w > h) { h = Math.round(h * MAX_DIM / w); w = MAX_DIM }
+            else { w = Math.round(w * MAX_DIM / h); h = MAX_DIM }
+          }
+          const c = document.createElement('canvas')
+          c.width = w; c.height = h
+          const ctx = c.getContext('2d')
+          ctx.drawImage(img, 0, 0, w, h)
+          const compressed = c.toDataURL('image/jpeg', 0.8)
+          const b64 = compressed.split(',')[1]
+          setAttachedImage(b64)
+          if (imagePreviewRef.current) {
+            imagePreviewRef.current.src = compressed
+            imagePreviewRef.current.style.display = 'block'
+          }
         }
+        img.src = ev.target.result
       }
       reader.readAsDataURL(file)
       return
