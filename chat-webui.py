@@ -54,6 +54,60 @@ IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
 USERS_FILE = os.path.expanduser("~/local-ai-files/users.json")
+TASKS_DB = os.path.expanduser("~/local-ai-files/tasks.db")
+
+import sqlite3
+_tasks_db_lock = threading.Lock()
+
+def _init_tasks_db():
+    with _tasks_db_lock:
+        conn = sqlite3.connect(TASKS_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                status TEXT DEFAULT 'pending',
+                priority TEXT DEFAULT 'medium',
+                due_date TEXT,
+                session_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                reminder_at TEXT,
+                reminded INTEGER DEFAULT 0
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+def _db_run(query, params=()):
+    with _tasks_db_lock:
+        conn = sqlite3.connect(TASKS_DB)
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.execute(query, params)
+            conn.commit()
+            return cur
+        finally:
+            conn.close()
+
+def _db_fetch(query, params=()):
+    with _tasks_db_lock:
+        conn = sqlite3.connect(TASKS_DB)
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.execute(query, params)
+            rows = [dict(r) for r in cur.fetchall()]
+            return rows
+        finally:
+            conn.close()
+
+def _db_fetch_one(query, params=()):
+    rows = _db_fetch(query, params)
+    return rows[0] if rows else None
+
+_init_tasks_db()
 
 with open(
     os.path.expanduser("~/local-ai-files/models.json"), "r", encoding="utf-8"
@@ -69,7 +123,9 @@ TOOLS = [
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "The search query — include location if relevant (e.g. 'weather in Bengaluru' not just 'weather')"}
+                        "query": {"type": "string", "description": "The search query"},
+                        "current_time": {"type": "string", "description": "Current date and time. Pass ONLY for time-sensitive queries (news, events, hours, etc.) where recency matters. Omit for direct-link lookups or general information."},
+                        "current_location": {"type": "string", "description": "User's location. Pass ONLY for location-specific results (weather, local news, nearby places, events). Omit for direct-link lookups or general queries."}
                     },
                     "required": ["query"],
                 },
@@ -149,6 +205,58 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_tasks",
+            "description": "Manage to-do tasks. Can create, update, complete, delete, list, or get task details. Use this when the user wants to track tasks, set reminders, or manage their to-do list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["create", "update", "complete", "delete", "list", "get"],
+                        "description": "The operation to perform.",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Required for update/complete/delete/get. The task ID.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Required for create. Task title.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Task description or details.",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "description": "Task priority (default: medium).",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed", "cancelled"],
+                        "description": "For update: new status.",
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "Due date in ISO format (e.g. 2026-08-15T17:00:00).",
+                    },
+                    "reminder_at": {
+                        "type": "string",
+                        "description": "Reminder time in ISO format. The system will notify about this task at the given time.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID to link this task to a conversation.",
+                    },
+                },
+                "required": ["operation"],
+            },
+        },
+    },
 ]
 
 
@@ -159,6 +267,71 @@ SYS_CONTENT = SYS_CONTENT.replace("%model_list%", model_list)
 SYS_CONTENT = SYS_CONTENT.replace("%_image_keys%", str(list(IMAGE_MODELS.keys())))
 
 print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)
+
+def task_create(user_id, title, description="", priority="medium", due_date=None, session_id=None, reminder_at=None):
+    tid = str(uuid.uuid4())
+    now = datetime.now().isoformat()
+    _db_run(
+        "INSERT INTO tasks (id, user_id, title, description, status, priority, due_date, session_id, created_at, updated_at, reminder_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (tid, user_id, title, description, "pending", priority, due_date, session_id, now, now, reminder_at),
+    )
+    return _db_fetch_one("SELECT * FROM tasks WHERE id=?", (tid,))
+
+def task_update(tid, user_id, **kwargs):
+    fields = {k: v for k, v in kwargs.items() if v is not None}
+    if not fields:
+        return None
+    fields["updated_at"] = datetime.now().isoformat()
+    set_clause = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [tid, user_id]
+    _db_run(f"UPDATE tasks SET {set_clause} WHERE id=? AND user_id=?", vals)
+    return _db_fetch_one("SELECT * FROM tasks WHERE id=?", (tid,))
+
+def task_complete(tid, user_id):
+    now = datetime.now().isoformat()
+    _db_run("UPDATE tasks SET status='completed', updated_at=? WHERE id=? AND user_id=?", (now, tid, user_id))
+    return _db_fetch_one("SELECT * FROM tasks WHERE id=?", (tid,))
+
+def task_delete(tid, user_id):
+    _db_run("DELETE FROM tasks WHERE id=? AND user_id=?", (tid, user_id))
+
+def task_list(user_id, status=None):
+    if status:
+        return _db_fetch("SELECT * FROM tasks WHERE user_id=? AND status=? ORDER BY due_date IS NULL, due_date ASC, created_at DESC", (user_id, status))
+    return _db_fetch("SELECT * FROM tasks WHERE user_id=? ORDER BY due_date IS NULL, due_date ASC, created_at DESC", (user_id,))
+
+def task_get(tid, user_id):
+    return _db_fetch_one("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, user_id))
+
+def handle_task_tool(user_id, args):
+    op = args.get("operation", "")
+    if op == "create":
+        t = task_create(user_id, args["title"], args.get("description", ""), args.get("priority", "medium"), args.get("due_date"), args.get("session_id"), args.get("reminder_at"))
+        return json.dumps({"ok": True, "task": t})
+    elif op == "update":
+        tid = args["task_id"]
+        t = task_update(tid, user_id, title=args.get("title"), description=args.get("description"), priority=args.get("priority"), status=args.get("status"), due_date=args.get("due_date"), reminder_at=args.get("reminder_at"))
+        if t:
+            return json.dumps({"ok": True, "task": t})
+        return json.dumps({"ok": False, "error": "Task not found"})
+    elif op == "complete":
+        tid = args["task_id"]
+        t = task_complete(tid, user_id)
+        if t:
+            return json.dumps({"ok": True, "task": t})
+        return json.dumps({"ok": False, "error": "Task not found"})
+    elif op == "delete":
+        task_delete(args["task_id"], user_id)
+        return json.dumps({"ok": True})
+    elif op == "list":
+        tasks = task_list(user_id, args.get("status"))
+        return json.dumps({"ok": True, "tasks": tasks})
+    elif op == "get":
+        t = task_get(args["task_id"], user_id)
+        if t:
+            return json.dumps({"ok": True, "task": t})
+        return json.dumps({"ok": False, "error": "Task not found"})
+    return json.dumps({"ok": False, "error": f"Unknown operation: {op}"})
 
 _users_cache = None
 _users_cache_time = 0
@@ -247,7 +420,7 @@ _queue_lock = threading.Lock()
 _queue_cond = threading.Condition(_queue_lock)
 _current_task_id = None
 
-MAX_INPUT_TOKENS = 4096
+MAX_INPUT_TOKENS = 32768
 
 _event_queue = _queue_mod.Queue()
 _llm_pool = ThreadPoolExecutor(max_workers=1)
@@ -317,9 +490,80 @@ def estimate_tokens(messages):
 
 def trim_messages_for_context(messages):
     trimmed = list(messages)
+    sys_msg = None
+    if trimmed and trimmed[0].get("role") == "system":
+        sys_msg = trimmed.pop(0)
     while estimate_tokens(trimmed) > MAX_INPUT_TOKENS and len(trimmed) > 1:
         trimmed.pop(0)
+    if sys_msg:
+        trimmed.insert(0, sys_msg)
     return trimmed
+
+
+def _summarize_with_llm(text):
+    payload = {
+        "model": MODEL_ID,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You summarize conversations concisely, preserving key facts, decisions, user preferences, and unresolved questions.",
+            },
+            {"role": "user", "content": text},
+        ],
+        "max_tokens": 1024,
+        "temperature": 0.3,
+        "stream": False,
+    }
+    try:
+        r = requests.post(LLAMA_URL, json=payload, timeout=120)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"[compact] LLM summarization failed: {e}")
+        return None
+
+
+def compact_session(sid, keep_messages=6):
+    with _data_lock:
+        msgs = list(sessions.get(sid, []))
+    if len(msgs) <= keep_messages + 1:
+        return {"ok": True, "note": "Nothing to compact", "token_estimate": estimate_tokens(msgs)}
+    sys_msg = None
+    if msgs and msgs[0].get("role") == "system":
+        sys_msg = msgs.pop(0)
+    to_compact = msgs[:-keep_messages] if keep_messages > 0 else msgs
+    recent = msgs[-keep_messages:] if keep_messages > 0 else []
+    compact_text = ""
+    for m in to_compact:
+        role = m.get("role", "unknown")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for p in content:
+                if isinstance(p, dict):
+                    if p.get("type") == "text":
+                        parts.append(p.get("text", ""))
+            content = " ".join(parts)
+        if not content:
+            continue
+        compact_text += f"[{role}]: {content}\n\n"
+    if not compact_text.strip():
+        return {"ok": True, "note": "Nothing to compact", "token_estimate": estimate_tokens(msgs)}
+    summary = _summarize_with_llm(
+        f"Compress the following conversation into a short paragraph, keeping all important details:\n\n{compact_text}"
+    )
+    if summary is None:
+        return {"ok": False, "error": "Summarization failed"}
+    new_msgs = []
+    if sys_msg:
+        new_msgs.append(sys_msg)
+    new_msgs.append({"role": "system", "content": f"[Compressed context]: {summary}"})
+    new_msgs.extend(recent)
+    with _data_lock:
+        sessions[sid] = new_msgs
+        sessions_meta.setdefault(sid, {})["updated"] = time.time()
+    save_sessions()
+    return {"ok": True, "token_estimate": estimate_tokens(new_msgs)}
 
 
 def set_status(task_id, message):
@@ -599,7 +843,7 @@ def location_str():
     global _client_location
     if _client_location:
         return _client_location
-    return "Unknown"
+    return None
 
 
 def extract_city(loc):
@@ -611,18 +855,17 @@ def extract_city(loc):
     return loc
 
 
-def web_search(query, client_ts=None):
-    try:
-        if client_ts:
-            ts = datetime.fromisoformat(client_ts.replace("Z", "+00:00"))
-        else:
-            ts = datetime.now()
-    except Exception:
-        ts = datetime.now()
-    loc_str = location_str()
-    city = extract_city(loc_str) if loc_str != "Unknown" else ""
-    clean_query = f"{query} {city}".strip() if city and city not in query else query
+def web_search(query, current_time=None, current_location=None):
+    ts = datetime.now()
     from urllib.parse import urlencode
+
+    clean_query = query
+    if current_time and current_location:
+        clean_query = f"{query} (current time: {current_time}) (location: {current_location})"
+    elif current_time:
+        clean_query = f"{query} (current time: {current_time})"
+    elif current_location:
+        clean_query = f"{query} (location: {current_location})"
 
     params = {"q": clean_query, "format": "json"}
     search_url = f"{SEARXNG_URL}?{urlencode(params)}"
@@ -1117,7 +1360,11 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
         set_status(task_id, f"Searching web for: {args.get('query')}...")
         with _data_lock:
             client_ts = tasks.get(task_id, {}).get("_client_timestamp")
-        result = web_search(args["query"], client_ts)
+        result = web_search(
+            args["query"],
+            current_time=args.get("current_time"),
+            current_location=args.get("current_location"),
+        )
         print(f"[web_search] RAW result for task {task_id}: {result[:300]}...")  # DEBUG
         with _data_lock:
             t = tasks.get(task_id)
@@ -1268,6 +1515,25 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
             round=round_num,
             tool_index=tool_index,
         )
+    elif tool_name == "manage_tasks":
+        user = ""
+        with _data_lock:
+            t = tasks.get(task_id)
+            if t:
+                user = t.get("_user", "")
+        if not user:
+            result = json.dumps({"ok": False, "error": "User not found"})
+        else:
+            result = handle_task_tool(user, args)
+        _event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
     else:
         result = json.dumps({"error": f"Unknown tool: {tool_name}"})
         _event_post(
@@ -1289,7 +1555,9 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
             ts = datetime.now()
     except Exception:
         ts = datetime.now()
-    date_loc_context = f"[Current date: {ts.strftime('%Y-%m-%d %A %H:%M')}] [User location: {location_str()}]"
+    loc = location_str()
+    loc_context = f" [User location: {loc}]" if loc else ""
+    date_loc_context = f"[Current date: {ts.strftime('%Y-%m-%d %A %H:%M')}]{loc_context}"
     user = ""
     with _data_lock:
         t = tasks.get(task_id)
@@ -1301,7 +1569,11 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
     full_sys_content = full_sys_content.replace(
         "%current_time%", ts.strftime("%Y-%m-%d %A %H:%M")
     )
-    full_sys_content = full_sys_content.replace("%current_location%", location_str())
+    if loc:
+        full_sys_content = full_sys_content.replace("%current_location%", loc)
+    else:
+        full_sys_content = full_sys_content.replace("Currently the server is hosted on %current_location%.", "")
+        full_sys_content = full_sys_content.replace("%current_location%", "not available")
     if user_context:
         print(
             f"[context] Injected {len(user_context)} chars of context for user '{user}'"
@@ -1374,7 +1646,7 @@ def _start_llm_round(task_id, sid, round_num):
         "messages": messages,
         "tools": TOOLS,
         "tool_choice": "auto",
-        "max_tokens": 4096,
+        "max_tokens": MAX_INPUT_TOKENS,
         "reasoning_budget": REASONING_BUDGET,
         "reasoning_effort": "medium",
     }
@@ -1608,6 +1880,19 @@ def _idle_unload_loop():
             unload_llama_model()
 
 
+def _reminder_loop():
+    while True:
+        try:
+            now = datetime.now().isoformat()
+            due = _db_fetch("SELECT * FROM tasks WHERE reminder_at IS NOT NULL AND reminder_at <= ? AND reminded=0 AND status NOT IN ('completed','cancelled')", (now,))
+            for task in due:
+                print(f"[reminder] Task '{task['title']}'. User: {task['user_id']}")
+                _db_run("UPDATE tasks SET reminded=1 WHERE id=?", (task["id"],))
+        except Exception as e:
+            print(f"[reminder] Error: {e}")
+        time.sleep(30)
+
+
 def _evacuate_ram():
     global _current_task_id, _ram_evacuating
     _ram_evacuating = True
@@ -1777,12 +2062,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         elif self.path == "/api/model-status":
             with _data_lock:
                 ms, tps, oh, gtemp = model_status, _last_tps, _overheated, _gpu_temp
+            try:
+                user = get_current_user(self.headers)
+                reminder_count = len(_db_fetch("SELECT id FROM tasks WHERE user_id=? AND reminder_at IS NOT NULL AND reminder_at <= ? AND reminded=0 AND status NOT IN ('completed','cancelled')", (user, datetime.now().isoformat()))) if user else 0
+            except Exception:
+                reminder_count = 0
             self.send_json(
                 {
                     "model": ms,
                     "predicted_per_second": tps,
                     "overheated": oh,
                     "gpu_temp": gtemp,
+                    "max_context": MAX_INPUT_TOKENS,
+                    "reminder_count": reminder_count,
                 }
             )
         elif self.path.startswith("/output/"):
@@ -1867,7 +2159,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 with open(fpath, "rb") as f:
                     self.wfile.write(f.read())
             elif self.path.startswith("/api/") or "." in os.path.basename(self.path):
-                self.send_error(404)
+                if self.path == "/api/tasks":
+                    user = get_current_user(self.headers)
+                    if not user:
+                        self.send_json({"error": "Unauthorized"}, status=401)
+                        return
+                    user_tasks = task_list(user)
+                    self.send_json({"tasks": user_tasks})
+                else:
+                    self.send_error(404)
             else:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1908,6 +2208,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"status": "deleted"})
             else:
                 self.send_error(404)
+        elif self.path.startswith("/api/tasks/"):
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            tid = self.path.split("/")[3]
+            task_delete(tid, user)
+            self.send_json({"status": "deleted"})
         else:
             self.send_error(404)
 
@@ -1928,6 +2236,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if meta:
                 save_sessions()
                 self.send_json({"status": "updated"})
+            else:
+                self.send_error(404)
+        elif self.path.startswith("/api/tasks/"):
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            tid = self.path.split("/")[3]
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            t = task_update(tid, user, **{k: v for k, v in body.items() if k in ("title","description","status","priority","due_date","reminder_at")})
+            if t:
+                self.send_json({"task": t})
             else:
                 self.send_error(404)
         else:
@@ -2058,6 +2379,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 }
             save_sessions()
             self.send_json({"session_id": sid})
+        elif self.path == "/api/compact":
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            sid = body.get("session_id", "")
+            keep = body.get("keep_messages", 6)
+            with _data_lock:
+                meta = sessions_meta.get(sid)
+                if not meta or meta.get("user_id", "") != user:
+                    self.send_json({"error": "Session not found"}, status=404)
+                    return
+            result = compact_session(sid, keep)
+            self.send_json(result)
         elif self.path == "/api/location":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
@@ -2077,6 +2414,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 except Exception:
                     _client_location = f"{lat:.4f}, {lng:.4f}"
             self.send_json({"ok": True})
+        elif self.path == "/api/tasks":
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            t = task_create(user, body.get("title", "Untitled"), body.get("description", ""), body.get("priority", "medium"), body.get("due_date"), body.get("session_id"), body.get("reminder_at"))
+            self.send_json({"task": t})
         else:
             self.send_error(404)
 
@@ -2101,10 +2447,20 @@ if __name__ == "__main__":
     except Exception:
         print("[startup] llama-server not reachable — starting...")
         restart_servers()
+    try:
+        r = requests.get(SEARXNG_URL, timeout=3)
+        if r.status_code in (200, 301, 302):
+            print("[startup] SearXNG is running")
+        else:
+            raise Exception(f"status {r.status_code}")
+    except Exception as e:
+        print(f"[startup] ERROR: SearXNG is not reachable at {SEARXNG_URL} ({e}). Web search will not work. Exiting.")
+        sys.exit(1)
     threading.Thread(target=_event_loop, daemon=True).start()
     threading.Thread(target=_queue_worker, daemon=True).start()
     threading.Thread(target=_idle_unload_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()
+    threading.Thread(target=_reminder_loop, daemon=True).start()
     print(f"Chat UI running on http://localhost:{PORT}")
     s = http.server.HTTPServer((HOST, PORT), Handler)
     try:

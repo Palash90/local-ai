@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 
-export default function ModelBar({ modelStatus, modelTps, tokenEstimate, onToggleSidebar, username, onLogout }) {
+export default function ModelBar({ modelStatus, modelTps, tokenEstimate, maxContext, onToggleSidebar, username, onLogout, onCompact, compacting, reminderCount, onToggleTasks }) {
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const dropdownRef = useRef(null)
 
@@ -36,8 +36,31 @@ export default function ModelBar({ modelStatus, modelTps, tokenEstimate, onToggl
           )}
         </span>
       )}
-      <span id="token-indicator" style={{ marginLeft: 12, fontSize: 12, color: '#666' }}>
-        {tokenEstimate > 1000 ? '~' + (tokenEstimate / 1000).toFixed(1) + 'k tokens' : tokenEstimate > 0 ? '~' + tokenEstimate + ' tokens' : ''}
+      <span id="token-indicator">
+        <svg id="context-donut" viewBox="0 0 24 24" width="18" height="18">
+          <circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="3" />
+          <circle
+            cx="12" cy="12" r="8" fill="none"
+            stroke={(tokenEstimate / maxContext) * 100 > 80 ? '#f87171' : (tokenEstimate / maxContext) * 100 > 60 ? '#fbbf24' : '#4ade80'}
+            strokeWidth="3" strokeLinecap="round"
+            strokeDasharray={Math.PI * 16}
+            strokeDashoffset={Math.PI * 16 * (1 - Math.min((tokenEstimate / maxContext) * 100, 100) / 100)}
+            transform="rotate(-90 12 12)"
+          />
+        </svg>
+        {tokenEstimate > 0 && (
+          <span className="token-text">
+            {tokenEstimate > 1000 ? (tokenEstimate / 1000).toFixed(1) + 'k' : tokenEstimate} / {maxContext > 1000 ? (maxContext / 1000).toFixed(0) + 'k' : maxContext}
+          </span>
+        )}
+        {onCompact && (
+          <button id="compact-btn" onClick={onCompact} disabled={compacting} title="Compress old messages to free context">
+            {compacting ? '...' : '\u21911'}
+          </button>
+        )}
+        <button id="tasks-btn" onClick={onToggleTasks} title="Tasks">
+          &#9776;{reminderCount > 0 && <span id="reminder-badge">{reminderCount}</span>}
+        </button>
       </span>
       <div id="user-menu" ref={dropdownRef}>
         <span id="user-name" onClick={() => setDropdownOpen(o => !o)}>{username}</span>

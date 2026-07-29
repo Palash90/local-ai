@@ -200,7 +200,7 @@ export default function Message({ msg, pending, onImageOpen }) {
   }, [])
 
   const hidePopup = useCallback(() => {
-    hideTimer.current = setTimeout(() => setPopupVisible(null), 300)
+    hideTimer.current = setTimeout(() => setPopupVisible(null), 800)
   }, [])
 
   const role = pending ? 'bot' : msg.role === 'user' ? 'user' : 'bot'

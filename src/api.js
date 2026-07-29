@@ -101,6 +101,15 @@ export async function getModelStatus() {
   return r.json();
 }
 
+export async function compactSession(sessionId, keepMessages = 6) {
+  const r = await authFetch('/api/compact', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, keep_messages: keepMessages }),
+  });
+  return r.json();
+}
+
 export async function sendLocation(latitude, longitude) {
   await fetch('/api/location', {
     method: 'POST',
@@ -116,4 +125,31 @@ export async function extractFile(name, dataB64) {
     body: JSON.stringify({ name, data: dataB64 }),
   });
   return r.json();
+}
+
+export async function fetchTasks() {
+  const r = await authFetch('/api/tasks');
+  return r.json();
+}
+
+export async function createTask(data) {
+  const r = await authFetch('/api/tasks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  return r.json();
+}
+
+export async function updateTask(taskId, data) {
+  const r = await authFetch(`/api/tasks/${taskId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  return r.json();
+}
+
+export async function deleteTask(taskId) {
+  await authFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
 }

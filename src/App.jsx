@@ -7,6 +7,7 @@ import ChatArea from './components/ChatArea'
 import InputBar from './components/InputBar'
 import ImageLightbox from './components/ImageLightbox'
 import OverloadWarning from './components/OverloadWarning'
+import TaskPanel from './components/TaskPanel'
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(false)
@@ -16,28 +17,23 @@ export default function App() {
   const [messages, setMessages] = useState([])
   const [pendingMessages, setPendingMessages] = useState({})
   const [tokenEstimate, setTokenEstimate] = useState(0)
+  const [maxContext, setMaxContext] = useState(4096)
   const [modelStatus, setModelStatus] = useState('unloaded')
   const [modelTps, setModelTps] = useState(null)
-  const [overheated, setOverheated] = useState(false)
-  const [gpuTemp, setGpuTemp] = useState(null)
+const [overheated, setOverheated] = useState(false)
+const [gpuTemp, setGpuTemp] = useState(null)
+const [reminderCount, setReminderCount] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [lightboxSrc, setLightboxSrc] = useState(null)
   const [micRecording, setMicRecording] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState({})
+const [compacting, setCompacting] = useState(false)
+const [showTasks, setShowTasks] = useState(false)
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const pendingRef = useRef({})
+  const sessionRef = useRef(null)
 
-
-  useEffect(() => {
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
-        () => {},
-        { timeout: 10000 }
-      )
-    }
-  }, [])
 
   useEffect(() => {
   const token = localStorage.getItem('auth_token') // or whatever key api.login uses
@@ -67,12 +63,13 @@ export default function App() {
     pendingRef.current = pendingMessages
   }, [pendingMessages])
 
+
   useEffect(() => {
     const handler = () => {
       setAuthenticated(false);
       setUsername('');
       setSessions([]);
-      setCurrentSessionId(null);
+      sessionRef.current = null; setCurrentSessionId(null);
       setMessages([]);
       setPendingMessages({});
       setSidebarOpen(false);
@@ -113,7 +110,7 @@ export default function App() {
     setAuthenticated(false)
     setUsername('')
     setSessions([])
-    setCurrentSessionId(null)
+    sessionRef.current = null; setCurrentSessionId(null)
     setMessages([])
     setPendingMessages({})
     setSidebarOpen(false)
@@ -128,16 +125,18 @@ export default function App() {
 
   function loadSessionMessages(sid) {
     api.fetchMessages(sid).then(data => {
+      if (sessionRef.current !== sid) return
       setMessages(data.messages || [])
       setTokenEstimate(data.token_estimate || 0)
     }).catch(() => {
+      if (sessionRef.current !== sid) return
       setMessages([])
       setTokenEstimate(0)
     })
   }
 
   async function switchSession(sid) {
-    setCurrentSessionId(sid)
+    sessionRef.current = sid; setCurrentSessionId(sid)
     localStorage.setItem('last_sid', sid)
     loadSessionMessages(sid)
     closeSidebar()
@@ -145,7 +144,7 @@ export default function App() {
 
   async function newChat() {
     const data = await api.createSession()
-    setCurrentSessionId(data.session_id)
+    sessionRef.current = data.session_id; setCurrentSessionId(data.session_id)
     localStorage.setItem('last_sid', data.session_id)
     setMessages([])
     setTokenEstimate(0)
@@ -164,6 +163,8 @@ export default function App() {
       } else {
         newChat()
       }
+    } else if (currentSessionId) {
+      loadSessionMessages(currentSessionId)
     }
   }
 
@@ -174,7 +175,7 @@ export default function App() {
     const prevSid = currentSessionId
     await api.renameSession(sid, newName.trim())
     const list = await loadSessions()
-    setCurrentSessionId(prevSid)
+    sessionRef.current = prevSid; setCurrentSessionId(prevSid)
     setSessions(list)
   }
 
@@ -287,6 +288,23 @@ export default function App() {
     })
   }
 
+  // ---- Compact ----
+  async function handleCompact() {
+    if (!currentSessionId || compacting) return
+    setCompacting(true)
+    try {
+      const res = await api.compactSession(currentSessionId, 6)
+      if (res.ok) {
+        loadSessionMessages(currentSessionId)
+      } else {
+        console.error('[compact] failed:', res.error)
+      }
+    } catch (e) {
+      console.error('[compact] error:', e)
+    }
+    setCompacting(false)
+  }
+
   // ---- Task polling ----
   useEffect(() => {
     if (!authenticated) return
@@ -317,11 +335,15 @@ export default function App() {
                 _image_model: st._image_model,
                 _search_details: st._search_details || [],
               }
-              setMessages(prev => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg])
+              if (pendingEntry?.sessionId === sessionRef.current) {
+                setMessages(prev => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg])
+              }
               if (st.token_estimate != null) setTokenEstimate(st.token_estimate)
               if (st.predicted_per_second != null) setModelTps(st.predicted_per_second)
             } else {
-              setMessages(prev => [...prev, { role: 'assistant', content: 'Error: ' + (st.error || '') }])
+              if (pendingEntry?.sessionId === sessionRef.current) {
+                setMessages(prev => [...prev, { role: 'assistant', content: 'Error: ' + (st.error || '') }])
+              }
             }
             const remaining = getStoredPending().filter(p => p.task_id !== taskId)
             setStoredPending(remaining)
@@ -349,6 +371,8 @@ export default function App() {
         setOverheated(data.overheated)
         setGpuTemp(data.gpu_temp)
         if (data.predicted_per_second != null) setModelTps(data.predicted_per_second)
+        if (data.max_context != null) setMaxContext(data.max_context)
+        if (data.reminder_count != null) setReminderCount(data.reminder_count)
       } catch { /* ignore */ }
     }, 2000)
     return () => clearInterval(interval)
@@ -376,8 +400,8 @@ export default function App() {
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
-          () => {},
-          { timeout: 10000 }
+          err => console.log('[location] ' + (err.code === 1 ? 'denied' : err.message)),
+          { timeout: 10000, enableHighAccuracy: false }
         )
       }
       console.log('[loginWrapper] loading sessions...')
@@ -408,9 +432,14 @@ export default function App() {
           modelStatus={modelStatus}
           modelTps={modelTps}
           tokenEstimate={tokenEstimate}
+          maxContext={maxContext}
           onToggleSidebar={() => setSidebarOpen(o => !o)}
           username={username}
           onLogout={handleLogout}
+          onCompact={handleCompact}
+          compacting={compacting}
+          reminderCount={reminderCount}
+          onToggleTasks={() => setShowTasks(o => !o)}
         />
         <div id="app-container">
           <Sidebar
@@ -438,6 +467,7 @@ export default function App() {
           />
         </div>
         <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+        {showTasks && <TaskPanel onClose={() => setShowTasks(false)} />}
       </div>
     </>
   )
