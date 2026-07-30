@@ -23,6 +23,7 @@ import sys
 
 sys.path.insert(0, COMFYUI_DIR)
 COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
+UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
 LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-server")
 LLAMA_QWEN_NGL = "12"
 LLAMA_GEMMA_NGL = "99"
@@ -198,6 +199,23 @@ TOOLS = [
                 "type": "object",
                 "properties": {},
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read the text content of an uploaded file (PDF, DOC, DOCX, XLS, XLSX). Call this when the user has attached a file and you need to read its content to answer their question. The file URL is provided in the user message as [FILE: url]. Pass that url as the file_url parameter.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_url": {
+                        "type": "string",
+                        "description": "The file URL from the user message (the /uploads/... path)."
+                    }
+                },
+                "required": ["file_url"],
             },
         },
     },
@@ -1395,6 +1413,21 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
         _event_post("tool_ok", task_id, tc_id=tc["id"], result=result, sid=sid, round=round_num, tool_index=tool_index)
         return
 
+    if tool_name == "read_file":
+        file_url = args.get("file_url", "")
+        filename = os.path.basename(urlparse(file_url).path)
+        fpath = os.path.abspath(os.path.join(UPLOADS_DIR, filename))
+        if fpath.startswith(os.path.abspath(UPLOADS_DIR)) and os.path.exists(fpath):
+            text = read_file_text(fpath)
+            if text:
+                result = f"Content of {file_url}:\n\n{text}"
+            else:
+                result = f"Could not extract text from {file_url}. The file may contain only images."
+        else:
+            result = f"File not found: {file_url}"
+        _event_post("tool_ok", task_id, tc_id=tc["id"], result=result, sid=sid, round=round_num, tool_index=tool_index)
+        return
+
     if tool_name == "web_search":
         set_status(task_id, f"Searching web for: {args.get('query')}...")
         with _data_lock:
@@ -2016,6 +2049,60 @@ def read_index_html():
         return "<html><body><h1>index.html missing</h1></body></html>"
 
 
+def read_file_text(file_path):
+    ext = os.path.splitext(file_path)[1].lower()
+    with open(file_path, "rb") as f:
+        raw = f.read()
+    if ext == ".pdf":
+        try:
+            import fitz
+            doc = fitz.open(stream=raw, filetype="pdf")
+            text = "\n".join(page.get_text() for page in doc)
+            doc.close()
+            return text
+        except ImportError:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmpf:
+                tmpf.write(raw)
+                tmp = tmpf.name
+            try:
+                r = subprocess.run(
+                    ["pdftotext", tmp, "-"], capture_output=True, text=True, timeout=30
+                )
+                return r.stdout
+            finally:
+                os.unlink(tmp)
+    elif ext == ".docx":
+        from docx import Document
+        doc = Document(io.BytesIO(raw))
+        return "\n".join(p.text for p in doc.paragraphs)
+    elif ext == ".doc":
+        with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as tmpf:
+            tmpf.write(raw)
+            tmp = tmpf.name
+        try:
+            r = subprocess.run(
+                ["catdoc", tmp], capture_output=True, text=True, timeout=30
+            )
+            if r.returncode == 0:
+                return r.stdout
+            r = subprocess.run(
+                ["antiword", tmp], capture_output=True, text=True, timeout=30
+            )
+            return r.stdout
+        finally:
+            os.unlink(tmp)
+    elif ext in (".xls", ".xlsx"):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        rows = []
+        for sheet in wb.worksheets:
+            for row in sheet.iter_rows(values_only=True):
+                rows.append("\t".join(str(c) if c is not None else "" for c in row))
+        wb.close()
+        return "\n".join(rows)
+    return ""
+
+
 def extract_file_text(name, data_b64):
     ext = os.path.splitext(name)[1].lower()
     raw = base64.b64decode(data_b64)
@@ -2133,6 +2220,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(f.read())
                 return
             self.send_error(404)
+        elif self.path.startswith("/uploads/"):
+            filename = os.path.basename(urlparse(self.path).path)
+            fpath = os.path.abspath(os.path.join(UPLOADS_DIR, filename))
+            if fpath.startswith(os.path.abspath(UPLOADS_DIR)) and os.path.exists(fpath):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", "inline")
+                self.end_headers()
+                with open(fpath, "rb") as f:
+                    self.wfile.write(f.read())
+                return
+            self.send_error(404)
         elif self.path.startswith("/api/status/"):
             task_id = os.path.basename(self.path)
             with _data_lock:
@@ -2240,6 +2339,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         if os.path.exists(fpath):
                             print(f"[delete] Removed output image: {fpath}")
                             os.remove(fpath)
+                raw = msg.get("content", "")
+                texts = []
+                if isinstance(raw, str):
+                    texts.append(raw)
+                elif isinstance(raw, list):
+                    for part in raw:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            texts.append(part.get("text", ""))
+                for text in texts:
+                    for part in text.split("[FILE:"):
+                        idx = part.find("/uploads/")
+                        if idx != -1:
+                            url_part = part[idx:].split("]")[0]
+                            fname = os.path.basename(url_part)
+                            fpath = os.path.join(UPLOADS_DIR, fname)
+                            if os.path.exists(fpath):
+                                print(f"[delete] Removed uploaded file: {fpath}")
+                                os.remove(fpath)
 
             with _data_lock:
                 exists = sid in sessions
@@ -2398,13 +2515,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         elif self.path == "/api/extract-file":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
-            text = extract_file_text(body.get("name", ""), body.get("data", ""))
-            if text:
-                self.send_json({"text": text})
-            else:
-                self.send_json(
-                    {"error": "Could not extract text from file"}, status=400
-                )
+            name = body.get("name", "")
+            data_b64 = body.get("data", "")
+            ext = os.path.splitext(name)[1].lower()
+            safe_name = str(uuid.uuid4()) + ext
+            filepath = os.path.join(UPLOADS_DIR, safe_name)
+            raw = base64.b64decode(data_b64)
+            with open(filepath, "wb") as f:
+                f.write(raw)
+            file_url = f"/uploads/{safe_name}"
+            self.send_json({"url": file_url, "name": name})
         elif self.path == "/api/sessions":
             user = get_current_user(self.headers)
             if not user:
@@ -2492,6 +2612,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
     load_sessions()
     try:
         r = requests.get(f"{LLAMA_BASE}/health", timeout=3)

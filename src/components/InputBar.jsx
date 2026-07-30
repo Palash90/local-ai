@@ -20,6 +20,7 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
   const [attachedImage, setAttachedImage] = useState(null)
   const [attachedFile, setAttachedFile] = useState(null)
   const [attachedFileText, setAttachedFileText] = useState(null)
+  const [attachedFileUrl, setAttachedFileUrl] = useState(null)
   const fileInputRef = useRef(null)
   const textareaRef = useRef(null)
   const imagePreviewRef = useRef(null)
@@ -29,6 +30,7 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
     setAttachedImage(null)
     setAttachedFile(null)
     setAttachedFileText(null)
+    setAttachedFileUrl(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
     if (imagePreviewRef.current) imagePreviewRef.current.style.display = 'none'
   }
@@ -91,12 +93,12 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
         const b64 = ev.target.result.split(',')[1]
         try {
           const data = await extractFile(file.name, b64)
-          if (data.text) {
-            setAttachedFile(file.name)
-            setAttachedFileText(data.text)
+          if (data.url) {
+            setAttachedFile(data.name)
+            setAttachedFileUrl(data.url)
           } else {
             clearAttachments()
-            alert('Could not extract text from ' + file.name + (data.error ? ': ' + data.error : ''))
+            alert('Could not process ' + file.name + (data.error ? ': ' + data.error : ''))
           }
         } catch (err) {
           clearAttachments()
@@ -120,11 +122,13 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
   async function handleSend() {
     if (sendingRef.current) return
     const msg = text.trim()
-    if (!msg && !attachedImage && !attachedFileText) return
+    if (!msg && !attachedImage && !attachedFileText && !attachedFileUrl) return
     sendingRef.current = true
     let finalText = msg
     if (attachedFileText) {
       finalText = '[FILE: ' + attachedFile + ']\n```\n' + attachedFileText + '\n```\n[END FILE]\n\n' + (msg || 'See attached file above.')
+    } else if (attachedFileUrl) {
+      finalText = '[FILE: ' + attachedFileUrl + '](' + attachedFile + ')\n\n' + (msg || 'See attached file above.')
     }
     try {
       await onSend(finalText, attachedImage)
@@ -158,6 +162,7 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
   function removeAttachedFile() {
     setAttachedFile(null)
     setAttachedFileText(null)
+    setAttachedFileUrl(null)
   }
 
   return (
