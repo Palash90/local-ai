@@ -9,9 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 LLAMA_BASE = "http://localhost:8081"
 LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
 
-
+VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
 COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
-SEARXNG_URL = "http://localhost:8080/search"
+SEARXNG_URL = "http://localhost:8080/search" # Change to localhost if running from direct OS
 COMFYUI_URL = "http://localhost:8188"
 HOST, PORT = "0.0.0.0", 3001
 REASONING_BUDGET = 1120  # 560 for medium, you don't need short reasoning
@@ -31,6 +31,7 @@ LLAMA_SERVER_ARGS = [
     "0.0.0.0",
     "--port",
     "8081",
+    "--jinja", # Not required for Q4, could not figure out why
     "--models-dir",
     os.path.expanduser("~/local-ai-files/my-models/"),
     "--n-gpu-layers",
@@ -761,7 +762,7 @@ def restart_servers():
     kill_llama_server()
     kill_comfyui()
     time.sleep(1)
-    log_dir = os.path.expanduser("~/local-ai")
+    log_dir = os.path.expanduser("~/local-ai-files")
     llm_log = open(os.path.join(log_dir, "llama-server.log"), "a")
     comfy_log = open(os.path.join(log_dir, "comfyui.log"), "a")
     subprocess.Popen(
@@ -772,7 +773,7 @@ def restart_servers():
     )
     subprocess.Popen(
         [
-            os.path.join(COMFYUI_DIR, "venv/bin/python"),
+            os.path.join(VENV_PYTHON),
             "main.py",
             "--output-directory",
             COMFYUI_OUTPUT,
@@ -813,7 +814,7 @@ def ensure_comfyui_running():
     comfy_log = open(os.path.join(log_dir, "comfyui.log"), "a")
     subprocess.Popen(
         [
-            os.path.join(COMFYUI_DIR, "venv/bin/python"),
+            os.path.join(VENV_PYTHON),
             "main.py",
             "--output-directory",
             COMFYUI_OUTPUT,
@@ -1647,8 +1648,8 @@ def _start_llm_round(task_id, sid, round_num):
         "tools": TOOLS,
         "tool_choice": "auto",
         "max_tokens": MAX_INPUT_TOKENS,
-        "reasoning_budget": REASONING_BUDGET,
-        "reasoning_effort": "medium",
+        #"reasoning_budget": REASONING_BUDGET,
+        #"reasoning_effort": "medium",
     }
     set_status(
         task_id, "Thinking..." if round_num == 0 else f"Thinking (round {round_num})..."

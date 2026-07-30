@@ -32,18 +32,54 @@ pip install -r requirements.txt
 cd llama.cpp
 cmake # website gives info
 
+### nvidia
+
+Install nvidia cuda toolkit
+Install nvidia container toolkit (Only if you want to run your ai server on a docker container, otherwise not needed)
+
 ### Docker
 
 Install searxng - read setup.sh
+
+In a docker container, install ubuntu:24.04 with gpus support
+
+```shell
+docker run -it --gpus all --name ai-container ubuntu:24.04
+nvidia-smi # To confirm the nvidia support
+nvcc --version # To verify nvcc
+```
+
+There is a separate docker-compose.yaml file in the repo if you want a containerized setup.
+
+Internet Toggle for container:
+
+```shell
+docker network connect local-ai_external-net ai-container
+
+docker exec -it ai-container bash
+
+apt update && apt install -y tzdata
+dpkg-reconfigure -f noninteractive tzdata
+
+# Update packages and install useful utilities
+apt update && apt install -y curl wget git python3 python3-pip nano pipx
+apt-get update && apt-get install -y nvidia-cuda-toolkit
+
+# Check GPU availability inside the container
+nvidia-smi
+
+docker network disconnect local-ai_external-net ai-container
+```
 
 ### ComfyUI
 
 Build step was there - read setup.sh
 
 ```shell
-cd /home/palash/local-ai
+mkdir ~/local-ai
+cd ~/local-ai
 source venv/bin/activate
-python main.py --lowvram --input-directory /home/palash/local-ai-files/ComfyUI/input --output-directory /home/palash/local-ai-files/ComfyUI/output
+python main.py --lowvram --input-directory ~/local-ai-files/ComfyUI/input --output-directory ~/local-ai-files/ComfyUI/output
 ```
 
 ### Llama Server

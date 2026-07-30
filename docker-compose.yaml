@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  # 1. SearXNG Container (Has internet access)
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    networks:
+      - external-net   # Access to Host and Internet
+      - internal-net   # Accessible by ai-container
+    ports:
+      - "8080:8080"    # Host can access SearXNG at http://localhost:8080
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+
+  # 2. AI Container (No direct internet, GPU access, shared memory, restricted network)
+  ai-container:
+    image: ubuntu:24.04
+    container_name: ai-container
+    restart: unless-stopped
+    command: tail -f /dev/null  # Keeps container running
+    ipc: host                    # Share host memory / IPC namespace for high-performance AI workloads
+    
+    # GPU Configuration (Requires NVIDIA Container Toolkit on host)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Shared File System
+    volumes:
+      - ~/local-ai-files:/root/local-ai-files:rw
+      - ~/git/local-ai:/root/git/local-ai:ro # To seamlessly test things on container directly
+
+    # Network Restrictions
+    networks:
+      - internal-net   # ONLY connected to internal-net (No internet access)
+    ports:
+      - "8081:8081"    # Port 8081 exposed to Host OS, for other AI works
+      - "3001:3001"    # The actual port of the chatbot
+
+networks:
+  # Network with internet gateway for SearXNG and Host
+  external-net:
+    driver: bridge
+
+  # Isolated network with NO internet gateway
+  internal-net:
+    driver: bridge
+    internal: true     # Prevents traffic from leaving this bridge network to the internet
