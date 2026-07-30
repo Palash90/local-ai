@@ -2049,6 +2049,15 @@ def read_index_html():
         return "<html><body><h1>index.html missing</h1></body></html>"
 
 
+def strip_html(text):
+    import re
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def read_file_text(file_path):
     ext = os.path.splitext(file_path)[1].lower()
     with open(file_path, "rb") as f:
@@ -2057,9 +2066,12 @@ def read_file_text(file_path):
         try:
             import fitz
             doc = fitz.open(stream=raw, filetype="pdf")
-            text = "\n".join(page.get_text() for page in doc)
+            lines = []
+            for page in doc:
+                lines.append(page.get_text())
             doc.close()
-            return text
+            text = "\n".join(lines)
+            return strip_html(text)
         except ImportError:
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmpf:
                 tmpf.write(raw)
@@ -2111,9 +2123,10 @@ def extract_file_text(name, data_b64):
             import fitz
 
             doc = fitz.open(stream=raw, filetype="pdf")
-            text = "\n".join(page.get_text() for page in doc)
+            lines = [page.get_text() for page in doc]
             doc.close()
-            return text
+            text = "\n".join(lines)
+            return strip_html(text)
         except ImportError:
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
                 f.write(raw)
@@ -2480,14 +2493,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 meta = sessions_meta.get(sid)
                 if not meta or meta.get("user_id", "") != user:
                     self.send_json({"error": "Session not found"}, status=404)
-                    return
-                if _overheated:
-                    self.send_json(
-                        {
-                            "error": "Server overloaded — your message is queued and will be processed once the GPU cools down"
-                        },
-                        status=503,
-                    )
                     return
 
             entry = {
