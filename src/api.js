@@ -75,8 +75,18 @@ export async function renameSession(sessionId, name) {
   });
 }
 
+function localISOString() {
+  const d = new Date()
+  const tz = -d.getTimezoneOffset()
+  const sign = tz >= 0 ? '+' : '-'
+  const pad = n => String(Math.abs(n)).padStart(2, '0')
+  return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + 'T' +
+    pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) +
+    sign + pad(Math.floor(Math.abs(tz)/60)) + ':' + pad(Math.abs(tz)%60)
+}
+
 export async function sendMessage(sessionId, message, image, audio, clientTimestamp) {
-  const body = { session_id: sessionId, message, client_timestamp: clientTimestamp || new Date().toISOString() };
+  const body = { session_id: sessionId, message, client_timestamp: clientTimestamp || localISOString() };
   if (image) body.image = image;
   if (audio) body.audio = audio;
   const r = await authFetch('/api/chat', {
@@ -110,11 +120,19 @@ export async function compactSession(sessionId, keepMessages = 6) {
   return r.json();
 }
 
-export async function sendLocation(latitude, longitude) {
+export async function sendLocation(latitude, longitude, taskId) {
   await fetch('/api/location', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ latitude, longitude }),
+    body: JSON.stringify({ latitude, longitude, task_id: taskId }),
+  });
+}
+
+export async function denyLocation(taskId) {
+  await fetch('/api/location', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ denied: true, task_id: taskId }),
   });
 }
 

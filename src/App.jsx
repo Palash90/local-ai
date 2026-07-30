@@ -31,6 +31,8 @@ const [reminderCount, setReminderCount] = useState(0)
 const [compacting, setCompacting] = useState(false)
 const [showTasks, setShowTasks] = useState(false)
 const [showLocationPrompt, setShowLocationPrompt] = useState(false)
+const [locationTaskId, setLocationTaskId] = useState(null)
+const [locationError, setLocationError] = useState(null)
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const pendingRef = useRef({})
@@ -194,7 +196,7 @@ const [showLocationPrompt, setShowLocationPrompt] = useState(false)
     const userMsg = { role: 'user', content: text || (attachedFileLabel(image)), _timestamp: new Date().toISOString() }
 
     try {
-      const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined, new Date().toISOString())
+      const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined)
       const taskId = data.task_id
 
       setPendingMessages(prev => ({
@@ -349,6 +351,10 @@ const [showLocationPrompt, setShowLocationPrompt] = useState(false)
             }
             const remaining = getStoredPending().filter(p => p.task_id !== taskId)
             setStoredPending(remaining)
+          } else if (st.message === 'location_needed') {
+            setShowLocationPrompt(true)
+            setLocationTaskId(taskId)
+            setLocationError(null)
           } else {
             setPendingMessages(prev => ({
               ...prev,
@@ -399,27 +405,6 @@ const [showLocationPrompt, setShowLocationPrompt] = useState(false)
     try {
       await handleLogin(username, password)
       console.log('[loginWrapper] after handleLogin, authenticated should be true')
-      if (navigator.geolocation) {
-        if (navigator.permissions) {
-          navigator.permissions.query({ name: 'geolocation' }).then(result => {
-            if (result.state === 'granted') {
-              navigator.geolocation.getCurrentPosition(
-                pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
-                () => {},
-                { timeout: 10000, enableHighAccuracy: false }
-              )
-            } else if (result.state === 'prompt') {
-              setShowLocationPrompt(true)
-            }
-          })
-        } else {
-          navigator.geolocation.getCurrentPosition(
-            pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
-            () => {},
-            { timeout: 10000, enableHighAccuracy: false }
-          )
-        }
-      }
       console.log('[loginWrapper] loading sessions...')
       const list = await loadSessions()
       console.log('[loginWrapper] sessions loaded', list.length)
@@ -439,21 +424,35 @@ const [showLocationPrompt, setShowLocationPrompt] = useState(false)
   }
 
   function handleLocationAllow() {
-    setShowLocationPrompt(false)
+    const tid = locationTaskId
     navigator.geolocation.getCurrentPosition(
-      pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
-      () => {},
+      pos => {
+        setShowLocationPrompt(false)
+        setLocationTaskId(null)
+        api.sendLocation(pos.coords.latitude, pos.coords.longitude, tid)
+      },
+      err => {
+        if (err.code === 1) {
+          setLocationError('Location access is blocked in your browser. Please enable it in browser settings and try again.')
+        } else {
+          setLocationError('Could not get location: ' + err.message + '. Try again or click Deny.')
+        }
+      },
       { timeout: 10000, enableHighAccuracy: false }
     )
   }
 
   function handleLocationDeny() {
     setShowLocationPrompt(false)
+    const tid = locationTaskId
+    setLocationTaskId(null)
+    setLocationError(null)
+    api.denyLocation(tid)
   }
 
   return (
     <>
-      {showLocationPrompt && <LocationPrompt onAllow={handleLocationAllow} onDeny={handleLocationDeny} />}
+      {showLocationPrompt && <LocationPrompt onAllow={handleLocationAllow} onDeny={handleLocationDeny} error={locationError} />}
       <div style={{ display: !authenticated ? '' : 'none' }}>
         <LoginScreen onLogin={handleLoginWrapper} />
       </div>

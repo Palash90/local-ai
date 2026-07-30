@@ -126,7 +126,7 @@ TOOLS = [
                     "properties": {
                         "query": {"type": "string", "description": "The search query"},
                         "current_time": {"type": "string", "description": "Current date and time. Pass ONLY for time-sensitive queries (news, events, hours, etc.) where recency matters. Omit for direct-link lookups or general information."},
-                        "current_location": {"type": "string", "description": "User's location. Pass ONLY for location-specific results (weather, local news, nearby places, events). Omit for direct-link lookups or general queries."}
+                        "current_location": {"type": "string", "description": "User's location. Pass ONLY for location-specific results (weather, local news, nearby places, events). If you don't know the user's location, call get_user_location first to obtain it. Do NOT guess or fabricate location."}
                     },
                     "required": ["query"],
                 },
@@ -186,6 +186,18 @@ TOOLS = [
                     },
                 },
                 "required": ["prompt", "denoise"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_user_location",
+            "description": "Request the user's current geographical location. Call this ONLY when you need location for a location-specific query (weather, local news, nearby places, etc.) and you don't already have the user's location. Returns the user's city/area or 'denied' if they refuse.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
             },
         },
     },
@@ -426,6 +438,8 @@ MAX_INPUT_TOKENS = 32768
 _event_queue = _queue_mod.Queue()
 _llm_pool = ThreadPoolExecutor(max_workers=1)
 _tool_pool = ThreadPoolExecutor(max_workers=2)
+
+_location_events = {}
 
 _overheated = False
 _gpu_temp = None
@@ -871,9 +885,20 @@ def web_search(query, current_time=None, current_location=None):
     params = {"q": clean_query, "format": "json"}
     search_url = f"{SEARXNG_URL}?{urlencode(params)}"
     print("Performing web search", search_url)
-    r = requests.get(SEARXNG_URL, params=params, timeout=10)
-    print("Web-search completed")
-    data = r.json()
+    try:
+        r = requests.get(SEARXNG_URL, params=params, timeout=10)
+        r.raise_for_status()
+        print("Web-search completed")
+        data = r.json()
+    except Exception as e:
+        print(f"Web-search failed: {e}")
+        return json.dumps({
+            "results": [],
+            "search_date": ts.strftime("%Y-%m-%d %A"),
+            "query": query,
+            "search_url": search_url,
+            "error": str(e),
+        })
     results = data.get("results", [])[:5]
     formatted = []
     for x in results:
@@ -1357,15 +1382,32 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
         tu = list(tasks.get(task_id, {}).get("_tools_used", []))
     has_generated_image = "generate_image" in tu
 
+    if tool_name == "get_user_location":
+        if _client_location:
+            result = _client_location
+        else:
+            ev = threading.Event()
+            _location_events[task_id] = ev
+            set_status(task_id, "location_needed")
+            ev.wait(timeout=60)
+            _location_events.pop(task_id, None)
+            result = _client_location if _client_location else "User denied location access"
+        _event_post("tool_ok", task_id, tc_id=tc["id"], result=result, sid=sid, round=round_num, tool_index=tool_index)
+        return
+
     if tool_name == "web_search":
         set_status(task_id, f"Searching web for: {args.get('query')}...")
         with _data_lock:
             client_ts = tasks.get(task_id, {}).get("_client_timestamp")
-        result = web_search(
-            args["query"],
-            current_time=args.get("current_time"),
-            current_location=args.get("current_location"),
-        )
+        try:
+            result = web_search(
+                args["query"],
+                current_time=args.get("current_time"),
+                current_location=args.get("current_location"),
+            )
+        except Exception as e:
+            print(f"[web_search] Unhandled exception for task {task_id}: {e}")
+            result = json.dumps({"results": [], "query": args.get("query"), "error": str(e)})
         print(f"[web_search] RAW result for task {task_id}: {result[:300]}...")  # DEBUG
         with _data_lock:
             t = tasks.get(task_id)
@@ -2400,6 +2442,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             global _client_location
+            task_id = body.get("task_id")
+            if body.get("denied"):
+                _client_location = ""
+                ev = _location_events.get(task_id) if task_id else None
+                if ev:
+                    ev.set()
+                self.send_json({"ok": True})
+                return
             lat = body.get("latitude")
             lng = body.get("longitude")
             if lat is not None and lng is not None:
@@ -2414,6 +2464,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     _client_location = display
                 except Exception:
                     _client_location = f"{lat:.4f}, {lng:.4f}"
+            ev = _location_events.get(task_id) if task_id else None
+            if ev:
+                ev.set()
             self.send_json({"ok": True})
         elif self.path == "/api/tasks":
             user = get_current_user(self.headers)
