@@ -8,6 +8,7 @@ import InputBar from './components/InputBar'
 import ImageLightbox from './components/ImageLightbox'
 import OverloadWarning from './components/OverloadWarning'
 import TaskPanel from './components/TaskPanel'
+import LocationPrompt from './components/LocationPrompt'
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(false)
@@ -29,6 +30,7 @@ const [reminderCount, setReminderCount] = useState(0)
   const [loadingSessions, setLoadingSessions] = useState({})
 const [compacting, setCompacting] = useState(false)
 const [showTasks, setShowTasks] = useState(false)
+const [showLocationPrompt, setShowLocationPrompt] = useState(false)
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const pendingRef = useRef({})
@@ -398,11 +400,25 @@ const [showTasks, setShowTasks] = useState(false)
       await handleLogin(username, password)
       console.log('[loginWrapper] after handleLogin, authenticated should be true')
       if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
-          err => console.log('[location] ' + (err.code === 1 ? 'denied' : err.message)),
-          { timeout: 10000, enableHighAccuracy: false }
-        )
+        if (navigator.permissions) {
+          navigator.permissions.query({ name: 'geolocation' }).then(result => {
+            if (result.state === 'granted') {
+              navigator.geolocation.getCurrentPosition(
+                pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
+                () => {},
+                { timeout: 10000, enableHighAccuracy: false }
+              )
+            } else if (result.state === 'prompt') {
+              setShowLocationPrompt(true)
+            }
+          })
+        } else {
+          navigator.geolocation.getCurrentPosition(
+            pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
+            () => {},
+            { timeout: 10000, enableHighAccuracy: false }
+          )
+        }
       }
       console.log('[loginWrapper] loading sessions...')
       const list = await loadSessions()
@@ -422,8 +438,22 @@ const [showTasks, setShowTasks] = useState(false)
     }
   }
 
+  function handleLocationAllow() {
+    setShowLocationPrompt(false)
+    navigator.geolocation.getCurrentPosition(
+      pos => api.sendLocation(pos.coords.latitude, pos.coords.longitude),
+      () => {},
+      { timeout: 10000, enableHighAccuracy: false }
+    )
+  }
+
+  function handleLocationDeny() {
+    setShowLocationPrompt(false)
+  }
+
   return (
     <>
+      {showLocationPrompt && <LocationPrompt onAllow={handleLocationAllow} onDeny={handleLocationDeny} />}
       <div style={{ display: !authenticated ? '' : 'none' }}>
         <LoginScreen onLogin={handleLoginWrapper} />
       </div>

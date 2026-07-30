@@ -1206,3 +1206,74 @@ input[type=file] {
     max-width: 320px;
   }
 }
+
+#location-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+#location-dialog {
+  background: #1a1a2e;
+  border: 1px solid #333;
+  border-radius: 12px;
+  padding: 28px 32px;
+  max-width: 380px;
+  width: 90%;
+  text-align: center;
+}
+
+#location-icon {
+  font-size: 36px;
+  margin-bottom: 12px;
+}
+
+#location-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+#location-desc {
+  font-size: 14px;
+  color: #999;
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+
+#location-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+#location-deny-btn, #location-allow-btn {
+  padding: 8px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+}
+
+#location-deny-btn {
+  background: #333;
+  color: #ccc;
+}
+
+#location-allow-btn {
+  background: #4a6cf7;
+  color: #fff;
+}
+
+#location-deny-btn:hover {
+  background: #444;
+}
+
+#location-allow-btn:hover {
+  background: #5b7dfa;
+}
