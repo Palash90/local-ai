@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import http.server, json, os, uuid, base64, mimetypes, requests, subprocess, time, random, threading, sys, io, tempfile, queue as _queue_mod
+import http.server, json, os, uuid, base64, mimetypes, requests, subprocess, time, random, threading, sys, io, tempfile, queue as _queue_mod, traceback
 
 sys.stdout.reconfigure(line_buffering=True)  # noqa
 from datetime import datetime
@@ -2530,6 +2530,94 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 f.write(raw)
             file_url = f"/uploads/{safe_name}"
             self.send_json({"url": file_url, "name": name})
+        elif self.path == "/api/tts":
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            raw_text = body.get("text", "")
+            if not raw_text:
+                self.send_json({"error": "No text provided"}, status=400)
+                return
+            try:
+                import re
+                text = raw_text
+                voice = body.get("voice", "")
+
+                # Detect language tag from LLM prefix: [bn], [hi], [te], [kn], [en]
+                m = re.match(r"^\s*\[(bn|hi|te|kn|en)\]\s*", text)
+                if m:
+                    tag = m.group(1)
+                    text = text[m.end():]
+                elif not voice:
+                    bn = len(re.findall(r"[\u0980-\u09FF]", text))
+                    hi = len(re.findall(r"[\u0900-\u097F]", text))
+                    te = len(re.findall(r"[\u0C00-\u0C7F]", text))
+                    kn = len(re.findall(r"[\u0C80-\u0CFF]", text))
+                    scores = {"bn": bn, "hi": hi, "te": te, "kn": kn}
+                    tag = max(scores, key=scores.get)
+                    if scores[tag] == 0:
+                        tag = "en"
+                else:
+                    tag = "en"
+
+                # Determine TTS backend
+                PIPER_VOICES = {
+                    "bn": "/home/palash/.piper_voices/bn_BD-google-medium.onnx",
+                    "hi": "/home/palash/.piper_voices/hi_IN-priyamvada-medium.onnx",
+                    "te": "/home/palash/.piper_voices/te_IN-padmavathi-medium.onnx",
+                    "en": "/home/palash/.piper_voices/en_US-amy-medium.onnx",
+                }
+                EDGE_VOICES = {
+                    "bn": "bn-IN-TanishaaNeural",
+                    "hi": "hi-IN-SwaraNeural",
+                    "te": "te-IN-ShrutiNeural",
+                    "kn": "kn-IN-GaganNeural",
+                    "en": "en-US-AriaNeural",
+                }
+
+                if tag in PIPER_VOICES:
+                    import piper, io, struct, wave
+                    onnx_path = PIPER_VOICES[tag]
+                    cfg_path = onnx_path + ".json"
+                    if not hasattr(self, "_piper_voices"):
+                        self._piper_voices = {}
+                    if tag not in self._piper_voices:
+                        print(f"[tts] Loading Piper voice '{tag}' ...")
+                        self._piper_voices[tag] = piper.PiperVoice.load(
+                            onnx_path, config_path=cfg_path
+                        )
+                    pv = self._piper_voices[tag]
+                    print(f"[tts] Piper {tag}: synthesizing {len(text)} chars")
+                    wav_io = io.BytesIO()
+                    with wave.open(wav_io, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(22050)
+                        for chunk in pv.synthesize(text):
+                            int16 = (chunk.audio_float_array * 32767).clip(-32768, 32767).astype("<i2")
+                            wf.writeframes(int16.tobytes())
+                    audio_b64 = base64.b64encode(wav_io.getvalue()).decode()
+                    self.send_json({"audio": audio_b64, "type": "audio/wav"})
+                else:
+                    import asyncio, edge_tts
+                    edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
+                    print(f"[tts] edge-tts {tag} ({edge_voice}): {len(text)} chars")
+                    communicate = edge_tts.Communicate(text, edge_voice)
+                    mp3_data = bytearray()
+                    async def _gen():
+                        async for chunk in communicate.stream():
+                            if chunk["type"] == "audio":
+                                mp3_data.extend(chunk["data"])
+                    asyncio.run(_gen())
+                    audio_b64 = base64.b64encode(bytes(mp3_data)).decode()
+                    self.send_json({"audio": audio_b64, "type": "audio/mpeg"})
+            except Exception as e:
+                print(f"[tts] Error: {e}")
+                traceback.print_exc()
+                self.send_json({"error": str(e)}, status=500)
         elif self.path == "/api/sessions":
             user = get_current_user(self.headers)
             if not user:

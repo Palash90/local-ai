@@ -2,6 +2,7 @@ import { useMemo, useRef, useState, useCallback, useEffect } from 'react'
 import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import DOMPurify from 'dompurify'
+import { speak as apiSpeak } from '../api'
 import StatusBox from './StatusBox'
 
 marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
@@ -153,6 +154,60 @@ function CopyButton({ text, genPrompt, imageUrl, forceShow }) {
   return <button className={'copy-btn' + (forceShow ? ' force-show' : '')} onClick={handleCopy}>{label}</button>
 }
 
+let _activeAudio = null
+
+function SpeakButton({ text }) {
+  const [speaking, setSpeaking] = useState(false)
+  const idRef = useRef(null)
+
+  async function handleClick() {
+    const myId = (idRef.current = {})
+    if (_activeAudio && _activeAudio._speakId === myId) {
+      _activeAudio.pause()
+      _activeAudio.currentTime = 0
+      _activeAudio = null
+      setSpeaking(false)
+      return
+    }
+    if (_activeAudio) {
+      _activeAudio.pause()
+      _activeAudio.currentTime = 0
+      _activeAudio = null
+      setSpeaking(false)
+    }
+    setSpeaking(true)
+    try {
+      const data = await apiSpeak(text)
+      if (idRef.current !== myId) return
+      const mime = data.type || 'audio/mpeg'
+      const audio = new Audio('data:' + mime + ';base64,' + data.audio)
+      audio._speakId = myId
+      audio.onended = () => {
+        if (_activeAudio === audio) {
+          _activeAudio = null
+          setSpeaking(false)
+        }
+      }
+      audio.onerror = () => { setSpeaking(false); _activeAudio = null }
+      _activeAudio = audio
+      audio.play()
+    } catch (e) {
+      console.warn('TTS error:', e)
+      setSpeaking(false)
+    }
+  }
+
+  return (
+    <button
+      className={'speak-btn' + (speaking ? ' speaking' : '')}
+      onClick={handleClick}
+      title={speaking ? 'Stop' : 'Read aloud'}
+    >
+      {speaking ? '\u23F9' : '\u25B6'}
+    </button>
+  )
+}
+
 const MAX_REASONING = 2000
 
 function ReasoningBlock({ text, open, onToggle }) {
@@ -254,6 +309,9 @@ export default function Message({ msg, pending, onImageOpen }) {
     text = typeof msg.content === 'string' ? msg.content : ''
   }
 
+  const ttsText = text
+  if (role === 'bot') text = text.replace(/^\s*\[(bn|hi|en)\]\s*/, '')
+
   const html = useMemo(() => {
     if (!text) return ''
     try {
@@ -288,6 +346,7 @@ export default function Message({ msg, pending, onImageOpen }) {
             )}
           </span>
         ))}
+        {role === 'bot' && text && <SpeakButton text={ttsText} />}
         <CopyButton text={text} genPrompt={genPrompt} imageUrl={imageUrl} />
       </div>
       {imageUrl && (

@@ -136,6 +136,14 @@ export async function denyLocation(taskId) {
   });
 }
 
+export async function speak(text, voice) {
+  const r = await authFetch('/api/tts', {
+    method: 'POST',
+    body: JSON.stringify({ text, voice: voice || undefined }),
+  });
+  return r.json();
+}
+
 export async function extractFile(name, dataB64) {
   const r = await authFetch('/api/extract-file', {
     method: 'POST',
