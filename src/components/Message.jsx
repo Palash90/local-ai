@@ -3,12 +3,36 @@ import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import DOMPurify from 'dompurify'
 import { speak as apiSpeak } from '../api'
+import { downloadFile } from '../utils'
 import StatusBox from './StatusBox'
 
 marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
 
 function escHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function execCopy(text) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch {}
+  document.body.removeChild(ta)
+  return ok
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(text)
+    return true
+  }
+  return execCopy(text)
 }
 
 function SearchPopup({ details }) {
@@ -202,8 +226,18 @@ function SpeakButton({ text }) {
       className={'speak-btn' + (speaking ? ' speaking' : '')}
       onClick={handleClick}
       title={speaking ? 'Stop' : 'Read aloud'}
+      aria-label={speaking ? 'Stop' : 'Read aloud'}
     >
-      {speaking ? '\u23F9' : '\u25B6'}
+      {speaking ? (
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
+          <rect x="6" y="5" width="4" height="14" rx="1" />
+          <rect x="14" y="5" width="4" height="14" rx="1" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+          <path d="M8 5v14l11-7z" />
+        </svg>
+      )}
     </button>
   )
 }
@@ -213,6 +247,7 @@ const MAX_REASONING = 2000
 function ReasoningBlock({ text, open, onToggle }) {
   const preRef = useRef(null)
   const prevLenRef = useRef(0)
+  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     if (!preRef.current || !text) return
@@ -234,9 +269,25 @@ function ReasoningBlock({ text, open, onToggle }) {
     html = escHtml(capped)
   }
 
+  function handleCopy(e) {
+    e.preventDefault()
+    e.stopPropagation()
+    writeClipboard(text).then((ok) => {
+      setCopied(ok)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
   return (
     <details className="reasoning-block" open={open} onToggle={(e) => onToggle(e.target.open)}>
-      <summary>Reasoning</summary>
+      <summary>
+        <span className="reasoning-summary-label">Reasoning</span>
+        {open && (
+          <button type="button" className="reasoning-copy-btn" onClick={handleCopy} title="Copy reasoning">
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+        )}
+      </summary>
       <div className="reasoning-text" ref={preRef} dangerouslySetInnerHTML={{ __html: html }} />
     </details>
   )
@@ -248,6 +299,7 @@ export default function Message({ msg, pending, onImageOpen }) {
   const [popupVisible, setPopupVisible] = useState(null)
   const hideTimer = useRef(null)
   const [reasoningOpen, setReasoningOpen] = useState(false)
+  const codeRef = useRef([])
 
   const showPopup = useCallback((idx) => {
     if (hideTimer.current) clearTimeout(hideTimer.current)
@@ -315,11 +367,34 @@ export default function Message({ msg, pending, onImageOpen }) {
   const html = useMemo(() => {
     if (!text) return ''
     try {
-      return DOMPurify.sanitize(marked.parse(text))
+      const codeBlocks = []
+      const renderer = new marked.Renderer()
+      renderer.code = ({ text: codeText, lang }) => {
+        const idx = codeBlocks.length
+        codeBlocks.push(codeText.replace(/\n$/, ''))
+        const code = (codeText.replace(/\n$/, '') + '\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+        const langAttr = lang ? ` class="language-${lang.split(/\s/)[0]}"` : ''
+        return `<div class="code-block"><button type="button" class="copy-code-btn" data-i="${idx}" title="Copy code">Copy</button><pre><code${langAttr}>${code}</code></pre></div>\n`
+      }
+      const out = DOMPurify.sanitize(marked.parse(text, { renderer }))
+      codeRef.current = codeBlocks
+      return out
     } catch {
       return escHtml(text)
     }
   }, [text])
+
+  async function handleContentClick(e) {
+    const btn = e.target.closest('.copy-code-btn')
+    if (!btn) return
+    const idx = parseInt(btn.dataset.i, 10)
+    const codeText = codeRef.current[idx]
+    if (codeText == null) return
+    const orig = btn.textContent
+    const ok = await writeClipboard(codeText)
+    btn.textContent = ok ? 'Copied!' : 'Failed'
+    setTimeout(() => { btn.textContent = orig }, 2000)
+  }
 
   if (role === 'user' && !text && !imageUrl && !userImg && !genPrompt) return null
 
@@ -350,12 +425,19 @@ export default function Message({ msg, pending, onImageOpen }) {
         <CopyButton text={text} genPrompt={genPrompt} imageUrl={imageUrl} />
       </div>
       {imageUrl && (
-        <img
-          src={imageUrl}
-          style={{ maxWidth: '100%', borderRadius: 10, cursor: 'pointer' }}
-          onClick={() => onImageOpen(imageUrl)}
-          alt="Generated"
-        />
+        <div className="image-wrap">
+          <img
+            src={imageUrl}
+            style={{ maxWidth: '100%', borderRadius: 10, cursor: 'pointer' }}
+            onClick={() => onImageOpen(imageUrl)}
+            alt="Generated"
+          />
+          <div className="img-actions">
+            <button type="button" className="img-download-btn" onClick={() => downloadFile(imageUrl, 'image.png')}>
+              Download
+            </button>
+          </div>
+        </div>
       )}
       {userImg && (
         <img
@@ -374,6 +456,7 @@ export default function Message({ msg, pending, onImageOpen }) {
       {text ? (
         <div
           className="msg-content"
+          onClick={handleContentClick}
           dangerouslySetInnerHTML={{ __html: html }}
         />
       ) : !imageUrl && !userImg ? (

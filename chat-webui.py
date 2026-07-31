@@ -14,7 +14,7 @@ COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = "http://localhost:8080/search" # Change to localhost if running from direct OS
 COMFYUI_URL = "http://localhost:8188"
 HOST, PORT = "0.0.0.0", 3001
-REASONING_BUDGET = 2048
+REASONING_BUDGET = 4096
 
 with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
     MODEL_ID = file.read()
@@ -66,59 +66,9 @@ COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
 USERS_FILE = os.path.expanduser("~/local-ai-files/users.json")
 TASKS_DB = os.path.expanduser("~/local-ai-files/tasks.db")
-
-import sqlite3
-_tasks_db_lock = threading.Lock()
-
-def _init_tasks_db():
-    with _tasks_db_lock:
-        conn = sqlite3.connect(TASKS_DB)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                status TEXT DEFAULT 'pending',
-                priority TEXT DEFAULT 'medium',
-                due_date TEXT,
-                session_id TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                reminder_at TEXT,
-                reminded INTEGER DEFAULT 0
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-def _db_run(query, params=()):
-    with _tasks_db_lock:
-        conn = sqlite3.connect(TASKS_DB)
-        conn.row_factory = sqlite3.Row
-        try:
-            cur = conn.execute(query, params)
-            conn.commit()
-            return cur
-        finally:
-            conn.close()
-
-def _db_fetch(query, params=()):
-    with _tasks_db_lock:
-        conn = sqlite3.connect(TASKS_DB)
-        conn.row_factory = sqlite3.Row
-        try:
-            cur = conn.execute(query, params)
-            rows = [dict(r) for r in cur.fetchall()]
-            return rows
-        finally:
-            conn.close()
-
-def _db_fetch_one(query, params=()):
-    rows = _db_fetch(query, params)
-    return rows[0] if rows else None
-
-_init_tasks_db()
+IMAGE_TOKEN_COST = 1200
+AUDIO_TOKEN_COST = 800
+PER_MESSAGE_OVERHEAD = 4
 
 with open(
     os.path.expanduser("~/local-ai-files/models.json"), "r", encoding="utf-8"
@@ -298,6 +248,63 @@ TOOLS = [
         },
     },
 ]
+
+TOOLS_TOKEN_COST = len(json.dumps(TOOLS)) // 4
+
+import sqlite3
+_tasks_db_lock = threading.Lock()
+
+def _init_tasks_db():
+    with _tasks_db_lock:
+        conn = sqlite3.connect(TASKS_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                status TEXT DEFAULT 'pending',
+                priority TEXT DEFAULT 'medium',
+                due_date TEXT,
+                session_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                reminder_at TEXT,
+                reminded INTEGER DEFAULT 0
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+def _db_run(query, params=()):
+    with _tasks_db_lock:
+        conn = sqlite3.connect(TASKS_DB)
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.execute(query, params)
+            conn.commit()
+            return cur
+        finally:
+            conn.close()
+
+def _db_fetch(query, params=()):
+    with _tasks_db_lock:
+        conn = sqlite3.connect(TASKS_DB)
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.execute(query, params)
+            rows = [dict(r) for r in cur.fetchall()]
+            return rows
+        finally:
+            conn.close()
+
+def _db_fetch_one(query, params=()):
+    rows = _db_fetch(query, params)
+    return rows[0] if rows else None
+
+_init_tasks_db()
+
+
 
 
 with open(PROMPT_PATH, "r") as file:
@@ -517,17 +524,44 @@ def save_sessions():
         json.dump(data, f, indent=2)
 
 
-def estimate_tokens(messages):
-    total_chars = 0
+def _text_tokens(s):
+    if not s:
+        return 0
+    # Multilingual/non-ASCII characters eat up far more tokens (~2 chars per token vs ~4 for English)
+    non_ascii = sum(1 for ch in s if ord(ch) > 0x7F)
+    divisor = 2.0 if non_ascii > len(s) * 0.15 else 4.0
+    return int(len(s) / divisor)
+
+def estimate_tokens(messages, include_tools=True):
+    total = TOOLS_TOKEN_COST if include_tools else 0
+    
     for msg in messages:
+        total += PER_MESSAGE_OVERHEAD
         content = msg.get("content", "")
+        
+        # Standard string content
         if isinstance(content, str):
-            total_chars += len(content)
+            total += _text_tokens(content)
+            
+        # Multi-modal array content (text + images + audio)
         elif isinstance(content, list):
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    total_chars += len(part.get("text", ""))
-    return max(1, total_chars // 4)
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get("type")
+                if ptype == "text":
+                    total += _text_tokens(part.get("text", ""))
+                elif ptype in ("image_url", "input_image", "image"):
+                    total += IMAGE_TOKEN_COST
+                elif ptype in ("audio_url", "input_audio", "audio"):
+                    total += AUDIO_TOKEN_COST
+                    
+        # Tool call tokens
+        for tc in msg.get("tool_calls") or []:
+            total += _text_tokens(json.dumps(tc))
+
+    # Return MUST be outside the for-loop!
+    return max(1, total)
 
 
 def trim_messages_for_context(messages):
