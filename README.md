@@ -2,6 +2,40 @@
 
 Self-hosted LLM + image generation stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM).
 
+## Quick Start
+
+```bash
+# 1. Clone and build
+git clone <this-repo> ~/git/local-ai
+cd ~/git/local-ai
+bash setup.sh
+
+# 2. Edit config files (required before first run)
+nano ~/local-ai-files/model.txt        # set your LLM model name
+nano ~/local-ai-files/models.json      # set ComfyUI model filenames
+nano ~/local-ai-files/users.json       # set passwords
+
+# 3. Download models into:
+#    LLMs:     ~/local-ai-files/my-models/
+#    ComfyUI:  ~/local-ai/ComfyUI/models/{checkpoints,clip,vae,unet,...}
+
+# 4. Start services (in order)
+~/local-ai/llama.cpp/build/bin/llama-server \
+    --host 0.0.0.0 --port 8081 \
+    --models-dir ~/local-ai-files/my-models/ \
+    --n-gpu-layers 99 --no-kv-offload --ctx-size 32768 \
+    --reasoning-budget 1120
+
+cd ~/local-ai/ComfyUI && source venv/bin/activate && python main.py \
+    --lowvram \
+    --input-directory ~/local-ai-files/ComfyUI/input \
+    --output-directory ~/local-ai-files/ComfyUI/output
+
+cd ~/git/local-ai && python chat-webui.py
+```
+
+Access at `http://chat.local` or `http://localhost:3001`.
+
 ## 1. Infrastructure & Network
 
 ```mermaid
@@ -129,7 +163,7 @@ graph TD
     A --> B["load_sessions()\nLoad sessions.json"]
     A1 & B --> C{"llama-server /health\nHTTP GET?"}
     C -- "200 OK" --> E["Start 4 Daemon Threads"]
-    C -- "Dead" --> D["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn llama-server Popen\n4. Spawn ComfyUI Popen\n5. Poll /health 2s up to 120s\n6. Kill if no response"]
+    C -- "Dead" --> D["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn llama-server Popen\n4. Spawn ComfyUI Popen\n5. Poll /health 2s up to 120s\n6. Kill [...]"]
     D --> E
 
     subgraph Daemons ["Background Daemon Threads"]
@@ -242,11 +276,11 @@ graph TD
     EvLoop --> EvDispatch{"ev_type?"}
 
     EvDispatch -- "start" --> EvStart["Store task metadata:\n_tools_used, _search_details\n_original_message, _original_image\n_audio, _user, _client_timestamp"]
-    EvStart --> PrepSession["prepare_session:\n1. Inject sys prompt + date + location\n2. Inject user context\n3. Append user msg to session\n4. Auto-name session from message\n5. save_sessions\n6. load_llama_model if needed"]
+    EvStart --> PrepSession["prepare_session:\n1. Inject sys prompt + date + location\n2. Inject user context\n3. Append user msg to session\n4. Auto-name session from message\n5. save_sessions\n[...]" ]
     PrepSession --> StartRound0["start_llm_round round 0"]
 
     EvDispatch -- "llm_ok" --> LLMOK{"state == llm_waiting\nand has tool_calls?"}
-    LLMOK -- "No tools" --> Finalize["_finalize_task:\n1. Build msg_entry with reasoning\n   tools_used, image_url etc\n2. Append to session\n3. save_sessions\n4. tasks id = status done\n5. Reset _last_llm_use"]
+    LLMOK -- "No tools" --> Finalize["_finalize_task:\n1. Build msg_entry with reasoning\n   tools_used, image_url etc\n2. Append to session\n3. save_sessions\n4. tasks id = status done\n5. Reset[...]"]
     LLMOK -- "Has tools" --> SubmitTools["1. Append assistant msg\n2. state = tools_running\n3. pending_tools = count\n4. save_sessions\n5. Submit to tool_pool"]
 
     EvDispatch -- "llm_err" --> LLMERR{"state == llm_waiting?"}
@@ -270,7 +304,7 @@ graph TD
     StartRound0["start_llm_round"] --> LLMWorker["_llm_worker\nin _llm_pool 1 worker"]
     LLMWorker --> PayloadBuild["Build payload:\nmodel messages tools\ntool_choice auto\nmax_tokens 4096\nreasoning_budget 1120\nstream true"]
     PayloadBuild --> StreamReq["POST llama-server\nv1/chat/completions\nstream=True timeout=600s"]
-    StreamReq --> StreamParse["Parse SSE stream:\n- reasoning_content delta\n  accumulate in reasoning_buf\n- content delta\n  accumulate in content_buf\n- tool_calls delta\n  reassemble by index\n  name id arguments concat"]
+    StreamReq --> StreamParse["Parse SSE stream:\n- reasoning_content delta\n  accumulate in reasoning_buf\n- content delta\n  accumulate in content_buf\n- tool_calls delta\n  reassemble by index[...]" ]
     StreamParse --> BuildAssistantMsg["Build assistant msg:\nrole assistant content\nreasoning_content tool_calls"]
     BuildAssistantMsg --> LLMOKPost["event_post llm_ok\nbody choices message"]
     LLMOKPost --> EvLoop["Back to _event_loop"]
@@ -286,15 +320,15 @@ graph TD
     ToolWorker --> ParseArgs["Parse tc.function.arguments\nfrom JSON string"]
     ParseArgs --> ChooseTool{"tc.function.name?"}
 
-    ChooseTool -- "web_search" --> ExecSearch["1. set_status Searching\n2. Get _client_timestamp\n3. web_search query client_ts:\n   Append city to query\n   GET SearXNG search json\n   Return top 5 results\n4. Track in _search_details"]
+    ChooseTool -- "web_search" --> ExecSearch["1. set_status Searching\n2. Get _client_timestamp\n3. web_search query client_ts:\n   Append city to query\n   GET SearXNG search json\n   Return to[...]" ]
     ExecSearch --> ToolPost["event_post tool_ok"]
 
     ChooseTool -- "generate_image" --> GenGuard{"already generated\nimage this task?"}
     GenGuard -- Yes --> GenReject["Return error:\nImage generation limit reached"]
-    GenGuard -- No --> GenImage["1. unload_llama_model\n2. Build ComfyUI workflow:\n   z_image 8 steps res_multistep\n   or sd3_5_medium 20 steps euler\n3. ensure_comfyui_running\n4. POST /prompt get prompt_id\n5. Poll /history 120s max\n6. free_comfyui_vram\n7. load_llama_model\n8. Store image_file in task"]
+    GenGuard -- No --> GenImage["1. unload_llama_model\n2. Build ComfyUI workflow:\n   z_image 8 steps res_multistep\n   or sd3_5_medium 20 steps euler\n3. ensure_comfyui_running\n4. POST /prompt[...]" ]
     GenImage --> ToolPost
 
-    ChooseTool -- "edit_image" --> EditImage["1. Find source image:\n   Check _image_url in session\n   Check base64 in user messages\n2. unload_llama_model\n3. Write input to ComfyUI/input\n4. ensure_comfyui_running\n5. Build workflow with VAEEncode\n6. POST /prompt poll 120s\n7. Cleanup input file\n8. free_comfyui_vram\n9. load_llama_model"]
+    ChooseTool -- "edit_image" --> EditImage["1. Find source image:\n   Check _image_url in session\n   Check base64 in user messages\n2. unload_llama_model\n3. Write input to ComfyUI/input\n4. e[...]" ]
     EditImage --> ToolPost
 
     ChooseTool -- "update_user_context" --> ExecContext["write_user_context:\nAppend timestamped entry\nto user context file"]
@@ -315,14 +349,14 @@ graph TD
     GPUTempCheck -- No --> CheckCool{"_overheated\nand Temp <= 65 C?"}
     CheckCool -- Yes --> UnsetOverheat["_overheated = False"]
     SetOverheat --> ThermalAction{"Is task running?"}
-    ThermalAction -- No --> ThermalUnload{"model_status?"}
+    ThermalAction -- No --> ThermalUnload["model_status?"]
     ThermalUnload -- "chat_loaded" --> UnloadModel["unload_llama_model"]
     ThermalUnload -- "image_active" --> FreeVRAM["free_comfyui_vram"]
     ThermalAction -- Yes --> ThermalSkip["Skip let task finish"]
     UnsetOverheat --> RAMCheck1
 
     ThermalLoop --> RAMCheck1{"not evacuating\nand RAM >= 95%?"}
-    RAMCheck1 -- Yes --> EvacuateRAM["_evacuate_ram:\n1. ram_evacuating = True\n2. Requeue current task to front\n3. Set task status error\n4. kill_llama_server\n5. kill_comfyui\n6. Wait until RAM <= 70%\n7. restart_servers\n8. ram_evacuating = False"]
+    RAMCheck1 -- Yes --> EvacuateRAM["_evacuate_ram:\n1. ram_evacuating = True\n2. Requeue current task to front\n3. Set task status error\n4. kill_llama_server\n5. kill_comfyui\n6. Wait until RA[...]" ]
     RAMCheck1 -- No --> ThermalLoop
 
     E3["_idle_unload_loop"] --> IdleLoop["Loop every 10s"]
@@ -330,49 +364,3 @@ graph TD
     IdleCheck -- Yes --> UnloadModel2["unload_llama_model\nRelease VRAM weights"]
     IdleCheck -- No --> IdleLoop
 ```
-
-## Requirements
-
-1. 2–4 concurrent users
-2. 15–20 image generations per week
-3. Multi-lingual
-4. Web search
-5. Recipe / travel planning assistance
-6. Image analysis (vision models)
-7. Minor coding assistance
-8. LAN accessible
-9. No Big Tech dependency
-
-## Quick Start
-
-```bash
-# 1. Clone and build
-git clone <this-repo> ~/git/local-ai
-cd ~/git/local-ai
-bash setup.sh
-
-# 2. Edit config files (required before first run)
-nano ~/local-ai-files/model.txt        # set your LLM model name
-nano ~/local-ai-files/models.json      # set ComfyUI model filenames
-nano ~/local-ai-files/users.json       # set passwords
-
-# 3. Download models into:
-#    LLMs:     ~/local-ai-files/my-models/
-#    ComfyUI:  ~/local-ai/ComfyUI/models/{checkpoints,clip,vae,unet,...}
-
-# 4. Start services (in order)
-~/local-ai/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 --port 8081 \
-    --models-dir ~/local-ai-files/my-models/ \
-    --n-gpu-layers 99 --no-kv-offload --ctx-size 32768 \
-    --reasoning-budget 1120
-
-cd ~/local-ai/ComfyUI && source venv/bin/activate && python main.py \
-    --lowvram \
-    --input-directory ~/local-ai-files/ComfyUI/input \
-    --output-directory ~/local-ai-files/ComfyUI/output
-
-cd ~/git/local-ai && python chat-webui.py
-```
-
-Access at `http://chat.local` or `http://localhost:3001`.
