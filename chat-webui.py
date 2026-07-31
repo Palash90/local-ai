@@ -988,14 +988,7 @@ def web_search(query, current_time=None, current_location=None):
     ts = datetime.now()
     from urllib.parse import urlencode
 
-    clean_query = query
-    if current_time and current_location:
-        clean_query = f"{query} (current time: {current_time}) (location: {current_location})"
-    elif current_time:
-        clean_query = f"{query} (current time: {current_time})"
-    elif current_location:
-        clean_query = f"{query} (location: {current_location})"
-
+    clean_query = query.strip()
     params = {"q": clean_query, "format": "json"}
     search_url = f"{SEARXNG_URL}?{urlencode(params)}"
     print("Performing web search", search_url)
