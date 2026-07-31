@@ -39,7 +39,6 @@ export default function App() {
   const pendingRef = useRef({})
   const sessionRef = useRef(null)
 
-
   useEffect(() => {
     const token = localStorage.getItem('auth_token') // or whatever key api.login uses
     if (token) {
@@ -310,8 +309,9 @@ export default function App() {
       for (const taskId of taskIds) {
         try {
           const st = await api.getTaskStatus(taskId)
-          if (st.status === 'done' || st.status === 'error') {
-            const pendingEntry = pends[taskId]
+          const pendingEntry = pends[taskId]
+          const abandoned = st.status === 'unknown' || st.status === 'not_found'
+          if (st.status === 'done' || st.status === 'error' || abandoned) {
             setPendingMessages(prev => {
               const next = { ...prev }
               delete next[taskId]
@@ -341,7 +341,10 @@ export default function App() {
               }
             } else {
               if (pendingEntry?.sessionId === sessionRef.current) {
-                setMessages(prev => [...prev, { role: 'assistant', content: 'Error: ' + (st.error || '') }])
+                setMessages(prev => [...prev, ...(pendingEntry._userMsg ? [pendingEntry._userMsg] : []), {
+                  role: 'assistant',
+                  content: 'Error: ' + (st.error || 'Task was lost — please retry.'),
+                }])
               }
             }
             const remaining = getStoredPending().filter(p => p.task_id !== taskId)

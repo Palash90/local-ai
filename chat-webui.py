@@ -13,8 +13,8 @@ VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
 COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = "http://localhost:8080/search" # Change to localhost if running from direct OS
 COMFYUI_URL = "http://localhost:8188"
-HOST, PORT = "0.0.0.0", 3001
-REASONING_BUDGET = 2048
+HOST, PORT = "127.0.0.1", 3001
+REASONING_BUDGET = 4096
 
 with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
     MODEL_ID = file.read()
@@ -51,13 +51,6 @@ LLAMA_SERVER_ARGS = [
     "--top-k", "64",
     "--min-p", "0.0",
     "--repeat-penalty", "1.0"
-]
-
-LLAMA_QWEN_ARGS = [
-    "--cache-type-k",
-    "q8_0",
-    "--cache-type-v",
-    "q8_0",
 ]
 
 SESSIONS_FILE = os.path.expanduser("~/local-ai-files/sessions.json")
