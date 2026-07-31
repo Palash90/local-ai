@@ -30,7 +30,7 @@ function execCopy(text) {
   let ok = false
   try {
     ok = document.execCommand('copy')
-  } catch {}
+  } catch { }
   document.body.removeChild(ta)
   return ok
 }
@@ -102,7 +102,7 @@ function CopyButton({ text, genPrompt, imageUrl, forceShow }) {
         const res = await fetch(url)
         const blob = await res.blob()
         const b64 = await blobToBase64(blob)
-        const escaped = textContent.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        const escaped = textContent.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         const cleanHtml = '<html><body>' + escaped.replace(/\n/g, '<br>') + '<br><br><img src="' + b64 + '"></body></html>'
 
         await navigator.clipboard.write([
@@ -115,7 +115,7 @@ function CopyButton({ text, genPrompt, imageUrl, forceShow }) {
         setLabel('Copied!')
         setTimeout(() => setLabel('Copy'), 2000)
         return
-      } catch {}
+      } catch { }
     }
 
     let copyText = textContent
@@ -317,7 +317,56 @@ export default function Message({ msg, pending, onImageOpen }) {
     hideTimer.current = setTimeout(() => setPopupVisible(null), 800)
   }, [])
 
-  const role = pending ? 'bot' : msg.role === 'user' ? 'user' : 'bot'
+  const role = pending ? 'bot' : msg.role === 'user' ? 'user' : 'bot';
+
+  let text = ''
+  let userImg = null
+  let timestamp = null
+
+  if (msg) {
+    if (role === 'user') {
+      if (typeof msg.content === 'string') {
+        text = msg.content
+      } else if (Array.isArray(msg.content)) {
+        msg.content.forEach(part => {
+          if (part.type === 'text') text += part.text
+          else if (part.type === 'image_url') {
+            const url = part.image_url.url
+            if (url.startsWith('data:')) userImg = url.split(',')[1]
+          }
+        })
+      }
+      if (msg._timestamp) {
+        try {
+          const d = new Date(msg._timestamp)
+          timestamp = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
+        } catch { }
+      }
+    } else {
+      text = typeof msg.content === 'string' ? msg.content : ''
+    }
+  }
+
+  // 2. ALWAYS call useMemo before any conditional return statements
+  const html = useMemo(() => {
+    if (!text) return ''
+    try {
+      const codeBlocks = []
+      const renderer = new marked.Renderer()
+      renderer.code = ({ text: codeText, lang }) => {
+        const idx = codeBlocks.length
+        codeBlocks.push(codeText.replace(/\n$/, ''))
+        const code = (codeText.replace(/\n$/, '') + '\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+        const langAttr = lang ? ` class="language-${lang.split(/\s/)[0]}"` : ''
+        return `<div class="code-block"><button type="button" class="copy-code-btn" data-i="${idx}" title="Copy code">Copy</button><pre><code${langAttr}>${code}</code></pre></div>\n`
+      }
+      const out = DOMPurify.sanitize(marked.parse(text, { renderer }))
+      codeRef.current = codeBlocks
+      return out
+    } catch {
+      return escHtml(text)
+    }
+  }, [text])
 
   if (pending) {
     return (
@@ -342,9 +391,17 @@ export default function Message({ msg, pending, onImageOpen }) {
   const imageUrl = msg._image_url
   const imageModel = msg._image_model
 
-  let text = ''
-  let userImg = null
-  let timestamp = null
+  if (
+    msg.role === 'assistant' &&
+    !text &&
+    !imageUrl &&
+    !userImg &&
+    !genPrompt &&
+    msg.tool_calls &&
+    msg.tool_calls.length > 0
+  ) {
+    return null
+  }
 
   if (role === 'user') {
     if (typeof msg.content === 'string') {
@@ -363,7 +420,7 @@ export default function Message({ msg, pending, onImageOpen }) {
       try {
         const d = new Date(msg._timestamp)
         timestamp = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
-      } catch {}
+      } catch { }
     }
   } else {
     text = typeof msg.content === 'string' ? msg.content : ''
@@ -371,26 +428,6 @@ export default function Message({ msg, pending, onImageOpen }) {
 
   const ttsText = text
   if (role === 'bot') text = text.replace(/^\s*\[(bn|hi|en)\]\s*/, '')
-
-  const html = useMemo(() => {
-    if (!text) return ''
-    try {
-      const codeBlocks = []
-      const renderer = new marked.Renderer()
-      renderer.code = ({ text: codeText, lang }) => {
-        const idx = codeBlocks.length
-        codeBlocks.push(codeText.replace(/\n$/, ''))
-        const code = (codeText.replace(/\n$/, '') + '\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-        const langAttr = lang ? ` class="language-${lang.split(/\s/)[0]}"` : ''
-        return `<div class="code-block"><button type="button" class="copy-code-btn" data-i="${idx}" title="Copy code">Copy</button><pre><code${langAttr}>${code}</code></pre></div>\n`
-      }
-      const out = DOMPurify.sanitize(marked.parse(text, { renderer }))
-      codeRef.current = codeBlocks
-      return out
-    } catch {
-      return escHtml(text)
-    }
-  }, [text])
 
   async function handleContentClick(e) {
     const btn = e.target.closest('.copy-code-btn')
