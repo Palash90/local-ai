@@ -14,7 +14,7 @@ COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = "http://localhost:8080/search" # Change to localhost if running from direct OS
 COMFYUI_URL = "http://localhost:8188"
 HOST, PORT = "0.0.0.0", 3001
-REASONING_BUDGET = 4096
+REASONING_BUDGET = 2048
 
 with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
     MODEL_ID = file.read()
@@ -36,7 +36,7 @@ LLAMA_SERVER_ARGS = [
     # GPU / VRAM Allocations
     "--n-gpu-layers", "99",
     "-fa", "on",  # Flash attention lowers VRAM footprint
-    "--ctx-size", "16384",  # Capped to 16k context to prevent VRAM overflow
+    "--ctx-size", "32768",  # Capped to 16k context to prevent VRAM overflow
     #"--no-kv-offload",
     "-ctk", "q8_0",            # Quantize Key cache to 8-bit (saves 50% VRAM)
     "-ctv", "q8_0",            # Quantize Value cache to 8-bit (saves 50% VRAM)
@@ -461,6 +461,9 @@ def write_user_context(username, content):
 _active_tokens = {}
 _tokens_lock = threading.Lock()
 
+_effective_contexts = {}
+_effective_contexts_lock = threading.Lock()
+
 
 def get_current_user(headers):
     token = headers.get("X-Auth-Token", "")
@@ -484,7 +487,8 @@ _queue_lock = threading.Lock()
 _queue_cond = threading.Condition(_queue_lock)
 _current_task_id = None
 
-MAX_INPUT_TOKENS = 16384
+MAX_INPUT_TOKENS = 32768
+AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 
 _event_queue = _queue_mod.Queue()
 _llm_pool = ThreadPoolExecutor(max_workers=1)
@@ -593,6 +597,87 @@ def trim_messages_for_context(messages):
     return trimmed
 
 
+def compact_messages_copy(messages, keep_messages=6):
+    """Return a compacted COPY of the message list (summary + recent messages)
+    WITHOUT modifying the stored session. Old messages are summarized, not deleted."""
+    msgs = list(messages)
+    sys_msg = None
+    if msgs and msgs[0].get("role") == "system":
+        sys_msg = msgs.pop(0)
+    if len(msgs) <= keep_messages + 1:
+        return ([sys_msg] + msgs) if sys_msg else msgs
+    to_compact = msgs[:-keep_messages] if keep_messages > 0 else msgs
+    recent = msgs[-keep_messages:] if keep_messages > 0 else []
+    compact_text = ""
+    for m in to_compact:
+        role = m.get("role", "unknown")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for p in content:
+                if isinstance(p, dict):
+                    if p.get("type") == "text":
+                        parts.append(p.get("text", ""))
+            content = " ".join(parts)
+        if not content:
+            continue
+        compact_text += f"[{role}]: {content}\n\n"
+    if not compact_text.strip():
+        return ([sys_msg] + msgs) if sys_msg else msgs
+    summary = _summarize_with_llm(
+        f"Compress the following conversation into a short paragraph, keeping all important details:\n\n{compact_text}"
+    )
+    if summary is None:
+        return ([sys_msg] + msgs) if sys_msg else msgs
+    new_msgs = []
+    if sys_msg:
+        new_msgs.append(sys_msg)
+    new_msgs.append({"role": "system", "content": f"[Compressed context]: {summary}"})
+    new_msgs.extend(recent)
+    return new_msgs
+
+
+def prepare_context_for_llm(sid, messages):
+    """Build the message list to send to the LLM. When the conversation nears the
+    context limit, old messages are summarized into a compressed context block —
+    but the stored session is left untouched, so no messages are deleted."""
+    total = estimate_tokens(messages)
+    if total <= AUTO_COMPACT_THRESHOLD:
+        context = trim_messages_for_context(messages)
+        with _effective_contexts_lock:
+            _effective_contexts.pop(sid, None)
+        return context
+    print(f"[context] Session {sid} estimate {total} tokens exceeds threshold {AUTO_COMPACT_THRESHOLD}; building compressed context for LLM")
+    compacted = compact_messages_copy(messages)
+    context = trim_messages_for_context(compacted)
+    print(f"[context] Compressed context built; estimate after: {estimate_tokens(context)}")
+    with _effective_contexts_lock:
+        _effective_contexts[sid] = context
+    return context
+
+
+def effective_token_estimate(sid, messages):
+    """Report the token count the UI shows: the compressed context actually sent
+    to the LLM once compression has kicked in, falling back to the full history."""
+    with _effective_contexts_lock:
+        cached = _effective_contexts.get(sid)
+    if cached is not None:
+        return estimate_tokens(cached)
+    return estimate_tokens(messages)
+
+
+def context_token_report(sid, messages):
+    """Token report for the UI: effective count sent to the LLM, the raw stored
+    count, and whether context compression is currently active."""
+    effective = effective_token_estimate(sid, messages)
+    raw = estimate_tokens(messages)
+    return {
+        "token_estimate": effective,
+        "raw_token_estimate": raw,
+        "context_compressed": raw > effective,
+    }
+
+
 def _summarize_with_llm(text):
     payload = {
         "model": MODEL_ID,
@@ -614,49 +699,6 @@ def _summarize_with_llm(text):
     except Exception as e:
         print(f"[compact] LLM summarization failed: {e}")
         return None
-
-
-def compact_session(sid, keep_messages=6):
-    with _data_lock:
-        msgs = list(sessions.get(sid, []))
-    if len(msgs) <= keep_messages + 1:
-        return {"ok": True, "note": "Nothing to compact", "token_estimate": estimate_tokens(msgs)}
-    sys_msg = None
-    if msgs and msgs[0].get("role") == "system":
-        sys_msg = msgs.pop(0)
-    to_compact = msgs[:-keep_messages] if keep_messages > 0 else msgs
-    recent = msgs[-keep_messages:] if keep_messages > 0 else []
-    compact_text = ""
-    for m in to_compact:
-        role = m.get("role", "unknown")
-        content = m.get("content", "")
-        if isinstance(content, list):
-            parts = []
-            for p in content:
-                if isinstance(p, dict):
-                    if p.get("type") == "text":
-                        parts.append(p.get("text", ""))
-            content = " ".join(parts)
-        if not content:
-            continue
-        compact_text += f"[{role}]: {content}\n\n"
-    if not compact_text.strip():
-        return {"ok": True, "note": "Nothing to compact", "token_estimate": estimate_tokens(msgs)}
-    summary = _summarize_with_llm(
-        f"Compress the following conversation into a short paragraph, keeping all important details:\n\n{compact_text}"
-    )
-    if summary is None:
-        return {"ok": False, "error": "Summarization failed"}
-    new_msgs = []
-    if sys_msg:
-        new_msgs.append(sys_msg)
-    new_msgs.append({"role": "system", "content": f"[Compressed context]: {summary}"})
-    new_msgs.extend(recent)
-    with _data_lock:
-        sessions[sid] = new_msgs
-        sessions_meta.setdefault(sid, {})["updated"] = time.time()
-    save_sessions()
-    return {"ok": True, "token_estimate": estimate_tokens(new_msgs)}
 
 
 def set_status(task_id, message):
@@ -784,7 +826,8 @@ def _finalize_task(task_id, sid, msg_content, body):
                 "status": "done",
                 "response": msg_content,
                 "session_id": sid,
-                "token_estimate": estimate_tokens(sessions.get(sid, [])),
+                "session_name": sessions_meta.get(sid, {}).get("name", ""),
+                **context_token_report(sid, sessions.get(sid, [])),
                 "predicted_per_second": predicted_per_second,
                 "tools_used": tools_used,
                 "image": image_url,
@@ -1412,8 +1455,23 @@ def _event_post(ev_type, task_id, **data):
     _event_queue.put((ev_type, task_id, data))
 
 
-def _llm_worker(task_id, sid, payload, round_num):
+def _llm_worker(task_id, sid, round_num, msgs):
     try:
+        if estimate_tokens(msgs) > AUTO_COMPACT_THRESHOLD:
+            set_status(task_id, "Context is full — compressing older messages...")
+        messages = prepare_context_for_llm(sid, msgs)
+        tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+        if tool_msgs:
+            print(f"[llm_round] Round {round_num} includes {len(tool_msgs)} tool message(s) with search results")  # DEBUG
+        payload = {
+            "model": MODEL_ID,
+            "messages": messages,
+            "tools": TOOLS,
+            "tool_choice": "auto",
+            "max_tokens": MAX_INPUT_TOKENS,
+            #"reasoning_budget": REASONING_BUDGET,
+            #"reasoning_effort": "medium",
+        }
         has_image = any(
             isinstance(m.get("content"), list)
             and any(p.get("type") == "image_url" for p in m["content"])
@@ -1850,24 +1908,12 @@ def _start_llm_round(task_id, sid, round_num):
             return
         t["_state"] = "llm_waiting"
         t["_round"] = round_num
-        messages = trim_messages_for_context(sessions.get(sid, []))
-    print(f"[llm_round] Starting round {round_num} for task {task_id} with {len(messages)} messages")  # DEBUG
-    tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
-    if tool_msgs:
-        print(f"[llm_round] Round {round_num} includes {len(tool_msgs)} tool message(s) with search results")  # DEBUG
-    payload = {
-        "model": MODEL_ID,
-        "messages": messages,
-        "tools": TOOLS,
-        "tool_choice": "auto",
-        "max_tokens": MAX_INPUT_TOKENS,
-        #"reasoning_budget": REASONING_BUDGET,
-        #"reasoning_effort": "medium",
-    }
+        messages = list(sessions.get(sid, []))
+    print(f"[llm_round] Starting round {round_num} for task {task_id} with {len(messages)} raw messages")  # DEBUG
     set_status(
         task_id, "Thinking..." if round_num == 0 else f"Thinking (round {round_num})..."
     )
-    _llm_pool.submit(_llm_worker, task_id, sid, payload, round_num)
+    _llm_pool.submit(_llm_worker, task_id, sid, round_num, messages)
 
 
 def _set_task_error(task_id, error, sid=None):
@@ -2407,7 +2453,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "name": meta.get("name", "Chat"),
                         "created": meta.get("created", 0),
                         "updated": meta.get("updated", 0),
-                        "token_estimate": estimate_tokens(sessions.get(sid, [])),
+                        **context_token_report(sid, sessions.get(sid, [])),
                     }
                     for sid, meta in sorted_items
                     if meta.get("user_id", "") == user
@@ -2429,7 +2475,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json(
                     {
                         "messages": msgs,
-                        "token_estimate": estimate_tokens(msgs),
+                        **context_token_report(sid, msgs),
                     }
                 )
             else:
@@ -2514,6 +2560,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if exists:
                     sessions.pop(sid, None)
                     sessions_meta.pop(sid, None)
+            if exists:
+                with _effective_contexts_lock:
+                    _effective_contexts.pop(sid, None)
             if exists:
                 save_sessions()
                 self.send_json({"status": "deleted"})
@@ -2773,22 +2822,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 }
             save_sessions()
             self.send_json({"session_id": sid})
-        elif self.path == "/api/compact":
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            sid = body.get("session_id", "")
-            keep = body.get("keep_messages", 6)
-            with _data_lock:
-                meta = sessions_meta.get(sid)
-                if not meta or meta.get("user_id", "") != user:
-                    self.send_json({"error": "Session not found"}, status=404)
-                    return
-            result = compact_session(sid, keep)
-            self.send_json(result)
         elif self.path == "/api/location":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))

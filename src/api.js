@@ -111,15 +111,6 @@ export async function getModelStatus() {
   return r.json();
 }
 
-export async function compactSession(sessionId, keepMessages = 6) {
-  const r = await authFetch('/api/compact', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, keep_messages: keepMessages }),
-  });
-  return r.json();
-}
-
 export async function sendLocation(latitude, longitude, taskId) {
   await fetch('/api/location', {
     method: 'POST',

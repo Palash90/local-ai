@@ -18,21 +18,22 @@ export default function App() {
   const [messages, setMessages] = useState([])
   const [pendingMessages, setPendingMessages] = useState({})
   const [tokenEstimate, setTokenEstimate] = useState(0)
-  const [maxContext, setMaxContext] = useState(16384)
+  const [contextCompressed, setContextCompressed] = useState(false)
+  const [rawTokenEstimate, setRawTokenEstimate] = useState(0)
+  const [maxContext, setMaxContext] = useState(32768)
   const [modelStatus, setModelStatus] = useState('unloaded')
   const [modelTps, setModelTps] = useState(null)
-const [overheated, setOverheated] = useState(false)
-const [gpuTemp, setGpuTemp] = useState(null)
-const [reminderCount, setReminderCount] = useState(0)
+  const [overheated, setOverheated] = useState(false)
+  const [gpuTemp, setGpuTemp] = useState(null)
+  const [reminderCount, setReminderCount] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [lightboxSrc, setLightboxSrc] = useState(null)
   const [micRecording, setMicRecording] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState({})
-const [compacting, setCompacting] = useState(false)
-const [showTasks, setShowTasks] = useState(false)
-const [showLocationPrompt, setShowLocationPrompt] = useState(false)
-const [locationTaskId, setLocationTaskId] = useState(null)
-const [locationError, setLocationError] = useState(null)
+  const [showTasks, setShowTasks] = useState(false)
+  const [showLocationPrompt, setShowLocationPrompt] = useState(false)
+  const [locationTaskId, setLocationTaskId] = useState(null)
+  const [locationError, setLocationError] = useState(null)
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const pendingRef = useRef({})
@@ -40,28 +41,28 @@ const [locationError, setLocationError] = useState(null)
 
 
   useEffect(() => {
-  const token = localStorage.getItem('auth_token') // or whatever key api.login uses
-  if (token) {
-    api.checkAuth()
-      .then(res => {
-        if (res.authenticated) {
-          setAuthenticated(true)
-          if (res.username) setUsername(res.username)
-          loadSessions().then(list => {
-            const lastSid = localStorage.getItem('last_sid')
-            if (lastSid && list.some(s => s.session_id === lastSid)) {
-              switchSession(lastSid)
-            } else if (list.length > 0) {
-              switchSession(list[0].session_id)
-            }
-          })
-        } else {
-          localStorage.removeItem('auth_token')
-        }
-      })
-      .catch(() => setAuthenticated(false))
-  }
-}, [])
+    const token = localStorage.getItem('auth_token') // or whatever key api.login uses
+    if (token) {
+      api.checkAuth()
+        .then(res => {
+          if (res.authenticated) {
+            setAuthenticated(true)
+            if (res.username) setUsername(res.username)
+            loadSessions().then(list => {
+              const lastSid = localStorage.getItem('last_sid')
+              if (lastSid && list.some(s => s.session_id === lastSid)) {
+                switchSession(lastSid)
+              } else if (list.length > 0) {
+                switchSession(list[0].session_id)
+              }
+            })
+          } else {
+            localStorage.removeItem('auth_token')
+          }
+        })
+        .catch(() => setAuthenticated(false))
+    }
+  }, [])
 
   useEffect(() => {
     pendingRef.current = pendingMessages
@@ -132,10 +133,14 @@ const [locationError, setLocationError] = useState(null)
       if (sessionRef.current !== sid) return
       setMessages(data.messages || [])
       setTokenEstimate(data.token_estimate || 0)
+      setContextCompressed(!!data.context_compressed)
+      setRawTokenEstimate(data.raw_token_estimate || 0)
     }).catch(() => {
       if (sessionRef.current !== sid) return
       setMessages([])
       setTokenEstimate(0)
+      setContextCompressed(false)
+      setRawTokenEstimate(0)
     })
   }
 
@@ -152,6 +157,8 @@ const [locationError, setLocationError] = useState(null)
     localStorage.setItem('last_sid', data.session_id)
     setMessages([])
     setTokenEstimate(0)
+    setContextCompressed(false)
+    setRawTokenEstimate(0)
     const list = await loadSessions()
     setSessions(list)
     closeSidebar()
@@ -292,23 +299,6 @@ const [locationError, setLocationError] = useState(null)
     })
   }
 
-  // ---- Compact ----
-  async function handleCompact() {
-    if (!currentSessionId || compacting) return
-    setCompacting(true)
-    try {
-      const res = await api.compactSession(currentSessionId, 6)
-      if (res.ok) {
-        loadSessionMessages(currentSessionId)
-      } else {
-        console.error('[compact] failed:', res.error)
-      }
-    } catch (e) {
-      console.error('[compact] error:', e)
-    }
-    setCompacting(false)
-  }
-
   // ---- Task polling ----
   useEffect(() => {
     if (!authenticated) return
@@ -343,7 +333,12 @@ const [locationError, setLocationError] = useState(null)
                 setMessages(prev => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg])
               }
               if (st.token_estimate != null) setTokenEstimate(st.token_estimate)
+              setContextCompressed(!!st.context_compressed)
+              if (st.raw_token_estimate != null) setRawTokenEstimate(st.raw_token_estimate)
               if (st.predicted_per_second != null) setModelTps(st.predicted_per_second)
+              if (st.session_name != null && st.session_id) {
+                setSessions(prev => prev.map(s => s.session_id === st.session_id ? { ...s, name: st.session_name } : s))
+              }
             } else {
               if (pendingEntry?.sessionId === sessionRef.current) {
                 setMessages(prev => [...prev, { role: 'assistant', content: 'Error: ' + (st.error || '') }])
@@ -461,12 +456,12 @@ const [locationError, setLocationError] = useState(null)
           modelStatus={modelStatus}
           modelTps={modelTps}
           tokenEstimate={tokenEstimate}
+          contextCompressed={contextCompressed}
+          rawTokenEstimate={rawTokenEstimate}
           maxContext={maxContext}
           onToggleSidebar={() => setSidebarOpen(o => !o)}
           username={username}
           onLogout={handleLogout}
-          onCompact={handleCompact}
-          compacting={compacting}
           reminderCount={reminderCount}
           onToggleTasks={() => setShowTasks(o => !o)}
         />

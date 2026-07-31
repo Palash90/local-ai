@@ -152,6 +152,16 @@ html, body {
   background: rgba(248, 113, 113, 0.1);
 }
 
+#user-dropdown button.task-menu-item {
+  position: relative;
+  color: #94a3b8;
+}
+
+#user-dropdown button.task-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
 /* ---- App Container ---- */
 #app-container {
   display: flex;
@@ -1069,46 +1079,11 @@ input[type=file] {
   flex-shrink: 0;
 }
 
-#compact-btn {
-  background: none;
-  border: 1px solid rgba(255,255,255,0.15);
-  color: #94a3b8;
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: 12px;
-  cursor: pointer;
-  line-height: 1.4;
-  transition: all .2s;
-}
-
-#compact-btn:hover:not(:disabled) {
-  background: rgba(255,255,255,0.08);
-  color: #fff;
-  border-color: rgba(255,255,255,0.3);
-}
-
-#compact-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-#tasks-btn {
-  background: none;
-  border: 1px solid rgba(255,255,255,0.15);
-  color: #94a3b8;
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: 14px;
-  cursor: pointer;
-  line-height: 1.4;
-  position: relative;
-  transition: all .2s;
-}
-
-#tasks-btn:hover {
-  background: rgba(255,255,255,0.08);
-  color: #fff;
-  border-color: rgba(255,255,255,0.3);
+.token-compressed {
+  color: #fbbf24;
+  opacity: 0.9;
+  margin-left: 4px;
+  font-weight: 600;
 }
 
 #reminder-badge {

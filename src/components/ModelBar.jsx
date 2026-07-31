@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 
-export default function ModelBar({ modelStatus, modelTps, tokenEstimate, maxContext, onToggleSidebar, username, onLogout, onCompact, compacting, reminderCount, onToggleTasks }) {
+export default function ModelBar({ modelStatus, modelTps, tokenEstimate, contextCompressed, rawTokenEstimate, maxContext, onToggleSidebar, username, onLogout, reminderCount, onToggleTasks }) {
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const dropdownRef = useRef(null)
 
@@ -51,20 +51,21 @@ export default function ModelBar({ modelStatus, modelTps, tokenEstimate, maxCont
         {tokenEstimate > 0 && (
           <span className="token-text">
             {tokenEstimate > 1000 ? (tokenEstimate / 1000).toFixed(1) + 'k' : tokenEstimate} / {maxContext > 1000 ? (maxContext / 1000).toFixed(0) + 'k' : maxContext}
+            {contextCompressed && rawTokenEstimate > 0 && (
+              <span className="token-compressed" title="Context compressed — older messages summarized">
+                ({rawTokenEstimate > 1000 ? (rawTokenEstimate / 1000).toFixed(1) + 'k' : rawTokenEstimate})
+              </span>
+            )}
           </span>
         )}
-        {onCompact && (
-          <button id="compact-btn" onClick={onCompact} disabled={compacting} title="Compress old messages to free context">
-            {compacting ? '...' : '\u21911'}
-          </button>
-        )}
-        <button id="tasks-btn" onClick={onToggleTasks} title="Tasks">
-          &#9776;{reminderCount > 0 && <span id="reminder-badge">{reminderCount}</span>}
-        </button>
       </span>
       <div id="user-menu" ref={dropdownRef}>
         <span id="user-name" onClick={() => setDropdownOpen(o => !o)}>{username}</span>
         <div id="user-dropdown" className={dropdownOpen ? 'open' : ''}>
+          <button className="task-menu-item" onClick={() => { onToggleTasks(); setDropdownOpen(false) }} title="Tasks">
+            <span>&#9776; Tasks</span>
+            {reminderCount > 0 && <span id="reminder-badge">{reminderCount}</span>}
+          </button>
           <button onClick={onLogout}>Logout</button>
         </div>
       </div>
