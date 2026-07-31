@@ -14,6 +14,13 @@ sudo apt install -y \
     pdftotext poppler-utils catdoc antiword \
     curl docker.io docker-compose-v2
 
+# Ensure Node.js (LTS) is installed (required for frontend build)
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "==> Installing Node.js (18.x LTS)..."
+    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+    sudo apt install -y nodejs
+fi
+
 echo "==> Starting avahi-daemon..."
 sudo systemctl enable --now avahi-daemon
 
@@ -56,10 +63,13 @@ fi
 # Chat frontend (this repo)
 # ──────────────────────────────────────────────
 echo "==> Setting up chat frontend..."
-if [ ! -d "$CHAT_DIR/node_modules" ]; then
+# Ensure we run npm from the chat directory
+cd "$CHAT_DIR"
+
+if [ ! -d "node_modules" ]; then
     npm install
 fi
-if [ ! -d "$CHAT_DIR/dist" ]; then
+if [ ! -d "dist" ]; then
     npm run build
 fi
 
@@ -133,10 +143,18 @@ mkdir -p "$FILES_DIR/contexts"
 # ──────────────────────────────────────────────
 # SearXNG (Docker)
 # ──────────────────────────────────────────────
-if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q searxng; then
+
+# Choose docker invocation depending on permissions
+if docker info >/dev/null 2>&1; then
+    DOCKER_CMD="docker"
+else
+    DOCKER_CMD="sudo docker"
+fi
+
+if ! $DOCKER_CMD ps --format '{{.Names}}' 2>/dev/null | grep -q searxng; then
     echo "==> Starting SearXNG..."
     mkdir -p "$FILES_DIR/searxng"
-    docker run -d --name searxng --restart unless-stopped \
+    $DOCKER_CMD run -d --name searxng --restart unless-stopped \
         -p 127.0.0.1:8080:8080 \
         -v "$FILES_DIR/searxng:/etc/searxng:rw" \
         -e SEARXNG_BASE_URL="http://localhost:8080/" \
@@ -212,15 +230,15 @@ echo "       - LLMs:     $FILES_DIR/my-models/"
 echo "       - ComfyUI:  $LOCAL_AI_HOME/ComfyUI/models/{checkpoints,clip,vae,unet,...}"
 echo ""
 echo "  Then start services in this order:"
-echo "    1. $LOCAL_AI_HOME/llama.cpp/build/bin/llama-server \\"
-echo "         --host 0.0.0.0 --port 8081 \\"
-echo "         --models-dir $FILES_DIR/my-models/ \\"
-echo "         --n-gpu-layers 99 --no-kv-offload --ctx-size 16384 \\"
-echo "         --reasoning-budget 1120"
+echo "    1. $LOCAL_AI_HOME/llama.cpp/build/bin/llama-server \\\""
+echo "         --host 0.0.0.0 --port 8081 \\\""
+echo "         --models-dir $FILES_DIR/my-models/ \\\""
+echo "         --n-gpu-layers 99 --no-kv-offload --ctx-size 32768 \\\""
+echo "         --reasoning-budget 4096"
 echo ""
-echo "    2. cd $LOCAL_AI_HOME/ComfyUI && source venv/bin/activate && python main.py \\"
-echo "         --lowvram \\"
-echo "         --input-directory $FILES_DIR/ComfyUI/input \\"
+echo "    2. cd $LOCAL_AI_HOME/ComfyUI && source venv/bin/activate && python main.py \\\""
+echo "         --lowvram \\\""
+echo "         --input-directory $FILES_DIR/ComfyUI/input \\\""
 echo "         --output-directory $FILES_DIR/ComfyUI/output"
 echo ""
 echo "    3. cd $CHAT_DIR && python chat-webui.py"
