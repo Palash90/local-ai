@@ -18,7 +18,7 @@ export default function App() {
   const [messages, setMessages] = useState([])
   const [pendingMessages, setPendingMessages] = useState({})
   const [tokenEstimate, setTokenEstimate] = useState(0)
-  const [maxContext, setMaxContext] = useState(4096)
+  const [maxContext, setMaxContext] = useState(16384)
   const [modelStatus, setModelStatus] = useState('unloaded')
   const [modelTps, setModelTps] = useState(null)
 const [overheated, setOverheated] = useState(false)

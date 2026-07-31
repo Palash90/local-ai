@@ -14,7 +14,7 @@ COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = "http://localhost:8080/search" # Change to localhost if running from direct OS
 COMFYUI_URL = "http://localhost:8188"
 HOST, PORT = "0.0.0.0", 3001
-REASONING_BUDGET = 1120  # 560 for medium, you don't need short reasoning
+REASONING_BUDGET = 2048
 
 with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
     MODEL_ID = file.read()
@@ -28,20 +28,29 @@ LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-ser
 LLAMA_QWEN_NGL = "12"
 LLAMA_GEMMA_NGL = "99"
 LLAMA_SERVER_ARGS = [
-    "--host",
-    "0.0.0.0",
-    "--port",
-    "8081",
-    "--jinja", # Not required for Q4, could not figure out why
-    "--models-dir",
-    os.path.expanduser("~/local-ai-files/my-models/"),
-    "--n-gpu-layers",
-    "99",  # Have to make it dynamic for Qwen switch
-    "--no-kv-offload",
-    "--ctx-size",
-    "32768",
-    "--reasoning-budget",
-    str(REASONING_BUDGET),
+    "--host", "0.0.0.0",
+    "--port", "8081",
+    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    "--jinja",
+    
+    # GPU / VRAM Allocations
+    "--n-gpu-layers", "99",
+    "-fa", "on",  # Flash attention lowers VRAM footprint
+    "--ctx-size", "16384",  # Capped to 16k context to prevent VRAM overflow
+    #"--no-kv-offload",
+    "-ctk", "q8_0",            # Quantize Key cache to 8-bit (saves 50% VRAM)
+    "-ctv", "q8_0",            # Quantize Value cache to 8-bit (saves 50% VRAM)
+    
+    # Reasoning & Thinking Limits
+    "--reasoning-budget", str(REASONING_BUDGET),
+    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+    
+    # Gemma 4 Sampling Preset
+    "--temp", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64",
+    "--min-p", "0.0",
+    "--repeat-penalty", "1.0"
 ]
 
 LLAMA_QWEN_ARGS = [
