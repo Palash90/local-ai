@@ -12,6 +12,14 @@ function escHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+function hostnameFromUrl(u) {
+  try {
+    return new URL(u).hostname
+  } catch {
+    return u || ''
+  }
+}
+
 function execCopy(text) {
   const ta = document.createElement('textarea')
   ta.value = text
@@ -242,8 +250,6 @@ function SpeakButton({ text }) {
   )
 }
 
-const MAX_REASONING = 2000
-
 function ReasoningBlock({ text, open, onToggle }) {
   const preRef = useRef(null)
   const prevLenRef = useRef(0)
@@ -260,7 +266,7 @@ function ReasoningBlock({ text, open, onToggle }) {
   }, [text])
 
   if (!text) return null
-  const capped = text.length > MAX_REASONING ? text.slice(0, MAX_REASONING) + '...' : text
+  const capped = text
 
   let html
   try {
@@ -298,7 +304,8 @@ export default function Message({ msg, pending, onImageOpen }) {
   const chatEl = useRef(null)
   const [popupVisible, setPopupVisible] = useState(null)
   const hideTimer = useRef(null)
-  const [reasoningOpen, setReasoningOpen] = useState(false)
+  const [reasoningOpen, setReasoningOpen] = useState(!!pending)
+  const [pageModal, setPageModal] = useState(null)
   const codeRef = useRef([])
 
   const showPopup = useCallback((idx) => {
@@ -330,6 +337,7 @@ export default function Message({ msg, pending, onImageOpen }) {
 
   const toolsUsed = msg._tools_used || []
   const searchDetails = msg._search_details || []
+  const fetchDetails = searchDetails.filter(d => d && d.tool === 'fetch_page')
   const genPrompt = msg._gen_prompt
   const imageUrl = msg._image_url
   const imageModel = msg._image_model
@@ -402,25 +410,42 @@ export default function Message({ msg, pending, onImageOpen }) {
     <div className={`msg ${role}`} ref={elRef}>
       {timestamp && <span className="msg-timestamp">{timestamp}</span>}
       <div className="msg-header">
-        {role === 'bot' && toolsUsed.length > 0 && toolsUsed.map((t, i) => (
-          <span
-            key={i}
-            className={`tool-badge ${t === 'web_search' ? 'search' : t === 'generate_image' ? 'image' : t === 'edit_image' ? 'edit' : t === 'fetch_page' ? 'fetch' : ''}`}
-            onMouseEnter={() => t === 'web_search' && searchDetails.length > 0 && showPopup(i)}
-            onMouseLeave={hidePopup}
-          >
-            {t === 'web_search' ? 'Web Search' : t === 'generate_image' ? `Image Gen${imageModel ? ' (' + imageModel + ')' : ''}` : t === 'edit_image' ? 'Edit Image' : t === 'fetch_page' ? 'Fetched Page' : t}
-            {t === 'web_search' && searchDetails.length > 0 && popupVisible === i && (
-              <div
-                className="search-popup"
-                onMouseEnter={() => showPopup(i)}
+        {role === 'bot' && toolsUsed.length > 0 && (() => {
+          let fetchIdx = 0
+          return toolsUsed.map((t, i) => {
+            const isFetch = t === 'fetch_page'
+            const fetchDetail = isFetch ? fetchDetails[fetchIdx++] : null
+            return (
+              <span
+                key={i}
+                className={`tool-badge ${t === 'web_search' ? 'search' : t === 'generate_image' ? 'image' : t === 'edit_image' ? 'edit' : t === 'fetch_page' ? 'fetch' : ''}`}
+                onMouseEnter={() => t === 'web_search' && searchDetails.length > 0 && showPopup(i)}
                 onMouseLeave={hidePopup}
               >
-                <SearchPopup details={searchDetails} />
-              </div>
-            )}
-          </span>
-        ))}
+                {t === 'web_search' ? 'Web Search' : t === 'generate_image' ? `Image Gen${imageModel ? ' (' + imageModel + ')' : ''}` : t === 'edit_image' ? 'Edit Image' : t === 'fetch_page' ? (fetchDetail?.url ? 'Fetched Page · ' + hostnameFromUrl(fetchDetail.url) : 'Fetched Page') : t}
+                {isFetch && fetchDetail && (
+                  <button
+                    type="button"
+                    className="fetch-info-btn"
+                    title="View page details"
+                    onClick={e => { e.stopPropagation(); setPageModal(fetchDetail) }}
+                  >
+                    &#9432;
+                  </button>
+                )}
+                {t === 'web_search' && searchDetails.length > 0 && popupVisible === i && (
+                  <div
+                    className="search-popup"
+                    onMouseEnter={() => showPopup(i)}
+                    onMouseLeave={hidePopup}
+                  >
+                    <SearchPopup details={searchDetails} />
+                  </div>
+                )}
+              </span>
+            )
+          })
+        })()}
         {role === 'bot' && text && <SpeakButton text={ttsText} />}
         <CopyButton text={text} genPrompt={genPrompt} imageUrl={imageUrl} />
       </div>
@@ -464,6 +489,31 @@ export default function Message({ msg, pending, onImageOpen }) {
           <em>(No response text generated)</em>
         </div>
       ) : null}
+      {pageModal && (
+        <div className="page-modal-overlay" onClick={() => setPageModal(null)}>
+          <div className="page-modal" onClick={e => e.stopPropagation()}>
+            <div className="page-modal-header">
+              <span>Fetched Page</span>
+              <button type="button" className="page-modal-close" onClick={() => setPageModal(null)}>&#10005;</button>
+            </div>
+            {pageModal.error ? (
+              <div className="page-modal-body error">
+                <div className="page-modal-url">{pageModal.url}</div>
+                <p className="page-modal-error-msg">{pageModal.error}</p>
+              </div>
+            ) : (
+              <div className="page-modal-body">
+                {pageModal.title && <div className="page-modal-title">{pageModal.title}</div>}
+                <a className="page-modal-url" href={pageModal.url} target="_blank" rel="noreferrer">{pageModal.url}</a>
+                <div className="page-modal-content">
+                  {(pageModal.content || '(No readable text content extracted)').slice(0, 6000)}
+                  {pageModal.content && pageModal.content.length > 6000 ? '\n...[truncated for display]' : ''}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

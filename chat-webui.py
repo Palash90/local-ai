@@ -1519,6 +1519,7 @@ def _llm_worker(task_id, sid, round_num, msgs):
                                 existing["function"]["name"] = fn["name"]
                             if fn.get("arguments"):
                                 existing["function"]["arguments"] += fn["arguments"]
+        print(f"[llm_round] Round {round_num} done: reasoning_buf={len(reasoning_buf)} chars, content_buf={len(content_buf)} chars, tool_calls={len(tool_calls_map)}")  # DEBUG
         msg = {
             "role": "assistant",
             "content": content_buf,
@@ -1632,6 +1633,17 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
             t = tasks.get(task_id)
             if t:
                 t.setdefault("_tools_used", []).append(tool_name)
+                try:
+                    res = json.loads(result)
+                    t.setdefault("_search_details", []).append({
+                        "tool": "fetch_page",
+                        "url": res.get("url", args.get("url", "")),
+                        "title": res.get("title", ""),
+                        "content": res.get("content", ""),
+                        "error": res.get("error", ""),
+                    })
+                except Exception:
+                    pass
         llm_result = (
             f"Page content fetched from URL '{args.get('url')}'. "
             f"Use this content to answer the user's question accurately. "
