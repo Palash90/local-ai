@@ -405,11 +405,11 @@ export default function Message({ msg, pending, onImageOpen }) {
         {role === 'bot' && toolsUsed.length > 0 && toolsUsed.map((t, i) => (
           <span
             key={i}
-            className={`tool-badge ${t === 'web_search' ? 'search' : t === 'generate_image' ? 'image' : t === 'edit_image' ? 'edit' : ''}`}
+            className={`tool-badge ${t === 'web_search' ? 'search' : t === 'generate_image' ? 'image' : t === 'edit_image' ? 'edit' : t === 'fetch_page' ? 'fetch' : ''}`}
             onMouseEnter={() => t === 'web_search' && searchDetails.length > 0 && showPopup(i)}
             onMouseLeave={hidePopup}
           >
-            {t === 'web_search' ? 'Web Search' : t === 'generate_image' ? `Image Gen${imageModel ? ' (' + imageModel + ')' : ''}` : t === 'edit_image' ? 'Edit Image' : t}
+            {t === 'web_search' ? 'Web Search' : t === 'generate_image' ? `Image Gen${imageModel ? ' (' + imageModel + ')' : ''}` : t === 'edit_image' ? 'Edit Image' : t === 'fetch_page' ? 'Fetched Page' : t}
             {t === 'web_search' && searchDetails.length > 0 && popupVisible === i && (
               <div
                 className="search-popup"

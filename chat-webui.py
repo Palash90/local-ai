@@ -80,7 +80,7 @@ TOOLS = [
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search.",
+                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search. The results contain snippets only; if the snippets are insufficient to answer the question fully, follow up with fetch_page to read the full content of the relevant page.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -92,6 +92,23 @@ TOOLS = [
                 },
             },
         },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_page",
+            "description": "Fetch and read the full text content of a web page. Use this AFTER web_search when the search snippets are not enough to answer the question (e.g. you need details, data, or an article's body). Pass the full URL of the page to read.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full URL of the web page to fetch (must start with http:// or https://)."
+                    }
+                },
+                "required": ["url"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -467,7 +484,7 @@ _queue_lock = threading.Lock()
 _queue_cond = threading.Condition(_queue_lock)
 _current_task_id = None
 
-MAX_INPUT_TOKENS = 32768
+MAX_INPUT_TOKENS = 16384
 
 _event_queue = _queue_mod.Queue()
 _llm_pool = ThreadPoolExecutor(max_workers=1)
@@ -978,6 +995,57 @@ def web_search(query, current_time=None, current_location=None):
             "search_url": search_url,
         }
     )
+
+
+def fetch_page(url, max_chars=8000):
+    import socket
+    import ipaddress
+    from bs4 import BeautifulSoup
+
+    if not url:
+        return json.dumps({"url": "", "error": "No URL provided."})
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return json.dumps({"url": url, "error": "Only http/https URLs are supported."})
+        host = parsed.hostname or ""
+        ip = socket.gethostbyname(host)
+        addr = ipaddress.ip_address(ip)
+        if addr.is_private or addr.is_loopback or addr.is_link_local:
+            return json.dumps({"url": url, "error": "Access to private/internal addresses is not allowed."})
+    except Exception as e:
+        return json.dumps({"url": url, "error": f"Invalid URL: {e}"})
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        r.raise_for_status()
+        ctype = r.headers.get("Content-Type", "").lower()
+        if not any(t in ctype for t in ("text/html", "text/plain", "application/xhtml", "application/json", "application/xml")):
+            return json.dumps({"url": url, "content_type": ctype, "error": "Skipped: page is not readable text content (likely binary/PDF/media)."})
+        if not r.encoding:
+            r.encoding = r.apparent_encoding
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script", "style", "noscript", "svg", "nav", "footer", "header", "aside", "form"]):
+            tag.decompose()
+        title = soup.title.get_text(strip=True) if soup.title else ""
+        main = soup.find("main") or soup.find("article") or soup.find("body") or soup
+        text = main.get_text(separator="\n", strip=True)
+        text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n...[truncated]"
+        return json.dumps({
+            "url": r.url,
+            "title": title,
+            "content": text or "(No readable text content extracted)",
+        }, ensure_ascii=False)
+    except Exception as e:
+        print(f"[fetch_page] Failed: {e}")
+        return json.dumps({"url": url, "error": f"Failed to fetch page: {e}"})
 
 
 def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
@@ -1498,6 +1566,33 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
             f"Analyze these search results thoroughly and provide a clear, accurate response based on the findings:\n\n{result}"
         )
         print(f"[web_search] LLM-bound result (with analysis instruction) for task {task_id}: {llm_result[:400]}...")  # DEBUG
+        _event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=llm_result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
+
+    elif tool_name == "fetch_page":
+        set_status(task_id, f"Fetching page: {args.get('url', '')}...")
+        try:
+            result = fetch_page(args.get("url", ""))
+        except Exception as e:
+            print(f"[fetch_page] Unhandled exception for task {task_id}: {e}")
+            result = json.dumps({"url": args.get("url", ""), "error": str(e)})
+        print(f"[fetch_page] Result for task {task_id}: {result[:300]}...")  # DEBUG
+        with _data_lock:
+            t = tasks.get(task_id)
+            if t:
+                t.setdefault("_tools_used", []).append(tool_name)
+        llm_result = (
+            f"Page content fetched from URL '{args.get('url')}'. "
+            f"Use this content to answer the user's question accurately. "
+            f"If the content is insufficient or was truncated, you may fetch another page or fall back to the search results:\n\n{result}"
+        )
         _event_post(
             "tool_ok",
             task_id,

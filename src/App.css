@@ -501,6 +501,11 @@ html, body {
   color: #34d399;
 }
 
+.tool-badge.fetch {
+  background: rgba(124, 58, 237, 0.25);
+  color: #a78bfa;
+}
+
 /* ---- Search Popup ---- */
 .search-popup {
   display: block;
