@@ -238,12 +238,14 @@ graph TD
 
 ```mermaid
 graph TD
-    A["python chat-webui.py"] --> A1["Load configs at import:\nmodel.txt, models.json,\nsys_prompt.txt, users.json"]
+    A["python chat-webui.py"] --> A1["Load configs at module import:\nmodel.txt, models.json,\nsys_prompt.txt, users.json"]
     A --> B["load_sessions()\nLoad sessions.json"]
     A1 & B --> C{"llama-server /health\nHTTP GET?"}
-    C -- "200 OK" --> E["Start 5 Daemon Threads"]
-    C -- "Dead" --> D["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn llama-server Popen\n4. Spawn ComfyUI Popen\n5. Poll /health 2s up to 120s\n6. Kill [...]"]
-    D --> E
+    C -- "200 OK" --> D{"SearXNG reachable\non localhost:8080?"}
+    C -- "Dead" --> Restart["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn llama-server Popen\n4. Spawn ComfyUI Popen\n5. Poll /health 2s up to 120s\n6. Kill on timeout"]
+    D -- "Yes" --> E["Start 5 Daemon Threads"]
+    D -- "No" --> Exit["print ERROR & sys.exit(1)"]
+    Restart --> D
 
     subgraph Daemons ["Background Daemon Threads"]
         E1["_event_loop\nSingle-threaded event dispatcher"]
@@ -293,13 +295,22 @@ graph TD
         Client -->|"DELETE /api/sessions/:id"| DeleteSession["Delete session + cleanup\nassociated output images"]
     end
 
+    subgraph TaskEndpoints ["Task Management"]
+        Client -->|"GET /api/tasks"| ListTasks["List user tasks\nwith reminders"]
+        Client -->|"POST /api/tasks"| CreateTask["Create task\n(title, priority, due_date, reminder)"]
+        Client -->|"PUT /api/tasks/:id"| UpdateTask["Update task fields"]
+        Client -->|"DELETE /api/tasks/:id"| DeleteTask["Delete task"]
+    end
+
     subgraph UtilityEndpoints ["Utility"]
-        Client -->|"GET /api/model-status"| ModelStatus["model_status, _last_tps\n_overheated, _gpu_temp"]
+        Client -->|"GET /api/model-status"| ModelStatus["model_status, _last_tps\n_overheated, _gpu_temp, reminder_count"]
         Client -->|"POST /api/extract-file"| ExtractFile["PDF/DOCX/DOC/XLSX to text\nvia fitz/catdoc/antiword/openpyxl"]
         Client -->|"POST /api/location"| SetLocation["Reverse geocode via Nominatim\nstore _client_location"]
         Client -->|"GET /api/user-context"| GetUserCtx["Read user context file"]
-        Client -->|"POST /api/user-context"| SetUserCtx["write / overwrite / read"]
-        Client -->|"GET /output/:filename"| ServeImage["Serve generated images\nfrom ComfyUI output dir"]
+        Client -->|"POST /api/user-context\n{action: write|overwrite|read}"| SetUserCtx["Write / overwrite / read\nuser context file"]
+        Client -->|"POST /api/tts"| TTS["Text-to-speech via Piper (local)\nor edge-tts (cloud fallback)"]
+        Client -->|"GET /output/:filename"| ServeImage["Serve generated images\nfrom ComfyUI output dir (no auth)"]
+        Client -->|"GET /uploads/:filename"| ServeUpload["Serve uploaded files\n(no auth)"]
     end
 
     subgraph SPA ["Static / SPA Serving"]
@@ -403,16 +414,28 @@ graph TD
     ChooseTool -- "web_search" --> ExecSearch["1. set_status Searching\n2. Get _client_timestamp\n3. web_search query client_ts:\n   Append city to query\n   GET SearXNG search json\n   Return to[...]" ]
     ExecSearch --> ToolPost["event_post tool_ok"]
 
+    ChooseTool -- "fetch_page" --> FetchPage["1. set_status Fetching\n2. fetch_page URL:\n   Validate URL (no private IPs)\n   GET with browser headers\n   Parse HTML (BeautifulSoup)\n   Return title + content"]
+    FetchPage --> ToolPost
+
     ChooseTool -- "generate_image" --> GenGuard{"already generated\nimage this task?"}
     GenGuard -- Yes --> GenReject["Return error:\nImage generation limit reached"]
-    GenGuard -- No --> GenImage["1. unload_llama_model\n2. Build ComfyUI workflow:\n   z_image 8 steps res_multistep\n   or sd3_5_medium 20 steps euler\n3. ensure_comfyui_running\n4. POST /prompt[...]" ]
+    GenGuard -- No --> GenImage["1. unload_llama_model\n2. Build ComfyUI workflow:\n   z_image 8 steps res_multistep\n   or sd3_5_medium 20 steps euler (default)\n3. ensure_comfyui_running\n4. POST /prompt\n5. Poll history 120s\n6. free_comfyui_vram\n7. load_llama_model"]
     GenImage --> ToolPost
 
-    ChooseTool -- "edit_image" --> EditImage["1. Find source image:\n   Check _image_url in session\n   Check base64 in user messages\n2. unload_llama_model\n3. Write input to ComfyUI/input\n4. e[...]" ]
+    ChooseTool -- "edit_image" --> EditImage["1. Find source image:\n   Check _image_url in session\n   Check base64 in user messages\n2. unload_llama_model\n3. Write input to ComfyUI/input\n4. Build img2img workflow (denoise)\n5. ensure_comfyui_running\n6. POST /prompt\n7. Poll history 120s\n8. free_comfyui_vram\n9. load_llama_model"]
     EditImage --> ToolPost
+
+    ChooseTool -- "get_user_location" --> GetLoc["If _client_location cached: return it\nElse: set_status location_needed\nWait for browser geolocation\n(60s timeout)\nReturn location or 'denied'"]
+    GetLoc --> ToolPost
+
+    ChooseTool -- "read_file" --> ReadFile["1. Validate file_url in /uploads/\n2. Read file from uploads dir\n3. Extract text via:\n   fitz (PDF), python-docx (DOCX)\n   catdoc/antiword (DOC)\n   openpyxl (XLSX)\n4. Return content"]
+    ReadFile --> ToolPost
 
     ChooseTool -- "update_user_context" --> ExecContext["write_user_context:\nAppend timestamped entry\nto user context file"]
     ExecContext --> ToolPost
+
+    ChooseTool -- "manage_tasks" --> ManageTasks["SQLite tasks DB ops:\ncreate/update/complete/delete/list/get\nPer-user, with reminders"]
+    ManageTasks --> ToolPost
 
     ChooseTool -- "unknown" --> ToolUnknown["Return error:\nUnknown tool"]
     ToolUnknown --> ToolPost
