@@ -1725,13 +1725,13 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
                 prompt=args.get("prompt", ""),
                 task_id=task_id,
                 negative_prompt=args.get("negative_prompt", ""),
-                model=args.get("model") or "sd3_5_medium",
+                model=args.get("model") or "z_image",
             )
             res_data = json.loads(result)
             if "file" in res_data:
                 fn = os.path.basename(res_data['file'])
                 image_url = f"/output/{fn}"
-                image_model_s = args.get("model") or "sd3_5_medium"
+                image_model_s = args.get("model") or "z_image"
                 print(f"[tool_worker] Image file: {res_data['file']}, basename: {fn}, url: {image_url}")  # DEBUG
                 with _data_lock:
                     t = tasks.get(task_id)
