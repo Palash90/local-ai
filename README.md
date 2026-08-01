@@ -2,7 +2,15 @@
 
 Self-hosted LLM + image generation stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM).
 
-## Quick Start
+## Requirements
+
+- NVIDIA GPU with the driver working — check with `nvidia-smi`.
+- **Host OS path:** CUDA toolkit (`nvcc`) needed to build llama.cpp. `setup.sh` installs
+  it automatically if it's missing.
+- **Dockerized path:** **NVIDIA Container Toolkit** on the *host* (for `--gpus`), plus
+  CUDA toolkit *inside* the container (`setup.sh` installs it there too).
+
+## Quick Start — Host OS
 
 ```bash
 # 1. Clone and build
@@ -10,31 +18,102 @@ git clone <this-repo> ~/git/local-ai
 cd ~/git/local-ai
 bash setup.sh
 
-# 2. Edit config files (required before first run)
-nano ~/local-ai-files/model.txt        # set your LLM model name
-nano ~/local-ai-files/models.json      # set ComfyUI model filenames
-nano ~/local-ai-files/users.json       # set passwords
+# 2. Post-processing — download your models (setup.sh does NOT download them)
+#    LLM (chat):   put a GGUF into ~/local-ai-files/my-models/
+#                  model.txt defaults to "gemma4-e2b" — edit it if you use another
+#    Image (z_image): copy these into ~/local-ai/ComfyUI/models/:
+#      diffusion_models/z_image_turbo_bf16.safetensors
+#      text_encoders/qwen_3_4b.safetensors
+#      vae/ae.safetensors
+#    (optional) nano ~/local-ai-files/users.json   # set passwords
 
-# 3. Download models into:
-#    LLMs:     ~/local-ai-files/my-models/
-#    ComfyUI:  ~/local-ai/ComfyUI/models/{checkpoints,clip,vae,unet,...}
-
-# 4. Start services (in order)
-~/local-ai/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 --port 8081 \
-    --models-dir ~/local-ai-files/my-models/ \
-    --n-gpu-layers 99 --no-kv-offload --ctx-size 32768 \
-    --reasoning-budget 1120
-
-cd ~/local-ai/ComfyUI && source venv/bin/activate && python main.py \
-    --lowvram \
-    --input-directory ~/local-ai-files/ComfyUI/input \
-    --output-directory ~/local-ai-files/ComfyUI/output
-
+# 3. Run — nothing else to configure
 cd ~/git/local-ai && python chat-webui.py
 ```
 
 Access at `http://chat.local` or `http://localhost:3001`.
+
+`chat-webui.py` auto-starts llama-server on boot if it's down, and starts ComfyUI on
+demand, so no manual service startup is required. If you prefer to run the services
+manually:
+
+```bash
+~/local-ai/llama.cpp/build/bin/llama-server \
+    --host 0.0.0.0 --port 8081 \
+    --models-dir ~/local-ai-files/my-models/ \
+    --n-gpu-layers 99 --ctx-size 32768 \
+    --reasoning-budget 4096
+cd ~/local-ai/ComfyUI && source venv/bin/activate && python main.py \
+    --lowvram \
+    --input-directory ~/local-ai-files/ComfyUI/input \
+    --output-directory ~/local-ai-files/ComfyUI/output
+```
+
+## Quick Start — Dockerized (GPU)
+
+The repo ships a `docker-compose.yaml` that runs the same stack inside an
+`ubuntu:24.04` container with GPU passthrough, with SearXNG as a sibling service.
+
+```bash
+# 1. Start services (SearXNG + ai-container with GPU + shared dirs)
+docker compose up -d
+
+# 2. Enter the container and run setup
+docker exec -it ai-container bash
+cd /root/git/local-ai
+bash setup.sh
+
+# 3. Post-processing — download models into the shared host dirs
+#    (same list as the Host OS path, but the image models land in
+#     ~/local-ai/ComfyUI/models/ on the HOST, which is mounted into the container)
+
+# 4. Run — inside the container
+cd /root/git/local-ai && python chat-webui.py
+```
+
+Access at `http://localhost:3001` (published from the container). Notes:
+
+- **Requires the NVIDIA Container Toolkit on the host**; the compose already passes
+  `--gpus` to the container.
+- `setup.sh` auto-detects the container: runs without `sudo`, skips systemd/mDNS/nginx
+  (not available in a container), skips starting SearXNG (provided by compose), and
+  installs the CUDA toolkit inside the container if `nvcc` is missing.
+- The container needs internet during setup (`apt`, `git clone`, `npm`, CUDA toolkit);
+  the compose attaches it to `external-net`.
+- Config/data dirs (`~/local-ai-files`) are shared with the host, so models and
+  sessions persist across container restarts.
+
+## Security & Deployment Notes
+
+> **Intended scope: a private, trusted home deployment** — e.g. a household of a few
+> users on a home LAN (this project targets ~2–4 concurrent users). The following
+> limitations are **accepted risk** for that use case. This stack is **not** built for
+> production, the public internet, or a shared LAN where many unknown users work —
+> do **not** use it under those conditions.
+
+- **File endpoints are unauthenticated.** `/output/...` (generated images) and
+  `/uploads/...` (uploaded documents) are served without requiring a login token
+  (`chat-webui.py` `do_GET`). Anyone who can reach port 3001 and knows a filename can
+  download them. Do not upload sensitive files you wouldn't want shared on the LAN.
+- **CORS is wide open.** Responses carry `Access-Control-Allow-Origin: *`
+  (`chat-webui.py` `do_OPTIONS`/`send_json`). A malicious page on the LAN could call
+  the API and read responses (login is still required via `X-Auth-Token`).
+- **Default credentials.** A fresh `setup.sh` run creates `admin` / `admin`
+  (`users.json`). Change it immediately — `nano ~/local-ai-files/users.json`.
+- **Plaintext passwords.** `users.json` stores passwords in plaintext and compares them
+  directly (`chat-webui.py` `/api/login`). Keep that file readable only by you
+  (`chmod 600`).
+- **No TLS/HTTPS.** Login tokens and chat content travel in plaintext. Fine on a
+  trusted LAN; never port-forward 3001/8081 without adding TLS in front.
+- **No content guardrails.** The model outputs whatever the loaded model produces; there
+  is no moderation or kid-safe filter in the stack. Choose your model accordingly and
+  set expectations for anyone using it.
+- **Third-party calls.** `fetch_page` and location lookup call external services
+  (SearXNG backends, `nominatim.openstreetmap.org`), and optional TTS can use
+  Microsoft `edge-tts` unless you configure the local Piper voices. If strict data
+  residency matters, disable or replace these.
+- **Compose exposes SearXNG on all host interfaces** (`8080:8080`), while the host path
+  binds it to `127.0.0.1`. Bind it to localhost if you don't need LAN-wide search.
 
 ## 1. Infrastructure & Network
 
@@ -118,10 +197,10 @@ graph TD
         RCL1["--host 0.0.0.0 --port 8081"]
         RCL2["--models-dir ~/local-ai-files/my-models/"]
         RCL3["--n-gpu-layers 99"]
-        RCL4["--no-kv-offload"]
-        RCL5["--ctx-size 32768"]
-        RCL6["--reasoning-budget 1120"]
-        RCL7["Qwen: --cache-type-k q8_0 --cache-type-v q8_0"]
+        RCL4["--ctx-size 32768"]
+        RCL5["--reasoning-budget 4096"]
+        RCL6["-ctk q8_0 -ctv q8_0 (KV cache quantization)"]
+        RCL7["-fa on (flash attention)"]
         RCL8["LLAMA_QWEN_NGL=12 LLAMA_GEMMA_NGL=99"]
     end
 
@@ -134,14 +213,14 @@ graph TD
 
     subgraph RCLimits ["Limits and Pools"]
         RL1["MAX_QUEUE_SIZE = 5"]
-        RL2["MAX_INPUT_TOKENS = 4096"]
+        RL2["MAX_INPUT_TOKENS = 32768"]
         RL3["_llm_pool = 1 worker"]
         RL4["_tool_pool = 2 workers"]
         RL5["Max tool rounds = 10"]
         RL6["Idle unload = 300s"]
         RL7["LLM timeout = 600s"]
         RL8["ComfyUI poll = 120s"]
-        RL9["REASONING_BUDGET = 1120"]
+        RL9["REASONING_BUDGET = 4096"]
     end
 
     subgraph RCThreads ["Thread Pools and Locks"]
@@ -162,7 +241,7 @@ graph TD
     A["python chat-webui.py"] --> A1["Load configs at import:\nmodel.txt, models.json,\nsys_prompt.txt, users.json"]
     A --> B["load_sessions()\nLoad sessions.json"]
     A1 & B --> C{"llama-server /health\nHTTP GET?"}
-    C -- "200 OK" --> E["Start 4 Daemon Threads"]
+    C -- "200 OK" --> E["Start 5 Daemon Threads"]
     C -- "Dead" --> D["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn llama-server Popen\n4. Spawn ComfyUI Popen\n5. Poll /health 2s up to 120s\n6. Kill [...]"]
     D --> E
 
@@ -171,8 +250,9 @@ graph TD
         E2["_queue_worker\nSequential task dequeuer"]
         E3["_idle_unload_loop\nPolls every 10s"]
         E4["_thermal_monitor\nPolls every 10s"]
+        E5["_reminder_loop\nPolls every 30s"]
     end
-    E --> E1 & E2 & E3 & E4
+    E --> E1 & E2 & E3 & E4 & E5
     E --> F["HTTPServer.serve_forever\n0.0.0.0:3001"]
 ```
 
@@ -302,7 +382,7 @@ graph TD
 ```mermaid
 graph TD
     StartRound0["start_llm_round"] --> LLMWorker["_llm_worker\nin _llm_pool 1 worker"]
-    LLMWorker --> PayloadBuild["Build payload:\nmodel messages tools\ntool_choice auto\nmax_tokens 4096\nreasoning_budget 1120\nstream true"]
+    LLMWorker -->     PayloadBuild["Build payload:\nmodel messages tools\ntool_choice auto\nmax_tokens 32768\nstream true\n(server: --reasoning-budget 4096)"]
     PayloadBuild --> StreamReq["POST llama-server\nv1/chat/completions\nstream=True timeout=600s"]
     StreamReq --> StreamParse["Parse SSE stream:\n- reasoning_content delta\n  accumulate in reasoning_buf\n- content delta\n  accumulate in content_buf\n- tool_calls delta\n  reassemble by index[...]" ]
     StreamParse --> BuildAssistantMsg["Build assistant msg:\nrole assistant content\nreasoning_content tool_calls"]

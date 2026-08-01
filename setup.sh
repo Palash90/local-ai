@@ -5,9 +5,20 @@ CHAT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOCAL_AI_HOME="$HOME/local-ai"
 FILES_DIR="$HOME/local-ai-files"
 
+# Environment detection (host vs. container)
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+if [ -d /run/systemd/system ]; then SYSTEMD=1; else SYSTEMD=0; fi
+if [ -f /.dockerenv ] || [ -f /run/.containerenv ]; then IN_CONTAINER=1; else IN_CONTAINER=0; fi
+
+if [ "$IN_CONTAINER" -eq 1 ]; then
+    echo "==> Detected: running inside a container (SearXNG / nginx / mDNS setup skipped)"
+else
+    echo "==> Detected: running on the host OS (SearXNG / nginx / mDNS setup enabled)"
+fi
+
 echo "==> Installing system packages..."
-sudo apt update
-sudo apt install -y \
+$SUDO apt update
+$SUDO apt install -y \
     git python3 python3-venv python3-pip \
     build-essential cmake \
     nginx avahi-daemon \
@@ -17,12 +28,31 @@ sudo apt install -y \
 # Ensure Node.js (LTS) is installed (required for frontend build)
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "==> Installing Node.js (18.x LTS)..."
-    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-    sudo apt install -y nodejs
+    curl -fsSL https://deb.nodesource.com/setup_18.x | $SUDO -E bash -
+    $SUDO apt install -y nodejs
+fi
+
+# GPU / CUDA toolchain (required to build llama.cpp with -DGGML_CUDA=ON)
+#   - Host OS:        needs an NVIDIA driver + CUDA toolkit (nvcc)
+#   - Dockerized:     needs nvidia-container-toolkit on the HOST + CUDA toolkit inside the container
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    if [ "$IN_CONTAINER" -eq 1 ]; then
+        echo "ERROR: nvidia-smi not found inside the container." >&2
+        echo "       Install nvidia-container-toolkit on the HOST and start the container with --gpus all." >&2
+    else
+        echo "ERROR: nvidia-smi not found. Install the NVIDIA driver on this host first." >&2
+    fi
+    exit 1
+fi
+if ! command -v nvcc >/dev/null 2>&1; then
+    echo "==> nvcc not found, installing CUDA toolkit (large download)..."
+    $SUDO apt install -y nvidia-cuda-toolkit
 fi
 
 echo "==> Starting avahi-daemon..."
-sudo systemctl enable --now avahi-daemon
+if [ "$SYSTEMD" -eq 1 ]; then
+    $SUDO systemctl enable --now avahi-daemon 2>/dev/null || true
+fi
 
 echo "==> Creating directory structure..."
 mkdir -p "$FILES_DIR"/{ComfyUI/{input,output},my-models}
@@ -80,31 +110,23 @@ echo "==> Creating config files..."
 
 if [ ! -f "$FILES_DIR/model.txt" ]; then
     cat > "$FILES_DIR/model.txt" << 'MODELEOF'
-llama-3.2-3b-instruct
+gemma4-e2b
 MODELEOF
-    echo "    $FILES_DIR/model.txt (EDIT ME with your model name)"
+    echo "    $FILES_DIR/model.txt (default LLM; edit if you download a different model)"
 fi
 
 if [ ! -f "$FILES_DIR/models.json" ]; then
     cat > "$FILES_DIR/models.json" << 'JSONEOF'
 {
   "z_image": {
-    "description": "Z-Image Turbo (512x512, 8 steps, fast aesthetic)",
-    "clip1": "clip_l.safetensors",
-    "vae": "vae.safetensors",
-    "unet": "z-image-turbo-fp16.safetensors"
-  },
-  "sd3_5_medium": {
-    "description": "SD 3.5 Medium (512x512, 20 steps, high quality)",
-    "clip1": "clip_g.safetensors",
-    "clip2": "clip_l.safetensors",
-    "t5": "t5xxl_fp8_e4m3fn.safetensors",
-    "vae": "vae.safetensors",
-    "unet": "sd3.5_medium.safetensors"
+    "unet": "z_image_turbo_bf16.safetensors",
+    "clip1": "qwen_3_4b.safetensors",
+    "vae": "ae.safetensors",
+    "description": "Z-Image Turbo (512x512, 8 steps, fast aesthetic image generation)"
   }
 }
 JSONEOF
-    echo "    $FILES_DIR/models.json (EDIT ME with your actual model filenames)"
+    echo "    $FILES_DIR/models.json (matches the downloaded z_image files below)"
 fi
 
 if [ ! -f "$FILES_DIR/users.json" ]; then
@@ -144,31 +166,39 @@ mkdir -p "$FILES_DIR/contexts"
 # SearXNG (Docker)
 # ──────────────────────────────────────────────
 
-# Choose docker invocation depending on permissions
-if docker info >/dev/null 2>&1; then
-    DOCKER_CMD="docker"
-else
-    DOCKER_CMD="sudo docker"
-fi
+# Skip inside a container: SearXNG is provided as a sibling service (docker-compose)
+if [ "$IN_CONTAINER" -eq 1 ]; then
+    echo "==> Skipping SearXNG container (running inside a container; provide it via docker-compose)"
 
-if ! $DOCKER_CMD ps --format '{{.Names}}' 2>/dev/null | grep -q searxng; then
-    echo "==> Starting SearXNG..."
-    mkdir -p "$FILES_DIR/searxng"
-    $DOCKER_CMD run -d --name searxng --restart unless-stopped \
-        -p 127.0.0.1:8080:8080 \
-        -v "$FILES_DIR/searxng:/etc/searxng:rw" \
-        -e SEARXNG_BASE_URL="http://localhost:8080/" \
-        searxng/searxng
-    echo "    SearXNG starting on http://localhost:8080"
+else
+    # Choose docker invocation depending on permissions
+    if docker info >/dev/null 2>&1; then
+        DOCKER_CMD="docker"
+    else
+        DOCKER_CMD="sudo docker"
+    fi
+
+    if ! $DOCKER_CMD ps --format '{{.Names}}' 2>/dev/null | grep -q searxng; then
+        echo "==> Starting SearXNG..."
+        mkdir -p "$FILES_DIR/searxng"
+        $DOCKER_CMD run -d --name searxng --restart unless-stopped \
+            -p 127.0.0.1:8080:8080 \
+            -v "$FILES_DIR/searxng:/etc/searxng:rw" \
+            -e SEARXNG_BASE_URL="http://localhost:8080/" \
+            searxng/searxng
+        echo "    SearXNG starting on http://localhost:8080"
+    fi
 fi
 
 # ──────────────────────────────────────────────
 # mDNS / nginx
 # ──────────────────────────────────────────────
 echo "==> Setting up mDNS and nginx..."
-sudo hostnamectl set-hostname chat 2>/dev/null || true
+if [ "$SYSTEMD" -eq 1 ]; then
+    $SUDO hostnamectl set-hostname chat 2>/dev/null || true
+fi
 
-sudo tee /etc/nginx/sites-available/chat.local > /dev/null << 'NGINXEOF'
+$SUDO tee /etc/nginx/sites-available/chat.local > /dev/null << 'NGINXEOF'
 server {
     listen 80;
     server_name chat.local;
@@ -185,12 +215,18 @@ server {
 NGINXEOF
 
 if [ ! -L /etc/nginx/sites-enabled/chat.local ]; then
-    sudo ln -s /etc/nginx/sites-available/chat.local /etc/nginx/sites-enabled/
+    $SUDO ln -s /etc/nginx/sites-available/chat.local /etc/nginx/sites-enabled/
 fi
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t && sudo systemctl restart nginx
+$SUDO rm -f /etc/nginx/sites-enabled/default
+if $SUDO nginx -t; then
+    if [ "$SYSTEMD" -eq 1 ]; then
+        $SUDO systemctl restart nginx
+    else
+        $SUDO service nginx restart 2>/dev/null || true
+    fi
+fi
 
-sudo tee /etc/avahi/services/chat.service > /dev/null << 'AVAHIEOF'
+$SUDO tee /etc/avahi/services/chat.service > /dev/null << 'AVAHIEOF'
 <?xml version="1.0" standalone='no'?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>
@@ -203,15 +239,19 @@ sudo tee /etc/avahi/services/chat.service > /dev/null << 'AVAHIEOF'
 </service-group>
 AVAHIEOF
 
-sudo systemctl restart avahi-daemon
+if [ "$SYSTEMD" -eq 1 ]; then
+    $SUDO systemctl restart avahi-daemon 2>/dev/null || true
+else
+    $SUDO service avahi-daemon restart 2>/dev/null || true
+fi
 
 # ──────────────────────────────────────────────
 # UFW
 # ──────────────────────────────────────────────
 if command -v ufw &>/dev/null; then
     echo "==> Configuring UFW..."
-    sudo ufw allow in on wlp2s0 2>/dev/null || true
-    sudo ufw allow out on wlp2s0 2>/dev/null || true
+    $SUDO ufw allow in on wlp2s0 2>/dev/null || true
+    $SUDO ufw allow out on wlp2s0 2>/dev/null || true
 fi
 
 # ──────────────────────────────────────────────
@@ -221,27 +261,24 @@ echo ""
 echo "============================================"
 echo "  Setup complete!"
 echo ""
-echo "  Before running, you MUST:"
-echo "    1. Edit $FILES_DIR/model.txt       - set your LLM model name"
-echo "    2. Edit $FILES_DIR/models.json     - set actual ComfyUI model filenames"
-echo "    3. Edit $FILES_DIR/users.json      - set passwords and fix username in path"
-echo "    4. Download models into:"
-echo "       - LLMs:     $FILES_DIR/my-models/"
-echo "       - ComfyUI:  $LOCAL_AI_HOME/ComfyUI/models/{checkpoints,clip,vae,unet,...}"
+echo "  POST-PROCESSING (models are NOT downloaded by this script):"
+echo "    Download whatever you need, then run the app. Nothing else to configure."
 echo ""
-echo "  Then start services in this order:"
-echo "    1. $LOCAL_AI_HOME/llama.cpp/build/bin/llama-server \\\""
-echo "         --host 0.0.0.0 --port 8081 \\\""
-echo "         --models-dir $FILES_DIR/my-models/ \\\""
-echo "         --n-gpu-layers 99 --no-kv-offload --ctx-size 32768 \\\""
-echo "         --reasoning-budget 4096"
+echo "    1. LLM (chat) — your choice:"
+echo "       Place a GGUF model into:  $FILES_DIR/my-models/"
+echo "       The default is:           $(cat "$FILES_DIR/model.txt")"
+echo "       (edit $FILES_DIR/model.txt if you download a different model)"
 echo ""
-echo "    2. cd $LOCAL_AI_HOME/ComfyUI && source venv/bin/activate && python main.py \\\""
-echo "         --lowvram \\\""
-echo "         --input-directory $FILES_DIR/ComfyUI/input \\\""
-echo "         --output-directory $FILES_DIR/ComfyUI/output"
+echo "    2. Image model z_image — place these files:"
+echo "       $LOCAL_AI_HOME/ComfyUI/models/diffusion_models/z_image_turbo_bf16.safetensors"
+echo "       $LOCAL_AI_HOME/ComfyUI/models/text_encoders/qwen_3_4b.safetensors"
+echo "       $LOCAL_AI_HOME/ComfyUI/models/vae/ae.safetensors"
 echo ""
-echo "    3. cd $CHAT_DIR && python chat-webui.py"
+echo "    3. (Optional) Set passwords in $FILES_DIR/users.json"
+echo ""
+echo "  Then just run:"
+echo "    cd $CHAT_DIR && python chat-webui.py"
+echo "    (it auto-starts llama-server and ComfyUI when needed)"
 echo ""
 echo "  Access at: http://chat.local  or  http://localhost:3001"
 echo "============================================"

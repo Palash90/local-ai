@@ -11,9 +11,10 @@ LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
 
 VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
 COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
-SEARXNG_URL = "http://localhost:8080/search" # Change to localhost if running from direct OS
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080/search")
 COMFYUI_URL = "http://localhost:8188"
-HOST, PORT = "127.0.0.1", 3001
+HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
+PORT = 3001
 REASONING_BUDGET = 4096
 
 with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
@@ -36,7 +37,7 @@ LLAMA_SERVER_ARGS = [
     # GPU / VRAM Allocations
     "--n-gpu-layers", "99",
     "-fa", "on",  # Flash attention lowers VRAM footprint
-    "--ctx-size", "32768",  # Capped to 16k context to prevent VRAM overflow
+    "--ctx-size", "32768",  # 32k context; KV cache quantized to q8_0 to fit VRAM
     #"--no-kv-offload",
     "-ctk", "q8_0",            # Quantize Key cache to 8-bit (saves 50% VRAM)
     "-ctv", "q8_0",            # Quantize Value cache to 8-bit (saves 50% VRAM)
