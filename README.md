@@ -1,4 +1,4 @@
-# Local AI — Architecture
+# Local AI - LLM + Image Generation Setup
 
 Self-hosted LLM + image generation stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM).
 
@@ -115,7 +115,9 @@ Access at `http://localhost:3001` (published from the container). Notes:
 - **Compose exposes SearXNG on all host interfaces** (`8080:8080`), while the host path
   binds it to `127.0.0.1`. Bind it to localhost if you don't need LAN-wide search.
 
-## 1. Infrastructure & Network
+## System Design
+
+### 1. Infrastructure & Network
 
 ```mermaid
 graph TD
@@ -149,7 +151,7 @@ graph TD
     end
 ```
 
-## 2. File Layout & Build
+### 2. File Layout & Build
 
 ```mermaid
 graph TD
@@ -182,7 +184,7 @@ graph TD
     end
 ```
 
-## 3. Runtime Constants & Locks
+### 3. Runtime Constants & Locks
 
 ```mermaid
 graph TD
@@ -234,7 +236,7 @@ graph TD
     end
 ```
 
-## 4. Server Startup
+### 4. Server Startup
 
 ```mermaid
 graph TD
@@ -258,7 +260,7 @@ graph TD
     E --> F["HTTPServer.serve_forever\n0.0.0.0:3001"]
 ```
 
-## 5. Model State Machine
+### 5. Model State Machine
 
 ```mermaid
 stateDiagram-v2
@@ -273,7 +275,7 @@ stateDiagram-v2
     image_active --> chat_loaded : free_comfyui_vram\n+ load_llama_model
 ```
 
-## 6. REST API Endpoints
+### 6. REST API Endpoints
 
 ```mermaid
 graph TD
@@ -323,7 +325,7 @@ graph TD
     end
 ```
 
-## 7. Chat Ingress Flow
+### 7. Chat Ingress Flow
 
 ```mermaid
 graph TD
@@ -344,7 +346,7 @@ graph TD
     TaskInit --> ReturnTaskID["Return task_id to Client"]
 ```
 
-## 8. Queue Worker
+### 8. Queue Worker
 
 ```mermaid
 graph TD
@@ -359,7 +361,7 @@ graph TD
     ClearTask --> QueueLoop
 ```
 
-## 9. Event Loop Pipeline
+### 9. Event Loop Pipeline
 
 ```mermaid
 graph TD
@@ -388,7 +390,7 @@ graph TD
     EvDispatch -- "tool_err" --> ToolERR["1. Append error as tool result\n2. pending_tools minus 1\n3. save_sessions\n4. Same round-limit logic"]
 ```
 
-## 10. LLM Worker
+### 10. LLM Worker
 
 ```mermaid
 graph TD
@@ -403,7 +405,7 @@ graph TD
     StreamReq -. "exception" .-> LLMException["event_post llm_err\nif image or vision in error\nuser-friendly message"]
 ```
 
-## 11. Tool Worker
+### 11. Tool Worker
 
 ```mermaid
 graph TD
@@ -441,7 +443,7 @@ graph TD
     ToolUnknown --> ToolPost
 ```
 
-## 12. Resource Management
+### 12. Resource Management
 
 ```mermaid
 graph TD
