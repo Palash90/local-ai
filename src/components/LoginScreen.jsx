@@ -9,15 +9,17 @@ export default function LoginScreen({ onLogin }) {
     if (e) {
       e.preventDefault()
     }
-    console.log('[LoginScreen] handleSubmit called', { username, password: password ? '***' : '' })
-    if (!username || !password) {
+    const user = username.trim()
+    const pass = password.trim()
+    console.log('[LoginScreen] handleSubmit called', { username: user, password: pass ? '***' : '' })
+    if (!user || !pass) {
       console.log('[LoginScreen] empty fields, returning')
       return
     }
     setError(false)
     try {
       console.log('[LoginScreen] calling onLogin...')
-      await onLogin(username, password)
+      await onLogin(user, pass)
       console.log('[LoginScreen] onLogin completed without error')
     } catch (e) {
       console.log('[LoginScreen] onLogin threw:', e.message)

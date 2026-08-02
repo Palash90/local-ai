@@ -2617,8 +2617,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path == "/api/login":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
-            username = body.get("username", "")
-            password = body.get("password", "")
+            username = body.get("username", "").strip()
+            password = body.get("password", "").strip()
             if get_user_password(username) == password:
                 token = str(uuid.uuid4())
                 with _tokens_lock:
