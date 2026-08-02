@@ -382,6 +382,15 @@ html, body {
   flex-wrap: wrap;
 }
 
+.msg-elapsed {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.35);
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  margin-right: 4px;
+  white-space: nowrap;
+}
+
 .copy-btn {
   opacity: 0;
   transition: opacity .2s;

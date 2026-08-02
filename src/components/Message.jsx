@@ -20,6 +20,15 @@ function hostnameFromUrl(u) {
   }
 }
 
+function formatElapsed(ms) {
+  if (ms == null) return ''
+  const s = ms / 1000
+  if (s < 60) return s.toFixed(1) + 's'
+  const m = Math.floor(s / 60)
+  const rs = Math.round(s % 60)
+  return m + 'm ' + rs + 's'
+}
+
 function execCopy(text) {
   const ta = document.createElement('textarea')
   ta.value = text
@@ -447,6 +456,9 @@ export default function Message({ msg, pending, onImageOpen }) {
     <div className={`msg ${role}`} ref={elRef}>
       {timestamp && <span className="msg-timestamp">{timestamp}</span>}
       <div className="msg-header">
+        {role === 'bot' && msg._elapsed_ms != null && (
+          <span className="msg-elapsed" title="Time from hitting Enter to full answer">&#9202; {formatElapsed(msg._elapsed_ms)}</span>
+        )}
         {role === 'bot' && toolsUsed.length > 0 && (() => {
           let fetchIdx = 0
           return toolsUsed.map((t, i) => {

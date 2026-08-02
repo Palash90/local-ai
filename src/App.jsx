@@ -207,7 +207,7 @@ export default function App() {
 
       setPendingMessages(prev => ({
         ...prev,
-        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg },
+        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg, _startMs: Date.now() },
       }))
 
       const stored = getStoredPending()
@@ -281,7 +281,7 @@ export default function App() {
       const taskId = data.task_id
       setPendingMessages(prev => ({
         ...prev,
-        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg },
+        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg, _startMs: Date.now() },
       }))
       const stored = getStoredPending()
       stored.push({ task_id: taskId, sid: taskSid })
@@ -319,9 +319,11 @@ export default function App() {
             })
             if (st.status === 'done') {
               const userMsg = pendingEntry?._userMsg
+              const startMs = pendingEntry?._startMs
               const assistantMsg = {
                 role: 'assistant',
                 content: st.response || '',
+                _elapsed_ms: startMs != null ? Date.now() - startMs : null,
                 _reasoning: st.reasoning || '',
                 _image_url: st.image || st._image_url,
                 _gen_prompt: st.gen_prompt,
