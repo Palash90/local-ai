@@ -167,6 +167,14 @@ export default function App() {
   async function deleteSession_(sid) {
     if (!confirm('Delete this session?')) return
     await api.deleteSession(sid)
+    setPendingMessages(prev => {
+      const next = { ...prev }
+      for (const [tid, p] of Object.entries(prev)) {
+        if (p.sessionId === sid) delete next[tid]
+      }
+      return next
+    })
+    setStoredPending(getStoredPending().filter(p => p.sid !== sid))
     const list = await loadSessions()
     if (sid === currentSessionId) {
       if (list.length > 0) {
@@ -361,7 +369,7 @@ export default function App() {
         if (p.sessionId === sessionRef.current) continue
         try {
           const st = await api.getTaskStatus(taskId)
-          const terminal = st && (st.status === 'done' || st.status === 'error' || st.status === 'unknown' || st.status === 'not_found')
+          const terminal = st && (st.status === 'done' || st.status === 'error' || st.status === 'cancelled' || st.status === 'unknown' || st.status === 'not_found')
           if (terminal) {
             handlePendingResolved(p, st)
           } else if (st.message === 'location_needed') {

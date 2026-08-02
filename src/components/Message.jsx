@@ -324,7 +324,7 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
       } catch {
         return
       }
-      if (!st || st.status === 'done' || st.status === 'error' || st.status === 'unknown' || st.status === 'not_found') {
+      if (!st || st.status === 'done' || st.status === 'error' || st.status === 'cancelled' || st.status === 'unknown' || st.status === 'not_found') {
         if (resolvedRef.current) return
         resolvedRef.current = true
         clearInterval(iv)

@@ -697,7 +697,7 @@ def _summarize_with_llm(text):
 
 def set_status(task_id, message):
     with _data_lock:
-        if task_id in tasks:
+        if task_id in tasks and tasks[task_id].get("status") != "cancelled":
             tasks[task_id]["status"] = "working"
             tasks[task_id]["message"] = message
 
@@ -1230,10 +1230,21 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
                 except Exception:
                     pass
             if found_file:
-                tasks[task_id]["image_file"] = found_file
-                set_status(task_id, f"Image saved as {found_file}")
-                print(f"[generate_image] SUCCESS: {found_file}")  # DEBUG
-                result = json.dumps({"prompt_id": prompt_id, "file": found_file})
+                with _data_lock:
+                    cancelled = bool(tasks.get(task_id, {}).get("status") == "cancelled")
+                if cancelled:
+                    try:
+                        if os.path.exists(found_file):
+                            os.remove(found_file)
+                            print(f"[image] Deleted orphaned image for cancelled task {task_id}: {found_file}")
+                    except OSError:
+                        pass
+                    result = json.dumps({"error": "Cancelled — session was deleted"})
+                else:
+                    tasks[task_id]["image_file"] = found_file
+                    set_status(task_id, f"Image saved as {found_file}")
+                    print(f"[generate_image] SUCCESS: {found_file}")  # DEBUG
+                    result = json.dumps({"prompt_id": prompt_id, "file": found_file})
             else:
                 print(f"[generate_image] TIMEOUT for task {task_id} after 120s")  # DEBUG
                 result = json.dumps({"error": "Image generation timeout"})
@@ -1416,9 +1427,20 @@ def edit_image(
                     pass
 
             if found_file:
-                tasks[task_id]["image_file"] = found_file
-                set_status(task_id, f"Edited image saved as {found_file}")
-                result = json.dumps({"prompt_id": prompt_id, "file": found_file})
+                with _data_lock:
+                    cancelled = bool(tasks.get(task_id, {}).get("status") == "cancelled")
+                if cancelled:
+                    try:
+                        if os.path.exists(found_file):
+                            os.remove(found_file)
+                            print(f"[image] Deleted orphaned edited image for cancelled task {task_id}: {found_file}")
+                    except OSError:
+                        pass
+                    result = json.dumps({"error": "Cancelled — session was deleted"})
+                else:
+                    tasks[task_id]["image_file"] = found_file
+                    set_status(task_id, f"Edited image saved as {found_file}")
+                    result = json.dumps({"prompt_id": prompt_id, "file": found_file})
             else:
                 result = json.dumps({"error": "Image editing timeout"})
     except Exception as e:
@@ -1926,12 +1948,33 @@ def _set_task_error(task_id, error, sid=None):
             }
 
 
+def _delete_task_image(task_id):
+    """Remove the generated image file attached to a (cancelled) task, if any."""
+    with _data_lock:
+        t = tasks.get(task_id)
+        if not t:
+            return
+        fname = t.get("image_file")
+    if not fname:
+        return
+    fpath = fname if os.path.isabs(fname) else os.path.join(IMG_PATH, fname)
+    try:
+        if os.path.exists(fpath):
+            os.remove(fpath)
+            print(f"[cancel] Removed image for cancelled task {task_id}: {fpath}")
+    except OSError:
+        pass
+
+
 def _event_loop():
     global _current_task_id
     while True:
         ev_type, task_id, data = _event_queue.get()
         t = tasks.get(task_id)
         if not t:
+            continue
+        if t.get("status") == "cancelled":
+            _delete_task_image(task_id)
             continue
 
         if ev_type == "start":
@@ -2109,11 +2152,11 @@ def _queue_worker():
             user=item.get("user", ""),
             client_timestamp=item.get("client_timestamp"),
         )
-        # Wait for this task to finish (status becomes "done" or "error") before dequeuing the next
+        # Wait for this task to finish (status becomes "done", "error" or "cancelled") before dequeuing the next
         while True:
             with _data_lock:
                 st = tasks.get(item["task_id"], {}).get("status")
-            if st in ("done", "error"):
+            if st in ("done", "error", "cancelled"):
                 break
             time.sleep(0.5)
         with _queue_lock:
@@ -2526,6 +2569,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self.send_error(404)
                     return
                 msgs = list(sessions.get(sid, []))
+            # Cancel all queued/in-flight tasks for this session so they stop processing
+            with _queue_lock:
+                _task_queue[:] = [q for q in _task_queue if q.get("session_id") != sid]
+            with _data_lock:
+                for tid, t in tasks.items():
+                    if t.get("session_id") == sid and t.get("status") not in ("done", "error"):
+                        tasks[tid] = {
+                            "status": "cancelled",
+                            "error": "Session was deleted",
+                            "session_id": sid,
+                        }
             for msg in msgs:
                 if msg.get("role") == "assistant":
                     url = msg.get("_image_url", "") or ""
