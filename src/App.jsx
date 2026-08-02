@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import * as api from './api'
 import LoginScreen from './components/LoginScreen'
 import ModelBar from './components/ModelBar'
@@ -36,8 +36,10 @@ export default function App() {
   const [locationError, setLocationError] = useState(null)
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
-  const pendingRef = useRef({})
   const sessionRef = useRef(null)
+  const selectingRef = useRef(false)
+  const pendingMessagesRef = useRef({})
+  const resolvedTasksRef = useRef(new Set())
 
   useEffect(() => {
     const token = localStorage.getItem('auth_token') // or whatever key api.login uses
@@ -64,11 +66,6 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    pendingRef.current = pendingMessages
-  }, [pendingMessages])
-
-
-  useEffect(() => {
     const handler = () => {
       setAuthenticated(false);
       setUsername('');
@@ -85,6 +82,10 @@ export default function App() {
   const hasPendingForCurrent = Object.values(pendingMessages).some(
     p => p.sessionId === currentSessionId
   )
+
+  useEffect(() => {
+    pendingMessagesRef.current = pendingMessages
+  }, [pendingMessages])
 
   // ---- Auth ----
   async function handleLogin(username, password) {
@@ -298,76 +299,79 @@ export default function App() {
     })
   }
 
-  // ---- Task polling ----
+  // ---- Task completion callbacks (called by the active PendingMessage) ----
+  const handlePendingResolved = useCallback((pending, st) => {
+    const taskId = pending.taskId
+    if (resolvedTasksRef.current.has(taskId)) return
+    resolvedTasksRef.current.add(taskId)
+    setPendingMessages(prev => {
+      const next = { ...prev }
+      delete next[taskId]
+      return next
+    })
+    if (st.status === 'done') {
+      const userMsg = pending._userMsg
+      const startMs = pending._startMs
+      const assistantMsg = {
+        role: 'assistant',
+        content: st.response || '',
+        _elapsed_ms: startMs != null ? Date.now() - startMs : null,
+        _reasoning: st.reasoning || '',
+        _image_url: st.image || st._image_url,
+        _gen_prompt: st.gen_prompt,
+        _tools_used: st.tools_used || [],
+        _image_model: st._image_model,
+        _search_details: st._search_details || [],
+      }
+      if (pending.sessionId === sessionRef.current) {
+        setMessages(prev => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg])
+      }
+      if (st.token_estimate != null) setTokenEstimate(st.token_estimate)
+      setContextCompressed(!!st.context_compressed)
+      if (st.raw_token_estimate != null) setRawTokenEstimate(st.raw_token_estimate)
+      if (st.predicted_per_second != null) setModelTps(st.predicted_per_second)
+      if (st.session_name != null && st.session_id) {
+        setSessions(prev => prev.map(s => s.session_id === st.session_id ? { ...s, name: st.session_name } : s))
+      }
+    } else {
+      if (pending.sessionId === sessionRef.current) {
+        setMessages(prev => [...prev, ...(pending._userMsg ? [pending._userMsg] : []), {
+          role: 'assistant',
+          content: 'Error: ' + (st.error || 'Task was lost — please retry.'),
+        }])
+      }
+    }
+    const remaining = getStoredPending().filter(p => p.task_id !== taskId)
+    setStoredPending(remaining)
+  }, [])
+
+  const handleLocationNeeded = useCallback((taskId) => {
+    setShowLocationPrompt(true)
+    setLocationTaskId(taskId)
+    setLocationError(null)
+  }, [])
+
+  // ---- Background task resolution ----
+  // Foreground pending tasks are self-polled by their PendingMessage (so only that
+  // message re-renders). This loop resolves tasks whose session is not currently open.
   useEffect(() => {
     if (!authenticated) return
     const interval = setInterval(async () => {
-      const pends = pendingRef.current
-      const taskIds = Object.keys(pends)
-      if (taskIds.length === 0) return
-
-      for (const taskId of taskIds) {
+      for (const [taskId, p] of Object.entries(pendingMessagesRef.current)) {
+        if (p.sessionId === sessionRef.current) continue
         try {
           const st = await api.getTaskStatus(taskId)
-          const pendingEntry = pends[taskId]
-          const abandoned = st.status === 'unknown' || st.status === 'not_found'
-          if (st.status === 'done' || st.status === 'error' || abandoned) {
-            setPendingMessages(prev => {
-              const next = { ...prev }
-              delete next[taskId]
-              return next
-            })
-            if (st.status === 'done') {
-              const userMsg = pendingEntry?._userMsg
-              const startMs = pendingEntry?._startMs
-              const assistantMsg = {
-                role: 'assistant',
-                content: st.response || '',
-                _elapsed_ms: startMs != null ? Date.now() - startMs : null,
-                _reasoning: st.reasoning || '',
-                _image_url: st.image || st._image_url,
-                _gen_prompt: st.gen_prompt,
-                _tools_used: st.tools_used || [],
-                _image_model: st._image_model,
-                _search_details: st._search_details || [],
-              }
-              if (pendingEntry?.sessionId === sessionRef.current) {
-                setMessages(prev => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg])
-              }
-              if (st.token_estimate != null) setTokenEstimate(st.token_estimate)
-              setContextCompressed(!!st.context_compressed)
-              if (st.raw_token_estimate != null) setRawTokenEstimate(st.raw_token_estimate)
-              if (st.predicted_per_second != null) setModelTps(st.predicted_per_second)
-              if (st.session_name != null && st.session_id) {
-                setSessions(prev => prev.map(s => s.session_id === st.session_id ? { ...s, name: st.session_name } : s))
-              }
-            } else {
-              if (pendingEntry?.sessionId === sessionRef.current) {
-                setMessages(prev => [...prev, ...(pendingEntry._userMsg ? [pendingEntry._userMsg] : []), {
-                  role: 'assistant',
-                  content: 'Error: ' + (st.error || 'Task was lost — please retry.'),
-                }])
-              }
-            }
-            const remaining = getStoredPending().filter(p => p.task_id !== taskId)
-            setStoredPending(remaining)
+          const terminal = st && (st.status === 'done' || st.status === 'error' || st.status === 'unknown' || st.status === 'not_found')
+          if (terminal) {
+            handlePendingResolved(p, st)
           } else if (st.message === 'location_needed') {
-            setShowLocationPrompt(true)
-            setLocationTaskId(taskId)
-            setLocationError(null)
-          } else {
-            setPendingMessages(prev => ({
-              ...prev,
-              [taskId]: { ...prev[taskId], status: st.status, message: st.message || 'Working...', reasoning: st.reasoning || prev[taskId]?.reasoning },
-            }))
+            handleLocationNeeded(taskId)
           }
-        } catch {
-          // ignore polling errors
-        }
+        } catch { }
       }
-    }, 1000)
+    }, 2000)
     return () => clearInterval(interval)
-  }, [authenticated])
+  }, [authenticated, handlePendingResolved, handleLocationNeeded])
 
   // ---- Model status polling ----
   useEffect(() => {
@@ -487,6 +491,9 @@ export default function App() {
             pendingMessages={pendingMessages}
             currentSessionId={currentSessionId}
             onImageOpen={setLightboxSrc}
+            selectingRef={selectingRef}
+            onPendingResolved={handlePendingResolved}
+            onLocationNeeded={handleLocationNeeded}
           />
           <InputBar
             onSend={handleSend}

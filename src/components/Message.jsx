@@ -1,8 +1,8 @@
-import { useMemo, useRef, useState, useCallback, useEffect } from 'react'
+import { useMemo, useRef, useState, useCallback, useEffect, memo } from 'react'
 import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import DOMPurify from 'dompurify'
-import { speak as apiSpeak } from '../api'
+import { speak as apiSpeak, getTaskStatus as apiGetTaskStatus } from '../api'
 import { downloadFile } from '../utils'
 import StatusBox from './StatusBox'
 
@@ -308,7 +308,66 @@ function ReasoningBlock({ text, open, onToggle }) {
   )
 }
 
-export default function Message({ msg, pending, onImageOpen }) {
+function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, selectingRef }) {
+  const [message, setMessage] = useState(pending.message || 'Thinking...')
+  const [reasoning, setReasoning] = useState(pending.reasoning || '')
+  const [reasoningOpen, setReasoningOpen] = useState(true)
+  const resolvedRef = useRef(false)
+  const locationNotifiedRef = useRef(false)
+
+  useEffect(() => {
+    const iv = setInterval(async () => {
+      if (resolvedRef.current) return
+      let st
+      try {
+        st = await apiGetTaskStatus(pending.taskId)
+      } catch {
+        return
+      }
+      if (!st || st.status === 'done' || st.status === 'error' || st.status === 'unknown' || st.status === 'not_found') {
+        if (resolvedRef.current) return
+        resolvedRef.current = true
+        clearInterval(iv)
+        onResolved(pending, st)
+        return
+      }
+      if (st.message === 'location_needed') {
+        if (!locationNotifiedRef.current) {
+          locationNotifiedRef.current = true
+          onLocationNeeded(pending.taskId)
+        }
+        return
+      }
+      locationNotifiedRef.current = false
+      if (selectingRef && selectingRef.current) return
+      setMessage(st.message || 'Working...')
+      if (st.reasoning) setReasoning(prev => (prev === st.reasoning ? prev : st.reasoning))
+    }, 1000)
+    return () => clearInterval(iv)
+  }, [pending, onResolved, onLocationNeeded, selectingRef])
+
+  return (
+    <>
+      {pending._userMsg && (
+        <Message
+          msg={pending._userMsg}
+          onImageOpen={onImageOpen}
+          selectingRef={selectingRef}
+          onResolved={onResolved}
+          onLocationNeeded={onLocationNeeded}
+        />
+      )}
+      <div className={`msg bot`}>
+        <div className="msg-content">
+          <StatusBox message={message} />
+          <ReasoningBlock text={reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
+        </div>
+      </div>
+    </>
+  )
+}
+
+function Message({ msg, pending, onImageOpen, selectingRef, onResolved, onLocationNeeded }) {
   const elRef = useRef(null)
   const chatEl = useRef(null)
   const [popupVisible, setPopupVisible] = useState(null)
@@ -379,15 +438,13 @@ export default function Message({ msg, pending, onImageOpen }) {
 
   if (pending) {
     return (
-      <>
-        {pending._userMsg && <Message msg={pending._userMsg} onImageOpen={onImageOpen} />}
-        <div className={`msg bot`} ref={elRef}>
-          <div className="msg-content">
-            <StatusBox message={pending.message} />
-            <ReasoningBlock text={pending.reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
-          </div>
-        </div>
-      </>
+      <PendingMessage
+        pending={pending}
+        onImageOpen={onImageOpen}
+        selectingRef={selectingRef}
+        onResolved={onResolved}
+        onLocationNeeded={onLocationNeeded}
+      />
     )
   }
 
@@ -566,3 +623,5 @@ export default function Message({ msg, pending, onImageOpen }) {
     </div>
   )
 }
+
+export default memo(Message)

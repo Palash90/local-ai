@@ -78,8 +78,8 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
 
     if (CODE_EXTS.has(ext)) {
       const text = await file.text()
-      if (text.length > 100000) {
-        alert('File too large (text exceeds 100KB): ' + file.name)
+      if (text.length > 1000000) {
+        alert('File too large (text exceeds 1000KB): ' + file.name)
         return
       }
       setAttachedFile(file.name)
