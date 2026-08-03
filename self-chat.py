@@ -32,23 +32,26 @@ def create_session(token, name):
         f"{BASE_URL}/api/sessions",
         json={"name": name},
         headers={"X-Auth-Token": token},
-        timeout=15
+        timeout=15,
     )
     resp.raise_for_status()
     return resp.json()["session_id"]
 
+
 def call_llm(token, session_id, message):
-    headers={"X-Auth-Token": token}
+    headers = {"X-Auth-Token": token}
 
     submit_respo = requests.post(
         f"{BASE_URL}/api/chat",
         json={
             "session_id": session_id,
             "message": message,
-            "client_timestamp": datetime.now().astimezone().isoformat(timespec="seconds")
+            "client_timestamp": datetime.now()
+            .astimezone()
+            .isoformat(timespec="seconds"),
         },
         headers=headers,
-        timeout=30
+        timeout=30,
     )
     submit_respo.raise_for_status()
     task_id = submit_respo.json()["task_id"]
@@ -69,17 +72,15 @@ def call_llm(token, session_id, message):
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
+
 def run_single_conversation(token, round_number):
     session_a = create_session(token, f"Agent A round {round_number}")
     session_b = create_session(token, f"Agent B round {round_number}")
 
-    print(session_a)
-    print(session_b)
-
     transcript = []
 
     opening_reply = call_llm(token, session_a, STARTING_CONVERSATION)
-    transcript.append({"speaker": "A", "text": opening_reply})
+    # transcript.append({"speaker": "A", "text": opening_reply})
 
     current_speaker = "B"
 
@@ -89,7 +90,7 @@ def run_single_conversation(token, round_number):
         reply = call_llm(token, other_session, last_mesage)
 
         print(f"{current_speaker}: {reply}\n")
-        transcript.append({"speaker": current_speaker, "text": reply})
+        # transcript.append({"speaker": current_speaker, "text": reply})
 
         if STOP_PHRASE in reply:
             print(f"Round {round_number} ended by agent\n")
@@ -100,11 +101,13 @@ def run_single_conversation(token, round_number):
 
     return transcript
 
+
 def save_transcript(transcript, round_number):
-    fname=f"conv_r{round_number}_{datetime.now()}.json"
+    fname = f"conv_r{round_number}_{datetime.now()}.json"
     with open(fname, "w") as f:
         json.dump(transcript, f, indent=4)
     print(f"Saved transcript to {fname}")
+
 
 def run_forever():
     token = login()
@@ -120,6 +123,7 @@ def run_forever():
             round_number += 1
     except KeyboardInterrupt:
         print("\nManual Interruption")
+
 
 if __name__ == "__main__":
     run_forever()
