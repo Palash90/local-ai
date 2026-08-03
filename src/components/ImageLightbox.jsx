@@ -9,6 +9,23 @@ export default function ImageLightbox({ src, onClose }) {
   const startY = useRef(0)
   const pinchDist = useRef(0)
 
+  function handleClose() {
+    onClose()
+    if (window.history.state && window.history.state.lightboxOpen) {
+      window.history.back()
+    }
+  }
+
+  useEffect(() => {
+    if (!src) return
+    const onPopState = () => onClose()
+    window.addEventListener('popstate', onPopState)
+    if (!(window.history.state && window.history.state.lightboxOpen)) {
+      window.history.pushState({ lightboxOpen: true }, '')
+    }
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [src, onClose])
+
   const updateTransform = useCallback(() => {
     const img = document.getElementById('fullscreen-img')
     if (img) {
@@ -51,7 +68,7 @@ export default function ImageLightbox({ src, onClose }) {
         overlay.style.cursor = 'grabbing'
         e.preventDefault()
       } else {
-        onClose()
+        handleClose()
       }
     }
 
@@ -105,12 +122,12 @@ export default function ImageLightbox({ src, onClose }) {
         dragging.current = false
       }
       if (e.changedTouches.length === 1 && e.target !== document.getElementById('fullscreen-img')) {
-        onClose()
+        handleClose()
       }
     }
 
     function handleKeyDown(e) {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') handleClose()
     }
 
     overlay.addEventListener('wheel', handleWheel, { passive: false })

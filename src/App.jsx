@@ -359,6 +359,8 @@ export default function App() {
     setLocationError(null)
   }, [])
 
+  const closeLightbox = useCallback(() => setLightboxSrc(null), [])
+
   // ---- Background task resolution ----
   // Foreground pending tasks are self-polled by their PendingMessage (so only that
   // message re-renders). This loop resolves tasks whose session is not currently open.
@@ -510,7 +512,7 @@ export default function App() {
             onMicToggle={toggleMic}
           />
         </div>
-        <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+        <ImageLightbox src={lightboxSrc} onClose={closeLightbox} />
         {showTasks && <TaskPanel onClose={() => setShowTasks(false)} />}
       </div>
     </>
