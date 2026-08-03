@@ -1105,7 +1105,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
             },
             "68": {
                 "class_type": "EmptySD3LatentImage",
-                "inputs": {"width": 512, "height": 512, "batch_size": 1},
+                "inputs": {"width": 1024, "height": 1024, "batch_size": 1},
             },
             "69": {
                 "class_type": "ModelSamplingAuraFlow",
@@ -1162,7 +1162,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
             },
             "5": {
                 "class_type": "EmptySD3LatentImage",
-                "inputs": {"width": 512, "height": 512, "batch_size": 1},
+                "inputs": {"width": 1024, "height": 1024, "batch_size": 1},
             },
             "6": {
                 "class_type": "KSampler",
@@ -1355,7 +1355,7 @@ def edit_image(
             "class_type": "ImageScaleToTotalPixels",
             "inputs": {
                 "image": ["5_load", 0],
-                "megapixels": 0.262,  # ~512x512
+                "megapixels": 1.049,  # ~1024x1024
                 "upscale_method": "bicubic",
                 "resolution_steps": 1,
             },
