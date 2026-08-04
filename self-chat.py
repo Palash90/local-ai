@@ -69,7 +69,7 @@ def call_llm(token, session_id, message):
         if status == "done":
             return data["response"]
         if status == "error":
-            return RuntimeError(f"Task failed {data}:")
+            raise RuntimeError(f"Task failed: {data}")
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
@@ -80,23 +80,25 @@ def run_single_conversation(token_a, token_b, round_number):
 
     transcript = []
 
-    opening_reply = call_llm(token_a, session_a, STARTING_CONVERSATION)
-    transcript.append({"speaker": "A", "text": opening_reply})
-
-    current_speaker = "B"
+    # Track turns explicitly
+    current_speaker = "A"
+    next_input = STARTING_CONVERSATION
 
     while True:
-        last_mesage = transcript[-1]["text"]
-        token = token_b if current_speaker == "B" else token_a
-        session = session_b if current_speaker == "B" else session_a
-        reply = call_llm(token, session, last_mesage)
+        token = token_a if current_speaker == "A" else token_b
+        session = session_a if current_speaker == "A" else session_b
+
+        # Get response from active speaker
+        reply = call_llm(token, session, next_input)
 
         transcript.append({"speaker": current_speaker, "text": reply})
 
         if STOP_PHRASE in reply:
-            print(f"Round {round_number} ended by agent\n")
+            print(f"Round {round_number} ended by agent {current_speaker}\n")
             break
 
+        # Pass current reply as input to next speaker
+        next_input = reply
         current_speaker = "B" if current_speaker == "A" else "A"
         time.sleep(SLEEP_BETWEEN_TURNS)
 
