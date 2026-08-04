@@ -221,7 +221,7 @@ def run_forever():
         while True:
             print(f"=== Starting round {round_number} ===\n")
             transcript = run_single_conversation(token_a, token_b, round_number)
-            save_transcript(transcript, round_number)
+            # save_transcript(transcript, round_number)
             save_markdown_story(transcript, round_number)
             round_number += 1
     except KeyboardInterrupt:
