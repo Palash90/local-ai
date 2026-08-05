@@ -4,6 +4,8 @@ import json
 import requests
 import re
 from datetime import datetime
+import random
+
 
 BASE_URL = "http://localhost"
 USERNAME_A = os.environ["SELF_CHAT_USER_A"]
@@ -11,14 +13,26 @@ USERNAME_B = os.environ["SELF_CHAT_USER_B"]
 PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
-POLL_INTERVAL_SECONDS = 10.0
+POLL_INTERVAL_SECONDS = 30.0
 SLEEP_BETWEEN_TURNS = 2.0
-MAX_MESSAGES_PER_AGENT = 5
-CONVERGE_WINDOW = 2  # last N messages per agent are for convergence/finalization
+MAX_MESSAGES_PER_AGENT = 6
+CONVERGE_WINDOW = 3  # last N messages per agent are for convergence/finalization
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
-STARTING_CONVERSATION = open("/home/palash/local-ai-files/self_chat.txt").read()
+STARTING_CONVERSATION = open("/home/palash/local-ai-files/self_chat.txt").read()    
 
-print(STARTING_CONVERSATION)
+user_input = input("Enter Detailed task: ")
+task = user_input
+
+user_input = input("Enter comma-separated mediums: ")
+mediums = user_input.split(',')
+
+user_input = input("In which language Kaya and Kolpo should have conversation (comma separated values):")
+languages = user_input.split(',')
+
+user_input = input("Keep sessions {y/n} ?")
+keep_sessions = user_input.strip() == 'y'
+
+print(task, mediums, languages)
 
 
 def login(username, password):
@@ -32,10 +46,13 @@ def login(username, password):
     return resp.json()["token"]
 
 
-def create_session(token, name):
+def create_session(token, name, system_prompts=None):
+    body = {"name": name}
+    if system_prompts:
+        body["system_prompts"] = system_prompts
     resp = requests.post(
         f"{BASE_URL}/api/sessions",
-        json={"name": name},
+        json=body,
         headers={"X-Auth-Token": token},
         timeout=15,
     )
@@ -91,50 +108,73 @@ def call_llm(token, session_id, message):
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-def build_input(speaker, message_number, incoming):
+def build_input(speaker, message_number, incoming, lang):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
-    remaining = MAX_MESSAGES_PER_AGENT - message_number
+    
+    progress = message_number / MAX_MESSAGES_PER_AGENT
 
     lines = [
-        f"You are {partner_agent}. You are conversing with {current_agent}.",
-        f"[Message {message_number} of {MAX_MESSAGES_PER_AGENT} | {remaining} remaining]",
+        f"[SYSTEM DIRECTIVE: You are responding as {current_agent}. Your partner is {partner_agent}.]\n",
+        f"[Progress: {int(progress * 100)}% | Turn {message_number}/{MAX_MESSAGES_PER_AGENT}]\n",
     ]
 
-    if message_number == 1 and speaker == "A":
-        lines.append("Opening prompt for the conversation:")
-    else:
-        lines.append(f"Latest message from {partner_agent}:")
-
-    if remaining <= CONVERGE_WINDOW:
-        if remaining == 1:
+    # Phase 1: Planning & Alignment (0% - 10%)
+    if progress <= 0.10:
+        lines.append(
+            f"[PHASE 1: ALIGNMENT (First 10%)] Agree on the plan/approach immediately with {partner_agent} based on %task%."
+        )
+    # Phase 3: Consolidation & Wrap-up (90% - 100%)
+    elif progress >= 0.90:
+        if message_number == MAX_MESSAGES_PER_AGENT:
             lines.append(
-                f"FINAL MESSAGE: Bring the work to a close with {partner_agent} "
-                f"and include {STOP_PHRASE}."
+                f"[PHASE 3: FINAL STEP] Consolidate output, finalize deliverables for {task}, and append {STOP_PHRASE}."
             )
         else:
             lines.append(
-                f"CONVERGENCE PHASE ({remaining} left): Work with {partner_agent} to "
-                f"finalize your joint creation. End with {STOP_PHRASE} once complete."
+                f"[PHASE 3: CONVERGENCE (Final 10%)] Wrap up remaining elements of {task} with {partner_agent}. Prepare final output and append {STOP_PHRASE}."
             )
+    # Phase 2: Direct Execution (10% - 90%)
     else:
         lines.append(
-            f"Exploration phase: Build on {partner_agent}'s last message."
+            f"[PHASE 2: EXECUTION] Work on {task} directly without meta-talk. "
+            f"Communicate in {lang} if required by the task."
         )
 
-    lines.extend(["", "----------", incoming])
+    if incoming:
+        lines.extend(["", "----------", incoming])
     return "\n".join(lines)
 
 
 def run_single_conversation(token_a, token_b, round_number):
-    session_a = create_session(token_a, f"{AGENT_NAMES['A']} round {round_number}")
-    session_b = create_session(token_b, f"{AGENT_NAMES['B']} round {round_number}")
+    medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
+    language = random.choice(languages)
+                           
+    s = STARTING_CONVERSATION.replace("%task%", task)
+    s = s.replace(
+        "%mediums%",
+        " , ".join(medium))
+    s = s.replace("%_lang%", random.choice(languages))
+
+    print(s)
+    prompt_block = {"name": "Self-Chat Directive", "content": s}
+    session_a = create_session(
+        token_a,
+        f"{AGENT_NAMES['A']} round {round_number}",
+        system_prompts=[prompt_block],
+    )
+    session_b = create_session(
+        token_b,
+        f"{AGENT_NAMES['B']} round {round_number}",
+        system_prompts=[prompt_block],
+    )
 
     transcript = []
     counts = {"A": 0, "B": 0}
 
     current_speaker = "A"
-    incoming = STARTING_CONVERSATION
+
+    incoming = ""
 
     try:
         while True:
@@ -143,7 +183,9 @@ def run_single_conversation(token_a, token_b, round_number):
             token = token_a if current_speaker == "A" else token_b
             session = session_a if current_speaker == "A" else session_b
 
-            prompt = build_input(current_speaker, message_number, incoming)
+            prompt = build_input(
+                current_speaker, message_number, "" if not transcript else incoming, language
+            )
             reply = call_llm(token, session, prompt)
 
             transcript.append(
@@ -154,7 +196,7 @@ def run_single_conversation(token_a, token_b, round_number):
                 }
             )
 
-            if STOP_PHRASE in reply:
+            if STOP_PHRASE in reply.upper():
                 print(f"Round {round_number} ended by {AGENT_NAMES[current_speaker]}\n")
                 break
             if counts[current_speaker] >= MAX_MESSAGES_PER_AGENT:
@@ -168,8 +210,11 @@ def run_single_conversation(token_a, token_b, round_number):
             current_speaker = "B" if current_speaker == "A" else "A"
             time.sleep(SLEEP_BETWEEN_TURNS)
     finally:
-        delete_session(token_a, session_a)
-        delete_session(token_b, session_b)
+        if keep_sessions:
+            pass
+        else:
+            delete_session(token_a, session_a)
+            delete_session(token_b, session_b)
 
     return transcript
 
@@ -184,7 +229,7 @@ def save_transcript(transcript, round_number):
 
 
 def save_markdown_story(transcript, round_number):
-    fname = f"story_r{round_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    fname = f"/home/palash/local-ai-files/stories/story_r{round_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
 
     markdown_lines = [
         f"# Collaborative Story — Round {round_number}\n",

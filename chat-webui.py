@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import http.server, json, os, uuid, base64, mimetypes, requests, subprocess, time, random, threading, sys, io, tempfile, queue as _queue_mod, traceback
+import http.server, json, os, re, glob, uuid, base64, mimetypes, requests, subprocess, time, random, threading, sys, io, tempfile, queue as _queue_mod, traceback
 
 sys.stdout.reconfigure(line_buffering=True)  # noqa
 from datetime import datetime
@@ -54,7 +54,9 @@ LLAMA_SERVER_ARGS = [
     "--repeat-penalty", "1.0"
 ]
 
-SESSIONS_FILE = os.path.expanduser("~/local-ai-files/sessions.json")
+FILES_DIR = os.path.expanduser("~/local-ai-files")
+SESSIONS_FILE = os.path.join(FILES_DIR, "sessions.json")
+SESSIONS_DIR = FILES_DIR
 IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
@@ -499,14 +501,50 @@ RAM_RESUME_THRESHOLD = 70
 _ram_evacuating = False
 
 
+def _safe_username(user):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", user or "")
+    return safe or "unknown"
+
+
+def _session_file(user):
+    return os.path.join(SESSIONS_DIR, f"sessions_{_safe_username(user)}.json")
+
+
+def _load_extra_prompts(items):
+    """Normalize a list of extra system prompt sources into [{name, content}].
+
+    Each item may be a {name, content} dict or a server-side file path string.
+    """
+    blocks = []
+    for it in items or []:
+        if isinstance(it, dict):
+            content = it.get("content") or ""
+            if not content.strip():
+                continue
+            blocks.append({"name": it.get("name") or "System Prompt", "content": content})
+        elif isinstance(it, str):
+            p = os.path.abspath(os.path.expanduser(it))
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        blocks.append({"name": os.path.basename(it), "content": f.read()})
+                except OSError:
+                    pass
+    return blocks
+
+
 def load_sessions():
     global sessions, sessions_meta
-    try:
-        with open(SESSIONS_FILE) as f:
-            data = json.load(f)
+    with _data_lock:
+        sessions = {}
+        sessions_meta = {}
+    for path in glob.glob(os.path.join(SESSIONS_DIR, "sessions_*.json")):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
         with _data_lock:
-            sessions = {}
-            sessions_meta = {}
             for sid, sdata in data.get("sessions", {}).items():
                 sessions[sid] = sdata.get("messages", [])
                 sessions_meta[sid] = {
@@ -514,29 +552,80 @@ def load_sessions():
                     "created": sdata.get("created", time.time()),
                     "updated": sdata.get("updated", time.time()),
                     "user_id": sdata.get("user_id", ""),
+                    "system_prompts": sdata.get("system_prompts", []),
                 }
-    except (FileNotFoundError, json.JSONDecodeError):
-        with _data_lock:
-            sessions = {}
-            sessions_meta = {}
+    stale = os.path.join(SESSIONS_DIR, "sessions.json")
+    if os.path.exists(stale):
+        try:
+            with open(stale) as f:
+                data = json.load(f)
+            with _data_lock:
+                for sid, sdata in data.get("sessions", {}).items():
+                    if sid not in sessions:
+                        sessions[sid] = sdata.get("messages", [])
+                        sessions_meta[sid] = {
+                            "name": sdata.get("name", "Chat"),
+                            "created": sdata.get("created", time.time()),
+                            "updated": sdata.get("updated", time.time()),
+                            "user_id": sdata.get("user_id", ""),
+                            "system_prompts": sdata.get("system_prompts", []),
+                        }
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
 
 
 def save_sessions():
+    by_user = {}
     with _data_lock:
-        data = {"sessions": {}}
         for sid in sessions:
             meta = sessions_meta.get(
                 sid, {"name": "Chat", "created": time.time(), "updated": time.time()}
             )
-            data["sessions"][sid] = {
+            user = meta.get("user_id", "")
+            by_user.setdefault(user, {}).setdefault("sessions", {})[sid] = {
                 "name": meta["name"],
                 "created": meta["created"],
                 "updated": meta["updated"],
                 "user_id": meta.get("user_id", ""),
+                "system_prompts": meta.get("system_prompts", []),
                 "messages": sessions[sid],
             }
-    with open(SESSIONS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    for user, data in by_user.items():
+        with open(_session_file(user), "w") as f:
+            json.dump(data, f, indent=2)
+
+
+def _task_user(task_id):
+    with _data_lock:
+        return tasks.get(task_id, {}).get("_user", "")
+
+
+def _output_dir(user):
+    return os.path.join(COMFYUI_OUTPUT, _safe_username(user))
+
+
+def _input_dir(user):
+    return os.path.join(COMFYUI_INPUT, _safe_username(user))
+
+
+def _output_rel(target):
+    if os.path.isabs(target):
+        try:
+            return os.path.relpath(target, COMFYUI_OUTPUT)
+        except ValueError:
+            return os.path.basename(target)
+    return target
+
+
+def _image_url_rel(url):
+    marker = "/output/"
+    if marker in url:
+        return url.split(marker, 1)[-1]
+    return os.path.basename(url)
 
 
 def _text_tokens(s):
@@ -1084,8 +1173,9 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
     set_status(task_id, "Freeing VRAM for image generation...")
     unload_llama_model()
 
+    user = _task_user(task_id)
     gen_tag = str(uuid.uuid4())[:8]
-    prefix = f"gen_{gen_tag}_"
+    prefix = f"{_safe_username(user)}/gen_{gen_tag}_"
     cfg = IMAGE_MODELS.get(model, IMAGE_MODELS["z_image"])
     if model == "z_image":
         print("Chose Z-Image Turbo for image generation")
@@ -1222,7 +1312,9 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
                         for node_id, node_out in outputs.items():
                             for img in node_out.get("images", []):
                                 fname = img["filename"]
-                                fpath = os.path.join(IMG_PATH, fname)
+                                fpath = os.path.join(
+                                    COMFYUI_OUTPUT, img.get("subfolder", ""), fname
+                                )
                                 found_file = fpath
                                 break
                         if found_file:
@@ -1241,10 +1333,16 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
                         pass
                     result = json.dumps({"error": "Cancelled — session was deleted"})
                 else:
-                    tasks[task_id]["image_file"] = found_file
+                    tasks[task_id]["image_file"] = _output_rel(found_file)
                     set_status(task_id, f"Image saved as {found_file}")
                     print(f"[generate_image] SUCCESS: {found_file}")  # DEBUG
-                    result = json.dumps({"prompt_id": prompt_id, "file": found_file})
+                    result = json.dumps(
+                        {
+                            "prompt_id": prompt_id,
+                            "file": found_file,
+                            "rel": _output_rel(found_file),
+                        }
+                    )
             else:
                 print(f"[generate_image] TIMEOUT for task {task_id} after 120s")  # DEBUG
                 result = json.dumps({"error": "Image generation timeout"})
@@ -1268,6 +1366,7 @@ def edit_image(
     sid=None,
 ):
     print("Image edit called with denoise", denoise)
+    user = _task_user(task_id)
     if not image_b64 and sid:
         with _data_lock:
             msgs = list(sessions.get(sid, []))
@@ -1277,8 +1376,8 @@ def edit_image(
             # 1. Check generated image URL attribute (_image_url)
             url = (msg.get("_image_url") or "").strip()
             if url:
-                fname = os.path.basename(url)
-                fpath = os.path.join(IMG_PATH, fname)
+                fname = os.path.join(IMG_PATH, _image_url_rel(url))
+                fpath = fname
                 print(
                     f"[edit_image] Checking _image_url path={fpath} exists={os.path.exists(fpath)}"
                 )
@@ -1316,11 +1415,11 @@ def edit_image(
     unload_llama_model()
 
     gen_tag = str(uuid.uuid4())[:8]
-    prefix = f"edit_{gen_tag}_"
-    input_filename = f"input_{gen_tag}.png"
+    prefix = f"{_safe_username(user)}/edit_{gen_tag}_"
+    input_filename = f"{_safe_username(user)}/input_{gen_tag}.png"
 
     input_dir = COMFYUI_INPUT
-    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.join(input_dir, input_filename)), exist_ok=True)
     input_filepath = os.path.join(input_dir, input_filename)
 
     with open(input_filepath, "wb") as f:
@@ -1419,7 +1518,9 @@ def edit_image(
                         for node_id, node_out in outputs.items():
                             for img in node_out.get("images", []):
                                 fname = img["filename"]
-                                found_file = os.path.join(IMG_PATH, fname)
+                                found_file = os.path.join(
+                                    IMG_PATH, img.get("subfolder", ""), fname
+                                )
                                 break
                         if found_file:
                             break
@@ -1438,9 +1539,15 @@ def edit_image(
                         pass
                     result = json.dumps({"error": "Cancelled — session was deleted"})
                 else:
-                    tasks[task_id]["image_file"] = found_file
+                    tasks[task_id]["image_file"] = _output_rel(found_file)
                     set_status(task_id, f"Edited image saved as {found_file}")
-                    result = json.dumps({"prompt_id": prompt_id, "file": found_file})
+                    result = json.dumps(
+                        {
+                            "prompt_id": prompt_id,
+                            "file": found_file,
+                            "rel": _output_rel(found_file),
+                        }
+                    )
             else:
                 result = json.dumps({"error": "Image editing timeout"})
     except Exception as e:
@@ -1694,13 +1801,13 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
         )
         res_data = json.loads(result)
         if "file" in res_data:
-            fn = os.path.basename(res_data['file'])
-            image_url = f"/output/{fn}"
+            rel = res_data.get("rel") or os.path.basename(res_data["file"])
+            image_url = f"/output/{rel}"
             with _data_lock:
                 t = tasks.get(task_id)
                 if t:
                     t.setdefault("_tools_used", []).append(tool_name)
-                    t["image_file"] = fn
+                    t["image_file"] = rel
                     t["gen_prompt"] = args.get("prompt", "")
                     t["_image_model"] = None
             tool_result = json.dumps({
@@ -1751,18 +1858,18 @@ def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
             )
             res_data = json.loads(result)
             if "file" in res_data:
-                fn = os.path.basename(res_data['file'])
-                image_url = f"/output/{fn}"
+                rel = res_data.get("rel") or os.path.basename(res_data["file"])
+                image_url = f"/output/{rel}"
                 image_model_s = args.get("model") or "z_image"
-                print(f"[tool_worker] Image file: {res_data['file']}, basename: {fn}, url: {image_url}")  # DEBUG
+                print(f"[tool_worker] Image file: {res_data['file']}, rel: {rel}, url: {image_url}")  # DEBUG
                 with _data_lock:
                     t = tasks.get(task_id)
                     if t:
                         t.setdefault("_tools_used", []).append(tool_name)
-                        t["image_file"] = fn
+                        t["image_file"] = rel
                         t["gen_prompt"] = args.get("prompt", "")
                         t["_image_model"] = image_model_s
-                        print(f"[tool_worker] Stored image_file='{fn}' in task {task_id}")  # DEBUG
+                        print(f"[tool_worker] Stored image_file='{rel}' in task {task_id}")  # DEBUG
                 tool_result = json.dumps({
                     "image_url": image_url,
                     "prompt": args.get("prompt", ""),
@@ -1852,13 +1959,17 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
     loc_context = f" [User location: {loc}]" if loc else ""
     date_loc_context = f"[Current date: {ts.strftime('%Y-%m-%d %A %H:%M')}]{loc_context}"
     user = ""
+    extra_prompts = []
     with _data_lock:
         t = tasks.get(task_id)
         if t:
             user = t.get("_user", "")
+        extra_prompts = sessions_meta.get(sid, {}).get("system_prompts", [])
     user_context = read_user_context(user) if user else ""
     context_block = f"\n\n## User Context\n{user_context}" if user_context else ""
     full_sys_content = f"{SYS_CONTENT}\n\n{date_loc_context}{context_block}"
+    for blk in extra_prompts:
+        full_sys_content += f"\n\n## {blk.get('name', 'System Prompt')}\n{blk.get('content', '')}"
     full_sys_content = full_sys_content.replace(
         "%current_time%", ts.strftime("%Y-%m-%d %A %H:%M")
     )
@@ -2447,8 +2558,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 }
             )
         elif self.path.startswith("/output/"):
-            filename = os.path.basename(urlparse(self.path).path)
-            fpath = os.path.abspath(os.path.join(COMFYUI_OUTPUT, filename))
+            rel = urlparse(self.path).path
+            rel = rel[len("/output/"):] if rel.startswith("/output/") else rel
+            fpath = os.path.abspath(os.path.join(COMFYUI_OUTPUT, rel))
             if fpath.startswith(os.path.abspath(COMFYUI_OUTPUT)) and os.path.exists(
                 fpath
             ):
@@ -2584,8 +2696,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if msg.get("role") == "assistant":
                     url = msg.get("_image_url", "") or ""
                     if url:
-                        fname = os.path.basename(url)
-                        fpath = os.path.join(IMG_PATH, fname)
+                        fname = os.path.join(IMG_PATH, _image_url_rel(url))
+                        fpath = fname
                         if os.path.exists(fpath):
                             print(f"[delete] Removed output image: {fpath}")
                             os.remove(fpath)
@@ -2863,6 +2975,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not user:
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
+            length = int(self.headers.get("Content-Length", 0))
+            extra = {}
+            if length:
+                try:
+                    ext_body = json.loads(self.rfile.read(length))
+                    extra = _load_extra_prompts(ext_body.get("system_prompts") or [])
+                except Exception:
+                    extra = []
             sid = str(uuid.uuid4())
             now = time.time()
             with _data_lock:
@@ -2872,6 +2992,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "created": now,
                     "updated": now,
                     "user_id": user,
+                    "system_prompts": extra,
                 }
             save_sessions()
             self.send_json({"session_id": sid})
