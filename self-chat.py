@@ -2,12 +2,22 @@ import os
 import time
 import json
 import base64
+import argparse
 import requests
 import re
 import shutil
 from difflib import SequenceMatcher
 from datetime import datetime
 import random
+
+parser = argparse.ArgumentParser(description="Self-chat story generator")
+parser.add_argument(
+    "--dir",
+    default="/home/palash/local-ai-files/stories",
+    help="Base directory where generated stories are saved (default: ~/local-ai-files/stories)",
+)
+args = parser.parse_args()
+STORY_BASE_DIR = args.dir
 
 BASE_URL = "http://localhost"
 USERNAME_A = "kolpo"
@@ -104,6 +114,39 @@ def image_url_to_b64(image_url):
         return None
     with open(abs_path, "rb") as f:
         return base64.b64encode(f.read()).decode()
+
+
+def register_agent_tokens(tokens):
+    try:
+        requests.post(
+            f"{BASE_URL}/api/register-agent",
+            json={"tokens": tokens},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[wait] Could not register agent tokens: {e}")
+
+
+def active_real_users():
+    try:
+        r = requests.get(f"{BASE_URL}/api/active-users", timeout=10)
+        users = r.json().get("users", [])
+    except Exception as e:
+        print(f"[wait] Could not check active users: {e}")
+        return []
+    return users
+
+
+def wait_for_user_to_leave():
+    while True:
+        real = active_real_users()
+        if not real:
+            return
+        print(
+            f"[wait] Real user(s) active ({', '.join(real)}) "
+            f"— pausing self-chat until they log out..."
+        )
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def call_llm(token, session_id, message, image_b64=None):
@@ -215,9 +258,13 @@ def run_single_conversation(token_a, token_b, round_number):
     incoming = ""
     shared_image_b64 = None
 
+    stories_dir, fname = start_story(round_number)
+    citations = {}
+
     while True:
         counts[current_speaker] += 1
         message_number = counts[current_speaker]
+        idx = len(transcript)
         token = token_a if current_speaker == "A" else token_b
         session = session_a if current_speaker == "A" else session_b
 
@@ -228,6 +275,8 @@ def run_single_conversation(token_a, token_b, round_number):
             language,
         )
 
+        wait_for_user_to_leave()
+
         result = call_llm(token, session, prompt, image_b64=shared_image_b64)
         reply = result["text"]
         if is_duplicate(reply, incoming):
@@ -236,15 +285,15 @@ def run_single_conversation(token_a, token_b, round_number):
             result = call_llm(token, session, prompt, image_b64=shared_image_b64)
             reply = result["text"]
 
-        transcript.append(
-            {
-                "speaker": AGENT_NAMES[current_speaker],
-                "message": message_number,
-                "text": reply,
-                "image": result.get("image"),
-                "searches": result.get("searches"),
-            }
-        )
+        entry = {
+            "speaker": AGENT_NAMES[current_speaker],
+            "message": message_number,
+            "text": reply,
+            "image": result.get("image"),
+            "searches": result.get("searches"),
+        }
+        transcript.append(entry)
+        append_story_entry(entry, fname, citations, stories_dir, round_number, idx)
 
         if STOP_PHRASE in reply.upper():
             print(f"Round {round_number} ended by {AGENT_NAMES[current_speaker]}\n")
@@ -282,7 +331,9 @@ def run_single_conversation(token_a, token_b, round_number):
         current_speaker = "B" if current_speaker == "A" else "A"
         time.sleep(SLEEP_BETWEEN_TURNS)
 
-    return transcript, session_a, session_b
+    finalize_story(fname, citations)
+
+    return transcript, session_a, session_b, fname
 
 
 def save_transcript(transcript, round_number):
@@ -294,10 +345,9 @@ def save_transcript(transcript, round_number):
     return fname
 
 
-def save_markdown_story(transcript, round_number):
-    base_dir = "/home/palash/local-ai-files/stories"
+def start_story(round_number):
+    base_dir = STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
-    comfy_output = os.path.expanduser("~/local-ai-files/ComfyUI/output")
     folder_name = datetime.now().strftime("%Y%m%d_%H%M%S")
     stories_dir = os.path.join(base_dir, folder_name)
     os.makedirs(stories_dir, exist_ok=True)
@@ -305,82 +355,92 @@ def save_markdown_story(transcript, round_number):
         stories_dir,
         f"story_r{round_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
     )
-
-    markdown_lines = [
+    header = [
         f"# Collaborative Story — Round {round_number}\n",
         f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n",
         "---\n\n",
     ]
+    with open(fname, "w", encoding="utf-8") as f:
+        f.writelines(header)
+    return stories_dir, fname
 
-    citations = {}
 
-    for idx, entry in enumerate(transcript):
-        speaker = entry.get("speaker", "Unknown")
-        text = entry.get("text", "")
+def clean_speaker_text(speaker, text):
+    cleaned = re.sub(
+        rf"^(kolpo|kaya|কল্প|কায়া):\s*", "", text, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(rf"^{re.escape(speaker)}:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\[NEXT TURN:\s*[^\]]*\]\s*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.replace("[END CONVERSATION]", "").strip()
 
-        # Clean leading speaker prefixes and meta/handoff tags
-        cleaned_text = re.sub(
-            rf"^{re.escape(speaker)}:\s*", "", text, flags=re.IGNORECASE
-        )
-        cleaned_text = re.sub(
-            r"\[NEXT TURN:\s*[^\]]*\]\s*", "", cleaned_text, flags=re.IGNORECASE
-        )
 
-        cleaned_text = re.sub(
-            r"^(kolpo|kaya|কল্প|কায়া):\s*", "", text, flags=re.IGNORECASE
-        )
-        cleaned_text = cleaned_text.replace("[END CONVERSATION]", "").strip()
+def embed_story_image(img_url, stories_dir, round_number, speaker, idx):
+    if not img_url:
+        return None
+    rel_name = img_url.split("/output/")[-1]
+    comfy_output = os.path.expanduser("~/local-ai-files/ComfyUI/output")
+    abs_src = os.path.join(comfy_output, rel_name)
+    if not os.path.isfile(abs_src):
+        return None
+    _, ext = os.path.splitext(rel_name)
+    local_name = f"img_r{round_number}_{speaker}_{idx}{ext}"
+    dest = os.path.join(stories_dir, local_name)
+    try:
+        shutil.copy(abs_src, dest)
+    except OSError as e:
+        print(f"Warning: could not copy {abs_src}: {e}")
+        return None
+    print(f"Embedded image {local_name}")
+    return local_name
 
-        markdown_lines.append(f"### {speaker}\n\n{cleaned_text}\n\n")
 
-        searches = entry.get("searches")
-        if searches:
-            for s in searches:
-                if not isinstance(s, dict):
-                    continue
-                query = s.get("query", "")
-                results = s.get("results") or []
-                for r in results:
-                    url = r.get("url", "")
-                    if not url or url in citations:
-                        continue
-                    title = r.get("title") or url
-                    citations[url] = (title, query)
+def collect_citations(citations, searches):
+    for s in searches or []:
+        if not isinstance(s, dict):
+            continue
+        query = s.get("query", "")
+        for r in s.get("results") or []:
+            url = r.get("url", "")
+            if not url or url in citations:
+                continue
+            citations[url] = (r.get("title") or url, query)
 
-        img_url = entry.get("image")
-        if img_url:
-            rel_name = img_url.split("/output/")[-1]
-            abs_src = os.path.join(comfy_output, rel_name)
-            if os.path.isfile(abs_src):
-                _, ext = os.path.splitext(rel_name)
-                local_name = f"img_r{round_number}_{speaker}_{idx}{ext}"
-                dest = os.path.join(stories_dir, local_name)
-                try:
-                    shutil.copy(abs_src, dest)
-                except OSError as e:
-                    print(f"Warning: could not copy {abs_src}: {e}")
-                    continue
-                print(f"Embedded image {local_name} into {fname}")
-                markdown_lines.append(f"![{speaker}]({local_name})\n\n")
 
+def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
+    speaker = entry.get("speaker", "Unknown")
+    cleaned = clean_speaker_text(speaker, entry.get("text", ""))
+    lines = [f"### {speaker}\n\n{cleaned}\n\n"]
+
+    collect_citations(citations, entry.get("searches"))
+
+    local_img = embed_story_image(
+        entry.get("image"), stories_dir, round_number, speaker, idx
+    )
+    if local_img:
+        lines.append(f"![{speaker}]({local_img})\n\n")
+
+    with open(fname, "a", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+def finalize_story(fname, citations):
     if citations:
-        markdown_lines.append("---\n\n## Citations & References\n\n")
+        lines = ["\n---\n\n## Citations & References\n\n"]
         for num, (url, (title, query)) in enumerate(citations.items(), start=1):
-            markdown_lines.append(
+            lines.append(
                 f"{num}. [{title}]({url})"
                 + (f" *(source: {query})*" if query else "")
                 + "\n"
             )
-
-    with open(fname, "w", encoding="utf-8") as f:
-        f.writelines(markdown_lines)
-
+        with open(fname, "a", encoding="utf-8") as f:
+            f.writelines(lines)
     print(f"Saved story to {fname}")
 
 
 def run_forever():
     token_a = login(USERNAME_A, PASSWORD)
     token_b = login(USERNAME_B, PASSWORD)
+    register_agent_tokens([token_a, token_b])
     print("Logged In")
 
     round_number = 1
@@ -388,11 +448,10 @@ def run_forever():
     try:
         while True:
             print(f"=== Starting round {round_number} ===\n")
-            transcript, session_a, session_b = run_single_conversation(
+            transcript, session_a, session_b, fname = run_single_conversation(
                 token_a, token_b, round_number
             )
             # save_transcript(transcript, round_number)
-            save_markdown_story(transcript, round_number)
             if not keep_sessions:
                 delete_session(token_a, session_a)
                 delete_session(token_b, session_b)

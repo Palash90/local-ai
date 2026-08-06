@@ -456,6 +456,7 @@ def write_user_context(username, content):
 
 _active_tokens = {}
 _tokens_lock = threading.Lock()
+_agent_tokens = set()
 
 _effective_contexts = {}
 _effective_contexts_lock = threading.Lock()
@@ -2539,6 +2540,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"authenticated": True, "username": user})
             else:
                 self.send_json({"authenticated": False})
+        elif self.path == "/api/active-users":
+            with _tokens_lock:
+                active = sorted(
+                    {
+                        _active_tokens[token]
+                        for token in _active_tokens
+                        if token not in _agent_tokens
+                    }
+                )
+            self.send_json({"users": active})
+        elif self.path == "/api/register-agent":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            tokens = body.get("tokens", []) or []
+            with _tokens_lock:
+                for t in tokens:
+                    _agent_tokens.add(t)
+            self.send_json({"ok": True})
         elif self.path == "/api/model-status":
             with _data_lock:
                 ms, tps, oh, gtemp = model_status, _last_tps, _overheated, _gpu_temp
