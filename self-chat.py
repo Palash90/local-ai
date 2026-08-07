@@ -27,8 +27,8 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 10.0
 SLEEP_BETWEEN_TURNS = 1.0
-MAX_MESSAGES_PER_AGENT = 6
-CONVERGE_WINDOW = 2  # last N messages per agent are for convergence/finalization
+MAX_MESSAGES_PER_AGENT = 50
+CONVERGE_WINDOW = 3  # last N messages per agent are for convergence/finalization
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 STARTING_CONVERSATION = open("/home/palash/local-ai-files/self_chat.txt").read()
 
@@ -120,7 +120,7 @@ def register_agent_tokens(tokens):
     try:
         requests.post(
             f"{BASE_URL}/api/register-agent",
-            json={"tokens": tokens},
+            json={"tokens": tokens, "usernames": [USERNAME_A, USERNAME_B]},
             timeout=10,
         )
     except Exception as e:
@@ -345,19 +345,26 @@ def save_transcript(transcript, round_number):
     return fname
 
 
+def slugify(text, max_len=60):
+    slug = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "", text, flags=re.UNICODE)
+    slug = re.sub(r"\s+", "-", slug).strip("-")
+    return slug[:max_len].strip("-") or "story"
+
+
 def start_story(round_number):
     base_dir = STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
-    folder_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    now = datetime.now()
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    folder_name = f"{slugify(task)}_{timestamp}"
     stories_dir = os.path.join(base_dir, folder_name)
     os.makedirs(stories_dir, exist_ok=True)
-    fname = os.path.join(
-        stories_dir,
-        f"story_r{round_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
-    )
+    fname = os.path.join(stories_dir, f"story_r{round_number}_{timestamp}.md")
     header = [
-        f"# Collaborative Story — Round {round_number}\n",
-        f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n",
+        f"# {task}\n",
+        f"*Round {round_number} · Generated on {now.strftime('%Y-%m-%d %H:%M:%S')}*\n\n",
+        f"**Task prompt:** {task}\n\n",
+        f"**Mediums:** {' , '.join(mediums)}  ·  **Language(s):** {' , '.join(languages)}\n\n",
         "---\n\n",
     ]
     with open(fname, "w", encoding="utf-8") as f:

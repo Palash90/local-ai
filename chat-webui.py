@@ -457,6 +457,7 @@ def write_user_context(username, content):
 _active_tokens = {}
 _tokens_lock = threading.Lock()
 _agent_tokens = set()
+_agent_users = set()
 
 _effective_contexts = {}
 _effective_contexts_lock = threading.Lock()
@@ -1196,7 +1197,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
             },
             "68": {
                 "class_type": "EmptySD3LatentImage",
-                "inputs": {"width": 256, "height": 256, "batch_size": 1},
+                "inputs": {"width": 1024, "height": 1024, "batch_size": 1},
             },
             "69": {
                 "class_type": "ModelSamplingAuraFlow",
@@ -2547,17 +2548,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         _active_tokens[token]
                         for token in _active_tokens
                         if token not in _agent_tokens
+                        and _active_tokens[token] not in _agent_users
                     }
                 )
             self.send_json({"users": active})
-        elif self.path == "/api/register-agent":
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length else {}
-            tokens = body.get("tokens", []) or []
-            with _tokens_lock:
-                for t in tokens:
-                    _agent_tokens.add(t)
-            self.send_json({"ok": True})
         elif self.path == "/api/model-status":
             with _data_lock:
                 ms, tps, oh, gtemp = model_status, _last_tps, _overheated, _gpu_temp
@@ -2799,7 +2793,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        if self.path == "/api/login":
+        if self.path == "/api/register-agent":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            tokens = body.get("tokens", []) or []
+            usernames = body.get("usernames", []) or []
+            print("Agent registered")
+            with _tokens_lock:
+                for t in tokens:
+                    _agent_tokens.add(t)
+                for u in usernames:
+                    _agent_users.add(u)
+            self.send_json({"ok": True})
+        elif self.path == "/api/login":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             username = body.get("username", "").strip()
