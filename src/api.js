@@ -107,7 +107,10 @@ export async function getTaskStatus(taskId) {
 }
 
 export async function getModelStatus() {
-  const r = await fetch('/api/model-status');
+  const token = authToken();
+  const r = await fetch('/api/model-status', {
+    headers: token ? { 'X-Auth-Token': token } : {},
+  });
   return r.json();
 }
 

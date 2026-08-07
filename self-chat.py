@@ -40,6 +40,11 @@ CONVERGE_WINDOW = 5  # last N messages per agent are for convergence/finalizatio
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 STARTING_CONVERSATION = open("/home/palash/local-ai-files/self_chat.txt").read()
 
+USERNAME_EDITOR = "editor"
+USERNAME_MODERATOR = "moderator"
+EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/editor_prompt.txt"
+MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/moderator_prompt.txt"
+
 DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 
 
@@ -164,11 +169,11 @@ def image_url_to_b64(image_url):
         return base64.b64encode(f.read()).decode()
 
 
-def register_agent_tokens(tokens):
+def register_agent_tokens(tokens, usernames=None):
     try:
         requests.post(
             f"{BASE_URL}/api/register-agent",
-            json={"tokens": tokens, "usernames": [USERNAME_A, USERNAME_B]},
+            json={"tokens": tokens, "usernames": usernames or []},
             timeout=10,
         )
     except Exception as e:
@@ -382,6 +387,11 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
 
     finalize_story(fname, citations)
 
+    print("=== Editor phase ===")
+    edited_path = run_editor(stories_dir, fname, task, genre)
+    print("=== Moderator phase ===")
+    run_moderator(stories_dir, fname, task, genre, editor_path=edited_path)
+
     return transcript, session_a, session_b, fname
 
 
@@ -435,6 +445,22 @@ def clean_speaker_text(speaker, text):
     return cleaned.replace("[END CONVERSATION]", "").strip()
 
 
+def scrub_agent_names(text):
+    """Deterministically remove the agents' names from story content.
+
+    The models often address each other by name despite the naming rules, so the
+    names are scrubbed here (vocative positions first, bare mentions as fallback).
+    """
+    text = re.sub(r"\b(?:Kaya|Kolpo)\b\s*[,،]+\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r",\s*\b(?:Kaya|Kolpo)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:কায়া|কল্প|काया|कल्प)\s*[,،]+\s*", "", text)
+    text = re.sub(r",\s*(?:কায়া|কল্প|काया|कल्प)", "", text)
+    text = re.sub(r"\b(?:Kaya|Kolpo)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"\s+([.,!?;:।])", r"\1", text)
+    return text.replace(" ,", ",").strip()
+
+
 def embed_story_image(img_url, stories_dir, round_number, speaker, idx):
     if not img_url:
         return None
@@ -470,6 +496,7 @@ def collect_citations(citations, searches):
 def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     speaker = entry.get("speaker", "Unknown")
     cleaned = clean_speaker_text(speaker, entry.get("text", ""))
+    cleaned = scrub_agent_names(cleaned)
     turn = entry.get("message", idx)
     lines = [
         f"<small style=\"color:#888\">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n",
@@ -502,10 +529,165 @@ def finalize_story(fname, citations):
     print(f"Saved story to {fname}")
 
 
+def file_to_b64(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
+def story_images_in_order(stories_dir, markdown_text):
+    """Return [(filename, abs_path)] of images referenced in the markdown, in order."""
+    ordered = []
+    seen = set()
+    for ref in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", markdown_text):
+        fname = os.path.basename(ref)
+        if fname in seen:
+            continue
+        seen.add(fname)
+        full = os.path.join(stories_dir, fname)
+        if os.path.isfile(full):
+            ordered.append((fname, full))
+    return ordered
+
+
+def extract_markdown_fence(text):
+    match = re.search(
+        r"```(?:markdown|md)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+
+def run_editor(stories_dir, fname, task, genre):
+    """Editor phase: review images + markdown, write story_rN_ts.edited.md."""
+    try:
+        token = login(USERNAME_EDITOR, PASSWORD)
+    except Exception as e:
+        print(f"[editor] Could not log in {USERNAME_EDITOR}: {e}")
+        return None
+    register_agent_tokens([token], [USERNAME_EDITOR])
+    try:
+        prompt = open(EDITOR_PROMPT_FILE, encoding="utf-8").read()
+    except OSError as e:
+        print(f"[editor] Could not read prompt file: {e}")
+        return None
+    session_id = create_session(
+        token,
+        "Editor review",
+        system_prompts=[{"name": "Editor Directive", "content": prompt}],
+    )
+    edited_path = fname.replace(".md", ".edited.md")
+    try:
+        with open(fname, "r", encoding="utf-8") as f:
+            markdown_text = f.read()
+        for img_fname, full in story_images_in_order(stories_dir, markdown_text):
+            wait_for_user_to_leave()
+            call_llm(
+                token,
+                session_id,
+                f"This is the image referenced in the story as {img_fname}. "
+                "Look at it carefully; it is part of the story you must edit.",
+                image_b64=file_to_b64(full),
+            )
+        wait_for_user_to_leave()
+        result = call_llm(
+            token,
+            session_id,
+            "Here is the full story markdown:\n\n"
+            + markdown_text
+            + "\n\nNow return the complete revised markdown, wrapped in a "
+            "single ```markdown code block. Nothing else.",
+        )
+        revised = extract_markdown_fence(result["text"])
+        revised = scrub_agent_names(revised) if revised else revised
+        if not revised:
+            print("[editor] Editor returned an empty revision; keeping original")
+            return None
+        with open(edited_path, "w", encoding="utf-8") as f:
+            f.write(revised + "\n")
+        print(f"[editor] Saved edited story to {edited_path}")
+        return edited_path
+    except Exception as e:
+        print(f"[editor] Editor phase failed: {e}")
+        return None
+    finally:
+        if not keep_sessions:
+            delete_session(token, session_id)
+
+
+def run_moderator(stories_dir, fname, task, genre, editor_path=None):
+    """Moderator phase: GREEN/RED verdict, written to story_rN_ts.moderation.json."""
+    try:
+        token = login(USERNAME_MODERATOR, PASSWORD)
+    except Exception as e:
+        print(f"[moderator] Could not log in {USERNAME_MODERATOR}: {e}")
+        return None
+    register_agent_tokens([token], [USERNAME_MODERATOR])
+    try:
+        prompt = open(MODERATOR_PROMPT_FILE, encoding="utf-8").read()
+    except OSError as e:
+        print(f"[moderator] Could not read prompt file: {e}")
+        return None
+    session_id = create_session(
+        token,
+        "Moderator review",
+        system_prompts=[{"name": "Moderator Directive", "content": prompt}],
+    )
+    try:
+        source = editor_path if editor_path else fname
+        with open(source, "r", encoding="utf-8") as f:
+            markdown_text = f.read()
+        for img_fname, full in story_images_in_order(stories_dir, markdown_text):
+            wait_for_user_to_leave()
+            call_llm(
+                token,
+                session_id,
+                f"This is the image referenced in the story as {img_fname}.",
+                image_b64=file_to_b64(full),
+            )
+        wait_for_user_to_leave()
+        result = call_llm(
+            token,
+            session_id,
+            "Here is the final story markdown:\n\n"
+            + markdown_text
+            + "\n\nGive your verdict using exactly these two lines:\n"
+            "VERDICT: GREEN\nREASONS: <short reasons>",
+        )
+        verdict = "UNKNOWN"
+        m = re.search(
+            r"VERDICT\s*:\s*(GREEN|RED)", result["text"], flags=re.IGNORECASE
+        )
+        if m:
+            verdict = m.group(1).upper()
+        elif re.search(r"\bGREEN\b", result["text"]):
+            verdict = "GREEN"
+        elif re.search(r"\bRED\b", result["text"]):
+            verdict = "RED"
+        verdict_path = fname.replace(".md", ".moderation.json")
+        data = {
+            "verdict": verdict,
+            "reasons": result["text"],
+            "task": task,
+            "genre": genre,
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        with open(verdict_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print(f"[moderator] Verdict {verdict} saved to {verdict_path}")
+        return data
+    except Exception as e:
+        print(f"[moderator] Moderator phase failed: {e}")
+        return None
+    finally:
+        if not keep_sessions:
+            delete_session(token, session_id)
+
+
 def run_forever():
     token_a = login(USERNAME_A, PASSWORD)
     token_b = login(USERNAME_B, PASSWORD)
-    register_agent_tokens([token_a, token_b])
+    register_agent_tokens([token_a, token_b], [USERNAME_A, USERNAME_B])
     print("Logged In")
 
     round_number = 1

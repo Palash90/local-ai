@@ -184,6 +184,39 @@ async def logout(
 
 # --- Dynamic Story Engine & Media Router ---
 
+def pick_story_md(folder_path):
+    """Prefer the editor's revised file (story_rN_ts.edited.md) over the original."""
+    mds = [f for f in os.listdir(folder_path) if f.endswith(".md")]
+    if not mds:
+        return None
+    edited = [f for f in mds if f.endswith(".edited.md")]
+    return os.path.join(folder_path, (edited or mds)[0])
+
+
+def story_moderation(folder_path):
+    """Return the moderator verdict dict for a story, or None."""
+    for f in os.listdir(folder_path):
+        if f.endswith(".moderation.json"):
+            try:
+                with open(os.path.join(folder_path, f), encoding="utf-8") as fh:
+                    return json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                return None
+    return None
+
+
+def moderation_badge(mod):
+    """HTML snippet showing the GREEN/RED verdict, or empty string."""
+    if not mod:
+        return ""
+    v = mod.get("verdict", "")
+    color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
+    return (
+        f' <span style="color:{color}; font-size:11px; font-family:sans-serif;">'
+        f"({v})</span>"
+    )
+
+
 def list_collection_stories(root: str):
     """Return [(genre_label | None, story_id)] for a collection root.
 
@@ -233,15 +266,13 @@ async def index(request: Request):
         sections = []
         for genre, sids in grouped.items():
             heading = f"<h3>{genre.replace('_', ' ').title()}</h3>" if genre else ""
-            sections.append(
-                heading
-                + "<ul>"
-                + "".join(
-                    f'<li><a href="/story/{name}/{sid}">{sid.split("/")[-1]}</a></li>'
-                    for sid in sids
+            lis = []
+            for sid in sids:
+                badge = moderation_badge(story_moderation(os.path.join(root, sid)))
+                lis.append(
+                    f'<li><a href="/story/{name}/{sid}">{sid.split("/")[-1]}</a>{badge}</li>'
                 )
-                + "</ul>"
-            )
+            sections.append(heading + "<ul>" + "".join(lis) + "</ul>")
         cards.append(
             f"<h2>{name.replace('_', ' ').title()}</h2>" + "".join(sections)
         )
@@ -321,7 +352,7 @@ async def index(request: Request):
     """
 
 
-@app.get("/media/{collection}/{story_id}/{filename}")
+@app.get("/media/{collection}/{story_id:path}/{filename}")
 async def serve_story_image(
     collection: str, 
     story_id: str, 
@@ -346,7 +377,7 @@ def render_story_html(collection: str, story_id: str, content: str) -> str:
     return html_content.replace('src="', f'src="/media/{collection}/{story_id}/')
 
 
-@app.get("/story/{collection}/{story_id}/content")
+@app.get("/story/{collection}/{story_id:path}/content")
 async def story_content(
     collection: str, 
     story_id: str, 
@@ -360,17 +391,17 @@ async def story_content(
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Story folder not found")
 
-    md_files = [f for f in os.listdir(folder_path) if f.endswith('.md')]
-    if not md_files:
+    md_file = pick_story_md(folder_path)
+    if not md_file:
         raise HTTPException(status_code=404, detail="No markdown file found in story directory")
 
-    with open(os.path.join(folder_path, md_files[0]), 'r', encoding='utf-8') as f:
+    with open(md_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
     return {"html": render_story_html(collection, story_id, content)}
 
 
-@app.delete("/story/{collection}/{story_id}")
+@app.delete("/story/{collection}/{story_id:path}")
 async def delete_story(
     collection: str, 
     story_id: str, 
@@ -390,7 +421,7 @@ async def delete_story(
     return {"ok": True, "deleted": story_id}
 
 
-@app.get("/story/{collection}/{story_id}", response_class=HTMLResponse)
+@app.get("/story/{collection}/{story_id:path}", response_class=HTMLResponse)
 async def read_story(
     collection: str, 
     story_id: str, 
@@ -404,14 +435,23 @@ async def read_story(
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Story folder not found")
         
-    md_files = [f for f in os.listdir(folder_path) if f.endswith('.md')]
-    if not md_files:
+    md_file = pick_story_md(folder_path)
+    if not md_file:
         raise HTTPException(status_code=404, detail="No markdown file found in story directory")
         
-    with open(os.path.join(folder_path, md_files[0]), 'r', encoding='utf-8') as f:
+    with open(md_file, 'r', encoding='utf-8') as f:
         content = f.read()
 
     html_content = render_story_html(collection, story_id, content)
+    verdict_html = ""
+    mod = story_moderation(folder_path)
+    if mod:
+        v = mod.get("verdict", "")
+        color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
+        verdict_html = (
+            f'<div style="font-family:sans-serif; color:{color}; font-size:13px; '
+            f'margin-bottom:12px;">Moderation: {v}</div>'
+        )
 
     return f"""
     <!DOCTYPE html>
@@ -441,6 +481,7 @@ async def read_story(
     <body>
         <a href="/" class="back">← Back to Collections</a>
         <button id="delete-btn" style="float:right; background:none; border:1px solid #c44; color:#c44; border-radius:6px; padding:4px 12px; cursor:pointer; font-family:sans-serif; font-size:13px;">Delete story</button>
+        {verdict_html}
         <article id="story-article">{html_content}</article>
         <script>
             const article = document.getElementById('story-article');

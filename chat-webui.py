@@ -459,14 +459,25 @@ _tokens_lock = threading.Lock()
 _agent_tokens = set()
 _agent_users = set()
 
+# A human user counts as "active" (blocking self-chat agents) while any of
+# their tokens has been seen within this window. The browser's 2s model-status
+# poll carries the auth token, acting as a heartbeat.
+ACTIVE_WINDOW_SECONDS = 120
+
 _effective_contexts = {}
 _effective_contexts_lock = threading.Lock()
 
 
 def get_current_user(headers):
     token = headers.get("X-Auth-Token", "")
+    if not token:
+        return None
     with _tokens_lock:
-        return _active_tokens.get(token)
+        entry = _active_tokens.get(token)
+        if not entry:
+            return None
+        entry["last_seen"] = time.time()
+        return entry["user"]
 
 
 sessions = {}
@@ -2543,14 +2554,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"authenticated": False})
         elif self.path == "/api/active-users":
             with _tokens_lock:
-                active = sorted(
-                    {
-                        _active_tokens[token]
-                        for token in _active_tokens
-                        if token not in _agent_tokens
-                        and _active_tokens[token] not in _agent_users
-                    }
-                )
+                now = time.time()
+                active_users = set()
+                for token, entry in _active_tokens.items():
+                    if token in _agent_tokens or entry["user"] in _agent_users:
+                        continue
+                    if now - entry["last_seen"] <= ACTIVE_WINDOW_SECONDS:
+                        active_users.add(entry["user"])
+                active = sorted(active_users)
             self.send_json({"users": active})
         elif self.path == "/api/model-status":
             with _data_lock:
@@ -2813,7 +2824,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if get_user_password(username) == password:
                 token = str(uuid.uuid4())
                 with _tokens_lock:
-                    _active_tokens[token] = username
+                    _active_tokens[token] = {"user": username, "last_seen": time.time()}
                 self.send_json(
                     {
                         "token": token,
