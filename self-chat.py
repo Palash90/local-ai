@@ -34,11 +34,12 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 10.0
-SLEEP_BETWEEN_TURNS = 1.0
-MAX_MESSAGES_PER_AGENT = 10
-CONVERGE_WINDOW = 5  # last N messages per agent are for convergence/finalization
+SLEEP_BETWEEN_TURNS = 2.0
+MAX_MESSAGES_PER_AGENT = 6
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 STARTING_CONVERSATION = open("/home/palash/local-ai-files/self_chat.txt").read()
+
+SLEEP_BETWEEN_ROUNDS = 300
 
 USERNAME_EDITOR = "editor"
 USERNAME_MODERATOR = "moderator"
@@ -247,34 +248,24 @@ def build_input(speaker, message_number, incoming, lang, task):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
 
-    progress = message_number / MAX_MESSAGES_PER_AGENT
-
     lines = [
         f"[SYSTEM DIRECTIVE: You are responding as {current_agent}. Your partner is {partner_agent}.]\n",
-        f"[Progress: {int(progress * 100)}% | Turn {message_number}/{MAX_MESSAGES_PER_AGENT}]\n",
+        f"[Turn {message_number}/{MAX_MESSAGES_PER_AGENT}]\n",
     ]
 
-    # Phase 1: Planning & Alignment (0% - 10%)
-    if progress <= 0.10:
+    if message_number <= 2:
         lines.append(
-            f"[PHASE 1: ALIGNMENT (First 10%)] Agree on the plan/approach immediately with {partner_agent} for this task: {task}."
+            f"[PHASE 1: ALIGNMENT] Agree on the plan/approach immediately with {partner_agent} for this task: {task}."
         )
-    # Phase 3: Consolidation & Wrap-up (90% - 100%)
-    elif progress >= 0.90:
-        if message_number == MAX_MESSAGES_PER_AGENT:
-            lines.append(
-                f"[PHASE 3: FINAL STEP] Consolidate output, finalize deliverables for {task}, and append {STOP_PHRASE}."
-            )
-        else:
-            lines.append(
-                f"[PHASE 3: CONVERGENCE (Final 10%)] Wrap up remaining elements of {task} with {partner_agent}. Prepare final output and append {STOP_PHRASE}."
-            )
-    # Phase 2: Direct Execution (10% - 90%)
+    elif message_number >= MAX_MESSAGES_PER_AGENT - 2:
+        lines.append(
+            f"[PHASE 3: FINALIZATION] Consolidate the work, write the final scene/panels, "
+            f"and terminate the turn sequence by appending {STOP_PHRASE}."
+        )
     else:
         lines.append(
-            f"[PHASE 2: DIRECT EXECUTION] DO NOT send meta-talk like 'waiting for data' or 'over to you'. "
-            f"Every single turn MUST add new factual story content, outline details, or execute a real tool call. "
-            f"Speak in {lang}."
+            f"[PHASE 2: DIRECT EXECUTION] Continue building content turn-by-turn. "
+            f"Do not send meta-talk or prematurely end the story. Speak in {lang}."
         )
 
     if incoming:
@@ -288,7 +279,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
 
     s = STARTING_CONVERSATION.replace("%task%", task)
     s = s.replace("%mediums%", " , ".join(medium))
-    s = s.replace("%_lang%", random.choice(languages))
+    s = s.replace("%_lang%", language)
 
     print(s)
     prompt_block = {"name": "Self-Chat Directive", "content": s}
@@ -311,7 +302,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     incoming = ""
     shared_image_b64 = None
 
-    stories_dir, fname = start_story(round_number, task, mediums, languages, roles, genre)
+    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre)
     citations = {}
 
     while True:
@@ -333,6 +324,16 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
 
         result = call_llm(token, session, prompt, image_b64=shared_image_b64)
         reply = result["text"]
+        if not reply.strip():
+            prompt += "\n[SYSTEM ERROR: Your previous output was empty. Generate real story content now.]"
+            result = call_llm(token, session, prompt, image_b64=shared_image_b64)
+            reply = result["text"]
+            if not reply.strip():
+                print(
+                    f"Round {round_number} ended: {AGENT_NAMES[current_speaker]} "
+                    f"returned no content after a retry\n"
+                )
+                break
         if is_duplicate(reply, incoming):
             # Re-prompt agent to generate new content instead of repeating
             prompt += "\n[SYSTEM ERROR: Your previous output was identical to your partner's. Generate unique content now.]"
@@ -387,6 +388,17 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
 
     finalize_story(fname, citations)
 
+    print("=== Title phase ===")
+    with open(fname, "r", encoding="utf-8") as f:
+        story_text = f.read()
+    title_session, title_token = random.choice(
+        [(session_a, token_a), (session_b, token_b)]
+    )
+    title = propose_title(title_token, title_session, task, language, genre, story_text)
+    print(f"Story title: {title}\n")
+    stories_dir, fname = apply_title(title, stories_dir, fname)
+    print(f"Story renamed to: {fname}\n")
+
     print("=== Editor phase ===")
     edited_path = run_editor(stories_dir, fname, task, genre)
     print("=== Moderator phase ===")
@@ -410,12 +422,72 @@ def slugify(text, max_len=60):
     return slug[:max_len].strip("-") or "story"
 
 
-def start_story(round_number, task, mediums, languages, roles=None, genre="General"):
+def sanitize_title(text):
+    """Extract a clean single-line title from an LLM reply, or None."""
+    if not text:
+        return None
+    first = text.strip().strip('"\'«»“”‘’`').splitlines()[0].strip()
+    first = re.sub(r"^(?:title|heading|name|header)\s*[:：]\s*", "", first, flags=re.IGNORECASE)
+    first = re.sub(r"^\d+[.)]\s*", "", first)
+    first = re.sub(r"\s+", " ", first).strip().rstrip(".।!")
+    return first[:80].strip() or None
+
+
+def propose_title(token, session_id, task, language, genre, story_text):
+    """Ask one of the agents to name the story after it is completed."""
+    prompt = (
+        "You are naming a completed article/story that has reached its "
+        "conclusion.\n"
+        f"Task: {task}\n"
+        f"Genre: {genre}\n"
+        f"Write your reply ONLY in: {language}\n"
+        "Read the completed story below, then propose ONE short, catchy, unique "
+        "title (max 60 characters) that captures its conclusion and theme. "
+        "Output ONLY the title text — no quotes, no numbering, no explanation, "
+        "no names of people or agents.\n\n"
+        "=== COMPLETED STORY ===\n\n"
+        + (story_text or "")[:6000]
+    )
+    wait_for_user_to_leave()
+    try:
+        result = call_llm(token, session_id, prompt)
+        return sanitize_title(result["text"]) or task
+    except Exception as e:
+        print(f"[title] Could not generate a title, falling back to task: {e}")
+        return task
+
+
+def apply_title(title, stories_dir, fname):
+    """Update the story heading with the new title and rename the folder to match."""
+    with open(fname, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    new_heading = f"# {title}\n"
+    if lines and lines[0].startswith("# "):
+        lines[0] = new_heading
+    else:
+        lines.insert(0, new_heading)
+    with open(fname, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+    m = re.search(r"_\d{8}_\d{6}\.md$", fname)
+    if not m:
+        return stories_dir, fname
+    timestamp = m.group(0).lstrip("_").replace(".md", "")
+    genre_dir = os.path.dirname(stories_dir)
+    new_stories_dir = os.path.join(genre_dir, f"{slugify(title)}_{timestamp}")
+    if new_stories_dir != stories_dir and os.path.isdir(stories_dir):
+        os.rename(stories_dir, new_stories_dir)
+        stories_dir = new_stories_dir
+        fname = os.path.join(new_stories_dir, os.path.basename(fname))
+    return stories_dir, fname
+
+
+def start_story(round_number, task, title, mediums, language, roles=None, genre="General"):
     base_dir = STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
-    folder_name = f"{slugify(task)}_{timestamp}"
+    folder_name = f"{slugify(title)}_{timestamp}"
     genre_dir = os.path.join(base_dir, slugify(genre))
     os.makedirs(genre_dir, exist_ok=True)
     stories_dir = os.path.join(genre_dir, folder_name)
@@ -423,12 +495,12 @@ def start_story(round_number, task, mediums, languages, roles=None, genre="Gener
     fname = os.path.join(stories_dir, f"story_r{round_number}_{timestamp}.md")
     roles = roles or ["free"]
     header = [
-        f"# {task}\n",
+        f"# {title}\n",
         f"*Round {round_number} · Generated on {now.strftime('%Y-%m-%d %H:%M:%S')}*\n\n",
         f"**Task prompt:** {task}\n\n",
         f"**Genre:** {genre}\n\n",
         f"**For roles:** {' , '.join(roles)}\n\n",
-        f"**Mediums:** {' , '.join(mediums)}  ·  **Language(s):** {' , '.join(languages)}\n\n",
+        f"**Mediums:** {' , '.join(mediums)}  ·  **Language(s):** {language}\n\n",
         "---\n\n",
     ]
     with open(fname, "w", encoding="utf-8") as f:
@@ -437,11 +509,13 @@ def start_story(round_number, task, mediums, languages, roles=None, genre="Gener
 
 
 def clean_speaker_text(speaker, text):
-    cleaned = re.sub(
-        rf"^(kolpo|kaya|কল্প|কায়া):\s*", "", text, flags=re.IGNORECASE
-    )
+    cleaned = re.sub(rf"^(kolpo|kaya|कल्प|কায়া):\s*", "", text, flags=re.IGNORECASE)
     cleaned = re.sub(rf"^{re.escape(speaker)}:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\[NEXT TURN:\s*[^\]]*\]\s*", "", cleaned, flags=re.IGNORECASE)
+    
+    # Remove raw action tags automatically
+    cleaned = re.sub(r"\[ACTION:\s*[^\]]+\]", "", cleaned, flags=re.IGNORECASE)
+    
     return cleaned.replace("[END CONVERSATION]", "").strip()
 
 
@@ -450,15 +524,71 @@ def scrub_agent_names(text):
 
     The models often address each other by name despite the naming rules, so the
     names are scrubbed here (vocative positions first, bare mentions as fallback).
+    Structural markup is protected: image alt-text (`![Kaya](...)`) and the turn
+    headers (`<small ...>_Round N · Kaya Turn M_</small>`) keep their names.
     """
+    protected = []
+    for token in re.findall(r"(?s)<small.*?</small>|!\[[^\]]*\]\([^)]*\)", text):
+        if token not in protected:
+            protected.append(token)
+
+    for i, token in enumerate(protected):
+        text = text.replace(token, f"\x00PROTECT{i}\x00")
+
+    # Remove names in vocative or isolated positions across supported scripts
     text = re.sub(r"\b(?:Kaya|Kolpo)\b\s*[,،]+\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r",\s*\b(?:Kaya|Kolpo)\b", "", text, flags=re.IGNORECASE)
     text = re.sub(r"(?:কায়া|কল্প|काया|कल्प)\s*[,،]+\s*", "", text)
     text = re.sub(r",\s*(?:কায়া|কল্প|काया|कल्प)", "", text)
     text = re.sub(r"\b(?:Kaya|Kolpo)\b", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s{2,}", " ", text)
-    text = re.sub(r"\s+([.,!?;:।])", r"\1", text)
-    return text.replace(" ,", ",").strip()
+
+    # Normalize inline space without merging lines across newlines
+    lines = text.split("\n")
+    cleaned_lines = []
+    for line in lines:
+        line = re.sub(r"[ \t]{2,}", " ", line)
+        line = re.sub(r"[ \t]+([.,!?;:।])", r"\1", line)
+        cleaned_lines.append(line.replace(" ,", ","))
+
+    text = "\n".join(cleaned_lines)
+
+    for i, token in enumerate(protected):
+        text = text.replace(f"\x00PROTECT{i}\x00", token)
+
+    return text.strip()
+
+
+def normalize_markdown_lines(text):
+    """Restore structural line breaks that the editor model may have flattened.
+
+    The editor sometimes returns the revised markdown with most newlines collapsed
+    to spaces. This re-inserts line breaks before every structural marker so the
+    published page renders as separate blocks again. Within-turn paragraph breaks
+    that were already lost cannot be recovered, but every heading, turn header,
+    image, and citation line ends up on its own line.
+    """
+    # Clean horizontal whitespace per line while preserving existing explicit newlines
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    text = "\n".join(lines)
+
+    # Re-insert structural double newlines for proper block rendering
+    text = re.sub(r"(?<!\n\n)<small ", "\n\n<small ", text)
+    text = re.sub(r"(?<!\n\n)(#{1,6}\s)", r"\n\n\1", text)
+    text = re.sub(
+        r"(?<!\n\n)(\*\*(?:Task prompt|Genre|For roles|Mediums|Language\(s\)):)",
+        r"\n\n\1",
+        text,
+    )
+    text = re.sub(r"(?<!\n\n)(\d+\.\s+\[)", r"\n\n\1", text)
+    text = re.sub(r"(?<!\n\n)!\[", "\n\n![", text)
+    text = re.sub(r"</small>(?!\n\n)", "</small>\n\n", text)
+    text = re.sub(r"\s*---\s*", "\n\n---\n\n", text)
+
+    # Clean up excessive line padding
+    text = re.sub(r"(?m)^ +", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip() + "\n"
 
 
 def embed_story_image(img_url, stories_dir, round_number, speaker, idx):
@@ -493,10 +623,27 @@ def collect_citations(citations, searches):
             citations[url] = (r.get("title") or url, query)
 
 
+def strip_model_citations(text):
+    """Remove any Citations & References block the model wrote into a turn.
+
+    Only finalize_story() may emit that section, and it is built exclusively from
+    web-search results. Model-authored variants (images, placeholder links, double
+    hashes) are dropped so they can never leak into the published section.
+    """
+    text = re.sub(
+        r"(?i)(?:^|\n)\s*#{1,6}\s+citations?\s*&?\s*references?.*$",
+        "",
+        text,
+        flags=re.DOTALL
+    )
+    return text.strip()
+
+
 def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     speaker = entry.get("speaker", "Unknown")
     cleaned = clean_speaker_text(speaker, entry.get("text", ""))
     cleaned = scrub_agent_names(cleaned)
+    cleaned = strip_model_citations(cleaned)
     turn = entry.get("message", idx)
     lines = [
         f"<small style=\"color:#888\">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n",
@@ -600,6 +747,7 @@ def run_editor(stories_dir, fname, task, genre):
         )
         revised = extract_markdown_fence(result["text"])
         revised = scrub_agent_names(revised) if revised else revised
+        revised = normalize_markdown_lines(revised) if revised else revised
         if not revised:
             print("[editor] Editor returned an empty revision; keeping original")
             return None
@@ -702,6 +850,7 @@ def run_forever():
             roles = spec.get("roles") or ["free"]
             genre = spec.get("genre") or "General"
             print(f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n")
+            start_time = time.time()
             transcript, session_a, session_b, fname = run_single_conversation(
                 token_a, token_b, round_number, task, mediums, languages, roles, genre
             )
@@ -711,6 +860,11 @@ def run_forever():
                 delete_session(token_b, session_b)
             round_number += 1
             task_index += 1
+            elapsed = time.time() - start_time
+            print(f"Total time elapsed in this round {elapsed:.2f} seconds\n")
+            print("Autonomous organization is in vacation...")
+            time.sleep(SLEEP_BETWEEN_ROUNDS)
+            print("Vacation over")
     except KeyboardInterrupt:
         print("\nManual Interruption")
 

@@ -5,6 +5,7 @@ sys.stdout.reconfigure(line_buffering=True)  # noqa
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor
+from utils.file_utils import extract_file_text
 
 LLAMA_BASE = "http://localhost:8081"
 LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
@@ -26,7 +27,7 @@ sys.path.insert(0, COMFYUI_DIR)
 COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
 LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-server")
-LLAMA_QWEN_NGL = "12"
+LLAMA_QWEN_NGL = "0"
 LLAMA_GEMMA_NGL = "99"
 LLAMA_SERVER_ARGS = [
     "--host", "0.0.0.0",
@@ -35,7 +36,7 @@ LLAMA_SERVER_ARGS = [
     "--jinja",
     
     # GPU / VRAM Allocations
-    "--n-gpu-layers", "99",
+    "--n-gpu-layers", LLAMA_QWEN_NGL,
     "-fa", "on",  # Flash attention lowers VRAM footprint
     "--ctx-size", "32768",  # 32k context; KV cache quantized to q8_0 to fit VRAM
     #"--no-kv-offload",
@@ -2455,63 +2456,6 @@ def read_file_text(file_path):
             os.unlink(tmp)
     elif ext in (".xls", ".xlsx"):
         from openpyxl import load_workbook
-        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-        rows = []
-        for sheet in wb.worksheets:
-            for row in sheet.iter_rows(values_only=True):
-                rows.append("\t".join(str(c) if c is not None else "" for c in row))
-        wb.close()
-        return "\n".join(rows)
-    return ""
-
-
-def extract_file_text(name, data_b64):
-    ext = os.path.splitext(name)[1].lower()
-    raw = base64.b64decode(data_b64)
-    if ext == ".pdf":
-        try:
-            import fitz
-
-            doc = fitz.open(stream=raw, filetype="pdf")
-            lines = [page.get_text() for page in doc]
-            doc.close()
-            text = "\n".join(lines)
-            return strip_html(text)
-        except ImportError:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
-                f.write(raw)
-                tmp = f.name
-            try:
-                r = subprocess.run(
-                    ["pdftotext", tmp, "-"], capture_output=True, text=True, timeout=30
-                )
-                return r.stdout
-            finally:
-                os.unlink(tmp)
-    elif ext == ".docx":
-        from docx import Document
-
-        doc = Document(io.BytesIO(raw))
-        return "\n".join(p.text for p in doc.paragraphs)
-    elif ext == ".doc":
-        with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as f:
-            f.write(raw)
-            tmp = f.name
-        try:
-            r = subprocess.run(
-                ["catdoc", tmp], capture_output=True, text=True, timeout=30
-            )
-            if r.returncode == 0:
-                return r.stdout
-            r = subprocess.run(
-                ["antiword", tmp], capture_output=True, text=True, timeout=30
-            )
-            return r.stdout
-        finally:
-            os.unlink(tmp)
-    elif ext in (".xls", ".xlsx"):
-        from openpyxl import load_workbook
-
         wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
         rows = []
         for sheet in wb.worksheets:
