@@ -105,12 +105,12 @@ class LoginRequest(BaseModel):
 
 # --- Auth & RBAC Helpers ---
 
-def get_current_user(request: Request, x_auth_token: str | None = Header(None, alias="X-Auth-Token")) -> str | None:
+def get_current_user(request: Request) -> str | None:
     """Extracts token from Header or Cookie and checks memory cache."""
-    token = x_auth_token or request.cookies.get("X-Auth-Token") or ""
+    token = request.headers.get("X-Auth-Token") or request.cookies.get("X-Auth-Token") or ""
     if not token:
         return None
-        
+
     with _tokens_lock:
         return _active_tokens.get(token)
 
@@ -188,8 +188,11 @@ async def logout(
 async def index(request: Request):
     """Collections index listing available story collections and their stories."""
     username = get_current_user(request)
+    user_level = user_role_level(username)
     cards = []
     for name, rule in COLLECTION_RULES.items():
+        if rule["min_level"] > user_level:
+            continue
         root = rule["path"]
         if not os.path.isdir(root):
             continue
@@ -208,6 +211,20 @@ async def index(request: Request):
             + "</ul>"
         )
     body = "".join(cards) or "<p>No story collections found yet.</p>"
+    if username:
+        auth_html = f"""
+        <p style="float:right; margin:0;">Logged in as <strong>{username}</strong>
+        <button id="logout-btn" style="margin-left:8px; background:none; border:1px solid #888; color:#888; border-radius:6px; padding:2px 10px; cursor:pointer; font-family:sans-serif; font-size:12px;">Log out</button></p>
+        """
+    else:
+        auth_html = f"""
+        <p style="float:right; margin:0;">
+            <input id="login-user" placeholder="Username" style="padding:4px 8px; border:1px solid #aaa; border-radius:6px; margin-right:4px;">
+            <input id="login-pass" type="password" placeholder="Password" style="padding:4px 8px; border:1px solid #aaa; border-radius:6px; margin-right:4px;">
+            <button id="login-btn" style="background:#06c; color:#fff; border:none; border-radius:6px; padding:5px 12px; cursor:pointer; font-family:sans-serif;">Log in</button>
+            <span id="login-msg" style="color:#c44; font-size:12px;"></span>
+        </p>
+        """
     return f"""
     <!DOCTYPE html>
     <html>
@@ -225,8 +242,45 @@ async def index(request: Request):
         </style>
     </head>
     <body>
+        {auth_html}
         <h1>Story Collections</h1>
         {body}
+        <script>
+            async function doLogin() {{
+                const user = document.getElementById('login-user').value.trim();
+                const pass = document.getElementById('login-pass').value;
+                const msg = document.getElementById('login-msg');
+                try {{
+                    const r = await fetch('/api/login', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ username: user, password: pass }}),
+                    }});
+                    if (r.ok) {{
+                        window.location.reload();
+                    }} else {{
+                        const d = await r.json();
+                        msg.textContent = d.detail || 'Invalid credentials';
+                    }}
+                }} catch (e) {{
+                    msg.textContent = e.message;
+                }}
+            }}
+            const loginBtn = document.getElementById('login-btn');
+            if (loginBtn) {{
+                loginBtn.addEventListener('click', doLogin);
+                document.getElementById('login-pass').addEventListener('keydown', e => {{
+                    if (e.key === 'Enter') doLogin();
+                }});
+            }}
+            const logoutBtn = document.getElementById('logout-btn');
+            if (logoutBtn) {{
+                logoutBtn.addEventListener('click', async () => {{
+                    await fetch('/api/logout', {{ method: 'POST' }});
+                    window.location.reload();
+                }});
+            }}
+        </script>
     </body>
     </html>
     """

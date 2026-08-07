@@ -12,12 +12,20 @@ import random
 
 parser = argparse.ArgumentParser(description="Self-chat story generator")
 parser.add_argument(
-    "--dir",
-    default="/home/palash/local-ai-files/stories",
-    help="Base directory where generated stories are saved (default: ~/local-ai-files/stories)",
+    "--config",
+    default="",
+    help="Path to a custom JSON task list to use instead of the default "
+    "(~/local-ai-files/tasks.json). Combine with --defaults to also include "
+    "the default tasks.",
+)
+parser.add_argument(
+    "--defaults",
+    action="store_true",
+    help="Also load the default tasks (~/local-ai-files/tasks.json) in addition "
+    "to the ones from --config.",
 )
 args = parser.parse_args()
-STORY_BASE_DIR = args.dir
+STORY_BASE_DIR = os.path.expanduser("~/local-ai-files/stories")
 
 BASE_URL = "http://localhost"
 USERNAME_A = "kolpo"
@@ -26,20 +34,20 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 10.0
-SLEEP_BETWEEN_TURNS = 1.0
+SLEEP_BETWEEN_TURNS = 10.0
 MAX_MESSAGES_PER_AGENT = 50
-CONVERGE_WINDOW = 3  # last N messages per agent are for convergence/finalization
+CONVERGE_WINDOW = 5  # last N messages per agent are for convergence/finalization
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 STARTING_CONVERSATION = open("/home/palash/local-ai-files/self_chat.txt").read()
 
-TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
+DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 
 
-def load_tasks():
-    if not os.path.isfile(TASKS_FILE):
-        print(f"Tasks file not found: {TASKS_FILE}")
+def load_tasks_from_file(tasks_file):
+    if not os.path.isfile(tasks_file):
+        print(f"Tasks file not found: {tasks_file}")
         return []
-    with open(TASKS_FILE, "r", encoding="utf-8") as f:
+    with open(tasks_file, "r", encoding="utf-8") as f:
         data = json.load(f)
     tasks = []
     for item in data:
@@ -52,21 +60,40 @@ def load_tasks():
         mediums = item.get("mediums") or ["image", "text"]
         if isinstance(mediums, str):
             mediums = [m.strip() for m in mediums.split(",")]
+        roles = item.get("roles") or ["free"]
+        if isinstance(roles, str):
+            roles = [r.strip() for r in roles.split(",")]
         tasks.append(
-            {"task": task, "languages": languages, "mediums": mediums}
+            {"task": task, "languages": languages, "mediums": mediums, "roles": roles}
         )
     return tasks
 
 
-TASKS = load_tasks()
+def load_tasks():
+    """Combine tasks from --config and/or the default file. No role tag => free."""
+    if args.config:
+        tasks = load_tasks_from_file(args.config)
+        source = args.config
+        if args.defaults:
+            defaults = load_tasks_from_file(DEFAULT_TASKS_FILE)
+            existing = {t["task"] for t in tasks}
+            tasks.extend(t for t in defaults if t["task"] not in existing)
+            source = f"{args.config} + defaults"
+    else:
+        tasks = load_tasks_from_file(DEFAULT_TASKS_FILE)
+        source = DEFAULT_TASKS_FILE
+    return tasks, source
+
+
+TASKS, TASKS_SOURCE = load_tasks()
 if not TASKS:
-    print("No tasks to run. Add tasks to tasks.json and restart.")
+    print("No tasks to run. Add tasks to a config file and restart.")
     raise SystemExit(1)
 
 user_input = input("Keep sessions {y/n} [default: n] ? ")
 keep_sessions = user_input.strip().lower() == "y"
 
-print(f"Loaded {len(TASKS)} task(s) from {TASKS_FILE}")
+print(f"Loaded {len(TASKS)} task(s) from {TASKS_SOURCE}")
 
 
 def is_duplicate(new_text, previous_text, threshold=0.8):
@@ -243,7 +270,7 @@ def build_input(speaker, message_number, incoming, lang, task):
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number, task, mediums, languages):
+def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
@@ -272,7 +299,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     incoming = ""
     shared_image_b64 = None
 
-    stories_dir, fname = start_story(round_number, task, mediums, languages)
+    stories_dir, fname = start_story(round_number, task, mediums, languages, roles)
     citations = {}
 
     while True:
@@ -366,7 +393,7 @@ def slugify(text, max_len=60):
     return slug[:max_len].strip("-") or "story"
 
 
-def start_story(round_number, task, mediums, languages):
+def start_story(round_number, task, mediums, languages, roles=None):
     base_dir = STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
     now = datetime.now()
@@ -375,10 +402,12 @@ def start_story(round_number, task, mediums, languages):
     stories_dir = os.path.join(base_dir, folder_name)
     os.makedirs(stories_dir, exist_ok=True)
     fname = os.path.join(stories_dir, f"story_r{round_number}_{timestamp}.md")
+    roles = roles or ["free"]
     header = [
         f"# {task}\n",
         f"*Round {round_number} · Generated on {now.strftime('%Y-%m-%d %H:%M:%S')}*\n\n",
         f"**Task prompt:** {task}\n\n",
+        f"**For roles:** {' , '.join(roles)}\n\n",
         f"**Mediums:** {' , '.join(mediums)}  ·  **Language(s):** {' , '.join(languages)}\n\n",
         "---\n\n",
     ]
@@ -478,9 +507,10 @@ def run_forever():
             task = spec["task"]
             mediums = spec["mediums"]
             languages = spec["languages"]
-            print(f"=== Starting round {round_number}: {task} ===\n")
+            roles = spec.get("roles") or ["free"]
+            print(f"=== Starting round {round_number}: {task} (for roles: {', '.join(roles)}) ===\n")
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number, task, mediums, languages
+                token_a, token_b, round_number, task, mediums, languages, roles
             )
             # save_transcript(transcript, round_number)
             if not keep_sessions:
