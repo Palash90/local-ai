@@ -5,7 +5,6 @@ sys.stdout.reconfigure(line_buffering=True)  # noqa
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor
-from utils.file_utils import extract_file_text
 
 LLAMA_BASE = "http://localhost:8081"
 LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
