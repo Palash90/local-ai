@@ -2,6 +2,7 @@ import os
 import json
 import time
 import uuid
+import shutil
 import threading
 import markdown
 from fastapi import FastAPI, HTTPException, Header, Request, Response, status
@@ -280,6 +281,26 @@ async def story_content(
     return {"html": render_story_html(collection, story_id, content)}
 
 
+@app.delete("/story/{collection}/{story_id}")
+async def delete_story(
+    collection: str, 
+    story_id: str, 
+    request: Request
+):
+    """Deletes the story folder (markdown + images) with RBAC enforcement."""
+    username = get_current_user(request)
+    enforce_rbac(collection, username)
+
+    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    if not os.path.exists(folder_path):
+        raise HTTPException(status_code=404, detail="Story folder not found")
+
+    shutil.rmtree(folder_path, ignore_errors=True)
+    if os.path.exists(folder_path):
+        raise HTTPException(status_code=500, detail="Failed to delete story folder")
+    return {"ok": True, "deleted": story_id}
+
+
 @app.get("/story/{collection}/{story_id}", response_class=HTMLResponse)
 async def read_story(
     collection: str, 
@@ -330,6 +351,7 @@ async def read_story(
     </head>
     <body>
         <a href="/" class="back">← Back to Collections</a>
+        <button id="delete-btn" style="float:right; background:none; border:1px solid #c44; color:#c44; border-radius:6px; padding:4px 12px; cursor:pointer; font-family:sans-serif; font-size:13px;">Delete story</button>
         <article id="story-article">{html_content}</article>
         <script>
             const article = document.getElementById('story-article');
@@ -354,6 +376,21 @@ async def read_story(
                 setTimeout(poll, 3000);
             }}
             poll();
+
+            document.getElementById('delete-btn').addEventListener('click', async () => {{
+                if (!confirm('Delete this story and all its images?')) return;
+                try {{
+                    const r = await fetch('/story/{collection}/{story_id}', {{ method: 'DELETE' }});
+                    if (r.ok) {{
+                        window.location.href = '/';
+                    }} else {{
+                        const d = await r.json();
+                        alert('Delete failed: ' + (d.detail || r.status));
+                    }}
+                }} catch (e) {{
+                    alert('Delete failed: ' + e.message);
+                }}
+            }});
         </script>
     </body>
     </html>

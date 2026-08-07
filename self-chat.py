@@ -433,7 +433,6 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     cleaned = clean_speaker_text(speaker, entry.get("text", ""))
     turn = entry.get("message", idx)
     lines = [
-        f"### {speaker}\n\n",
         f"<small style=\"color:#888\">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n",
         f"{cleaned}\n\n",
     ]
