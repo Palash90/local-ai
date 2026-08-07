@@ -34,8 +34,8 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 10.0
-SLEEP_BETWEEN_TURNS = 10.0
-MAX_MESSAGES_PER_AGENT = 50
+SLEEP_BETWEEN_TURNS = 1.0
+MAX_MESSAGES_PER_AGENT = 10
 CONVERGE_WINDOW = 5  # last N messages per agent are for convergence/finalization
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 STARTING_CONVERSATION = open("/home/palash/local-ai-files/self_chat.txt").read()
@@ -63,8 +63,15 @@ def load_tasks_from_file(tasks_file):
         roles = item.get("roles") or ["free"]
         if isinstance(roles, str):
             roles = [r.strip() for r in roles.split(",")]
+        genre = (item.get("genre") or "").strip() or "General"
         tasks.append(
-            {"task": task, "languages": languages, "mediums": mediums, "roles": roles}
+            {
+                "task": task,
+                "genre": genre,
+                "languages": languages,
+                "mediums": mediums,
+                "roles": roles,
+            }
         )
     return tasks
 
@@ -270,7 +277,7 @@ def build_input(speaker, message_number, incoming, lang, task):
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None):
+def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General"):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
@@ -299,7 +306,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     incoming = ""
     shared_image_b64 = None
 
-    stories_dir, fname = start_story(round_number, task, mediums, languages, roles)
+    stories_dir, fname = start_story(round_number, task, mediums, languages, roles, genre)
     citations = {}
 
     while True:
@@ -393,13 +400,15 @@ def slugify(text, max_len=60):
     return slug[:max_len].strip("-") or "story"
 
 
-def start_story(round_number, task, mediums, languages, roles=None):
+def start_story(round_number, task, mediums, languages, roles=None, genre="General"):
     base_dir = STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
     folder_name = f"{slugify(task)}_{timestamp}"
-    stories_dir = os.path.join(base_dir, folder_name)
+    genre_dir = os.path.join(base_dir, slugify(genre))
+    os.makedirs(genre_dir, exist_ok=True)
+    stories_dir = os.path.join(genre_dir, folder_name)
     os.makedirs(stories_dir, exist_ok=True)
     fname = os.path.join(stories_dir, f"story_r{round_number}_{timestamp}.md")
     roles = roles or ["free"]
@@ -407,6 +416,7 @@ def start_story(round_number, task, mediums, languages, roles=None):
         f"# {task}\n",
         f"*Round {round_number} · Generated on {now.strftime('%Y-%m-%d %H:%M:%S')}*\n\n",
         f"**Task prompt:** {task}\n\n",
+        f"**Genre:** {genre}\n\n",
         f"**For roles:** {' , '.join(roles)}\n\n",
         f"**Mediums:** {' , '.join(mediums)}  ·  **Language(s):** {' , '.join(languages)}\n\n",
         "---\n\n",
@@ -508,9 +518,10 @@ def run_forever():
             mediums = spec["mediums"]
             languages = spec["languages"]
             roles = spec.get("roles") or ["free"]
-            print(f"=== Starting round {round_number}: {task} (for roles: {', '.join(roles)}) ===\n")
+            genre = spec.get("genre") or "General"
+            print(f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n")
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number, task, mediums, languages, roles
+                token_a, token_b, round_number, task, mediums, languages, roles, genre
             )
             # save_transcript(transcript, round_number)
             if not keep_sessions:

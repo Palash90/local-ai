@@ -184,6 +184,34 @@ async def logout(
 
 # --- Dynamic Story Engine & Media Router ---
 
+def list_collection_stories(root: str):
+    """Return [(genre_label | None, story_id)] for a collection root.
+
+    Legacy flat story folders (md directly inside root) are reported with
+    genre None; genre folders contain story subdirectories.
+    """
+    entries = sorted(
+        os.listdir(root),
+        key=lambda e: os.path.getmtime(os.path.join(root, e)),
+        reverse=True,
+    )
+    items = []
+    for entry in entries:
+        full = os.path.join(root, entry)
+        if not os.path.isdir(full):
+            continue
+        if any(f.endswith(".md") for f in os.listdir(full)):
+            items.append((None, entry))
+            continue
+        for sub in sorted(os.listdir(full), reverse=True):
+            subfull = os.path.join(full, sub)
+            if os.path.isdir(subfull) and any(
+                f.endswith(".md") for f in os.listdir(subfull)
+            ):
+                items.append((entry, os.path.join(entry, sub)))
+    return items
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Collections index listing available story collections and their stories."""
@@ -196,19 +224,26 @@ async def index(request: Request):
         root = rule["path"]
         if not os.path.isdir(root):
             continue
-        story_ids = sorted(
-            os.listdir(root),
-            key=lambda sid: os.path.getmtime(os.path.join(root, sid)),
-            reverse=True,
-        )
-        if not story_ids:
+        items = list_collection_stories(root)
+        if not items:
             continue
-        cards.append(
-            f"<h2>{name.replace('_', ' ').title()}</h2><ul>"
-            + "".join(
-                f'<li><a href="/story/{name}/{sid}">{sid}</a></li>' for sid in story_ids
+        grouped = {}
+        for genre, sid in items:
+            grouped.setdefault(genre, []).append(sid)
+        sections = []
+        for genre, sids in grouped.items():
+            heading = f"<h3>{genre.replace('_', ' ').title()}</h3>" if genre else ""
+            sections.append(
+                heading
+                + "<ul>"
+                + "".join(
+                    f'<li><a href="/story/{name}/{sid}">{sid.split("/")[-1]}</a></li>'
+                    for sid in sids
+                )
+                + "</ul>"
             )
-            + "</ul>"
+        cards.append(
+            f"<h2>{name.replace('_', ' ').title()}</h2>" + "".join(sections)
         )
     body = "".join(cards) or "<p>No story collections found yet.</p>"
     if username:
