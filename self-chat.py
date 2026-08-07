@@ -32,27 +32,41 @@ CONVERGE_WINDOW = 3  # last N messages per agent are for convergence/finalizatio
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 STARTING_CONVERSATION = open("/home/palash/local-ai-files/self_chat.txt").read()
 
-user_input = input("Enter Detailed task: ")
-task = user_input or "Short Comic Based on last weeks sports event"
+TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 
-user_input = input("Enter comma-separated mediums: ")
-mediums = (
-    [m.strip() for m in user_input.split(",")]
-    if user_input.strip()
-    else ["image", "text"]
-)
 
-user_input = input(
-    "In which language Kaya and Kolpo should have conversation (comma separated values):"
-)
-languages = (
-    [m.strip() for m in user_input.split(",")] if user_input.strip() else ["English"]
-)
+def load_tasks():
+    if not os.path.isfile(TASKS_FILE):
+        print(f"Tasks file not found: {TASKS_FILE}")
+        return []
+    with open(TASKS_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    tasks = []
+    for item in data:
+        task = (item.get("task") or "").strip()
+        if not task:
+            continue
+        languages = item.get("languages") or ["English"]
+        if isinstance(languages, str):
+            languages = [l.strip() for l in languages.split(",")]
+        mediums = item.get("mediums") or ["image", "text"]
+        if isinstance(mediums, str):
+            mediums = [m.strip() for m in mediums.split(",")]
+        tasks.append(
+            {"task": task, "languages": languages, "mediums": mediums}
+        )
+    return tasks
 
-user_input = input("Keep sessions {y/n} ?")
-keep_sessions = user_input.strip().lower() == "y" if user_input.strip() else True
 
-print(task, mediums, languages)
+TASKS = load_tasks()
+if not TASKS:
+    print("No tasks to run. Add tasks to tasks.json and restart.")
+    raise SystemExit(1)
+
+user_input = input("Keep sessions {y/n} [default: n] ? ")
+keep_sessions = user_input.strip().lower() == "y"
+
+print(f"Loaded {len(TASKS)} task(s) from {TASKS_FILE}")
 
 
 def is_duplicate(new_text, previous_text, threshold=0.8):
@@ -190,7 +204,7 @@ def call_llm(token, session_id, message, image_b64=None):
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-def build_input(speaker, message_number, incoming, lang):
+def build_input(speaker, message_number, incoming, lang, task):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
 
@@ -229,7 +243,7 @@ def build_input(speaker, message_number, incoming, lang):
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number):
+def run_single_conversation(token_a, token_b, round_number, task, mediums, languages):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
@@ -258,7 +272,7 @@ def run_single_conversation(token_a, token_b, round_number):
     incoming = ""
     shared_image_b64 = None
 
-    stories_dir, fname = start_story(round_number)
+    stories_dir, fname = start_story(round_number, task, mediums, languages)
     citations = {}
 
     while True:
@@ -273,6 +287,7 @@ def run_single_conversation(token_a, token_b, round_number):
             message_number,
             "" if not transcript else incoming,
             language,
+            task,
         )
 
         wait_for_user_to_leave()
@@ -351,7 +366,7 @@ def slugify(text, max_len=60):
     return slug[:max_len].strip("-") or "story"
 
 
-def start_story(round_number):
+def start_story(round_number, task, mediums, languages):
     base_dir = STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
     now = datetime.now()
@@ -416,7 +431,12 @@ def collect_citations(citations, searches):
 def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     speaker = entry.get("speaker", "Unknown")
     cleaned = clean_speaker_text(speaker, entry.get("text", ""))
-    lines = [f"### {speaker}\n\n{cleaned}\n\n"]
+    turn = entry.get("message", idx)
+    lines = [
+        f"### {speaker}\n\n",
+        f"<small style=\"color:#888\">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n",
+        f"{cleaned}\n\n",
+    ]
 
     collect_citations(citations, entry.get("searches"))
 
@@ -451,18 +471,24 @@ def run_forever():
     print("Logged In")
 
     round_number = 1
+    task_index = 0
 
     try:
         while True:
-            print(f"=== Starting round {round_number} ===\n")
+            spec = TASKS[task_index % len(TASKS)]
+            task = spec["task"]
+            mediums = spec["mediums"]
+            languages = spec["languages"]
+            print(f"=== Starting round {round_number}: {task} ===\n")
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number
+                token_a, token_b, round_number, task, mediums, languages
             )
             # save_transcript(transcript, round_number)
             if not keep_sessions:
                 delete_session(token_a, session_a)
                 delete_session(token_b, session_b)
             round_number += 1
+            task_index += 1
     except KeyboardInterrupt:
         print("\nManual Interruption")
 
