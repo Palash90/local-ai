@@ -400,12 +400,19 @@ class TestBuildInput:
         assert "Your partner is Kaya" in out
 
     def test_phase2(self, self_chat):
-        out = self_chat.build_input("B", 3, "", "english", "Task X")
+        # Any turn strictly between the alignment window (<=2) and the
+        # finalization window (>= MAX-2) should be PHASE 2, regardless of
+        # what MAX_MESSAGES_PER_AGENT is currently set to.
+        mid_turn = max(3, self_chat.MAX_MESSAGES_PER_AGENT // 2)
+        out = self_chat.build_input("B", mid_turn, "", "english", "Task X")
         assert "PHASE 2: DIRECT EXECUTION" in out
         assert "Speak in english" in out
 
     def test_phase3(self, self_chat):
-        out = self_chat.build_input("A", 6, "", "english", "Task X")
+        # First turn of the finalization window, derived from the constant
+        # so this doesn't rot when MAX_MESSAGES_PER_AGENT changes.
+        final_turn = self_chat.MAX_MESSAGES_PER_AGENT - 2
+        out = self_chat.build_input("A", final_turn, "", "english", "Task X")
         assert "PHASE 3: FINALIZATION" in out
         assert "[END CONVERSATION]" in out
 
