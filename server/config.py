@@ -28,7 +28,7 @@ LLAMA_SERVER_ARGS = [
     "--jinja",
 
     # GPU / VRAM Allocations
-    "--n-gpu-layers", LLAMA_QWEN_NGL,
+    "--n-gpu-layers", LLAMA_GEMMA_NGL,
     "-fa", "on",  # Flash attention lowers VRAM footprint
     "--ctx-size", "32768",  # 32k context; KV cache quantized to q8_0 to fit VRAM
     #"--no-kv-offload",     # Use it to move the kv cache to RAM

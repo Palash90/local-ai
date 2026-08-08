@@ -43,6 +43,9 @@ from server.config import (
 
 from server.api import APP_STATE_NAMES, Handler, set_app_state
 
+import server.users as _users_mod
+import server.sessions as _sessions_mod
+
 import sys
 
 sys.path.insert(0, COMFYUI_DIR)
@@ -121,44 +124,19 @@ def load_users():
 
 
 def get_user_password(username):
-    users = load_users()
-    u = users.get(username)
-    return u.get("password", "") if u else ""
+    return _users_mod.get_user_password(load_users(), username)
 
 
 def get_user_context_path(username):
-    users = load_users()
-    u = users.get(username)
-    if u and u.get("context_file"):
-        return os.path.join(u["context_file"])
-    return ""
+    return _users_mod.get_user_context_path(load_users(), username)
 
 
 def read_user_context(username):
-    path = get_user_context_path(username)
-    print("Context path", path, "for", username)
-    if path and os.path.exists(path):
-        try:
-            print("Reading", path)
-            with open(path) as f:
-                context = f.read()
-                print(context)
-                return context
-        except:
-            return ""
-    return ""
+    return _users_mod.read_user_context(load_users(), username)
 
 
 def write_user_context(username, content):
-    path = get_user_context_path(username)
-    if path:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        existing = read_user_context(username)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        entry = f"[{timestamp}] {content}"
-        new_content = (existing.strip() + "\n\n" + entry) if existing.strip() else entry
-        with open(path, "w") as f:
-            f.write(new_content)
+    _users_mod.write_user_context(load_users(), username, content)
 
 
 _active_tokens = {}
@@ -222,101 +200,30 @@ _ram_evacuating = False
 
 
 def _safe_username(user):
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", user or "")
-    return safe or "unknown"
+    return _sessions_mod.safe_username(user)
 
 
 def _session_file(user):
-    return os.path.join(SESSIONS_DIR, f"sessions_{_safe_username(user)}.json")
+    return _sessions_mod.session_file(SESSIONS_DIR, user)
 
 
 def _load_extra_prompts(items):
-    """Normalize a list of extra system prompt sources into [{name, content}].
-
-    Each item may be a {name, content} dict or a server-side file path string.
-    """
-    blocks = []
-    for it in items or []:
-        if isinstance(it, dict):
-            content = it.get("content") or ""
-            if not content.strip():
-                continue
-            blocks.append({"name": it.get("name") or "System Prompt", "content": content})
-        elif isinstance(it, str):
-            p = os.path.abspath(os.path.expanduser(it))
-            if os.path.isfile(p):
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        blocks.append({"name": os.path.basename(it), "content": f.read()})
-                except OSError:
-                    pass
-    return blocks
+    return _sessions_mod.load_extra_prompts(items)
 
 
 def load_sessions():
     global sessions, sessions_meta
+    new_sessions, new_sessions_meta = _sessions_mod.load_sessions(SESSIONS_DIR)
     with _data_lock:
-        sessions.clear()
-        sessions_meta.clear()
-    for path in glob.glob(os.path.join(SESSIONS_DIR, "sessions_*.json")):
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            continue
-        with _data_lock:
-            for sid, sdata in data.get("sessions", {}).items():
-                sessions[sid] = sdata.get("messages", [])
-                sessions_meta[sid] = {
-                    "name": sdata.get("name", "Chat"),
-                    "created": sdata.get("created", time.time()),
-                    "updated": sdata.get("updated", time.time()),
-                    "user_id": sdata.get("user_id", ""),
-                    "system_prompts": sdata.get("system_prompts", []),
-                }
-    stale = os.path.join(SESSIONS_DIR, "sessions.json")
-    if os.path.exists(stale):
-        try:
-            with open(stale) as f:
-                data = json.load(f)
-            with _data_lock:
-                for sid, sdata in data.get("sessions", {}).items():
-                    if sid not in sessions:
-                        sessions[sid] = sdata.get("messages", [])
-                        sessions_meta[sid] = {
-                            "name": sdata.get("name", "Chat"),
-                            "created": sdata.get("created", time.time()),
-                            "updated": sdata.get("updated", time.time()),
-                            "user_id": sdata.get("user_id", ""),
-                            "system_prompts": sdata.get("system_prompts", []),
-                        }
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        try:
-            os.remove(stale)
-        except OSError:
-            pass
+        sessions = new_sessions
+        sessions_meta = new_sessions_meta
 
 
 def save_sessions():
-    by_user = {}
     with _data_lock:
-        for sid in sessions:
-            meta = sessions_meta.get(
-                sid, {"name": "Chat", "created": time.time(), "updated": time.time()}
-            )
-            user = meta.get("user_id", "")
-            by_user.setdefault(user, {}).setdefault("sessions", {})[sid] = {
-                "name": meta["name"],
-                "created": meta["created"],
-                "updated": meta["updated"],
-                "user_id": meta.get("user_id", ""),
-                "system_prompts": meta.get("system_prompts", []),
-                "messages": sessions[sid],
-            }
-    for user, data in by_user.items():
-        with open(_session_file(user), "w") as f:
-            json.dump(data, f, indent=2)
+        sessions_snapshot = dict(sessions)
+        sessions_meta_snapshot = dict(sessions_meta)
+    _sessions_mod.save_sessions(SESSIONS_DIR, sessions_snapshot, sessions_meta_snapshot)
 
 
 def _task_user(task_id):
