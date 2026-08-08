@@ -325,6 +325,16 @@ def _load_extra_prompts(items):
     return blocks
 
 
+def _session_meta_from(sdata):
+    return {
+        "name": sdata.get("name", "Chat"),
+        "created": sdata.get("created", time.time()),
+        "updated": sdata.get("updated", time.time()),
+        "user_id": sdata.get("user_id", ""),
+        "system_prompts": sdata.get("system_prompts", []),
+    }
+
+
 def load_sessions():
     global sessions, sessions_meta
     with _data_lock:
@@ -339,13 +349,7 @@ def load_sessions():
         with _data_lock:
             for sid, sdata in data.get("sessions", {}).items():
                 sessions[sid] = sdata.get("messages", [])
-                sessions_meta[sid] = {
-                    "name": sdata.get("name", "Chat"),
-                    "created": sdata.get("created", time.time()),
-                    "updated": sdata.get("updated", time.time()),
-                    "user_id": sdata.get("user_id", ""),
-                    "system_prompts": sdata.get("system_prompts", []),
-                }
+                sessions_meta[sid] = _session_meta_from(sdata)
     stale = os.path.join(SESSIONS_DIR, "sessions.json")
     if os.path.exists(stale):
         try:
@@ -355,13 +359,7 @@ def load_sessions():
                 for sid, sdata in data.get("sessions", {}).items():
                     if sid not in sessions:
                         sessions[sid] = sdata.get("messages", [])
-                        sessions_meta[sid] = {
-                            "name": sdata.get("name", "Chat"),
-                            "created": sdata.get("created", time.time()),
-                            "updated": sdata.get("updated", time.time()),
-                            "user_id": sdata.get("user_id", ""),
-                            "system_prompts": sdata.get("system_prompts", []),
-                        }
+                        sessions_meta[sid] = _session_meta_from(sdata)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         try:
