@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+import json
+import os
+
+LLAMA_BASE = "http://localhost:8081"
+LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
+
+VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
+COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080/search")
+COMFYUI_URL = "http://localhost:8188"
+HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
+PORT = 3001
+REASONING_BUDGET = 4096
+
+with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
+    MODEL_ID = file.read()
+
+COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
+UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
+LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-server")
+LLAMA_QWEN_NGL = "0"
+LLAMA_GEMMA_NGL = "99"
+LLAMA_SERVER_ARGS = [
+    "--host", "0.0.0.0",
+    "--port", "8081",
+    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    "--jinja",
+
+    # GPU / VRAM Allocations
+    "--n-gpu-layers", LLAMA_QWEN_NGL,
+    "-fa", "on",  # Flash attention lowers VRAM footprint
+    "--ctx-size", "32768",  # 32k context; KV cache quantized to q8_0 to fit VRAM
+    #"--no-kv-offload",     # Use it to move the kv cache to RAM
+    "-ctk", "q8_0",            # Quantize Key cache to 8-bit (saves 50% VRAM)
+    "-ctv", "q8_0",            # Quantize Value cache to 8-bit (saves 50% VRAM)
+
+    # Reasoning & Thinking Limits
+    "--reasoning-budget", str(REASONING_BUDGET),
+    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+
+    # Gemma 4 Sampling Preset
+    "--temp", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64",
+    "--min-p", "0.0",
+    "--repeat-penalty", "1.0"
+]
+
+FILES_DIR = os.path.expanduser("~/local-ai-files")
+SESSIONS_FILE = os.path.join(FILES_DIR, "sessions.json")
+SESSIONS_DIR = FILES_DIR
+IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
+COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
+PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
+USERS_FILE = os.path.expanduser("~/local-ai-files/users.json")
+TASKS_DB = os.path.expanduser("~/local-ai-files/tasks.db")
+IMAGE_TOKEN_COST = 1200
+AUDIO_TOKEN_COST = 800
+PER_MESSAGE_OVERHEAD = 4
+
+with open(
+    os.path.expanduser("~/local-ai-files/models.json"), "r", encoding="utf-8"
+) as file:
+    IMAGE_MODELS = json.load(file)
+
+TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search. The results contain snippets only; if the snippets are insufficient to answer the question fully, follow up with fetch_page to read the full content of the relevant page.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query"},
+                        "current_time": {"type": "string", "description": "Current date and time. Pass ONLY for time-sensitive queries (news, events, hours, etc.) where recency matters. Omit for direct-link lookups or general information."},
+                        "current_location": {"type": "string", "description": "User's location. Pass ONLY for location-specific results (weather, local news, nearby places, events). If you don't know the user's location, call get_user_location first to obtain it. Do NOT guess or fabricate location."}
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_page",
+            "description": "Fetch and read the full text content of a web page. Use this AFTER web_search when the search snippets are not enough to answer the question (e.g. you need details, data, or an article's body). Pass the full URL of the page to read.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full URL of the web page to fetch (must start with http:// or https://)."
+                    }
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate or draw an image. You MUST choose a style model.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed visual description of what to draw/generate.",
+                    },
+                    "negative_prompt": {
+                        "type": "string",
+                        "description": "Things to avoid in the image",
+                    },
+                    "model": {
+                        "type": "string",
+                        "enum": list(IMAGE_MODELS.keys()),
+                        "description": "Art style to use. Options: "
+                        + ", ".join(
+                            [
+                                f"'{k}' ({v['description']})"
+                                for k, v in IMAGE_MODELS.items()
+                            ]
+                        ),
+                    },
+                },
+                "required": ["prompt", "model"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_image",
+            "description": "Generic Img2Img image editor to modify, restyle, recolor, add elements, or transform existing or uploaded images.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Complete description of what the edited image should look like.",
+                    },
+                    "negative_prompt": {
+                        "type": "string",
+                        "description": "Elements to exclude from the visual generation.",
+                    },
+                    "denoise": {
+                        "type": "number",
+                        "description": "Denoising value (0.1 to 1.0). Use 0.25-0.4 for subtle color/lighting changes, 0.45-0.65 for structural edits and object additions, and 0.7-0.85 for massive re-imaginings.",
+                    },
+                },
+                "required": ["prompt", "denoise"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_user_location",
+            "description": "Request the user's current geographical location. Call this ONLY when you need location for a location-specific query (weather, local news, nearby places, etc.) and you don't already have the user's location. Returns the user's city/area or 'denied' if they refuse.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read the text content of an uploaded file (PDF, DOC, DOCX, XLS, XLSX). Call this when the user has attached a file and you need to read its content to answer their question. The file URL is provided in the user message as [FILE: url]. Pass that url as the file_url parameter.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_url": {
+                        "type": "string",
+                        "description": "The file URL from the user message (the /uploads/... path)."
+                    }
+                },
+                "required": ["file_url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_user_context",
+            "description": "Store information about the current user that persists across conversations. Saves preferences, personal details, important facts, or anything the user should not need to repeat. This APPENDS to existing context — only add NEW information, do not repeat what was already saved.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The new information to append to the user's context. Keep it concise and focused on what's new.",
+                    }
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_tasks",
+            "description": "Manage to-do tasks. Can create, update, complete, delete, list, or get task details. Use this when the user wants to track tasks, set reminders, or manage their to-do list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["create", "update", "complete", "delete", "list", "get"],
+                        "description": "The operation to perform.",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Required for update/complete/delete/get. The task ID.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Required for create. Task title.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Task description or details.",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high"],
+                        "description": "Task priority (default: medium).",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed", "cancelled"],
+                        "description": "For update: new status.",
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "Due date in ISO format (e.g. 2026-08-15T17:00:00).",
+                    },
+                    "reminder_at": {
+                        "type": "string",
+                        "description": "Reminder time in ISO format. The system will notify about this task at the given time.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID to link this task to a conversation.",
+                    },
+                },
+                "required": ["operation"],
+            },
+        },
+    },
+]
+
+TOOLS_TOKEN_COST = len(json.dumps(TOOLS)) // 4
+
+
+def build_sys_content():
+    with open(PROMPT_PATH, "r") as file:
+        sys_content = file.read()
+    model_list = "; ".join(f"{k}: {v['description']}" for k, v in IMAGE_MODELS.items())
+    sys_content = sys_content.replace("%model_list%", model_list)
+    sys_content = sys_content.replace("%_image_keys%", str(list(IMAGE_MODELS.keys())))
+    return sys_content

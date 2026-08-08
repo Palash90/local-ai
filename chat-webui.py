@@ -1,268 +1,50 @@
 #!/usr/bin/env python3
-import http.server, json, os, re, glob, uuid, base64, mimetypes, requests, subprocess, time, random, threading, sys, io, tempfile, queue as _queue_mod, traceback
+import http.server, json, os, re, glob, uuid, base64, requests, subprocess, time, random, threading, sys, io, tempfile, queue as _queue_mod
 
 sys.stdout.reconfigure(line_buffering=True)  # noqa
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor
 
-LLAMA_BASE = "http://localhost:8081"
-LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
+from server.config import (
+    AUDIO_TOKEN_COST,
+    COMFYUI_DIR,
+    COMFYUI_INPUT,
+    COMFYUI_OUTPUT,
+    COMFYUI_URL,
+    FILES_DIR,
+    HOST,
+    IMG_PATH,
+    IMAGE_MODELS,
+    IMAGE_TOKEN_COST,
+    LLAMA_BASE,
+    LLAMA_GEMMA_NGL,
+    LLAMA_QWEN_NGL,
+    LLAMA_SERVER_ARGS,
+    LLAMA_SERVER_PATH,
+    LLAMA_URL,
+    MODEL_ID,
+    PER_MESSAGE_OVERHEAD,
+    PORT,
+    PROMPT_PATH,
+    REASONING_BUDGET,
+    SEARXNG_URL,
+    SESSIONS_DIR,
+    SESSIONS_FILE,
+    TASKS_DB,
+    TOOLS,
+    TOOLS_TOKEN_COST,
+    UPLOADS_DIR,
+    USERS_FILE,
+    VENV_PYTHON,
+    build_sys_content,
+)
 
-VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
-COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
-SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080/search")
-COMFYUI_URL = "http://localhost:8188"
-HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
-PORT = 3001
-REASONING_BUDGET = 4096
-
-with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
-    MODEL_ID = file.read()
+from server.api import APP_STATE_NAMES, Handler, set_app_state
 
 import sys
 
 sys.path.insert(0, COMFYUI_DIR)
-COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
-UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
-LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-server")
-LLAMA_QWEN_NGL = "0"
-LLAMA_GEMMA_NGL = "99"
-LLAMA_SERVER_ARGS = [
-    "--host", "0.0.0.0",
-    "--port", "8081",
-    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
-    "--jinja",
-    
-    # GPU / VRAM Allocations
-    "--n-gpu-layers", LLAMA_QWEN_NGL,
-    "-fa", "on",  # Flash attention lowers VRAM footprint
-    "--ctx-size", "32768",  # 32k context; KV cache quantized to q8_0 to fit VRAM
-    #"--no-kv-offload",
-    "-ctk", "q8_0",            # Quantize Key cache to 8-bit (saves 50% VRAM)
-    "-ctv", "q8_0",            # Quantize Value cache to 8-bit (saves 50% VRAM)
-    
-    # Reasoning & Thinking Limits
-    "--reasoning-budget", str(REASONING_BUDGET),
-    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
-    
-    # Gemma 4 Sampling Preset
-    "--temp", "1.0",
-    "--top-p", "0.95",
-    "--top-k", "64",
-    "--min-p", "0.0",
-    "--repeat-penalty", "1.0"
-]
-
-FILES_DIR = os.path.expanduser("~/local-ai-files")
-SESSIONS_FILE = os.path.join(FILES_DIR, "sessions.json")
-SESSIONS_DIR = FILES_DIR
-IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
-COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
-PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
-USERS_FILE = os.path.expanduser("~/local-ai-files/users.json")
-TASKS_DB = os.path.expanduser("~/local-ai-files/tasks.db")
-IMAGE_TOKEN_COST = 1200
-AUDIO_TOKEN_COST = 800
-PER_MESSAGE_OVERHEAD = 4
-
-with open(
-    os.path.expanduser("~/local-ai-files/models.json"), "r", encoding="utf-8"
-) as file:
-    IMAGE_MODELS = json.load(file)
-
-TOOLS = [
-        {
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search. The results contain snippets only; if the snippets are insufficient to answer the question fully, follow up with fetch_page to read the full content of the relevant page.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The search query"},
-                        "current_time": {"type": "string", "description": "Current date and time. Pass ONLY for time-sensitive queries (news, events, hours, etc.) where recency matters. Omit for direct-link lookups or general information."},
-                        "current_location": {"type": "string", "description": "User's location. Pass ONLY for location-specific results (weather, local news, nearby places, events). If you don't know the user's location, call get_user_location first to obtain it. Do NOT guess or fabricate location."}
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_page",
-            "description": "Fetch and read the full text content of a web page. Use this AFTER web_search when the search snippets are not enough to answer the question (e.g. you need details, data, or an article's body). Pass the full URL of the page to read.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The full URL of the web page to fetch (must start with http:// or https://)."
-                    }
-                },
-                "required": ["url"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_image",
-            "description": "Generate or draw an image. You MUST choose a style model.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Detailed visual description of what to draw/generate.",
-                    },
-                    "negative_prompt": {
-                        "type": "string",
-                        "description": "Things to avoid in the image",
-                    },
-                    "model": {
-                        "type": "string",
-                        "enum": list(IMAGE_MODELS.keys()),
-                        "description": "Art style to use. Options: "
-                        + ", ".join(
-                            [
-                                f"'{k}' ({v['description']})"
-                                for k, v in IMAGE_MODELS.items()
-                            ]
-                        ),
-                    },
-                },
-                "required": ["prompt", "model"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_image",
-            "description": "Generic Img2Img image editor to modify, restyle, recolor, add elements, or transform existing or uploaded images.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "Complete description of what the edited image should look like.",
-                    },
-                    "negative_prompt": {
-                        "type": "string",
-                        "description": "Elements to exclude from the visual generation.",
-                    },
-                    "denoise": {
-                        "type": "number",
-                        "description": "Denoising value (0.1 to 1.0). Use 0.25-0.4 for subtle color/lighting changes, 0.45-0.65 for structural edits and object additions, and 0.7-0.85 for massive re-imaginings.",
-                    },
-                },
-                "required": ["prompt", "denoise"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_user_location",
-            "description": "Request the user's current geographical location. Call this ONLY when you need location for a location-specific query (weather, local news, nearby places, etc.) and you don't already have the user's location. Returns the user's city/area or 'denied' if they refuse.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read the text content of an uploaded file (PDF, DOC, DOCX, XLS, XLSX). Call this when the user has attached a file and you need to read its content to answer their question. The file URL is provided in the user message as [FILE: url]. Pass that url as the file_url parameter.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_url": {
-                        "type": "string",
-                        "description": "The file URL from the user message (the /uploads/... path)."
-                    }
-                },
-                "required": ["file_url"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_user_context",
-            "description": "Store information about the current user that persists across conversations. Saves preferences, personal details, important facts, or anything the user should not need to repeat. This APPENDS to existing context — only add NEW information, do not repeat what was already saved.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The new information to append to the user's context. Keep it concise and focused on what's new.",
-                    }
-                },
-                "required": ["content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "manage_tasks",
-            "description": "Manage to-do tasks. Can create, update, complete, delete, list, or get task details. Use this when the user wants to track tasks, set reminders, or manage their to-do list.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "operation": {
-                        "type": "string",
-                        "enum": ["create", "update", "complete", "delete", "list", "get"],
-                        "description": "The operation to perform.",
-                    },
-                    "task_id": {
-                        "type": "string",
-                        "description": "Required for update/complete/delete/get. The task ID.",
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Required for create. Task title.",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Task description or details.",
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["low", "medium", "high"],
-                        "description": "Task priority (default: medium).",
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["pending", "in_progress", "completed", "cancelled"],
-                        "description": "For update: new status.",
-                    },
-                    "due_date": {
-                        "type": "string",
-                        "description": "Due date in ISO format (e.g. 2026-08-15T17:00:00).",
-                    },
-                    "reminder_at": {
-                        "type": "string",
-                        "description": "Reminder time in ISO format. The system will notify about this task at the given time.",
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Session ID to link this task to a conversation.",
-                    },
-                },
-                "required": ["operation"],
-            },
-        },
-    },
-]
-
-TOOLS_TOKEN_COST = len(json.dumps(TOOLS)) // 4
 
 import sqlite3
 _tasks_db_lock = threading.Lock()
@@ -292,11 +74,10 @@ def _init_tasks_db():
 def _db_run(query, params=()):
     with _tasks_db_lock:
         conn = sqlite3.connect(TASKS_DB)
-        conn.row_factory = sqlite3.Row
         try:
             cur = conn.execute(query, params)
             conn.commit()
-            return cur
+            return cur.rowcount
         finally:
             conn.close()
 
@@ -317,14 +98,7 @@ def _db_fetch_one(query, params=()):
 
 _init_tasks_db()
 
-
-
-
-with open(PROMPT_PATH, "r") as file:
-    SYS_CONTENT = file.read()
-model_list = "; ".join(f"{k}: {v['description']}" for k, v in IMAGE_MODELS.items())
-SYS_CONTENT = SYS_CONTENT.replace("%model_list%", model_list)
-SYS_CONTENT = SYS_CONTENT.replace("%_image_keys%", str(list(IMAGE_MODELS.keys())))
+SYS_CONTENT = build_sys_content()
 
 print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)
 
@@ -353,7 +127,7 @@ def task_complete(tid, user_id):
     return _db_fetch_one("SELECT * FROM tasks WHERE id=?", (tid,))
 
 def task_delete(tid, user_id):
-    _db_run("DELETE FROM tasks WHERE id=? AND user_id=?", (tid, user_id))
+    return _db_run("DELETE FROM tasks WHERE id=? AND user_id=?", (tid, user_id))
 
 def task_list(user_id, status=None):
     if status:
@@ -366,31 +140,35 @@ def task_get(tid, user_id):
 def handle_task_tool(user_id, args):
     op = args.get("operation", "")
     if op == "create":
+        if not args.get("title"):
+            return json.dumps({"ok": False, "error": "Missing required argument: title"})
         t = task_create(user_id, args["title"], args.get("description", ""), args.get("priority", "medium"), args.get("due_date"), args.get("session_id"), args.get("reminder_at"))
         return json.dumps({"ok": True, "task": t})
-    elif op == "update":
-        tid = args["task_id"]
-        t = task_update(tid, user_id, title=args.get("title"), description=args.get("description"), priority=args.get("priority"), status=args.get("status"), due_date=args.get("due_date"), reminder_at=args.get("reminder_at"))
-        if t:
-            return json.dumps({"ok": True, "task": t})
-        return json.dumps({"ok": False, "error": "Task not found"})
-    elif op == "complete":
-        tid = args["task_id"]
-        t = task_complete(tid, user_id)
-        if t:
-            return json.dumps({"ok": True, "task": t})
-        return json.dumps({"ok": False, "error": "Task not found"})
-    elif op == "delete":
-        task_delete(args["task_id"], user_id)
-        return json.dumps({"ok": True})
+    elif op in ("update", "complete", "delete", "get"):
+        tid = args.get("task_id")
+        if not tid:
+            return json.dumps({"ok": False, "error": f"Missing required argument: task_id"})
+        if op == "update":
+            t = task_update(tid, user_id, title=args.get("title"), description=args.get("description"), priority=args.get("priority"), status=args.get("status"), due_date=args.get("due_date"), reminder_at=args.get("reminder_at"))
+            if t:
+                return json.dumps({"ok": True, "task": t})
+            return json.dumps({"ok": False, "error": "Task not found"})
+        elif op == "complete":
+            t = task_complete(tid, user_id)
+            if t:
+                return json.dumps({"ok": True, "task": t})
+            return json.dumps({"ok": False, "error": "Task not found"})
+        elif op == "delete":
+            task_delete(tid, user_id)
+            return json.dumps({"ok": True})
+        else:
+            t = task_get(tid, user_id)
+            if t:
+                return json.dumps({"ok": True, "task": t})
+            return json.dumps({"ok": False, "error": "Task not found"})
     elif op == "list":
         tasks = task_list(user_id, args.get("status"))
         return json.dumps({"ok": True, "tasks": tasks})
-    elif op == "get":
-        t = task_get(args["task_id"], user_id)
-        if t:
-            return json.dumps({"ok": True, "task": t})
-        return json.dumps({"ok": False, "error": "Task not found"})
     return json.dumps({"ok": False, "error": f"Unknown operation: {op}"})
 
 _users_cache = None
@@ -549,8 +327,8 @@ def _load_extra_prompts(items):
 def load_sessions():
     global sessions, sessions_meta
     with _data_lock:
-        sessions = {}
-        sessions_meta = {}
+        sessions.clear()
+        sessions_meta.clear()
     for path in glob.glob(os.path.join(SESSIONS_DIR, "sessions_*.json")):
         try:
             with open(path) as f:
@@ -810,6 +588,16 @@ def is_llama_alive():
         return r.status_code == 200
     except:
         return False
+
+
+def model_status_snapshot():
+    with _data_lock:
+        return {
+            "model": model_status,
+            "predicted_per_second": _last_tps,
+            "overheated": _overheated,
+            "gpu_temp": _gpu_temp,
+        }
 
 
 _model_transition_lock = threading.Lock()
@@ -1078,13 +866,9 @@ def location_str():
     return None
 
 
-def extract_city(loc):
-    parts = [p.strip() for p in loc.split(",")]
-    if len(parts) >= 3:
-        return f"{parts[0]}, {parts[-3]}".strip(", ")
-    if len(parts) >= 2:
-        return parts[0].strip()
-    return loc
+def set_client_location(value):
+    global _client_location
+    _client_location = value
 
 
 def web_search(query, current_time=None, current_location=None):
@@ -1601,11 +1385,6 @@ def _llm_worker(task_id, sid, round_num, msgs):
             #"reasoning_budget": REASONING_BUDGET,
             #"reasoning_effort": "medium",
         }
-        has_image = any(
-            isinstance(m.get("content"), list)
-            and any(p.get("type") == "image_url" for p in m["content"])
-            for m in payload.get("messages", [])
-        )
         payload["stream"] = True
         r = requests.post(LLAMA_URL, json=payload, stream=True, timeout=600)
         r.encoding = "utf-8"
@@ -1689,6 +1468,23 @@ def _llm_worker(task_id, sid, round_num, msgs):
 
 
 def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
+    tool_name = tc["function"]["name"]
+    try:
+        _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index)
+    except Exception as e:
+        print(f"[tool_worker] Tool '{tool_name}' crashed for task {task_id}: {e}")
+        _event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc.get("id", ""),
+            result=json.dumps({"error": f"Tool {tool_name} failed: {e}"}),
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
+
+
+def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
     tool_name = tc["function"]["name"]
     try:
         args = json.loads(tc["function"]["arguments"])
@@ -2390,15 +2186,6 @@ def _thermal_monitor():
                 _evacuate_ram()
 
 
-def read_index_html():
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist", "index.html")
-    try:
-        with open(p) as f:
-            return f.read()
-    except:
-        return "<html><body><h1>index.html missing</h1></body></html>"
-
-
 def strip_html(text):
     import re
     text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
@@ -2465,567 +2252,7 @@ def read_file_text(file_path):
     return ""
 
 
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header(
-            "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"
-        )
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token")
-        self.end_headers()
-
-    def do_GET(self):
-        if self.path == "/api/user-context":
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            context = read_user_context(user)
-            self.send_json(
-                {
-                    "context": context,
-                    "username": user,
-                    "context_file": get_user_context_path(user),
-                }
-            )
-        elif self.path == "/api/check-auth":
-            user = get_current_user(self.headers)
-            if user:
-                self.send_json({"authenticated": True, "username": user})
-            else:
-                self.send_json({"authenticated": False})
-        elif self.path == "/api/active-users":
-            with _tokens_lock:
-                now = time.time()
-                active_users = set()
-                for token, entry in _active_tokens.items():
-                    if token in _agent_tokens or entry["user"] in _agent_users:
-                        continue
-                    if now - entry["last_seen"] <= ACTIVE_WINDOW_SECONDS:
-                        active_users.add(entry["user"])
-                active = sorted(active_users)
-            self.send_json({"users": active})
-        elif self.path == "/api/model-status":
-            with _data_lock:
-                ms, tps, oh, gtemp = model_status, _last_tps, _overheated, _gpu_temp
-            try:
-                user = get_current_user(self.headers)
-                reminder_count = len(_db_fetch("SELECT id FROM tasks WHERE user_id=? AND reminder_at IS NOT NULL AND reminder_at <= ? AND reminded=0 AND status NOT IN ('completed','cancelled')", (user, datetime.now().isoformat()))) if user else 0
-            except Exception:
-                reminder_count = 0
-            self.send_json(
-                {
-                    "model": ms,
-                    "predicted_per_second": tps,
-                    "overheated": oh,
-                    "gpu_temp": gtemp,
-                    "max_context": MAX_INPUT_TOKENS,
-                    "reminder_count": reminder_count,
-                }
-            )
-        elif self.path.startswith("/output/"):
-            rel = urlparse(self.path).path
-            rel = rel[len("/output/"):] if rel.startswith("/output/") else rel
-            fpath = os.path.abspath(os.path.join(COMFYUI_OUTPUT, rel))
-            if fpath.startswith(os.path.abspath(COMFYUI_OUTPUT)) and os.path.exists(
-                fpath
-            ):
-                self.send_response(200)
-                self.send_header("Content-Type", "image/png")
-                self.end_headers()
-                with open(fpath, "rb") as f:
-                    self.wfile.write(f.read())
-                return
-            self.send_error(404)
-        elif self.path.startswith("/uploads/"):
-            filename = os.path.basename(urlparse(self.path).path)
-            fpath = os.path.abspath(os.path.join(UPLOADS_DIR, filename))
-            if fpath.startswith(os.path.abspath(UPLOADS_DIR)) and os.path.exists(fpath):
-                self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Disposition", "inline")
-                self.end_headers()
-                with open(fpath, "rb") as f:
-                    self.wfile.write(f.read())
-                return
-            self.send_error(404)
-        elif self.path.startswith("/api/status/"):
-            task_id = os.path.basename(self.path)
-            with _data_lock:
-                status = tasks.get(
-                    task_id, {"status": "unknown", "message": "Not found"}
-                )
-            self.send_json(status)
-        elif self.path == "/api/sessions":
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json([], status=401)
-                return
-            with _data_lock:
-                sorted_items = sorted(
-                    sessions_meta.items(),
-                    key=lambda x: x[1].get("updated", 0),
-                    reverse=True,
-                )
-                result = [
-                    {
-                        "session_id": sid,
-                        "name": meta.get("name", "Chat"),
-                        "created": meta.get("created", 0),
-                        "updated": meta.get("updated", 0),
-                        **context_token_report(sid, sessions.get(sid, [])),
-                    }
-                    for sid, meta in sorted_items
-                    if meta.get("user_id", "") == user
-                ]
-            self.send_json(result)
-        elif self.path.startswith("/api/sessions/") and self.path.endswith("/messages"):
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            sid = self.path.split("/")[3]
-            with _data_lock:
-                meta = sessions_meta.get(sid)
-                if not meta or meta.get("user_id", "") != user:
-                    self.send_error(404)
-                    return
-                msgs = sessions.get(sid)
-            if msgs is not None:
-                self.send_json(
-                    {
-                        "messages": msgs,
-                        **context_token_report(sid, msgs),
-                    }
-                )
-            else:
-                self.send_error(404)
-        elif self.path == "/":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            self.wfile.write(read_index_html().encode())
-        else:
-            DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
-            fpath = os.path.abspath(os.path.join(DIST_DIR, self.path.lstrip("/")))
-            if fpath.startswith(os.path.abspath(DIST_DIR)) and os.path.isfile(fpath):
-                ctype, _ = mimetypes.guess_type(fpath)
-                self.send_response(200)
-                self.send_header("Content-Type", ctype or "application/octet-stream")
-                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
-                self.end_headers()
-                with open(fpath, "rb") as f:
-                    self.wfile.write(f.read())
-            elif self.path.startswith("/api/") or "." in os.path.basename(self.path):
-                if self.path == "/api/tasks":
-                    user = get_current_user(self.headers)
-                    if not user:
-                        self.send_json({"error": "Unauthorized"}, status=401)
-                        return
-                    user_tasks = task_list(user)
-                    self.send_json({"tasks": user_tasks})
-                else:
-                    self.send_error(404)
-            else:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Cache-Control", "no-cache")
-                self.end_headers()
-                self.wfile.write(read_index_html().encode())
-
-    def do_DELETE(self):
-        if self.path.startswith("/api/sessions/"):
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            sid = self.path.split("/")[3]
-            with _data_lock:
-                meta = sessions_meta.get(sid)
-                if not meta or meta.get("user_id", "") != user:
-                    self.send_error(404)
-                    return
-                msgs = list(sessions.get(sid, []))
-            # Cancel all queued/in-flight tasks for this session so they stop processing
-            with _queue_lock:
-                _task_queue[:] = [q for q in _task_queue if q.get("session_id") != sid]
-            with _data_lock:
-                for tid, t in tasks.items():
-                    if t.get("session_id") == sid and t.get("status") not in ("done", "error"):
-                        tasks[tid] = {
-                            "status": "cancelled",
-                            "error": "Session was deleted",
-                            "session_id": sid,
-                        }
-            for msg in msgs:
-                if msg.get("role") == "assistant":
-                    url = msg.get("_image_url", "") or ""
-                    if url:
-                        fname = os.path.join(IMG_PATH, _image_url_rel(url))
-                        fpath = fname
-                        if os.path.exists(fpath):
-                            print(f"[delete] Removed output image: {fpath}")
-                            os.remove(fpath)
-                raw = msg.get("content", "")
-                texts = []
-                if isinstance(raw, str):
-                    texts.append(raw)
-                elif isinstance(raw, list):
-                    for part in raw:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            texts.append(part.get("text", ""))
-                for text in texts:
-                    for part in text.split("[FILE:"):
-                        idx = part.find("/uploads/")
-                        if idx != -1:
-                            url_part = part[idx:].split("]")[0]
-                            fname = os.path.basename(url_part)
-                            fpath = os.path.join(UPLOADS_DIR, fname)
-                            if os.path.exists(fpath):
-                                print(f"[delete] Removed uploaded file: {fpath}")
-                                os.remove(fpath)
-
-            with _data_lock:
-                exists = sid in sessions
-                if exists:
-                    sessions.pop(sid, None)
-                    sessions_meta.pop(sid, None)
-            if exists:
-                with _effective_contexts_lock:
-                    _effective_contexts.pop(sid, None)
-            if exists:
-                save_sessions()
-                self.send_json({"status": "deleted"})
-            else:
-                self.send_error(404)
-        elif self.path.startswith("/api/tasks/"):
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            tid = self.path.split("/")[3]
-            task_delete(tid, user)
-            self.send_json({"status": "deleted"})
-        else:
-            self.send_error(404)
-
-    def do_PUT(self):
-        if self.path.startswith("/api/sessions/"):
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            sid = self.path.split("/")[3]
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            with _data_lock:
-                meta = sessions_meta.get(sid)
-                if meta and meta.get("user_id", "") == user:
-                    meta["name"] = body.get("name", meta["name"])
-                    meta["updated"] = time.time()
-            if meta:
-                save_sessions()
-                self.send_json({"status": "updated"})
-            else:
-                self.send_error(404)
-        elif self.path.startswith("/api/tasks/"):
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            tid = self.path.split("/")[3]
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            t = task_update(tid, user, **{k: v for k, v in body.items() if k in ("title","description","status","priority","due_date","reminder_at")})
-            if t:
-                self.send_json({"task": t})
-            else:
-                self.send_error(404)
-        else:
-            self.send_error(404)
-
-    def do_POST(self):
-        if self.path == "/api/register-agent":
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length)) if length else {}
-            tokens = body.get("tokens", []) or []
-            usernames = body.get("usernames", []) or []
-            print("Agent registered")
-            with _tokens_lock:
-                for t in tokens:
-                    _agent_tokens.add(t)
-                for u in usernames:
-                    _agent_users.add(u)
-            self.send_json({"ok": True})
-        elif self.path == "/api/login":
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            username = body.get("username", "").strip()
-            password = body.get("password", "").strip()
-            if get_user_password(username) == password:
-                token = str(uuid.uuid4())
-                with _tokens_lock:
-                    _active_tokens[token] = {"user": username, "last_seen": time.time()}
-                self.send_json(
-                    {
-                        "token": token,
-                        "username": username,
-                        "context_file": get_user_context_path(username),
-                    }
-                )
-            else:
-                self.send_json({"error": "Invalid credentials"}, status=401)
-        elif self.path == "/api/logout":
-            token = self.headers.get("X-Auth-Token", "")
-            with _tokens_lock:
-                _active_tokens.pop(token, None)
-            self.send_json({"ok": True})
-        elif self.path == "/api/user-context":
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            action = body.get("action", "read")
-            if action == "write":
-                content = body.get("context", "")
-                write_user_context(user, content)
-                self.send_json({"status": "ok", "username": user})
-            elif action == "overwrite":
-                content = body.get("context", "")
-                path = get_user_context_path(user)
-                if path:
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    with open(path, "w") as f:
-                        f.write(content)
-                self.send_json({"status": "ok", "username": user})
-            else:
-                context = read_user_context(user)
-                self.send_json(
-                    {
-                        "context": context,
-                        "username": user,
-                        "context_file": get_user_context_path(user),
-                    }
-                )
-        elif self.path == "/api/chat":
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            task_id = str(uuid.uuid4())
-            sid = body.get("session_id", "default")
-            with _data_lock:
-                meta = sessions_meta.get(sid)
-                if not meta or meta.get("user_id", "") != user:
-                    self.send_json({"error": "Session not found"}, status=404)
-                    return
-
-            entry = {
-                "task_id": task_id,
-                "session_id": sid,
-                "message": body.get("message", ""),
-                "image": body.get("image"),
-                "audio": body.get("audio"),
-                "user": user,
-                "client_timestamp": body.get("client_timestamp"),
-            }
-            with _queue_lock:
-                if len(_task_queue) >= MAX_QUEUE_SIZE:
-                    self.send_json({"error": "Server busy"}, status=503)
-                    return
-                _task_queue.append(entry)
-                _queue_cond.notify()
-            with _data_lock:
-                tasks[task_id] = {
-                    "status": "queued",
-                    "message": "Waiting in line...",
-                    "session_id": sid,
-                }
-            self.send_json({"task_id": task_id})
-        elif self.path == "/api/extract-file":
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            name = body.get("name", "")
-            data_b64 = body.get("data", "")
-            ext = os.path.splitext(name)[1].lower()
-            safe_name = str(uuid.uuid4()) + ext
-            filepath = os.path.join(UPLOADS_DIR, safe_name)
-            raw = base64.b64decode(data_b64)
-            with open(filepath, "wb") as f:
-                f.write(raw)
-            file_url = f"/uploads/{safe_name}"
-            self.send_json({"url": file_url, "name": name})
-        elif self.path == "/api/tts":
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            raw_text = body.get("text", "")
-            if not raw_text:
-                self.send_json({"error": "No text provided"}, status=400)
-                return
-            try:
-                import re
-                text = raw_text
-                voice = body.get("voice", "")
-
-                # Detect language tag from LLM prefix: [bn], [hi], [te], [kn], [en]
-                m = re.match(r"^\s*\[(bn|hi|te|kn|en)\]\s*", text)
-                if m:
-                    tag = m.group(1)
-                    text = text[m.end():]
-                elif not voice:
-                    bn = len(re.findall(r"[\u0980-\u09FF]", text))
-                    hi = len(re.findall(r"[\u0900-\u097F]", text))
-                    te = len(re.findall(r"[\u0C00-\u0C7F]", text))
-                    kn = len(re.findall(r"[\u0C80-\u0CFF]", text))
-                    scores = {"bn": bn, "hi": hi, "te": te, "kn": kn}
-                    tag = max(scores, key=scores.get)
-                    if scores[tag] == 0:
-                        tag = "en"
-                else:
-                    tag = "en"
-
-                # Determine TTS backend
-                PIPER_VOICES = {
-                    "bn": "/home/palash/.piper_voices/bn_BD-google-medium.onnx",
-                    "hi": "/home/palash/.piper_voices/hi_IN-priyamvada-medium.onnx",
-                    "te": "/home/palash/.piper_voices/te_IN-padmavathi-medium.onnx",
-                    "en": "/home/palash/.piper_voices/en_US-amy-medium.onnx",
-                }
-                EDGE_VOICES = {
-                    "bn": "bn-IN-TanishaaNeural",
-                    "hi": "hi-IN-SwaraNeural",
-                    "te": "te-IN-ShrutiNeural",
-                    "kn": "kn-IN-GaganNeural",
-                    "en": "en-US-AriaNeural",
-                }
-
-                if tag in PIPER_VOICES:
-                    import piper, io, struct, wave
-                    onnx_path = PIPER_VOICES[tag]
-                    cfg_path = onnx_path + ".json"
-                    if not hasattr(self, "_piper_voices"):
-                        self._piper_voices = {}
-                    if tag not in self._piper_voices:
-                        print(f"[tts] Loading Piper voice '{tag}' ...")
-                        self._piper_voices[tag] = piper.PiperVoice.load(
-                            onnx_path, config_path=cfg_path
-                        )
-                    pv = self._piper_voices[tag]
-                    print(f"[tts] Piper {tag}: synthesizing {len(text)} chars")
-                    wav_io = io.BytesIO()
-                    with wave.open(wav_io, "wb") as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(22050)
-                        for chunk in pv.synthesize(text):
-                            int16 = (chunk.audio_float_array * 32767).clip(-32768, 32767).astype("<i2")
-                            wf.writeframes(int16.tobytes())
-                    audio_b64 = base64.b64encode(wav_io.getvalue()).decode()
-                    self.send_json({"audio": audio_b64, "type": "audio/wav"})
-                else:
-                    import asyncio, edge_tts
-                    edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
-                    print(f"[tts] edge-tts {tag} ({edge_voice}): {len(text)} chars")
-                    communicate = edge_tts.Communicate(text, edge_voice)
-                    mp3_data = bytearray()
-                    async def _gen():
-                        async for chunk in communicate.stream():
-                            if chunk["type"] == "audio":
-                                mp3_data.extend(chunk["data"])
-                    asyncio.run(_gen())
-                    audio_b64 = base64.b64encode(bytes(mp3_data)).decode()
-                    self.send_json({"audio": audio_b64, "type": "audio/mpeg"})
-            except Exception as e:
-                print(f"[tts] Error: {e}")
-                traceback.print_exc()
-                self.send_json({"error": str(e)}, status=500)
-        elif self.path == "/api/sessions":
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            length = int(self.headers.get("Content-Length", 0))
-            extra = {}
-            if length:
-                try:
-                    ext_body = json.loads(self.rfile.read(length))
-                    extra = _load_extra_prompts(ext_body.get("system_prompts") or [])
-                except Exception:
-                    extra = []
-            sid = str(uuid.uuid4())
-            now = time.time()
-            with _data_lock:
-                sessions[sid] = []
-                sessions_meta[sid] = {
-                    "name": "New Chat",
-                    "created": now,
-                    "updated": now,
-                    "user_id": user,
-                    "system_prompts": extra,
-                }
-            save_sessions()
-            self.send_json({"session_id": sid})
-        elif self.path == "/api/location":
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            global _client_location
-            task_id = body.get("task_id")
-            if body.get("denied"):
-                _client_location = ""
-                ev = _location_events.get(task_id) if task_id else None
-                if ev:
-                    ev.set()
-                self.send_json({"ok": True})
-                return
-            lat = body.get("latitude")
-            lng = body.get("longitude")
-            if lat is not None and lng is not None:
-                try:
-                    geo = requests.get(
-                        "https://nominatim.openstreetmap.org/reverse",
-                        params={"format": "json", "lat": lat, "lon": lng},
-                        headers={"User-Agent": "LocalAI/1.0"},
-                        timeout=5,
-                    ).json()
-                    display = geo.get("display_name", "")
-                    _client_location = display
-                except Exception:
-                    _client_location = f"{lat:.4f}, {lng:.4f}"
-            ev = _location_events.get(task_id) if task_id else None
-            if ev:
-                ev.set()
-            self.send_json({"ok": True})
-        elif self.path == "/api/tasks":
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            t = task_create(user, body.get("title", "Untitled"), body.get("description", ""), body.get("priority", "medium"), body.get("due_date"), body.get("session_id"), body.get("reminder_at"))
-            self.send_json({"task": t})
-        else:
-            self.send_error(404)
-
-    def send_json(self, data, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
-
-    def log_message(self, format, *args):
-        pass
+set_app_state({name: globals()[name] for name in APP_STATE_NAMES})
 
 
 if __name__ == "__main__":

@@ -15,14 +15,23 @@ parser.add_argument(
     "--config",
     default="",
     help="Path to a custom JSON task list to use instead of the default "
-    "(~/local-ai-files/tasks.json). Combine with --defaults to also include "
-    "the default tasks.",
+    "(~/local-ai-files/tasks.json). The file may be a plain task list or an "
+    "object with 'tasks' plus optional 'genre_checklists'. Each task may also "
+    "carry its own 'checklist' (editor/moderator) that wins over the genre "
+    "checklist. Combine with --defaults to also include the default tasks.",
 )
 parser.add_argument(
     "--defaults",
     action="store_true",
     help="Also load the default tasks (~/local-ai-files/tasks.json) in addition "
     "to the ones from --config.",
+)
+parser.add_argument(
+    "--dry-run",
+    action="store_true",
+    help="Validate the task config and environment and print the full plan "
+    "for each task (genre/checklist resolution, script enforcement, medium "
+    "feasibility) without making any LLM call, then exit.",
 )
 args = parser.parse_args()
 STORY_BASE_DIR = os.path.expanduser("~/local-ai-files/stories")
@@ -37,7 +46,8 @@ POLL_INTERVAL_SECONDS = 10.0
 SLEEP_BETWEEN_TURNS = 2.0
 MAX_MESSAGES_PER_AGENT = 6
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
-STARTING_CONVERSATION = open("/home/palash/local-ai-files/self_chat.txt").read()
+SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
+STARTING_CONVERSATION = open(SELF_CHAT_PROMPT_FILE).read()
 
 SLEEP_BETWEEN_ROUNDS = 300
 
@@ -49,14 +59,26 @@ MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/moderator_prompt.txt"
 DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 
 
-def load_tasks_from_file(tasks_file):
-    if not os.path.isfile(tasks_file):
-        print(f"Tasks file not found: {tasks_file}")
-        return []
-    with open(tasks_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
+GENRE_CHECKLISTS_FILE = os.path.expanduser("~/local-ai-files/genre_checklists.json")
+
+
+def load_genre_checklists(extra=None):
+    """Base checklists from genre_checklists.json, overridden per genre by any
+    'genre_checklists' carried in a task config file."""
+    checklists = {}
+    try:
+        with open(GENRE_CHECKLISTS_FILE, encoding="utf-8") as f:
+            checklists = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"[checklist] Could not load {GENRE_CHECKLISTS_FILE}: {e} — using empty checklists")
+    if extra:
+        checklists.update(extra)
+    return checklists
+
+
+def _parse_tasks(items):
     tasks = []
-    for item in data:
+    for item in items:
         task = (item.get("task") or "").strip()
         if not task:
             continue
@@ -70,6 +92,8 @@ def load_tasks_from_file(tasks_file):
         if isinstance(roles, str):
             roles = [r.strip() for r in roles.split(",")]
         genre = (item.get("genre") or "").strip() or "General"
+        details = (item.get("details") or "").strip()
+        checklist = item.get("checklist") or {}
         tasks.append(
             {
                 "task": task,
@@ -77,36 +101,202 @@ def load_tasks_from_file(tasks_file):
                 "languages": languages,
                 "mediums": mediums,
                 "roles": roles,
+                "details": details,
+                "checklist": checklist,
             }
         )
     return tasks
 
 
+def load_config_file(tasks_file):
+    """Load a task config file. Accepts either a plain task list or an object
+    with 'tasks' plus optional 'genre_checklists' (genre -> {editor, moderator}).
+    Returns (tasks, genre_checklists)."""
+    if not os.path.isfile(tasks_file):
+        print(f"Tasks file not found: {tasks_file}")
+        return [], {}
+    with open(tasks_file, "r", encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            print(
+                f"[config] Invalid JSON in {tasks_file}: {e.msg} at line "
+                f"{e.lineno}, column {e.colno} (char {e.pos}). Check for "
+                "trailing commas after the last property/array item."
+            )
+            raise SystemExit(1) from e
+    if isinstance(data, dict):
+        return _parse_tasks(data.get("tasks") or []), data.get("genre_checklists") or {}
+    return _parse_tasks(data), {}
+
+
 def load_tasks():
-    """Combine tasks from --config and/or the default file. No role tag => free."""
+    """Combine tasks from --config and/or the default file. No role tag => free.
+    Genre checklists from the config file override the default file's."""
+    checklists = {}
     if args.config:
-        tasks = load_tasks_from_file(args.config)
+        tasks, cfg_checklists = load_config_file(args.config)
         source = args.config
+        checklists.update(cfg_checklists)
         if args.defaults:
-            defaults = load_tasks_from_file(DEFAULT_TASKS_FILE)
+            defaults, def_checklists = load_config_file(DEFAULT_TASKS_FILE)
             existing = {t["task"] for t in tasks}
             tasks.extend(t for t in defaults if t["task"] not in existing)
+            checklists.update(def_checklists)
             source = f"{args.config} + defaults"
     else:
-        tasks = load_tasks_from_file(DEFAULT_TASKS_FILE)
+        tasks, def_checklists = load_config_file(DEFAULT_TASKS_FILE)
+        checklists.update(def_checklists)
         source = DEFAULT_TASKS_FILE
-    return tasks, source
+    return tasks, source, checklists
 
 
-TASKS, TASKS_SOURCE = load_tasks()
-if not TASKS:
-    print("No tasks to run. Add tasks to a config file and restart.")
-    raise SystemExit(1)
+def checklist_for(genre, role, task_checklist=None):
+    """role is 'editor' or 'moderator'. A task's own checklist wins, then the
+    genre's entry, then the 'default' entry, then nothing."""
+    items = (task_checklist or {}).get(role)
+    if not items:
+        entry = GENRE_CHECKLISTS.get(genre) or {}
+        items = entry.get(role)
+    if not items:
+        items = GENRE_CHECKLISTS.get("default", {}).get(role) or []
+    if not items:
+        return "- No genre-specific checks defined for this genre."
+    return "\n".join(f"- {item}" for item in items)
 
-user_input = input("Keep sessions {y/n} [default: n] ? ")
-keep_sessions = user_input.strip().lower() == "y"
 
-print(f"Loaded {len(TASKS)} task(s) from {TASKS_SOURCE}")
+# Unicode block ranges used to sanity-check that a story is actually written in
+# the language it was assigned, without needing an LLM call to find out.
+_SCRIPT_RANGES = {
+    "bengali": (0x0980, 0x09FF),
+    "hindi": (0x0900, 0x097F),
+}
+
+
+def check_language_script(text, language):
+    lang_key = (language or "").strip().lower()
+    rng = _SCRIPT_RANGES.get(lang_key)
+    if not rng:
+        return True  # English or an unmapped language — skip this check
+    lo, hi = rng
+    body = re.sub(r"(?s)<small.*?</small>", "", text)
+    total_letters = sum(1 for ch in body if ch.isalpha())
+    if total_letters == 0:
+        return False
+    script_chars = sum(1 for ch in body if lo <= ord(ch) <= hi)
+    return (script_chars / total_letters) > 0.5
+
+
+def run_dry_run():
+    """Print the full plan for every task and validate the environment without
+    making any LLM call. Exits before any session is created."""
+    def indent(text):
+        return "\n".join("    " + line for line in text.splitlines())
+
+    print("=" * 68)
+    print(f"DRY RUN — {len(TASKS)} task(s) from {TASKS_SOURCE}")
+    print("No LLM calls will be made.\n")
+
+    for idx, spec in enumerate(TASKS, 1):
+        task = spec["task"]
+        genre = spec.get("genre") or "General"
+        mediums = spec.get("mediums") or []
+        languages = spec.get("languages") or []
+        roles = spec.get("roles") or ["free"]
+        details = spec.get("details") or ""
+        checklist = spec.get("checklist") or {}
+        source = "task" if checklist else "genre/default"
+
+        print(f"=== Task {idx}: {task}")
+        print(f"  genre:       {genre}   (checklist source: {source})")
+        print(f"  languages:   {', '.join(languages)}")
+        for lang in languages:
+            if (lang or "").strip().lower() in _SCRIPT_RANGES:
+                print(f"               - '{lang}' -> script enforcement active (bengali/hindi)")
+            else:
+                print(f"               - '{lang}' -> no script check (unmapped)")
+        for medium in mediums:
+            flag = ""
+            if medium.strip().lower() == "audio":
+                flag = "   WARNING: no audio tool exists — round will be skipped by the guard"
+            print(f"  mediums:     {medium}{flag}")
+        print(f"  roles:       {', '.join(roles)}")
+        print(f"  details:     {'present (' + str(len(details)) + ' chars)' if details else 'EMPTY'}")
+        print("  editor checklist (resolved):")
+        print(indent(checklist_for(genre, "editor", checklist)))
+        print("  moderator checklist (resolved):")
+        print(indent(checklist_for(genre, "moderator", checklist)))
+        print()
+
+    print("=" * 68)
+    print("ENVIRONMENT")
+    print(f"  tasks source:        {TASKS_SOURCE}")
+    print(f"  genre_checklists:    {GENRE_CHECKLISTS_FILE}")
+    if not os.path.isfile(GENRE_CHECKLISTS_FILE):
+        print("                         MISSING — falling back to empty checklists")
+    else:
+        print(f"                         loaded ({len(GENRE_CHECKLISTS)} genre(s))")
+
+    handled = {
+        SELF_CHAT_PROMPT_FILE: {"%task%", "%mediums%", "%_lang%", "%details%"},
+        EDITOR_PROMPT_FILE: {"%genre%", "%mediums%", "%language%", "%details%", "%checklist%"},
+        MODERATOR_PROMPT_FILE: {"%genre%", "%mediums%", "%language%", "%details%", "%checklist%"},
+    }
+    for path, placeholders in handled.items():
+        name = os.path.basename(path)
+        if not os.path.isfile(path):
+            print(f"  prompt file {name}: MISSING")
+            continue
+        with open(path, encoding="utf-8") as f:
+            found = set(re.findall(r"%[a-z_]+%", f.read()))
+        unhandled = found - placeholders
+        if unhandled:
+            print(f"  prompt file {name}: ok, but UNHANDLED placeholders {sorted(unhandled)}")
+        else:
+            print(f"  prompt file {name}: ok ({len(found)} placeholder(s) replaced by code)")
+    print()
+
+
+_PROHIBITED_NAMES = ("Kaya", "Kolpo", "কায়া", "কল্প", "काया", "कल्प")
+
+
+def verify_task_fulfillment(original_text, check_text, mediums, language):
+    """Deterministic (no-LLM) checks that catch the failure classes an editor/
+    moderator LLM keeps missing: declared medium never delivered, header fields
+    dropped during editing, citations dropped, wrong script/language, and
+    agent-name leaks. Returns a list of problem strings (empty = all good)."""
+    problems = []
+
+    if "audio" in mediums:
+        problems.append(
+            "Medium 'audio' was declared, but no audio-generation tool exists yet "
+            "in TOOLS — this task cannot currently be fulfilled by the agents."
+        )
+
+    if "image" in mediums and not re.search(r"!\[[^\]]*\]\([^)]+\)", check_text):
+        problems.append("Medium 'image' was declared but no image is embedded in the final story.")
+
+    for field in ["Task prompt", "Genre", "Mediums", "Language(s)"]:
+        if f"**{field}:**" in original_text and f"**{field}:**" not in check_text:
+            problems.append(f"Editor dropped the '{field}' header field.")
+
+    if "## Citations & References" in original_text and "## Citations & References" not in check_text:
+        problems.append("Editor dropped the Citations & References section.")
+
+    if not check_language_script(check_text, language):
+        problems.append(f"Story does not appear to be predominantly written in the declared language '{language}'.")
+
+    stripped = re.sub(r"(?s)<small.*?</small>|!\[[^\]]*\]\([^)]*\)", "", check_text)
+    for bad in _PROHIBITED_NAMES:
+        if re.search(rf"\b{re.escape(bad)}\b", stripped):
+            problems.append(f"Prohibited name '{bad}' still appears in the story text.")
+
+    if "<!-- EDITOR FLAG:" in check_text:
+        flags = re.findall(r"<!--\s*EDITOR FLAG:\s*(.*?)-->", check_text)
+        for flag in flags:
+            problems.append(f"Editor flagged an unresolved problem: {flag.strip()}")
+
+    return problems
 
 
 def is_duplicate(new_text, previous_text, threshold=0.8):
@@ -273,13 +463,14 @@ def build_input(speaker, message_number, incoming, lang, task):
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General"):
+def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
     s = STARTING_CONVERSATION.replace("%task%", task)
     s = s.replace("%mediums%", " , ".join(medium))
     s = s.replace("%_lang%", language)
+    s = s.replace("%details%", details or "None")
 
     print(s)
     prompt_block = {"name": "Self-Chat Directive", "content": s}
@@ -400,9 +591,33 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     print(f"Story renamed to: {fname}\n")
 
     print("=== Editor phase ===")
-    edited_path = run_editor(stories_dir, fname, task, genre)
-    print("=== Moderator phase ===")
-    run_moderator(stories_dir, fname, task, genre, editor_path=edited_path)
+    edited_path = run_editor(stories_dir, fname, task, genre, mediums=medium, language=language, details=details, checklist=checklist)
+
+    print("=== Deterministic verification ===")
+    with open(fname, "r", encoding="utf-8") as f:
+        original_text = f.read()
+    check_source = edited_path if edited_path else fname
+    with open(check_source, "r", encoding="utf-8") as f:
+        check_text = f.read()
+    problems = verify_task_fulfillment(original_text, check_text, medium, language)
+
+    if problems:
+        print(f"[verify] {len(problems)} problem(s) found — auto-RED, skipping moderator LLM call:")
+        for p in problems:
+            print(f"[verify]   - {p}")
+        verdict_path = fname.replace(".md", ".moderation.json")
+        data = {
+            "verdict": "RED",
+            "reasons": "Automatic RED (deterministic check, no LLM call):\n" + "\n".join(f"- {p}" for p in problems),
+            "task": task,
+            "genre": genre,
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        with open(verdict_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    else:
+        print("=== Moderator phase ===")
+        run_moderator(stories_dir, fname, task, genre, editor_path=edited_path, mediums=medium, language=language, details=details, checklist=checklist)
 
     return transcript, session_a, session_b, fname
 
@@ -512,10 +727,10 @@ def clean_speaker_text(speaker, text):
     cleaned = re.sub(rf"^(kolpo|kaya|कल्प|কায়া):\s*", "", text, flags=re.IGNORECASE)
     cleaned = re.sub(rf"^{re.escape(speaker)}:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\[NEXT TURN:\s*[^\]]*\]\s*", "", cleaned, flags=re.IGNORECASE)
-    
+
     # Remove raw action tags automatically
     cleaned = re.sub(r"\[ACTION:\s*[^\]]+\]", "", cleaned, flags=re.IGNORECASE)
-    
+
     return cleaned.replace("[END CONVERSATION]", "").strip()
 
 
@@ -705,7 +920,7 @@ def extract_markdown_fence(text):
     return text.strip()
 
 
-def run_editor(stories_dir, fname, task, genre):
+def run_editor(stories_dir, fname, task, genre, mediums=None, language="", details="", checklist=None):
     """Editor phase: review images + markdown, write story_rN_ts.edited.md."""
     try:
         token = login(USERNAME_EDITOR, PASSWORD)
@@ -715,6 +930,11 @@ def run_editor(stories_dir, fname, task, genre):
     register_agent_tokens([token], [USERNAME_EDITOR])
     try:
         prompt = open(EDITOR_PROMPT_FILE, encoding="utf-8").read()
+        prompt = prompt.replace("%genre%", genre)
+        prompt = prompt.replace("%mediums%", ", ".join(mediums or []))
+        prompt = prompt.replace("%language%", language or "")
+        prompt = prompt.replace("%details%", details or "None")
+        prompt = prompt.replace("%checklist%", checklist_for(genre, "editor", checklist))
     except OSError as e:
         print(f"[editor] Could not read prompt file: {e}")
         return None
@@ -763,7 +983,7 @@ def run_editor(stories_dir, fname, task, genre):
             delete_session(token, session_id)
 
 
-def run_moderator(stories_dir, fname, task, genre, editor_path=None):
+def run_moderator(stories_dir, fname, task, genre, editor_path=None, mediums=None, language="", details="", checklist=None):
     """Moderator phase: GREEN/RED verdict, written to story_rN_ts.moderation.json."""
     try:
         token = login(USERNAME_MODERATOR, PASSWORD)
@@ -773,6 +993,11 @@ def run_moderator(stories_dir, fname, task, genre, editor_path=None):
     register_agent_tokens([token], [USERNAME_MODERATOR])
     try:
         prompt = open(MODERATOR_PROMPT_FILE, encoding="utf-8").read()
+        prompt = prompt.replace("%genre%", genre)
+        prompt = prompt.replace("%mediums%", ", ".join(mediums or []))
+        prompt = prompt.replace("%language%", language or "")
+        prompt = prompt.replace("%details%", details or "None")
+        prompt = prompt.replace("%checklist%", checklist_for(genre, "moderator", checklist))
     except OSError as e:
         print(f"[moderator] Could not read prompt file: {e}")
         return None
@@ -849,10 +1074,20 @@ def run_forever():
             languages = spec["languages"]
             roles = spec.get("roles") or ["free"]
             genre = spec.get("genre") or "General"
+            details = spec.get("details") or ""
+            checklist = spec.get("checklist") or {}
+            if "audio" in mediums:
+                print(
+                    f"[guard] Task declares 'audio', but no audio tool exists in TOOLS — "
+                    f"skipping round {round_number} without running it.\n"
+                )
+                round_number += 1
+                task_index += 1
+                continue
             print(f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n")
             start_time = time.time()
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number, task, mediums, languages, roles, genre
+                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist
             )
             # save_transcript(transcript, round_number)
             if not keep_sessions:
@@ -867,6 +1102,22 @@ def run_forever():
             print("Vacation over")
     except KeyboardInterrupt:
         print("\nManual Interruption")
+
+
+TASKS, TASKS_SOURCE, TASK_CHECKLISTS = load_tasks()
+if not TASKS:
+    print("No tasks to run. Add tasks to a config file and restart.")
+    raise SystemExit(1)
+
+GENRE_CHECKLISTS = load_genre_checklists(TASK_CHECKLISTS)
+print(f"Loaded {len(TASKS)} task(s) from {TASKS_SOURCE}")
+
+if args.dry_run:
+    run_dry_run()
+    raise SystemExit(0)
+
+user_input = input("Keep sessions {y/n} [default: n] ? ")
+keep_sessions = user_input.strip().lower() == "y"
 
 
 if __name__ == "__main__":
