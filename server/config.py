@@ -14,7 +14,7 @@ PORT = 3001
 REASONING_BUDGET = 4096
 
 with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
-    MODEL_ID = file.read()
+    MODEL_ID = file.read().strip()
 
 COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
@@ -28,7 +28,7 @@ LLAMA_SERVER_ARGS = [
     "--jinja",
 
     # GPU / VRAM Allocations
-    "--n-gpu-layers", LLAMA_QWEN_NGL,
+    "--n-gpu-layers", LLAMA_GEMMA_NGL,
     "-fa", "on",  # Flash attention lowers VRAM footprint
     "--ctx-size", "32768",  # 32k context; KV cache quantized to q8_0 to fit VRAM
     #"--no-kv-offload",     # Use it to move the kv cache to RAM
