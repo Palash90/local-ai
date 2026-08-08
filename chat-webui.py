@@ -47,58 +47,130 @@ import sys
 
 sys.path.insert(0, COMFYUI_DIR)
 
-import server.tasks as _tasks_mod
-
-# Thin wrappers over server/tasks.py that thread through this module's
-# TASKS_DB global. Kept under the original names (and as plain module-level
-# functions, not just re-exports) because server/api.py's Handler and the
-# test suite read them out of chat-webui.py's globals() / monkeypatch them
-# directly (e.g. `monkeypatch.setattr(chat_webui, "TASKS_DB", ...)`).
+import sqlite3
+_tasks_db_lock = threading.Lock()
 
 def _init_tasks_db():
-    _tasks_mod.init_tasks_db(TASKS_DB)
+    with _tasks_db_lock:
+        conn = sqlite3.connect(TASKS_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                status TEXT DEFAULT 'pending',
+                priority TEXT DEFAULT 'medium',
+                due_date TEXT,
+                session_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                reminder_at TEXT,
+                reminded INTEGER DEFAULT 0
+            )
+        """)
+        conn.commit()
+        conn.close()
 
 def _db_run(query, params=()):
-    return _tasks_mod.db_run(TASKS_DB, query, params)
+    with _tasks_db_lock:
+        conn = sqlite3.connect(TASKS_DB)
+        try:
+            cur = conn.execute(query, params)
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
 
 def _db_fetch(query, params=()):
-    return _tasks_mod.db_fetch(TASKS_DB, query, params)
+    with _tasks_db_lock:
+        conn = sqlite3.connect(TASKS_DB)
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.execute(query, params)
+            rows = [dict(r) for r in cur.fetchall()]
+            return rows
+        finally:
+            conn.close()
 
 def _db_fetch_one(query, params=()):
-    return _tasks_mod.db_fetch_one(TASKS_DB, query, params)
-
-def task_create(user_id, title, description="", priority="medium", due_date=None, session_id=None, reminder_at=None):
-    return _tasks_mod.task_create(TASKS_DB, user_id, title, description, priority, due_date, session_id, reminder_at)
-
-def task_update(tid, user_id, **kwargs):
-    return _tasks_mod.task_update(TASKS_DB, tid, user_id, **kwargs)
-
-def task_complete(tid, user_id):
-    return _tasks_mod.task_complete(TASKS_DB, tid, user_id)
-
-def task_delete(tid, user_id):
-    return _tasks_mod.task_delete(TASKS_DB, tid, user_id)
-
-def task_list(user_id, status=None):
-    return _tasks_mod.task_list(TASKS_DB, user_id, status)
-
-def task_get(tid, user_id):
-    return _tasks_mod.task_get(TASKS_DB, tid, user_id)
-
-def due_reminders(now_iso):
-    return _tasks_mod.due_reminders(TASKS_DB, now_iso)
-
-def mark_reminded(tid):
-    _tasks_mod.mark_reminded(TASKS_DB, tid)
-
-def handle_task_tool(user_id, args):
-    return _tasks_mod.handle_task_tool(TASKS_DB, user_id, args)
+    rows = _db_fetch(query, params)
+    return rows[0] if rows else None
 
 _init_tasks_db()
 
 SYS_CONTENT = build_sys_content()
 
 print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)
+
+def task_create(user_id, title, description="", priority="medium", due_date=None, session_id=None, reminder_at=None):
+    tid = str(uuid.uuid4())
+    now = datetime.now().isoformat()
+    _db_run(
+        "INSERT INTO tasks (id, user_id, title, description, status, priority, due_date, session_id, created_at, updated_at, reminder_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (tid, user_id, title, description, "pending", priority, due_date, session_id, now, now, reminder_at),
+    )
+    return _db_fetch_one("SELECT * FROM tasks WHERE id=?", (tid,))
+
+def task_update(tid, user_id, **kwargs):
+    fields = {k: v for k, v in kwargs.items() if v is not None}
+    if not fields:
+        return None
+    fields["updated_at"] = datetime.now().isoformat()
+    set_clause = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [tid, user_id]
+    _db_run(f"UPDATE tasks SET {set_clause} WHERE id=? AND user_id=?", vals)
+    return _db_fetch_one("SELECT * FROM tasks WHERE id=?", (tid,))
+
+def task_complete(tid, user_id):
+    now = datetime.now().isoformat()
+    _db_run("UPDATE tasks SET status='completed', updated_at=? WHERE id=? AND user_id=?", (now, tid, user_id))
+    return _db_fetch_one("SELECT * FROM tasks WHERE id=?", (tid,))
+
+def task_delete(tid, user_id):
+    return _db_run("DELETE FROM tasks WHERE id=? AND user_id=?", (tid, user_id))
+
+def task_list(user_id, status=None):
+    if status:
+        return _db_fetch("SELECT * FROM tasks WHERE user_id=? AND status=? ORDER BY due_date IS NULL, due_date ASC, created_at DESC", (user_id, status))
+    return _db_fetch("SELECT * FROM tasks WHERE user_id=? ORDER BY due_date IS NULL, due_date ASC, created_at DESC", (user_id,))
+
+def task_get(tid, user_id):
+    return _db_fetch_one("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, user_id))
+
+def handle_task_tool(user_id, args):
+    op = args.get("operation", "")
+    if op == "create":
+        if not args.get("title"):
+            return json.dumps({"ok": False, "error": "Missing required argument: title"})
+        t = task_create(user_id, args["title"], args.get("description", ""), args.get("priority", "medium"), args.get("due_date"), args.get("session_id"), args.get("reminder_at"))
+        return json.dumps({"ok": True, "task": t})
+    elif op in ("update", "complete", "delete", "get"):
+        tid = args.get("task_id")
+        if not tid:
+            return json.dumps({"ok": False, "error": f"Missing required argument: task_id"})
+        if op == "update":
+            t = task_update(tid, user_id, title=args.get("title"), description=args.get("description"), priority=args.get("priority"), status=args.get("status"), due_date=args.get("due_date"), reminder_at=args.get("reminder_at"))
+            if t:
+                return json.dumps({"ok": True, "task": t})
+            return json.dumps({"ok": False, "error": "Task not found"})
+        elif op == "complete":
+            t = task_complete(tid, user_id)
+            if t:
+                return json.dumps({"ok": True, "task": t})
+            return json.dumps({"ok": False, "error": "Task not found"})
+        elif op == "delete":
+            task_delete(tid, user_id)
+            return json.dumps({"ok": True})
+        else:
+            t = task_get(tid, user_id)
+            if t:
+                return json.dumps({"ok": True, "task": t})
+            return json.dumps({"ok": False, "error": "Task not found"})
+    elif op == "list":
+        tasks = task_list(user_id, args.get("status"))
+        return json.dumps({"ok": True, "tasks": tasks})
+    return json.dumps({"ok": False, "error": f"Unknown operation: {op}"})
 
 _users_cache = None
 _users_cache_time = 0
@@ -253,6 +325,16 @@ def _load_extra_prompts(items):
     return blocks
 
 
+def _session_meta_from(sdata):
+    return {
+        "name": sdata.get("name", "Chat"),
+        "created": sdata.get("created", time.time()),
+        "updated": sdata.get("updated", time.time()),
+        "user_id": sdata.get("user_id", ""),
+        "system_prompts": sdata.get("system_prompts", []),
+    }
+
+
 def load_sessions():
     global sessions, sessions_meta
     with _data_lock:
@@ -267,13 +349,7 @@ def load_sessions():
         with _data_lock:
             for sid, sdata in data.get("sessions", {}).items():
                 sessions[sid] = sdata.get("messages", [])
-                sessions_meta[sid] = {
-                    "name": sdata.get("name", "Chat"),
-                    "created": sdata.get("created", time.time()),
-                    "updated": sdata.get("updated", time.time()),
-                    "user_id": sdata.get("user_id", ""),
-                    "system_prompts": sdata.get("system_prompts", []),
-                }
+                sessions_meta[sid] = _session_meta_from(sdata)
     stale = os.path.join(SESSIONS_DIR, "sessions.json")
     if os.path.exists(stale):
         try:
@@ -283,13 +359,7 @@ def load_sessions():
                 for sid, sdata in data.get("sessions", {}).items():
                     if sid not in sessions:
                         sessions[sid] = sdata.get("messages", [])
-                        sessions_meta[sid] = {
-                            "name": sdata.get("name", "Chat"),
-                            "created": sdata.get("created", time.time()),
-                            "updated": sdata.get("updated", time.time()),
-                            "user_id": sdata.get("user_id", ""),
-                            "system_prompts": sdata.get("system_prompts", []),
-                        }
+                        sessions_meta[sid] = _session_meta_from(sdata)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         try:
@@ -2034,9 +2104,11 @@ def _idle_unload_loop():
 def _reminder_loop():
     while True:
         try:
-            for task in due_reminders(datetime.now().isoformat()):
+            now = datetime.now().isoformat()
+            due = _db_fetch("SELECT * FROM tasks WHERE reminder_at IS NOT NULL AND reminder_at <= ? AND reminded=0 AND status NOT IN ('completed','cancelled')", (now,))
+            for task in due:
                 print(f"[reminder] Task '{task['title']}'. User: {task['user_id']}")
-                mark_reminded(task["id"])
+                _db_run("UPDATE tasks SET reminded=1 WHERE id=?", (task["id"],))
         except Exception as e:
             print(f"[reminder] Error: {e}")
         time.sleep(30)

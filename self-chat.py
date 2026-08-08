@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 import time
 import json
@@ -44,8 +43,8 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 10.0
-SLEEP_BETWEEN_TURNS = 10.0
-MAX_MESSAGES_PER_AGENT = 25
+SLEEP_BETWEEN_TURNS = 2.0
+MAX_MESSAGES_PER_AGENT = 6
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
 STARTING_CONVERSATION = open(SELF_CHAT_PROMPT_FILE).read()
