@@ -1,0 +1,454 @@
+"""ComfyUI image generation and editing."""
+
+import base64
+import json
+import os
+import random
+import time
+import uuid
+
+import requests
+
+from server.features.state import M
+from server.features.users import _safe_username
+
+
+def _output_dir(user):
+    return os.path.join(M.COMFYUI_OUTPUT, _safe_username(user))
+
+
+def _input_dir(user):
+    return os.path.join(M.COMFYUI_INPUT, _safe_username(user))
+
+
+def _output_rel(target):
+    if os.path.isabs(target):
+        try:
+            return os.path.relpath(target, M.COMFYUI_OUTPUT)
+        except ValueError:
+            return os.path.basename(target)
+    return target
+
+
+def _image_url_rel(url):
+    marker = "/output/"
+    if marker in url:
+        return url.split(marker, 1)[-1]
+    return os.path.basename(url)
+
+
+def free_comfyui_vram():
+    print("[comfyui] Freeing VRAM...")
+    try:
+        r = requests.post(
+            f"{M.COMFYUI_URL}/free",
+            json={"unload_models": True, "free_memory": True},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            print("[comfyui] VRAM freed")
+            return True
+    except Exception as e:
+        print(f"[comfyui] Free error: {e}")
+    finally:
+        time.sleep(10)
+    return False
+
+
+def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
+    print(f"\n[image] Generating image for task {task_id} with the prompt: {prompt}")
+    M.set_status(task_id, "Freeing VRAM for image generation...")
+    M.unload_llama_model()
+
+    user = M._task_user(task_id)
+    gen_tag = str(uuid.uuid4())[:8]
+    prefix = f"{_safe_username(user)}/gen_{gen_tag}_"
+    cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+    if model == "z_image":
+        print("Chose Z-Image Turbo for image generation")
+        workflow = {
+            "62": {
+                "class_type": "CLIPLoader",
+                "inputs": {"clip_name": cfg["clip1"], "type": "lumina2"},
+            },
+            "63": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
+            "66": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": cfg["unet"], "weight_dtype": "default"},
+            },
+            "67": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": prompt, "clip": ["62", 0]},
+            },
+            "68": {
+                "class_type": "EmptySD3LatentImage",
+                "inputs": {"width": 1024, "height": 1024, "batch_size": 1},
+            },
+            "69": {
+                "class_type": "ModelSamplingAuraFlow",
+                "inputs": {"shift": 3, "model": ["66", 0]},
+            },
+            "71": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative_prompt, "clip": ["62", 0]},
+            },
+            "70": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**31),
+                    "steps": 8,
+                    "cfg": 1.0,
+                    "sampler_name": "res_multistep",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                    "model": ["69", 0],
+                    "positive": ["67", 0],
+                    "negative": ["71", 0],
+                    "latent_image": ["68", 0],
+                },
+            },
+            "65": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["70", 0], "vae": ["63", 0]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": prefix, "images": ["65", 0]},
+            },
+        }
+    elif model == "sd3_5_medium":
+        print("Chose SD 3.5 for image generation")
+        workflow = {
+            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": cfg["unet"]}},
+            "2": {
+                "class_type": "TripleCLIPLoaderGGUF",
+                "inputs": {
+                    "clip_name1": cfg["clip1"],
+                    "clip_name2": cfg["clip2"],
+                    "clip_name3": cfg["t5"],
+                    "type": "sd3",
+                },
+            },
+            "3": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": prompt, "clip": ["2", 0]},
+            },
+            "4": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative_prompt, "clip": ["2", 0]},
+            },
+            "5": {
+                "class_type": "EmptySD3LatentImage",
+                "inputs": {"width": 1024, "height": 1024, "batch_size": 1},
+            },
+            "6": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**31),
+                    "steps": 20,  # Recommended steps for SD 3.5 Medium
+                    "cfg": 4.5,  # Recommended CFG range for SD 3.5 Medium: 3.5 to 5.0
+                    "sampler_name": "euler",
+                    "scheduler": "sgm_uniform",
+                    "denoise": 1.0,
+                    "model": ["1", 0],
+                    "positive": ["3", 0],
+                    "negative": ["4", 0],
+                    "latent_image": ["5", 0],
+                },
+            },
+            "7": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["6", 0], "vae": ["7", 0]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": prefix, "images": ["8", 0]},
+            },
+        }
+    else:
+        print("No Image Model Selected Perfectly")
+
+    with M._data_lock:
+        M.model_status = "image_active"
+        M.tasks[task_id]["gen_prompt"] = prompt
+        M.tasks[task_id]["_image_model"] = model
+        M.tasks[task_id]["negative_prompt"] = negative_prompt
+    M.ensure_comfyui_running()
+    p_short = prompt[:200] + ("..." if len(prompt) > 200 else "")
+    M.set_status(task_id, f"Generating image ({model})... Prompt: {p_short}")
+    try:
+        r = requests.post(
+            f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
+        )
+        data = r.json()
+
+        if "error" in data:
+            result = json.dumps({"error": f"ComfyUI: {data['error']}"})
+        else:
+            prompt_id = data["prompt_id"]
+            found_file = None
+            for _ in range(120):
+                time.sleep(1)
+                try:
+                    hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
+                    hist = hr.json()
+
+                    if prompt_id in hist:
+                        outputs = hist[prompt_id].get("outputs", {})
+                        for node_id, node_out in outputs.items():
+                            for img in node_out.get("images", []):
+                                fname = img["filename"]
+                                fpath = os.path.join(
+                                    M.COMFYUI_OUTPUT, img.get("subfolder", ""), fname
+                                )
+                                found_file = fpath
+                                break
+                        if found_file:
+                            break
+                except Exception:
+                    pass
+            if found_file:
+                with M._data_lock:
+                    cancelled = bool(M.tasks.get(task_id, {}).get("status") == "cancelled")
+                if cancelled:
+                    try:
+                        if os.path.exists(found_file):
+                            os.remove(found_file)
+                            print(f"[image] Deleted orphaned image for cancelled task {task_id}: {found_file}")
+                    except OSError:
+                        pass
+                    result = json.dumps({"error": "Cancelled — session was deleted"})
+                else:
+                    M.tasks[task_id]["image_file"] = M._output_rel(found_file)
+                    M.set_status(task_id, f"Image saved as {found_file}")
+                    print(f"[generate_image] SUCCESS: {found_file}")  # DEBUG
+                    result = json.dumps(
+                        {
+                            "prompt_id": prompt_id,
+                            "file": found_file,
+                            "rel": M._output_rel(found_file),
+                        }
+                    )
+            else:
+                print(f"[generate_image] TIMEOUT for task {task_id} after 120s")  # DEBUG
+                result = json.dumps({"error": "Image generation timeout"})
+    except Exception as e:
+        result = json.dumps({"error": str(e)})
+    finally:
+        M.set_status(task_id, "Freeing image generation VRAM...")
+        M.free_comfyui_vram()
+        M.set_status(task_id, "Loading chat model...")
+        M.load_llama_model()
+    return result
+
+
+def edit_image(
+    prompt,
+    task_id,
+    image_b64,
+    negative_prompt="",
+    denoise=0.4,
+    model="z_image",
+    sid=None,
+):
+    print("Image edit called with denoise", denoise)
+    user = M._task_user(task_id)
+    if not image_b64 and sid:
+        with M._data_lock:
+            msgs = list(M.sessions.get(sid, []))
+        print(f"[edit_image] Scanning {len(msgs)} session messages for image sources")
+
+        for msg in reversed(msgs):
+            # 1. Check generated image URL attribute (_image_url)
+            url = (msg.get("_image_url") or "").strip()
+            if url:
+                fname = os.path.join(M.IMG_PATH, M._image_url_rel(url))
+                fpath = fname
+                print(
+                    f"[edit_image] Checking _image_url path={fpath} exists={os.path.exists(fpath)}"
+                )
+                if os.path.exists(fpath):
+                    with open(fpath, "rb") as f:
+                        image_b64 = base64.b64encode(f.read()).decode()
+                    break
+
+            # 2. Check user-uploaded images stored in the message's content array
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in reversed(content):
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        img_url = part.get("image_url", {}).get("url", "")
+                        if img_url.startswith("data:image"):
+                            # Extracted base64 string directly from user upload
+                            image_b64 = img_url.split(",", 1)[-1]
+                            print(
+                                "[edit_image] Extracted base64 image from user message content"
+                            )
+                            break
+                if image_b64:
+                    break
+
+    if not image_b64:
+        print("[edit_image] FAILED to find an image to edit")
+        return json.dumps({"error": "No image provided for editing."})
+
+    print(
+        f"[edit_image] Found image ({len(image_b64)} bytes base64), proceeding with edit"
+    )
+
+    print(f"\n[image_edit] Editing image for task {task_id} with prompt: {prompt}")
+    M.set_status(task_id, "Freeing VRAM for image editing...")
+    M.unload_llama_model()
+
+    gen_tag = str(uuid.uuid4())[:8]
+    prefix = f"{_safe_username(user)}/edit_{gen_tag}_"
+    input_filename = f"{_safe_username(user)}/input_{gen_tag}.png"
+
+    input_dir = M.COMFYUI_INPUT
+    os.makedirs(os.path.dirname(os.path.join(input_dir, input_filename)), exist_ok=True)
+    input_filepath = os.path.join(input_dir, input_filename)
+
+    with open(input_filepath, "wb") as f:
+        f.write(base64.b64decode(image_b64))
+
+    cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+
+    workflow = {
+        "62": {
+            "class_type": "CLIPLoader",
+            "inputs": {"clip_name": cfg["clip1"], "type": "lumina2"},
+        },
+        "63": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
+        "66": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": cfg["unet"], "weight_dtype": "default"},
+        },
+        "67": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": prompt, "clip": ["62", 0]},
+        },
+        "71": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": negative_prompt, "clip": ["62", 0]},
+        },
+        "69": {
+            "class_type": "ModelSamplingAuraFlow",
+            "inputs": {"shift": 3, "model": ["66", 0]},
+        },
+        "5_load": {"class_type": "LoadImage", "inputs": {"image": input_filename}},
+        "5_scale": {
+            "class_type": "ImageScaleToTotalPixels",
+            "inputs": {
+                "image": ["5_load", 0],
+                "megapixels": 1.049,  # ~1024x1024
+                "upscale_method": "bicubic",
+                "resolution_steps": 1,
+            },
+        },
+        # Standard VAEEncode instead of VAEEncodeForInpaint
+        "5_encode": {
+            "class_type": "VAEEncode",
+            "inputs": {"pixels": ["5_scale", 0], "vae": ["63", 0]},
+        },
+        "70": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": random.randint(0, 2**31),
+                "steps": 8,
+                "cfg": 1.0,
+                "sampler_name": "res_multistep",
+                "scheduler": "simple",
+                "denoise": float(denoise),  # Dynamically controls edit depth
+                "model": ["69", 0],
+                "positive": ["67", 0],
+                "negative": ["71", 0],
+                "latent_image": ["5_encode", 0],
+            },
+        },
+        "65": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["70", 0], "vae": ["63", 0]},
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": prefix, "images": ["65", 0]},
+        },
+    }
+    with M._data_lock:
+        M.model_status = "image_active"
+        M.tasks[task_id]["gen_prompt"] = prompt
+        M.tasks[task_id]["_image_model"] = model
+        M.tasks[task_id]["negative_prompt"] = negative_prompt
+
+    M.ensure_comfyui_running()
+    M.set_status(task_id, f"Editing image ({model})... Prompt: {prompt[:150]}")
+
+    try:
+        r = requests.post(
+            f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
+        )
+        data = r.json()
+
+        if "error" in data:
+            result = json.dumps({"error": f"ComfyUI: {data['error']}"})
+        else:
+            prompt_id = data["prompt_id"]
+            found_file = None
+            for _ in range(120):
+                time.sleep(1)
+                try:
+                    hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
+                    hist = hr.json()
+                    if prompt_id in hist:
+                        outputs = hist[prompt_id].get("outputs", {})
+                        for node_id, node_out in outputs.items():
+                            for img in node_out.get("images", []):
+                                fname = img["filename"]
+                                found_file = os.path.join(
+                                    M.IMG_PATH, img.get("subfolder", ""), fname
+                                )
+                                break
+                        if found_file:
+                            break
+                except Exception:
+                    pass
+
+            if found_file:
+                with M._data_lock:
+                    cancelled = bool(M.tasks.get(task_id, {}).get("status") == "cancelled")
+                if cancelled:
+                    try:
+                        if os.path.exists(found_file):
+                            os.remove(found_file)
+                            print(f"[image] Deleted orphaned edited image for cancelled task {task_id}: {found_file}")
+                    except OSError:
+                        pass
+                    result = json.dumps({"error": "Cancelled — session was deleted"})
+                else:
+                    M.tasks[task_id]["image_file"] = M._output_rel(found_file)
+                    M.set_status(task_id, f"Edited image saved as {found_file}")
+                    result = json.dumps(
+                        {
+                            "prompt_id": prompt_id,
+                            "file": found_file,
+                            "rel": M._output_rel(found_file),
+                        }
+                    )
+            else:
+                result = json.dumps({"error": "Image editing timeout"})
+    except Exception as e:
+        result = json.dumps({"error": str(e)})
+    finally:
+        if os.path.exists(input_filepath):
+            try:
+                os.remove(input_filepath)
+                print(f"[edit_image] Cleaned up input file: {input_filepath}")
+            except Exception as e:
+                print(f"[edit_image] Failed to cleanup input file: {e}")
+        M.set_status(task_id, "Freeing image generation VRAM...")
+        M.free_comfyui_vram()
+        M.set_status(task_id, "Loading chat model...")
+        M.load_llama_model()
+
+    return result
