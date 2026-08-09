@@ -39,7 +39,7 @@ _CHAT_STATE = [
     "sessions", "sessions_meta", "tasks", "_active_tokens", "_agent_tokens",
     "_agent_users", "_effective_contexts", "_client_location",
     "_users_cache", "_users_cache_time", "model_status", "_last_tps",
-    "_current_task_id", "_overheated", "_gpu_temp",
+    "_current_task_id", "_overheated", "_gpu_temp", "_event_post",
 ]
 
 
