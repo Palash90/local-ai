@@ -47,6 +47,36 @@ LLAMA_SERVER_ARGS = [
     "--repeat-penalty", "1.0"
 ]
 
+# Second set of llama-server arguments used when processing automated
+# self-chat messages (editor/moderator/agent runs). These are background,
+# non-interactive jobs, so they deliberately run the model on the CPU only —
+# slower, but they never compete with interactive users for VRAM.
+LLAMA_SERVER_ARGS_CPU = [
+    "--host", "0.0.0.0",
+    "--port", "8079",
+    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    "--jinja",
+
+    # CPU-only execution — no layers offloaded to the GPU.
+    "--n-gpu-layers", "0",
+    "-fa", "on",
+    "--ctx-size", "32768",
+    "-ctk", "q8_0",            # Quantized KV cache keeps RAM usage low
+    "-ctv", "q8_0",
+    "-nkvo",
+
+    # Reasoning & Thinking Limits
+    "--reasoning-budget", str(REASONING_BUDGET),
+    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+
+    # Gemma 4 Sampling Preset
+    "--temp", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64",
+    "--min-p", "0.0",
+    "--repeat-penalty", "1.0"
+]
+
 FILES_DIR = os.path.expanduser("~/local-ai-files")
 SESSIONS_FILE = os.path.join(FILES_DIR, "sessions.json")
 SESSIONS_DIR = FILES_DIR

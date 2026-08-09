@@ -104,6 +104,20 @@ class TestConstants:
         assert str(cfg.PORT) in args or "8081" in args
         assert "--n-gpu-layers" in args
 
+    def test_llama_server_args_cpu(self, cfg):
+        cpu_args = cfg.LLAMA_SERVER_ARGS_CPU
+        assert "--host" in cpu_args
+        assert "--port" in cpu_args
+        assert "--n-gpu-layers" in cpu_args
+        ngl = cpu_args[cpu_args.index("--n-gpu-layers") + 1]
+        assert ngl == "0"
+        assert "--ctx-size" in cpu_args
+
+    def test_llama_server_cpu_differs_from_gpu(self, cfg):
+        assert cfg.LLAMA_SERVER_ARGS_CPU != cfg.LLAMA_SERVER_ARGS
+        gpu_ngl = cfg.LLAMA_SERVER_ARGS[cfg.LLAMA_SERVER_ARGS.index("--n-gpu-layers") + 1]
+        assert gpu_ngl != "0"
+
     def test_image_models_nonempty(self, cfg):
         assert isinstance(cfg.IMAGE_MODELS, dict)
         assert len(cfg.IMAGE_MODELS) >= 1

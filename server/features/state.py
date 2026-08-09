@@ -85,6 +85,7 @@ _location_events = {}
 
 # Scalars the engine reads and rebinds at runtime.
 model_status = "unloaded"
+_llama_mode = "gpu"  # "gpu" (interactive) or "cpu" (self-chat agent runs)
 _last_tps = None
 _last_llm_use = time.time()
 _client_location = None

@@ -177,6 +177,7 @@ def _llm_worker(task_id, sid, round_num, msgs):
 
 
 def _start_llm_round(task_id, sid, round_num):
+    M._ensure_llama_mode_for_task(task_id)
     with M._data_lock:
         ms = M.model_status
     if ms != "chat_loaded":

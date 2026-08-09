@@ -1020,7 +1020,103 @@ class TestRestartServers:
         assert killed.count("llama") == 2
 
 
-class TestEnsureComfyuiRunning:
+class TestRestartLlamaServer:
+    def test_switches_to_cpu(self, chat_webui, monkeypatch, tmp_path):
+        chat_webui._llama_mode = "gpu"
+        killed = []
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: killed.append("llama"))
+        monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: type("R", (), {"status_code": 200})())
+        popens = []
+        monkeypatch.setattr(chat_webui.subprocess, "Popen", lambda *a, **k: popens.append(a))
+        monkeypatch.setattr(chat_webui.os.path, "expanduser", lambda p: str(tmp_path))
+        real_open = open
+        monkeypatch.setattr(builtins, "open", lambda path, mode: real_open(path, mode))
+        chat_webui.restart_llama_server("cpu")
+        assert chat_webui._llama_mode == "cpu"
+        assert killed == ["llama"]
+        assert len(popens) == 1
+        assert popens[0][0][0] == chat_webui.LLAMA_SERVER_PATH
+        assert popens[0][0][1:] == chat_webui.LLAMA_SERVER_ARGS_CPU
+
+    def test_noop_when_already_cpu(self, chat_webui, monkeypatch):
+        chat_webui._llama_mode = "cpu"
+        called = []
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: called.append("k"))
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: called.append("g"))
+        chat_webui.restart_llama_server("cpu")
+        assert called == []
+
+    def test_switches_back_to_gpu(self, chat_webui, monkeypatch, tmp_path):
+        chat_webui._llama_mode = "cpu"
+        killed = []
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: killed.append("llama"))
+        monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: type("R", (), {"status_code": 200})())
+        popens = []
+        monkeypatch.setattr(chat_webui.subprocess, "Popen", lambda *a, **k: popens.append(a))
+        monkeypatch.setattr(chat_webui.os.path, "expanduser", lambda p: str(tmp_path))
+        real_open = open
+        monkeypatch.setattr(builtins, "open", lambda path, mode: real_open(path, mode))
+        chat_webui.restart_llama_server("gpu")
+        assert chat_webui._llama_mode == "gpu"
+        assert popens[0][0][1:] == chat_webui.LLAMA_SERVER_ARGS
+
+    def test_keeps_mode_when_start_fails(self, chat_webui, monkeypatch, tmp_path):
+        chat_webui._llama_mode = "gpu"
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: None)
+        monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
+        state = {"t": 1000.0}
+
+        def fake_time():
+            state["t"] += 3
+            return state["t"]
+
+        monkeypatch.setattr(chat_webui.time, "time", fake_time)
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: (_ for _ in ()).throw(OSError("down")))
+        monkeypatch.setattr(chat_webui.subprocess, "Popen", lambda *a, **k: None)
+        monkeypatch.setattr(chat_webui.os.path, "expanduser", lambda p: str(tmp_path))
+        real_open = open
+        monkeypatch.setattr(builtins, "open", lambda path, mode: real_open(path, mode))
+        chat_webui.restart_llama_server("cpu")
+        assert chat_webui._llama_mode == "gpu"
+
+
+class TestEnsureLlamaModeForTask:
+    def test_agent_user_needs_cpu(self, chat_webui, monkeypatch):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        chat_webui.tasks["t1"] = {"_user": "editor"}
+        chat_webui._llama_mode = "gpu"
+        switched = []
+        monkeypatch.setattr(chat_webui, "restart_llama_server", lambda m: switched.append(m))
+        chat_webui._ensure_llama_mode_for_task("t1")
+        assert switched == ["cpu"]
+
+    def test_normal_user_needs_gpu(self, chat_webui, monkeypatch):
+        chat_webui._agent_users.clear()
+        chat_webui.tasks["t1"] = {"_user": "alice"}
+        chat_webui._llama_mode = "gpu"
+        switched = []
+        monkeypatch.setattr(chat_webui, "restart_llama_server", lambda m: switched.append(m))
+        chat_webui._ensure_llama_mode_for_task("t1")
+        assert switched == []
+
+    def test_missing_task_is_noop(self, chat_webui, monkeypatch):
+        chat_webui.tasks.pop("ghost", None)
+        switched = []
+        monkeypatch.setattr(chat_webui, "restart_llama_server", lambda m: switched.append(m))
+        chat_webui._ensure_llama_mode_for_task("ghost")
+        assert switched == []
+
+    def test_user_with_no_name_is_gpu(self, chat_webui, monkeypatch):
+        chat_webui._agent_users.clear()
+        chat_webui.tasks["t1"] = {"session_id": "s1"}
+        chat_webui._llama_mode = "cpu"
+        switched = []
+        monkeypatch.setattr(chat_webui, "restart_llama_server", lambda m: switched.append(m))
+        chat_webui._ensure_llama_mode_for_task("t1")
+        assert switched == ["gpu"]
     def test_already_running(self, chat_webui, monkeypatch):
         class Resp:
             status_code = 200
@@ -1804,6 +1900,31 @@ class TestPrepareSessionFull:
         assert [p["type"] for p in user_msg["content"]] == ["image_url", "audio_url", "text"]
         assert chat_webui.sessions_meta["s1"]["name"] == "hello there"
         assert load_calls == [1]
+
+    def test_context_tokens_substituted(self, chat_webui, temp_paths, make_user, tmp_path):
+        ctx = str(tmp_path / "ctx" / "editor.txt")
+        make_user({"editor": "secret"}, context_files={"editor": ctx})
+        os.makedirs(os.path.dirname(ctx), exist_ok=True)
+        with open(ctx, "w", encoding="utf-8") as f:
+            f.write("- Genre: %genre%\n- Checklist: %checklist%\n")
+        chat_webui.tasks["t1"] = {"_user": "editor"}
+        chat_webui.sessions.clear()
+        chat_webui.sessions_meta.clear()
+        chat_webui.sessions_meta["s1"] = {
+            "name": "Editor review",
+            "system_prompts": [{"name": "Editor Directive", "content": "Genre is %genre%"}],
+            "created": 1,
+            "updated": 1,
+            "context_tokens": {"%genre%": "adult", "%checklist%": "- Be explicit"},
+        }
+        chat_webui.model_status = "chat_loaded"
+        chat_webui._prepare_session("t1", "s1", "review", None)
+        sys_content = chat_webui.sessions["s1"][0]["content"]
+        assert "Genre: adult" in sys_content
+        assert "Checklist: - Be explicit" in sys_content
+        assert "Genre is adult" in sys_content
+        assert "%genre%" not in sys_content
+        assert "%checklist%" not in sys_content
 
     def test_existing_session_system_update(self, chat_webui, temp_paths, monkeypatch):
         chat_webui.tasks["t1"] = {"_user": ""}

@@ -36,7 +36,7 @@ parser.add_argument(
 args = parser.parse_args()
 STORY_BASE_DIR = os.path.expanduser("~/local-ai-files/stories")
 
-BASE_URL = "http://localhost"
+BASE_URL = "http://localhost:3001"
 USERNAME_A = "kolpo"
 USERNAME_B = "kaya"
 PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
@@ -44,7 +44,7 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 10.0
 SLEEP_BETWEEN_TURNS = 2.0
-MAX_MESSAGES_PER_AGENT = 15
+MAX_MESSAGES_PER_AGENT = 6
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
 STARTING_CONVERSATION = open(SELF_CHAT_PROMPT_FILE).read()
@@ -319,10 +319,12 @@ def login(username, password):
     return resp.json()["token"]
 
 
-def create_session(token, name, system_prompts=None):
+def create_session(token, name, system_prompts=None, context_tokens=None):
     body = {"name": name}
     if system_prompts:
         body["system_prompts"] = system_prompts
+    if context_tokens:
+        body["context_tokens"] = context_tokens
     resp = requests.post(
         f"{BASE_URL}/api/sessions",
         json=body,
@@ -930,11 +932,15 @@ def run_editor(stories_dir, fname, task, genre, mediums=None, language="", detai
     register_agent_tokens([token], [USERNAME_EDITOR])
     try:
         prompt = open(EDITOR_PROMPT_FILE, encoding="utf-8").read()
-        prompt = prompt.replace("%genre%", genre)
-        prompt = prompt.replace("%mediums%", ", ".join(mediums or []))
-        prompt = prompt.replace("%language%", language or "")
-        prompt = prompt.replace("%details%", details or "None")
-        prompt = prompt.replace("%checklist%", checklist_for(genre, "editor", checklist))
+        context_tokens = {
+            "%genre%": genre,
+            "%mediums%": ", ".join(mediums or []),
+            "%language%": language or "",
+            "%details%": details or "None",
+            "%checklist%": checklist_for(genre, "editor", checklist),
+        }
+        for placeholder, value in context_tokens.items():
+            prompt = prompt.replace(placeholder, value)
     except OSError as e:
         print(f"[editor] Could not read prompt file: {e}")
         return None
@@ -942,6 +948,7 @@ def run_editor(stories_dir, fname, task, genre, mediums=None, language="", detai
         token,
         "Editor review",
         system_prompts=[{"name": "Editor Directive", "content": prompt}],
+        context_tokens=context_tokens,
     )
     edited_path = fname.replace(".md", ".edited.md")
     try:
@@ -993,11 +1000,15 @@ def run_moderator(stories_dir, fname, task, genre, editor_path=None, mediums=Non
     register_agent_tokens([token], [USERNAME_MODERATOR])
     try:
         prompt = open(MODERATOR_PROMPT_FILE, encoding="utf-8").read()
-        prompt = prompt.replace("%genre%", genre)
-        prompt = prompt.replace("%mediums%", ", ".join(mediums or []))
-        prompt = prompt.replace("%language%", language or "")
-        prompt = prompt.replace("%details%", details or "None")
-        prompt = prompt.replace("%checklist%", checklist_for(genre, "moderator", checklist))
+        context_tokens = {
+            "%genre%": genre,
+            "%mediums%": ", ".join(mediums or []),
+            "%language%": language or "",
+            "%details%": details or "None",
+            "%checklist%": checklist_for(genre, "moderator", checklist),
+        }
+        for placeholder, value in context_tokens.items():
+            prompt = prompt.replace(placeholder, value)
     except OSError as e:
         print(f"[moderator] Could not read prompt file: {e}")
         return None
@@ -1005,6 +1016,7 @@ def run_moderator(stories_dir, fname, task, genre, editor_path=None, mediums=Non
         token,
         "Moderator review",
         system_prompts=[{"name": "Moderator Directive", "content": prompt}],
+        context_tokens=context_tokens,
     )
     try:
         source = editor_path if editor_path else fname

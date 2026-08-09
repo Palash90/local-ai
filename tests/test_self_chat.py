@@ -563,13 +563,26 @@ class TestLoginAndSessions:
             return FakeResp({"session_id": "S"})
 
         monkeypatch.setattr(self_chat.requests, "post", fake_post)
-        sid = self_chat.create_session("tok", "Chat", system_prompts=[{"name": "N", "content": "c"}])
+        sid = self_chat.create_session("tok", "Chat", system_prompts=[{"name": "N", "content": "c"}], context_tokens={"%genre%": "adult"})
         assert sid == "S"
         args, kwargs = calls["post"]
         assert args[0] == "http://localhost/api/sessions"
         assert kwargs["headers"] == {"X-Auth-Token": "tok"}
         assert kwargs["json"]["name"] == "Chat"
         assert kwargs["json"]["system_prompts"] == [{"name": "N", "content": "c"}]
+        assert kwargs["json"]["context_tokens"] == {"%genre%": "adult"}
+
+    def test_create_session_no_context_tokens(self, self_chat, monkeypatch):
+        calls = {}
+
+        def fake_post(*a, **k):
+            calls["post"] = (a, k)
+            return FakeResp({"session_id": "S"})
+
+        monkeypatch.setattr(self_chat.requests, "post", fake_post)
+        self_chat.create_session("tok", "Chat")
+        args, kwargs = calls["post"]
+        assert "context_tokens" not in kwargs["json"]
 
     def test_delete_session_success(self, self_chat, monkeypatch):
         monkeypatch.setattr(self_chat.requests, "delete", lambda *a, **k: FakeResp(status=200))

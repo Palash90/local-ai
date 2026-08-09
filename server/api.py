@@ -617,10 +617,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             length = int(self.headers.get("Content-Length", 0))
             extra = {}
+            context_tokens = {}
             if length:
                 try:
                     ext_body = json.loads(self.rfile.read(length))
                     extra = _load_extra_prompts(ext_body.get("system_prompts") or [])
+                    context_tokens = ext_body.get("context_tokens") or {}
                 except Exception:
                     extra = []
             sid = str(uuid.uuid4())
@@ -633,6 +635,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "updated": now,
                     "user_id": user,
                     "system_prompts": extra,
+                    "context_tokens": context_tokens,
                 }
             save_sessions()
             self.send_json({"session_id": sid})

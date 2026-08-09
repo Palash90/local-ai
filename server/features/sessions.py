@@ -20,6 +20,7 @@ def _session_meta_from(sdata):
         "updated": sdata.get("updated", time.time()),
         "user_id": sdata.get("user_id", ""),
         "system_prompts": sdata.get("system_prompts", []),
+        "context_tokens": sdata.get("context_tokens", {}),
     }
 
 
@@ -96,6 +97,7 @@ def save_sessions():
                 "updated": meta["updated"],
                 "user_id": meta.get("user_id", ""),
                 "system_prompts": meta.get("system_prompts", []),
+                "context_tokens": meta.get("context_tokens", {}),
                 "messages": M.sessions[sid],
             }
     for user, data in by_user.items():
@@ -116,11 +118,14 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
     date_loc_context = f"[Current date: {ts.strftime('%Y-%m-%d %A %H:%M')}]{loc_context}"
     user = ""
     extra_prompts = []
+    context_tokens = {}
     with M._data_lock:
         t = M.tasks.get(task_id)
         if t:
             user = t.get("_user", "")
-        extra_prompts = M.sessions_meta.get(sid, {}).get("system_prompts", [])
+        meta = M.sessions_meta.get(sid, {})
+        extra_prompts = meta.get("system_prompts", [])
+        context_tokens = meta.get("context_tokens", {})
     user_context = M.read_user_context(user) if user else ""
     context_block = f"\n\n## User Context\n{user_context}" if user_context else ""
     full_sys_content = f"{M.SYS_CONTENT}\n\n{date_loc_context}{context_block}"
@@ -136,6 +141,8 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
             "Currently the server is hosted on %current_location%.", ""
         )
         full_sys_content = full_sys_content.replace("%current_location%", "not available")
+    for token, value in context_tokens.items():
+        full_sys_content = full_sys_content.replace(token, value)
     if user_context:
         print(
             f"[context] Injected {len(user_context)} chars of context for user '{user}'"

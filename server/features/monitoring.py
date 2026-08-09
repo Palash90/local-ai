@@ -55,20 +55,74 @@ def kill_comfyui():
     subprocess.run(["pkill", "-f", "main.py.*lowvram"], capture_output=True)
 
 
+def _start_llama_process(args):
+    """Launch llama-server with the given argument list and wait for health."""
+    log_dir = os.path.expanduser("~/local-ai-files")
+    llm_log = open(os.path.join(log_dir, "llama-server.log"), "a")
+    subprocess.Popen(
+        [M.LLAMA_SERVER_PATH] + args,
+        stdout=llm_log,
+        stderr=llm_log,
+        start_new_session=True,
+    )
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        time.sleep(2)
+        try:
+            r = requests.get(f"{M.LLAMA_BASE}/health", timeout=3)
+            if r.status_code == 200:
+                print("[restart] llama-server healthy")
+                return True
+        except Exception:
+            pass
+    print("[restart] llama-server did not respond within 2 minutes — killing")
+    M.kill_llama_server()
+    return False
+
+
+def restart_llama_server(mode):
+    """Restart llama-server using the GPU or CPU argument set.
+
+    ``mode`` is ``"gpu"`` (interactive users — the full VRAM config) or
+    ``"cpu"`` (automated self-chat jobs — the CPU-only config). No-op when the
+    server is already running in the requested mode.
+    """
+    if M._llama_mode == mode:
+        return
+    print(f"[llama] Switching llama-server to {mode} mode")
+    M.kill_llama_server()
+    time.sleep(1)
+    with M._data_lock:
+        M.model_status = "unloaded"
+    args = M.LLAMA_SERVER_ARGS if mode == "gpu" else M.LLAMA_SERVER_ARGS_CPU
+    if _start_llama_process(args):
+        M._llama_mode = mode
+
+
+def _ensure_llama_mode_for_task(task_id):
+    """Make sure llama-server runs in the mode the task's author needs.
+
+    Tasks posted by agent users (self-chat: editor, moderator, ...) run the
+    model on the CPU; tasks from interactive users keep the GPU config.
+    """
+    with M._data_lock:
+        t = M.tasks.get(task_id)
+        if not t:
+            return
+        user = t.get("_user", "")
+    needed = "cpu" if user in M._agent_users else "gpu"
+    if M._llama_mode != needed:
+        print(f"[llama] Task {task_id} user '{user}' needs {needed} mode")
+        M.restart_llama_server(needed)
+
+
 def restart_servers():
     print("Restarting servers")
     M.kill_llama_server()
     M.kill_comfyui()
     time.sleep(1)
     log_dir = os.path.expanduser("~/local-ai-files")
-    llm_log = open(os.path.join(log_dir, "llama-server.log"), "a")
     comfy_log = open(os.path.join(log_dir, "comfyui.log"), "a")
-    subprocess.Popen(
-        [M.LLAMA_SERVER_PATH] + M.LLAMA_SERVER_ARGS,
-        stdout=llm_log,
-        stderr=llm_log,
-        start_new_session=True,
-    )
     subprocess.Popen(
         [
             os.path.join(M.VENV_PYTHON),
@@ -84,18 +138,10 @@ def restart_servers():
         stderr=comfy_log,
         start_new_session=True,
     )
-    deadline = time.time() + 120
-    while time.time() < deadline:
-        time.sleep(2)
-        try:
-            r = requests.get(f"{M.LLAMA_BASE}/health", timeout=3)
-            if r.status_code == 200:
-                print("[restart] llama-server healthy")
-                return
-        except Exception:
-            pass
-    print("[restart] llama-server did not respond within 2 minutes — killing")
-    M.kill_llama_server()
+    with M._data_lock:
+        M.model_status = "unloaded"
+    _start_llama_process(M.LLAMA_SERVER_ARGS)
+    M._llama_mode = "gpu"
 
 
 def ensure_comfyui_running():

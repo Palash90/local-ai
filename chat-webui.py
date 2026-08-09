@@ -34,6 +34,7 @@ from server.config import (  # noqa: F401
     LLAMA_GEMMA_NGL,
     LLAMA_QWEN_NGL,
     LLAMA_SERVER_ARGS,
+    LLAMA_SERVER_ARGS_CPU,
     LLAMA_SERVER_PATH,
     LLAMA_URL,
     MODEL_ID,
@@ -84,6 +85,7 @@ from server.features.state import (  # noqa: E402
     _gpu_temp,
     _last_llm_use,
     _last_tps,
+    _llama_mode,
     _llm_pool,
     _location_events,
     _model_transition_lock,
@@ -155,7 +157,6 @@ from server.features.llm import (  # noqa: E402
     load_llama_model,
     unload_llama_model,
 )
-
 from server.features.tools import (  # noqa: E402
     _dispatch_tool,
     _tool_worker,
@@ -174,6 +175,7 @@ from server.features.images import (  # noqa: E402
 )
 
 from server.features.monitoring import (  # noqa: E402
+    _ensure_llama_mode_for_task,
     _evacuate_ram,
     _idle_unload_loop,
     _reminder_loop,
@@ -184,6 +186,7 @@ from server.features.monitoring import (  # noqa: E402
     kill_comfyui,
     kill_llama_server,
     model_status_snapshot,
+    restart_llama_server,
     restart_servers,
 )
 

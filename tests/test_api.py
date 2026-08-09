@@ -226,6 +226,18 @@ class TestSessions:
         assert r.status == 200
         assert any(s["session_id"] == sid for s in r.json)
 
+    def test_create_with_context_tokens(self, api_env):
+        env = api_env
+        r = env["handler"]("/api/sessions", method="POST",
+                           data={"system_prompts": [{"name": "D", "content": "g is %genre%"}],
+                                 "context_tokens": {"%genre%": "adult"}},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        sid = r.json["session_id"]
+        meta = env["chat"].sessions_meta[sid]
+        assert meta["context_tokens"] == {"%genre%": "adult"}
+        assert meta["system_prompts"] == [{"name": "D", "content": "g is %genre%"}]
+
     def test_sessions_scoped_to_user(self, api_env):
         env = api_env
         _create_session(env, env["auth_a"])
