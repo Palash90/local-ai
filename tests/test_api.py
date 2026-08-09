@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import time
 import types
 
@@ -560,6 +561,250 @@ class TestServing:
         env = api_env
         r = env["handler"]("/uploads/../../etc/passwd")
         assert r.status == 404
+
+
+class TestIndexMissing:
+    def test_missing_index_falls_back(self, api_env, monkeypatch):
+        import server.api as api
+        monkeypatch.setattr(api, "__file__", "/tmp/nope/package/api.py")
+        assert "index.html missing" in api.read_index_html()
+
+
+class TestModelStatusReminder:
+    def test_reminder_db_error_returns_zero(self, api_env, monkeypatch):
+        env = api_env
+        import server.api as api
+
+        def boom(*a, **k):
+            raise RuntimeError("db locked")
+        monkeypatch.setattr(api, "_db_fetch", boom)
+        r = env["handler"]("/api/model-status", headers=env["auth_a"])
+        assert r.status == 200
+        assert r.json["reminder_count"] == 0
+
+    def test_reminder_count_for_user(self, api_env):
+        env = api_env
+        import server.api as api
+        task = env["handler"]("/api/tasks", method="POST",
+                              data={"title": "R", "reminder_at": "2000-01-01T00:00:00"},
+                              headers=env["auth_a"]).json["task"]
+        r = env["handler"]("/api/model-status", headers=env["auth_a"])
+        assert r.json["reminder_count"] == 1
+
+
+class TestSessionMessagesUnauthorized:
+    def test_messages_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/sessions/s1/messages")
+        assert r.status == 401
+
+    def test_messages_missing_session_404(self, api_env):
+        env = api_env
+        sid = _create_session(env, env["auth_a"])
+        with env["chat"]._data_lock:
+            env["chat"].sessions.pop(sid, None)
+        r = env["handler"]("/api/sessions/%s/messages" % sid, headers=env["auth_a"])
+        assert r.status == 404
+
+
+class TestStaticServing:
+    def test_serves_dist_asset(self, api_env):
+        env = api_env
+        import server.api as api
+        import os
+        dist_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(api.__file__))), "dist")
+        os.makedirs(dist_dir, exist_ok=True)
+        asset = os.path.join(dist_dir, "test-asset-xyz.js")
+        with open(asset, "w") as f:
+            f.write("console.log('hi')")
+        try:
+            r = env["handler"]("/test-asset-xyz.js")
+            assert r.status == 200
+            assert r.wfile.getvalue() == b"console.log('hi')"
+        finally:
+            os.remove(asset)
+
+
+class TestDeleteSessionDeep:
+    def test_cancels_inflight_and_removes_files(self, api_env):
+        env = api_env
+        sid = _create_session(env, env["auth_a"])
+        with env["chat"]._data_lock:
+            env["chat"].sessions[sid] = [
+                {"role": "assistant", "_image_url": "/output/user/gen.png"},
+                {"role": "user", "content": "See [FILE: /uploads/doc.pdf] and [FILE: /uploads/other.txt]"},
+                {"role": "user", "content": [{"type": "text", "text": "plain [FILE: /uploads/multi.txt]"}]},
+            ]
+            env["chat"].tasks["t9"] = {"session_id": sid, "status": "working"}
+        img_dir = os.path.join(env["api"].IMG_PATH, "user")
+        os.makedirs(img_dir, exist_ok=True)
+        for name in ["doc.pdf", "other.txt", "multi.txt"]:
+            with open(os.path.join(env["api"].UPLOADS_DIR, name), "w") as f:
+                f.write("x")
+        with open(os.path.join(img_dir, "gen.png"), "w") as f:
+            f.write("img")
+        with env["chat"]._effective_contexts_lock:
+            env["chat"]._effective_contexts[sid] = [{"role": "system", "content": "c"}]
+        r = env["handler"]("/api/sessions/%s" % sid, method="DELETE", headers=env["auth_a"])
+        assert r.status == 200
+        assert env["chat"].tasks["t9"]["status"] == "cancelled"
+        assert not os.path.exists(os.path.join(env["api"].UPLOADS_DIR, "doc.pdf"))
+        assert not os.path.exists(os.path.join(env["api"].UPLOADS_DIR, "multi.txt"))
+        assert not os.path.exists(os.path.join(img_dir, "gen.png"))
+        with env["chat"]._effective_contexts_lock:
+            assert sid not in env["chat"]._effective_contexts
+
+    def test_delete_missing_session_404(self, api_env):
+        env = api_env
+        sid = _create_session(env, env["auth_a"])
+        with env["chat"]._data_lock:
+            env["chat"].sessions.pop(sid, None)
+        r = env["handler"]("/api/sessions/%s" % sid, method="DELETE", headers=env["auth_a"])
+        assert r.status == 404
+
+
+class TestDeleteUnauthorized:
+    def test_delete_session_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/sessions/s1", method="DELETE")
+        assert r.status == 401
+
+    def test_delete_task_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/tasks/t1", method="DELETE")
+        assert r.status == 401
+
+    def test_delete_task_missing_404(self, api_env):
+        env = api_env
+        r = env["handler"]("/api/tasks/nope", method="DELETE", headers=env["auth_a"])
+        assert r.status == 404
+
+    def test_delete_unknown_path_404(self, api_env):
+        r = api_env["handler"]("/api/nope", method="DELETE")
+        assert r.status == 404
+
+
+class TestPutUnauthorized:
+    def test_put_session_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/sessions/s1", method="PUT", data={"name": "x"})
+        assert r.status == 401
+
+    def test_put_session_missing_404(self, api_env):
+        env = api_env
+        r = env["handler"]("/api/sessions/nope", method="PUT", data={"name": "x"}, headers=env["auth_a"])
+        assert r.status == 404
+
+    def test_put_task_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/tasks/t1", method="PUT", data={"title": "x"})
+        assert r.status == 401
+
+    def test_put_task_missing_404(self, api_env):
+        env = api_env
+        r = env["handler"]("/api/tasks/nope", method="PUT", data={"title": "x"}, headers=env["auth_a"])
+        assert r.status == 404
+
+    def test_put_unknown_path_404(self, api_env):
+        r = api_env["handler"]("/api/nope", method="PUT", data={})
+        assert r.status == 404
+
+
+class TestPostUserContext:
+    def test_write_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/user-context", method="POST", data={"action": "write", "context": "x"})
+        assert r.status == 401
+
+    def test_read_action_default(self, api_env):
+        env = api_env
+        r = env["handler"]("/api/user-context", method="POST", data={"action": "other"}, headers=env["auth_a"])
+        assert r.status == 200
+        assert r.json["context"] == ""
+        assert r.json["username"] == "alice"
+
+
+class TestTTSVoiceBranch:
+    def test_voice_present_uses_en(self, api_env, monkeypatch):
+        import sys
+        import types
+        env = api_env
+
+        class FakeArray:
+            def __mul__(self, o):
+                return self
+
+            def clip(self, lo, hi):
+                return self
+
+            def astype(self, dtype):
+                return self
+
+            def tobytes(self):
+                return b"\x00\x00" * 40
+
+        class FakeVoice:
+            @classmethod
+            def load(cls, onnx_path, config_path=None):
+                return cls()
+
+            def synthesize(self, text):
+                yield types.SimpleNamespace(audio_float_array=FakeArray())
+
+        monkeypatch.setitem(sys.modules, "piper", types.SimpleNamespace(PiperVoice=FakeVoice))
+        r = env["handler"]("/api/tts", method="POST",
+                           data={"text": "hello there", "voice": "bn-IN-TanishaaNeural"},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        assert r.json["type"] == "audio/wav"
+
+
+class TestPostSessions:
+    def test_create_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/sessions", method="POST", data={})
+        assert r.status == 401
+
+    def test_create_with_bad_json_body(self, api_env):
+        env = api_env
+        r = env["handler"]("/api/sessions", method="POST", body=b"{not json", headers=env["auth_a"])
+        assert r.status == 200
+        assert r.json["session_id"]
+
+
+class TestLocationEvents:
+    def test_denied_sets_event(self, api_env):
+        env = api_env
+        ev = threading.Event()
+        with env["chat"]._data_lock:
+            env["chat"]._location_events["t1"] = ev
+        r = env["handler"]("/api/location", method="POST", data={"denied": True, "task_id": "t1"})
+        assert r.status == 200
+        assert ev.is_set()
+
+    def test_allow_sets_event(self, api_env, monkeypatch):
+        env = api_env
+        import server.api as api
+        ev = threading.Event()
+        with env["chat"]._data_lock:
+            env["chat"]._location_events["t2"] = ev
+        fake_resp = types.SimpleNamespace(json=lambda: {"display_name": "Dhaka"})
+        monkeypatch.setattr(api.requests, "get", lambda *a, **k: fake_resp)
+        r = env["handler"]("/api/location", method="POST",
+                           data={"latitude": 23.8, "longitude": 90.4, "task_id": "t2"})
+        assert r.status == 200
+        assert ev.is_set()
+
+
+class TestPostFallback:
+    def test_unknown_post_404(self, api_env):
+        r = api_env["handler"]("/api/does-not-exist", method="POST", data={})
+        assert r.status == 404
+
+    def test_post_tasks_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/tasks", method="POST", data={"title": "x"})
+        assert r.status == 401
+
+
+class TestLogMessage:
+    def test_log_message_noop(self, api_env):
+        import server.api
+        h = server.api.Handler.__new__(server.api.Handler)
+        h.log_message("x")
+
 
 
 def test_debug_env(api_env):

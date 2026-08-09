@@ -1,3 +1,18 @@
+import io
+import os
+import re
+import subprocess
+import tempfile
+
+
+def strip_html(text):
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def read_file_text(file_path):
     ext = os.path.splitext(file_path)[1].lower()
     with open(file_path, "rb") as f:

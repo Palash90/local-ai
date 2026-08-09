@@ -405,9 +405,19 @@ class TestBuildInput:
         assert "Speak in english" in out
 
     def test_phase3(self, self_chat):
-        out = self_chat.build_input("A", 6, "", "english", "Task X")
+        out = self_chat.build_input("A", self_chat.MAX_MESSAGES_PER_AGENT - 2, "", "english", "Task X")
         assert "PHASE 3: FINALIZATION" in out
         assert "[END CONVERSATION]" in out
+
+    def test_phase2_mid_conversation(self, self_chat):
+        mid = max(3, self_chat.MAX_MESSAGES_PER_AGENT // 2)
+        out = self_chat.build_input("A", mid, "", "english", "Task X")
+        assert "PHASE 2: DIRECT EXECUTION" in out
+
+    def test_phase3_boundary(self, self_chat):
+        boundary = self_chat.MAX_MESSAGES_PER_AGENT - 3
+        out = self_chat.build_input("A", boundary, "", "english", "Task X")
+        assert "PHASE 2: DIRECT EXECUTION" in out
 
     def test_incoming_included(self, self_chat):
         out = self_chat.build_input("A", 3, "previous reply", "english", "Task X")
