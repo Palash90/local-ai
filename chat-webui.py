@@ -83,6 +83,7 @@ from server.features.state import (  # noqa: E402
     _effective_contexts_lock,
     _event_queue,
     _gpu_temp,
+    _image_queue,
     _last_llm_use,
     _last_tps,
     _llama_mode,
@@ -165,7 +166,9 @@ from server.features.tools import (  # noqa: E402
 )
 
 from server.features.images import (  # noqa: E402
+    _enqueue_image_job,
     _image_url_rel,
+    _image_worker,
     _input_dir,
     _output_dir,
     _output_rel,
@@ -238,6 +241,7 @@ if __name__ == "__main__":
         sys.exit(1)
     threading.Thread(target=_event_loop, daemon=True).start()
     threading.Thread(target=_queue_worker, daemon=True).start()
+    threading.Thread(target=_image_worker, daemon=True).start()
     threading.Thread(target=_idle_unload_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()
     threading.Thread(target=_reminder_loop, daemon=True).start()

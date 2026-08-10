@@ -452,3 +452,130 @@ def edit_image(
         M.load_llama_model()
 
     return result
+
+
+def _enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index):
+    """Queue an image generation/edit job for the single image worker thread.
+
+    Image work is serialized so the VRAM choreography (llama unload / ComfyUI
+    / free / reload) and the ``image_active`` model status never race, even when
+    CPU and GPU chat lanes process tasks concurrently. The job carries its
+    originating session so the finished image lands in the right conversation.
+    """
+    with M._data_lock:
+        image_b64 = M.tasks.get(task_id, {}).get("_original_image")
+    M.set_status(task_id, "Queued for image generation...")
+    M._image_queue.put(
+        {
+            "task_id": task_id,
+            "sid": sid,
+            "tool_name": tool_name,
+            "args": args,
+            "tc_id": tc["id"],
+            "round": round_num,
+            "tool_index": tool_index,
+            "image_b64": image_b64,
+        }
+    )
+    print(f"[image_worker] Queued {tool_name} for task {task_id} (sid {sid})")
+
+
+def _run_generate_image(task_id, args):
+    result = M.generate_image(
+        prompt=args.get("prompt", ""),
+        task_id=task_id,
+        negative_prompt=args.get("negative_prompt", ""),
+        model=args.get("model") or "z_image",
+    )
+    res_data = json.loads(result)
+    if "file" in res_data:
+        rel = res_data.get("rel") or os.path.basename(res_data["file"])
+        image_url = f"/output/{rel}"
+        image_model_s = args.get("model") or "z_image"
+        with M._data_lock:
+            t = M.tasks.get(task_id)
+            if t:
+                t.setdefault("_tools_used", []).append("generate_image")
+                t["image_file"] = rel
+                t["gen_prompt"] = args.get("prompt", "")
+                t["_image_model"] = image_model_s
+        return json.dumps(
+            {
+                "image_url": image_url,
+                "prompt": args.get("prompt", ""),
+                "model": image_model_s,
+            }
+        )
+    return result
+
+
+def _run_edit_image(task_id, sid, args, image_b64):
+    result = M.edit_image(
+        prompt=args.get("prompt", ""),
+        task_id=task_id,
+        image_b64=image_b64,
+        negative_prompt=args.get("negative_prompt", ""),
+        denoise=args.get("denoise", 0.4),
+        model="z_image",
+        sid=sid,
+    )
+    res_data = json.loads(result)
+    if "file" in res_data:
+        rel = res_data.get("rel") or os.path.basename(res_data["file"])
+        image_url = f"/output/{rel}"
+        with M._data_lock:
+            t = M.tasks.get(task_id)
+            if t:
+                t.setdefault("_tools_used", []).append("edit_image")
+                t["image_file"] = rel
+                t["gen_prompt"] = args.get("prompt", "")
+                t["_image_model"] = None
+        return json.dumps(
+            {
+                "image_url": image_url,
+                "prompt": args.get("prompt", ""),
+                "model": None,
+            }
+        )
+    return result
+
+
+def _image_worker():
+    """Run one image job at a time from the image queue.
+
+    On completion the worker posts the same ``tool_ok`` event the tool worker
+    would have, so the event loop, pending-tool counting and session attachment
+    are unchanged. Matching to the originating session is preserved through the
+    job's ``sid`` and the task-keyed ``image_file`` stored on ``tasks[task_id]``.
+    """
+    while True:
+        job = M._image_queue.get()
+        if job.get("tool_name") == "__shutdown__":
+            break
+        task_id = job["task_id"]
+        with M._data_lock:
+            t = M.tasks.get(task_id)
+            if t is None or t.get("status") in ("cancelled", "error"):
+                continue
+        sid = job["sid"]
+        tool_name = job["tool_name"]
+        args = job["args"]
+        try:
+            if tool_name == "generate_image":
+                result = _run_generate_image(task_id, args)
+            elif tool_name == "edit_image":
+                result = _run_edit_image(task_id, sid, args, job.get("image_b64"))
+            else:
+                result = json.dumps({"error": f"Unknown image tool: {tool_name}"})
+        except Exception as e:
+            print(f"[image_worker] {tool_name} crashed for task {task_id}: {e}")
+            result = json.dumps({"error": f"Tool {tool_name} failed: {e}"})
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=job["tc_id"],
+            result=result,
+            sid=sid,
+            round=job["round"],
+            tool_index=job["tool_index"],
+        )

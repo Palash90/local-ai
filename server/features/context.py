@@ -132,10 +132,43 @@ def compact_messages_copy(messages, keep_messages=6):
     return new_msgs
 
 
+def sanitize_content_for_llm(messages):
+    """Return a COPY of ``messages`` with content parts the LLM backend cannot
+    process (e.g. ``audio_url``) removed, so a stale multimodal message can't
+    make llama-server reject the whole request (HTTP 400 "unsupported
+    content[].type"). The stored session is left untouched.
+    """
+    sanitized = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            sanitized.append(msg)
+            continue
+        parts = []
+        dropped_audio = False
+        for p in content:
+            if not isinstance(p, dict):
+                continue
+            if p.get("type") in ("audio_url", "input_audio", "audio"):
+                dropped_audio = True
+                continue
+            parts.append(p)
+        if dropped_audio:
+            parts.append(
+                {
+                    "type": "text",
+                    "text": "[Voice message omitted — audio input is not supported by this model]",
+                }
+            )
+        sanitized.append({**msg, "content": parts})
+    return sanitized
+
+
 def prepare_context_for_llm(sid, messages):
     """Build the message list to send to the LLM. When the conversation nears the
     context limit, old messages are summarized into a compressed context block —
     but the stored session is left untouched, so no messages are deleted."""
+    messages = sanitize_content_for_llm(messages)
     total = estimate_tokens(messages)
     if total <= M.AUTO_COMPACT_THRESHOLD:
         context = trim_messages_for_context(messages)

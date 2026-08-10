@@ -169,12 +169,7 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
                 }
             )
         if audio_b64:
-            content.append(
-                {
-                    "type": "audio_url",
-                    "audio_url": {"url": f"data:audio/webm;base64,{audio_b64}"},
-                }
-            )
+            content.append({"type": "text", "text": "\U0001F3A4 Audio message"})
         content.append(
             {
                 "type": "text",

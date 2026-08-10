@@ -78,6 +78,9 @@ _queue_cond = threading.Condition(_queue_lock)
 _current_task_id = None
 
 _event_queue = _queue.Queue()
+# Serializes image generation/editing so VRAM management (llama unload/free/load)
+# and the ``image_active`` model status never race between concurrent chats.
+_image_queue = _queue.Queue()
 _llm_pool = ThreadPoolExecutor(max_workers=1)
 _tool_pool = ThreadPoolExecutor(max_workers=2)
 

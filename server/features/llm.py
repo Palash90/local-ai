@@ -96,6 +96,9 @@ def _llm_worker(task_id, sid, round_num, msgs):
         }
         payload["stream"] = True
         r = requests.post(M.LLAMA_URL, json=payload, stream=True, timeout=600)
+        if r.status_code != 200:
+            err_body = r.text[:500] if r.text else f"HTTP {r.status_code}"
+            raise RuntimeError(f"LLM server returned {r.status_code}: {err_body}")
         r.encoding = "utf-8"
         reasoning_buf = ""
         content_buf = ""
