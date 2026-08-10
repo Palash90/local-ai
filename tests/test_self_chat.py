@@ -552,7 +552,7 @@ class TestLoginAndSessions:
         token = self_chat.login("alice", "secret")
         assert token == "T"
         args, kwargs = calls["post"]
-        assert args[0] == "http://localhost/api/login"
+        assert args[0] == "http://localhost:3001/api/login"
         assert kwargs["json"] == {"username": "alice", "password": "secret"}
 
     def test_create_session(self, self_chat, monkeypatch):
@@ -566,7 +566,7 @@ class TestLoginAndSessions:
         sid = self_chat.create_session("tok", "Chat", system_prompts=[{"name": "N", "content": "c"}], context_tokens={"%genre%": "adult"})
         assert sid == "S"
         args, kwargs = calls["post"]
-        assert args[0] == "http://localhost/api/sessions"
+        assert args[0] == "http://localhost:3001/api/sessions"
         assert kwargs["headers"] == {"X-Auth-Token": "tok"}
         assert kwargs["json"]["name"] == "Chat"
         assert kwargs["json"]["system_prompts"] == [{"name": "N", "content": "c"}]
@@ -611,7 +611,7 @@ class TestRegisterAgentTokens:
         monkeypatch.setattr(self_chat.requests, "post", lambda *a, **k: calls.setdefault("post", (a, k)) or FakeResp({"ok": True}))
         self_chat.register_agent_tokens(["t1"], ["kolpo"])
         args, kwargs = calls["post"]
-        assert args[0] == "http://localhost/api/register-agent"
+        assert args[0] == "http://localhost:3001/api/register-agent"
         assert kwargs["json"] == {"tokens": ["t1"], "usernames": ["kolpo"]}
 
     def test_error_is_swallowed(self, self_chat, monkeypatch):
