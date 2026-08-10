@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import queue
 import sys
 
 import pytest
@@ -52,11 +53,13 @@ def _reset_chat_state(chat_webui):
             snapshots[name] = getattr(chat_webui, name)
     try:
         chat_webui._task_queue[:] = []
+        chat_webui._image_queue = queue.Queue()
         yield
     finally:
         for name, value in snapshots.items():
             setattr(chat_webui, name, value)
         chat_webui._task_queue[:] = []
+        chat_webui._image_queue = queue.Queue()
 
 
 @pytest.fixture

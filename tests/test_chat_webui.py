@@ -115,6 +115,43 @@ class TestCompactMessagesCopy:
 
 
 class TestPrepareContextForLLM:
+    def test_sanitize_drops_audio_parts(self, chat_webui):
+        from server.features.context import sanitize_content_for_llm
+
+        msgs = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/webm;base64,AAAA"}},
+                    {"type": "text", "text": "hello"},
+                ],
+            },
+            {"role": "user", "content": "plain"},
+        ]
+        out = sanitize_content_for_llm(msgs)
+        parts = out[0]["content"]
+        assert [p["type"] for p in parts] == ["text", "text"]
+        assert "Voice message omitted" in parts[-1]["text"]
+        # stored session untouched
+        assert [p["type"] for p in msgs[0]["content"]] == ["audio_url", "text"]
+        assert out[1] == msgs[1]
+
+    def test_prepare_context_sanitizes_audio(self, chat_webui):
+        sid = "s_audio"
+        msgs = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/webm;base64,AAAA"}},
+                    {"type": "text", "text": "hello"},
+                ],
+            }
+        ]
+        with chat_webui._effective_contexts_lock:
+            chat_webui._effective_contexts.pop(sid, None)
+        out = chat_webui.prepare_context_for_llm(sid, msgs)
+        assert "audio_url" not in [p["type"] for p in out[0]["content"]]
+
     def test_below_threshold_uses_trim(self, chat_webui):
         sid = "s1"
         msgs = [{"role": "user", "content": "hello"}]
@@ -545,6 +582,8 @@ class TestDispatchTool:
         assert "limit reached" in result["error"]
 
     def test_generate_image_success(self, chat_webui, monkeypatch):
+        from server.features.images import _image_worker
+
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(
@@ -554,6 +593,15 @@ class TestDispatchTool:
         chat_webui.tasks["t1"] = {"session_id": "s1"}
         tc = {"id": "tc1", "function": {"name": "generate_image", "arguments": json.dumps({"prompt": "cat", "model": "z_image"})}}
         chat_webui._dispatch_tool("t1", "s1", tc, None, 0, 0)
+        job = list(chat_webui._image_queue.queue)[0]
+        assert job["tool_name"] == "generate_image"
+        assert job["task_id"] == "t1" and job["sid"] == "s1"
+        import threading
+        worker = threading.Thread(target=_image_worker, daemon=True)
+        worker.start()
+        chat_webui._image_queue.put({"tool_name": "__shutdown__"})
+        worker.join(timeout=5)
+        assert events and events[0][0][0] == "tool_ok"
         result = json.loads(events[0][1]["result"])
         assert result["image_url"] == "/output/user/x.png"
         assert chat_webui.tasks["t1"]["image_file"] == "user/x.png"
@@ -600,6 +648,8 @@ class TestDispatchTool:
         assert "Likes cats" in chat_webui.read_user_context("alice")
 
     def test_edit_image(self, chat_webui, monkeypatch):
+        from server.features.images import _image_worker
+
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(
@@ -609,6 +659,14 @@ class TestDispatchTool:
         chat_webui.tasks["t1"] = {"session_id": "s1"}
         tc = {"id": "tc1", "function": {"name": "edit_image", "arguments": json.dumps({"prompt": "make it red", "denoise": 0.5})}}
         chat_webui._dispatch_tool("t1", "s1", tc, None, 0, 0)
+        job = list(chat_webui._image_queue.queue)[0]
+        assert job["tool_name"] == "edit_image"
+        import threading
+        worker = threading.Thread(target=_image_worker, daemon=True)
+        worker.start()
+        chat_webui._image_queue.put({"tool_name": "__shutdown__"})
+        worker.join(timeout=5)
+        assert events and events[0][0][0] == "tool_ok"
         result = json.loads(events[0][1]["result"])
         assert result["image_url"] == "/output/user/e.png"
 
@@ -1485,21 +1543,37 @@ class TestDispatchToolMore:
         assert chat_webui.tasks["t1"].get("_search_details") is None
 
     def test_edit_image_no_file(self, chat_webui, monkeypatch):
+        from server.features.images import _image_worker
+
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(chat_webui, "edit_image", lambda **k: json.dumps({"error": "nope"}))
         chat_webui.tasks["t1"] = {"session_id": "s1"}
         tc = {"id": "tc1", "function": {"name": "edit_image", "arguments": json.dumps({"prompt": "x"})}}
         chat_webui._dispatch_tool("t1", "s1", tc, None, 0, 0)
+        import threading
+        worker = threading.Thread(target=_image_worker, daemon=True)
+        worker.start()
+        chat_webui._image_queue.put({"tool_name": "__shutdown__"})
+        worker.join(timeout=5)
+        assert events and events[0][0][0] == "tool_ok"
         assert json.loads(events[0][1]["result"])["error"] == "nope"
 
     def test_generate_image_no_file(self, chat_webui, monkeypatch):
+        from server.features.images import _image_worker
+
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(chat_webui, "generate_image", lambda **k: json.dumps({"error": "timeout"}))
         chat_webui.tasks["t1"] = {"session_id": "s1"}
         tc = {"id": "tc1", "function": {"name": "generate_image", "arguments": json.dumps({"prompt": "cat", "model": "z_image"})}}
         chat_webui._dispatch_tool("t1", "s1", tc, None, 0, 0)
+        import threading
+        worker = threading.Thread(target=_image_worker, daemon=True)
+        worker.start()
+        chat_webui._image_queue.put({"tool_name": "__shutdown__"})
+        worker.join(timeout=5)
+        assert events and events[0][0][0] == "tool_ok"
         assert json.loads(events[0][1]["result"])["error"] == "timeout"
 
     def test_manage_tasks_no_user(self, chat_webui):
@@ -1897,7 +1971,8 @@ class TestPrepareSessionFull:
         assert "Loves cats" in sys_msg["content"]
         assert "extra stuff" in sys_msg["content"]
         user_msg = chat_webui.sessions["s1"][-1]
-        assert [p["type"] for p in user_msg["content"]] == ["image_url", "audio_url", "text"]
+        assert [p["type"] for p in user_msg["content"]] == ["image_url", "text", "text"]
+        assert user_msg["content"][1]["text"] == "\U0001F3A4 Audio message"
         assert chat_webui.sessions_meta["s1"]["name"] == "hello there"
         assert load_calls == [1]
 
@@ -2016,14 +2091,17 @@ class TestStartLLMRound:
 
 class TestLLMWorker:
     @staticmethod
-    def _stream(lines):
+    def _stream(lines, status_code=200):
         class Resp:
             encoding = "utf-8"
 
             def iter_lines(self, decode_unicode=False):
                 return iter(lines)
 
-        return Resp()
+        resp = Resp()
+        resp.status_code = status_code
+        resp.text = "\n".join(lines)
+        return resp
 
     def test_final_response(self, chat_webui, temp_paths, monkeypatch):
         events = []
@@ -2096,6 +2174,20 @@ class TestLLMWorker:
         chat_webui._llm_worker("t1", "s1", 0, [{"role": "user", "content": "x"}])
         assert events[0][0][0] == "llm_err"
         assert events[0][1]["error"] == "connection reset"
+
+    def test_http_error_surfaces_as_llm_err(self, chat_webui, temp_paths, monkeypatch):
+        events = []
+        chat_webui._event_post = lambda *a, **k: events.append((a, k))
+        chat_webui.sessions.clear()
+        chat_webui.sessions["s1"] = [{"role": "user", "content": "hi"}]
+        chat_webui.tasks["t1"] = {"session_id": "s1", "reasoning": ""}
+        body = '{"error":{"code":400,"message":"unsupported content[].type","type":"invalid_request_error"}}'
+        resp = self._stream([body], status_code=400)
+        monkeypatch.setattr(chat_webui.requests, "post", lambda *a, **k: resp)
+        chat_webui._llm_worker("t1", "s1", 0, chat_webui.sessions["s1"])
+        assert events and events[0][0][0] == "llm_err"
+        assert "400" in events[0][1]["error"]
+        assert "unsupported content[].type" in events[0][1]["error"]
 
     def test_error_image_message(self, chat_webui, monkeypatch):
         events = []

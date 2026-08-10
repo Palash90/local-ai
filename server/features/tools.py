@@ -235,50 +235,8 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         )
 
     elif tool_name == "edit_image":
-        result = M.edit_image(
-            prompt=args.get("prompt", ""),
-            task_id=task_id,
-            image_b64=image_b64,
-            negative_prompt=args.get("negative_prompt", ""),
-            denoise=args.get("denoise", 0.4),
-            model="z_image",
-            sid=sid,
-        )
-        res_data = json.loads(result)
-        if "file" in res_data:
-            rel = res_data.get("rel") or os.path.basename(res_data["file"])
-            image_url = f"/output/{rel}"
-            with M._data_lock:
-                t = M.tasks.get(task_id)
-                if t:
-                    t.setdefault("_tools_used", []).append(tool_name)
-                    t["image_file"] = rel
-                    t["gen_prompt"] = args.get("prompt", "")
-                    t["_image_model"] = None
-            tool_result = json.dumps({
-                "image_url": image_url,
-                "prompt": args.get("prompt", ""),
-                "model": None,
-            })
-            M._event_post(
-                "tool_ok",
-                task_id,
-                tc_id=tc["id"],
-                result=tool_result,
-                sid=sid,
-                round=round_num,
-                tool_index=tool_index,
-            )
-        else:
-            M._event_post(
-                "tool_ok",
-                task_id,
-                tc_id=tc["id"],
-                result=result,
-                sid=sid,
-                round=round_num,
-                tool_index=tool_index,
-            )
+        M._enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index)
+        return
 
     elif tool_name == "generate_image":
         if has_generated_image:
@@ -295,51 +253,8 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                 tool_index=tool_index,
             )
         else:
-            result = M.generate_image(
-                prompt=args.get("prompt", ""),
-                task_id=task_id,
-                negative_prompt=args.get("negative_prompt", ""),
-                model=args.get("model") or "z_image",
-            )
-            res_data = json.loads(result)
-            if "file" in res_data:
-                rel = res_data.get("rel") or os.path.basename(res_data["file"])
-                image_url = f"/output/{rel}"
-                image_model_s = args.get("model") or "z_image"
-                print(f"[tool_worker] Image file: {res_data['file']}, rel: {rel}, url: {image_url}")  # DEBUG
-                with M._data_lock:
-                    t = M.tasks.get(task_id)
-                    if t:
-                        t.setdefault("_tools_used", []).append(tool_name)
-                        t["image_file"] = rel
-                        t["gen_prompt"] = args.get("prompt", "")
-                        t["_image_model"] = image_model_s
-                        print(f"[tool_worker] Stored image_file='{rel}' in task {task_id}")  # DEBUG
-                tool_result = json.dumps({
-                    "image_url": image_url,
-                    "prompt": args.get("prompt", ""),
-                    "model": image_model_s,
-                })
-                M._event_post(
-                    "tool_ok",
-                    task_id,
-                    tc_id=tc["id"],
-                    result=tool_result,
-                    sid=sid,
-                    round=round_num,
-                    tool_index=tool_index,
-                )
-            else:
-                print(f"[tool_worker] generate_image FAILED for task {task_id}: {result[:200]}")  # DEBUG
-                M._event_post(
-                    "tool_ok",
-                    task_id,
-                    tc_id=tc["id"],
-                    result=result,
-                    sid=sid,
-                    round=round_num,
-                    tool_index=tool_index,
-                )
+            M._enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index)
+        return
     elif tool_name == "update_user_context":
         content = args.get("content", "")
         user = ""
