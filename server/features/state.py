@@ -72,10 +72,17 @@ _model_transition_lock = threading.Lock()
 _data_lock = threading.Lock()
 
 MAX_QUEUE_SIZE = 5
-_task_queue = []
-_queue_lock = threading.Lock()
-_queue_cond = threading.Condition(_queue_lock)
-_current_task_id = None
+
+# Two independent task lanes so interactive UI (GPU) users and self-chat
+# agents (CPU) never queue behind each other. Each lane has its own list,
+# lock/condition and "currently running" marker. Only image-generation VRAM
+# choreography (see _image_queue in images.py) stays globally serialized,
+# since ComfyUI only has one physical GPU to render on regardless of which
+# lane requested the image.
+_task_queues = {"gpu": [], "cpu": []}
+_queue_locks = {"gpu": threading.Lock(), "cpu": threading.Lock()}
+_queue_conds = {mode: threading.Condition(lock) for mode, lock in _queue_locks.items()}
+_current_task_ids = {"gpu": None, "cpu": None}
 
 _event_queue = _queue.Queue()
 # Serializes image generation/editing so VRAM management (llama unload/free/load)

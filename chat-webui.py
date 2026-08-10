@@ -82,7 +82,7 @@ from server.features.state import (  # noqa: E402
     _client_location,
     _cpu_last_llm_use,
     _cpu_model_status,
-    _current_task_id,
+    _current_task_ids,
     _data_lock,
     _effective_contexts,
     _effective_contexts_lock,
@@ -95,10 +95,10 @@ from server.features.state import (  # noqa: E402
     _location_events,
     _model_transition_lock,
     _overheated,
-    _queue_cond,
-    _queue_lock,
+    _queue_conds,
+    _queue_locks,
     _ram_evacuating,
-    _task_queue,
+    _task_queues,
     _tokens_lock,
     _tool_pool,
     _users_cache,
@@ -253,7 +253,11 @@ if __name__ == "__main__":
         print(f"[startup] ERROR: SearXNG is not reachable at {SEARXNG_URL} ({e}). Web search will not work. Exiting.")
         sys.exit(1)
     threading.Thread(target=_event_loop, daemon=True).start()
-    threading.Thread(target=_queue_worker, daemon=True).start()
+    # One queue worker per lane: GPU (interactive UI users) and CPU (self-chat
+    # agents) now run fully independently, so an agent task can never make a
+    # UI user wait behind it.
+    threading.Thread(target=_queue_worker, args=("gpu",), daemon=True).start()
+    threading.Thread(target=_queue_worker, args=("cpu",), daemon=True).start()
     threading.Thread(target=_image_worker, daemon=True).start()
     threading.Thread(target=_idle_unload_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()

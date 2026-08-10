@@ -41,9 +41,9 @@ _effective_contexts_lock = None
 _image_url_rel = None
 _load_extra_prompts = None
 _location_events = None
-_queue_cond = None
-_queue_lock = None
-_task_queue = None
+_queue_conds = None
+_queue_locks = None
+_task_queues = None
 _tokens_lock = None
 context_token_report = None
 get_current_user = None
@@ -76,9 +76,9 @@ APP_STATE_NAMES = [
     "_image_url_rel",
     "_load_extra_prompts",
     "_location_events",
-    "_queue_cond",
-    "_queue_lock",
-    "_task_queue",
+    "_queue_conds",
+    "_queue_locks",
+    "_task_queues",
     "_tokens_lock",
     "context_token_report",
     "get_current_user",
@@ -308,8 +308,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return
                 msgs = list(sessions.get(sid, []))
             # Cancel all queued/in-flight tasks for this session so they stop processing
-            with _queue_lock:
-                _task_queue[:] = [q for q in _task_queue if q.get("session_id") != sid]
+            for mode in ("gpu", "cpu"):
+                with _queue_locks[mode]:
+                    q = _task_queues[mode]
+                    q[:] = [item for item in q if item.get("session_id") != sid]
             with _data_lock:
                 for tid, t in tasks.items():
                     if t.get("session_id") == sid and t.get("status") not in ("done", "error"):
@@ -496,12 +498,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "user": user,
                 "client_timestamp": body.get("client_timestamp"),
             }
-            with _queue_lock:
-                if len(_task_queue) >= MAX_QUEUE_SIZE:
+            # Route to the GPU lane (interactive UI users) or the CPU lane
+            # (self-chat agents) so the two never wait behind each other.
+            mode = "cpu" if user in _agent_users else "gpu"
+            with _queue_locks[mode]:
+                if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:
                     self.send_json({"error": "Server busy"}, status=503)
                     return
-                _task_queue.append(entry)
-                _queue_cond.notify()
+                _task_queues[mode].append(entry)
+                _queue_conds[mode].notify()
             with _data_lock:
                 tasks[task_id] = {
                     "status": "queued",
@@ -689,3 +694,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass
+
+async def handle_chat(user_message):
+    # Run both LLM calls in parallel to prevent waiting
+    user_response, bot_response = await asyncio.gather(
+        llm_call_user(user_message),
+        llm_call_bot(user_message)
+    )
+    return user_response, bot_response

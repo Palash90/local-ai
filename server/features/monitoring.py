@@ -216,12 +216,13 @@ def _idle_unload_loop():
     while True:
         time.sleep(10)
 
-        with M._queue_lock:
-            queue_active = len(M._task_queue) > 0 or M._current_task_id is not None
-
-        # Each llama-server unloads independently once its own model has been
-        # idle for > 300s (and no tasks are queued anywhere).
+        # Each llama-server unloads independently once its own LANE has been
+        # idle for > 300s. This is checked per-lane (not combined) so a busy
+        # CPU self-chat agent can't keep the idle GPU model pinned in VRAM,
+        # and vice versa.
         for mode in ("gpu", "cpu"):
+            with M._queue_locks[mode]:
+                queue_active = len(M._task_queues[mode]) > 0 or M._current_task_ids[mode] is not None
             with M._data_lock:
                 ms = M._cpu_model_status if mode == "cpu" else M.model_status
                 lu = M._cpu_last_llm_use if mode == "cpu" else M._last_llm_use
@@ -246,23 +247,28 @@ def _reminder_loop():
 def _evacuate_ram():
     M._ram_evacuating = True
     print("[ram] Emergency RAM evacuation")
-    with M._queue_lock:
-        tid = M._current_task_id
-        if tid:
-            with M._data_lock:
-                t = M.tasks.get(tid)
-                if t and t.get("status") not in ("done", "error"):
-                    entry = {
-                        "task_id": tid,
-                        "session_id": t.get("session_id", ""),
-                        "message": t.get("_original_message", ""),
-                        "image": t.get("_original_image"),
-                    }
-                    M._task_queue.insert(0, entry)
-                    t["status"] = "error"
-                    t["error"] = "Server ran out of RAM — requeued"
-                    t["_ram_evacuating"] = True
-                    print(f"[ram] Requeued task {tid} to front of queue")
+    # RAM pressure is whole-box, so both lanes (GPU/UI and CPU/agent) get
+    # their in-flight task requeued to the front of their own lane.
+    for mode in ("gpu", "cpu"):
+        with M._queue_locks[mode]:
+            tid = M._current_task_ids[mode]
+            if tid:
+                with M._data_lock:
+                    t = M.tasks.get(tid)
+                    if t and t.get("status") not in ("done", "error"):
+                        entry = {
+                            "task_id": tid,
+                            "session_id": t.get("session_id", ""),
+                            "message": t.get("_original_message", ""),
+                            "image": t.get("_original_image"),
+                            "user": t.get("_user", ""),
+                            "client_timestamp": t.get("_client_timestamp"),
+                        }
+                        M._task_queues[mode].insert(0, entry)
+                        t["status"] = "error"
+                        t["error"] = "Server ran out of RAM — requeued"
+                        t["_ram_evacuating"] = True
+                        print(f"[ram] Requeued {mode} task {tid} to front of its lane")
     M.kill_llama_server()
     M.kill_comfyui()
     print("[ram] Killed llama-server and ComfyUI")
@@ -293,8 +299,11 @@ def _thermal_monitor():
                 M._overheated = False
 
         if M._overheated:
-            with M._queue_lock:
-                busy = M._current_task_id is not None
+            # Only the GPU lane's business matters here — unloading the GPU
+            # chat model / freeing ComfyUI VRAM should not be held up by an
+            # unrelated self-chat agent task running on the CPU lane.
+            with M._queue_locks["gpu"]:
+                busy = M._current_task_ids["gpu"] is not None
             if not busy:
                 with M._data_lock:
                     ms = M.model_status

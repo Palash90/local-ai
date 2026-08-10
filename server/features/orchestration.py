@@ -152,7 +152,8 @@ def _event_loop():
                     "_user": user,
                     "_client_timestamp": client_ts,
                 }
-            M._current_task_id = task_id
+            # (The owning lane's _current_task_ids[mode] was already set by
+            # _queue_worker before this "start" event was posted.)
             M._prepare_session(task_id, sid, user_message, image_b64, audio_b64, client_ts)
             M._start_llm_round(task_id, sid, 0)
 
@@ -278,17 +279,32 @@ def _event_loop():
                     M._set_task_error(task_id, "Max tool rounds exceeded", data["sid"])
 
 
-def _queue_worker():
+def _queue_worker(mode):
+    """Drain the task queue for ``mode`` ("gpu" for interactive UI users,
+    "cpu" for self-chat agents).
+
+    Each lane runs on its own thread with its own lock/condition/queue, so a
+    self-chat agent task sitting in the CPU lane can never make an
+    interactive UI user in the GPU lane wait in line — they only share
+    physical hardware if they both actually need the GPU (chat model load or
+    image generation), which is arbitrated separately.
+    """
+    queue_lock = M._queue_locks[mode]
+    queue_cond = M._queue_conds[mode]
+    task_queue = M._task_queues[mode]
     while True:
         item = None
-        with M._queue_lock:
-            while not M._task_queue:
-                M._queue_cond.wait()
+        with queue_lock:
+            while not task_queue:
+                queue_cond.wait()
             with M._data_lock:
                 oh = M._overheated
-            if oh or M._ram_evacuating:
+            # GPU overheating only pauses the GPU lane — the CPU lane runs on
+            # the CPU server and is unaffected. RAM pressure affects the whole
+            # box, so it pauses both lanes.
+            if (oh and mode == "gpu") or M._ram_evacuating:
                 label = "GPU overheating" if oh else "RAM pressure — restarting servers"
-                for qitem in M._task_queue:
+                for qitem in task_queue:
                     tid = qitem["task_id"]
                     if tid in M.tasks:
                         M.tasks[tid] = {
@@ -296,10 +312,10 @@ def _queue_worker():
                             "message": f"Server paused — {label}. Will resume shortly.",
                             "session_id": qitem["session_id"],
                         }
-                M._queue_cond.wait(5)
+                queue_cond.wait(5)
                 continue
-            item = M._task_queue.pop(0)
-            M._current_task_id = item["task_id"]
+            item = task_queue.pop(0)
+            M._current_task_ids[mode] = item["task_id"]
         M._event_post(
             "start",
             item["task_id"],
@@ -310,13 +326,15 @@ def _queue_worker():
             user=item.get("user", ""),
             client_timestamp=item.get("client_timestamp"),
         )
-        # Wait for this task to finish (status becomes "done", "error" or "cancelled") before dequeuing the next
+        # Wait for this task to finish (status becomes "done", "error" or "cancelled")
+        # before dequeuing the next item IN THIS LANE. The other lane's worker
+        # keeps running independently the whole time.
         while True:
             with M._data_lock:
                 st = M.tasks.get(item["task_id"], {}).get("status")
             if st in ("done", "error", "cancelled"):
                 break
             time.sleep(0.5)
-        with M._queue_lock:
-            M._current_task_id = None
-            M._queue_cond.notify_all()
+        with queue_lock:
+            M._current_task_ids[mode] = None
+            queue_cond.notify_all()
