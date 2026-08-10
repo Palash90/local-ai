@@ -31,13 +31,16 @@ from server.config import (  # noqa: F401
     IMAGE_MODELS,
     IMAGE_TOKEN_COST,
     LLAMA_BASE,
+    LLAMA_BASE_CPU,
     LLAMA_GEMMA_NGL,
     LLAMA_QWEN_NGL,
     LLAMA_SERVER_ARGS,
     LLAMA_SERVER_ARGS_CPU,
     LLAMA_SERVER_PATH,
     LLAMA_URL,
+    LLAMA_URL_CPU,
     MODEL_ID,
+    MODEL_ID_CPU,
     PER_MESSAGE_OVERHEAD,
     PORT,
     PROMPT_PATH,
@@ -77,6 +80,8 @@ from server.features.state import (  # noqa: E402
     _agent_tokens,
     _agent_users,
     _client_location,
+    _cpu_last_llm_use,
+    _cpu_model_status,
     _current_task_id,
     _data_lock,
     _effective_contexts,
@@ -86,7 +91,6 @@ from server.features.state import (  # noqa: E402
     _image_queue,
     _last_llm_use,
     _last_tps,
-    _llama_mode,
     _llm_pool,
     _location_events,
     _model_transition_lock,
@@ -154,8 +158,15 @@ from server.features.context import (  # noqa: E402
 from server.features.llm import (  # noqa: E402
     _llm_worker,
     _start_llm_round,
+    active_model_id,
     is_llama_alive,
     load_llama_model,
+    server_base,
+    server_last_use,
+    server_model_id,
+    server_status,
+    server_url,
+    task_mode,
     unload_llama_model,
 )
 from server.features.tools import (  # noqa: E402
@@ -178,12 +189,13 @@ from server.features.images import (  # noqa: E402
 )
 
 from server.features.monitoring import (  # noqa: E402
-    _ensure_llama_mode_for_task,
+    _ensure_llama_server_for_task,
     _evacuate_ram,
     _idle_unload_loop,
     _reminder_loop,
     _thermal_monitor,
     ensure_comfyui_running,
+    ensure_llama_server,
     get_gpu_temp,
     get_ram_usage,
     kill_comfyui,
@@ -226,10 +238,11 @@ if __name__ == "__main__":
         r = requests.get(f"{LLAMA_BASE}/health", timeout=3)
         if r.status_code != 200:
             raise Exception("health check failed")
-        print("[startup] llama-server is running")
+        print("[startup] GPU llama-server is running")
     except Exception:
-        print("[startup] llama-server not reachable — starting...")
+        print("[startup] GPU llama-server not reachable — starting...")
         restart_servers()
+    ensure_llama_server("cpu")
     try:
         r = requests.get(SEARXNG_URL, timeout=3)
         if r.status_code in (200, 301, 302):

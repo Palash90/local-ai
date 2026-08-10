@@ -88,12 +88,16 @@ def _finalize_task(task_id, sid, msg_content, body):
         "_image_model": image_model,
         "_search_details": search_details,
     }
+    mode = M.task_mode(task_id)
     with M._data_lock:
         if sid in M.sessions:
             M.sessions[sid].append(msg_entry)
             M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
-        M._last_tps = predicted_per_second
-        M._last_llm_use = time.time()  # Reset idle timer when task finishes
+        if mode == "gpu":
+            M._last_tps = predicted_per_second
+            M._last_llm_use = time.time()  # Reset GPU idle timer when task finishes
+        else:
+            M._cpu_last_llm_use = time.time()  # Reset CPU idle timer when task finishes
     M.save_sessions()
     with M._data_lock:
         if task_id in M.tasks:
@@ -159,8 +163,12 @@ def _event_loop():
             round_num = data["round"]
             body = data["body"]
             msg = body["choices"][0]["message"]
+            mode = M.task_mode(task_id)
             with M._data_lock:
-                M._last_llm_use = time.time()
+                if mode == "cpu":
+                    M._cpu_last_llm_use = time.time()
+                else:
+                    M._last_llm_use = time.time()
             if msg.get("tool_calls"):
                 with M._data_lock:
                     tt = M.tasks.get(task_id)

@@ -1,4 +1,16 @@
-"""llama-server lifecycle and the streaming LLM round-trip worker."""
+"""llama-server lifecycle and the streaming LLM round-trip worker.
+
+Two llama-server processes run concurrently:
+
+* the **GPU** server on ``LLAMA_BASE`` (8081) serving interactive chat UI
+  users, and
+* the **CPU** server on ``LLAMA_BASE_CPU`` (8079) serving automated self-chat
+  agents.
+
+Every function below takes a ``mode`` (``"gpu"`` or ``"cpu"``) so loads,
+unloads and completions always hit the right server without ever stopping the
+other one.
+"""
 
 import json
 import time
@@ -8,56 +20,134 @@ import requests
 from server.features.state import M
 
 
-def is_llama_alive():
+def task_mode(task_id):
+    """Return the llama-server mode a task must run on.
+
+    Tasks posted by agent users (self-chat: editor, moderator, ...) run on the
+    CPU server; tasks from interactive users use the GPU server.
+    """
+    with M._data_lock:
+        t = M.tasks.get(task_id)
+        if not t:
+            return "gpu"
+        user = t.get("_user", "")
+    return "cpu" if user in M._agent_users else "gpu"
+
+
+def server_base(mode):
+    """Base URL of the llama-server for ``mode`` (defaults to the GPU server)."""
+    return M.LLAMA_BASE_CPU if mode == "cpu" else M.LLAMA_BASE
+
+
+def server_url(mode):
+    """Chat-completions URL of the llama-server for ``mode``."""
+    return M.LLAMA_URL_CPU if mode == "cpu" else M.LLAMA_URL
+
+
+def server_model_id(mode):
+    """Model filename the llama-server for ``mode`` should load."""
+    if mode == "cpu":
+        return M.MODEL_ID_CPU or M.MODEL_ID
+    return M.MODEL_ID
+
+
+def server_status(mode):
+    """Model status of the llama-server for ``mode`` ("unloaded", "loading",
+    "chat_loaded", "unloading", ...)."""
+    with M._data_lock:
+        return M._cpu_model_status if mode == "cpu" else M.model_status
+
+
+def server_last_use(mode):
+    """Idle timestamp of the llama-server for ``mode``."""
+    return M._cpu_last_llm_use if mode == "cpu" else M._last_llm_use
+
+
+def active_model_id(mode="gpu"):
+    """Backwards-compatible model filename lookup for ``mode``."""
+    return server_model_id(mode)
+
+
+def is_llama_alive(base=None):
+    """True when the llama-server at ``base`` answers /health.
+
+    Defaults to the GPU server so existing callers keep working.
+    """
+    if base is None:
+        base = M.LLAMA_BASE
     try:
-        r = requests.get(f"{M.LLAMA_BASE}/health", timeout=5)
+        r = requests.get(f"{base}/health", timeout=5)
         return r.status_code == 200
-    except:
+    except Exception:
         return False
 
 
-def unload_llama_model():
+def unload_llama_model(mode="gpu"):
+    """Unload the model from the llama-server for ``mode``."""
     with M._model_transition_lock:
         with M._data_lock:
-            if M.model_status == "unloaded":
+            if (M._cpu_model_status if mode == "cpu" else M.model_status) == "unloaded":
                 return True
-            M.model_status = "unloading"
+            if mode == "cpu":
+                M._cpu_model_status = "unloading"
+            else:
+                M.model_status = "unloading"
 
-        print("[llama] Requesting model unload from VRAM...")
+        print(f"[llama] Requesting {mode} model unload from VRAM/RAM...")
         try:
             r = requests.post(
-                f"{M.LLAMA_BASE}/models/unload", json={"model": M.MODEL_ID}, timeout=30
+                f"{M.server_base(mode)}/models/unload",
+                json={"model": M.server_model_id(mode)},
+                timeout=30,
             )
             if r.status_code == 200:
-                print("[llama] Model unloaded")
+                print(f"[llama] {mode} model unloaded")
                 with M._data_lock:
-                    M.model_status = "unloaded"
+                    if mode == "cpu":
+                        M._cpu_model_status = "unloaded"
+                    else:
+                        M.model_status = "unloaded"
                 return True
             print(f"[llama] Unload response: {r.status_code} {r.text[:200]}")
         except Exception as e:
             print(f"[llama] Unload error: {e}")
 
         # Check real status if unload failed or erred out
+        alive = M.is_llama_alive(M.server_base(mode))
         with M._data_lock:
-            M.model_status = "chat_loaded" if M.is_llama_alive() else "unloaded"
+            if mode == "cpu":
+                M._cpu_model_status = "chat_loaded" if alive else "unloaded"
+            else:
+                M.model_status = "chat_loaded" if alive else "unloaded"
         return False
 
 
-def load_llama_model():
+def load_llama_model(mode="gpu"):
+    """Load the model on the llama-server for ``mode`` and wait for it to be
+    ready, tracking the per-server model status and idle timestamp."""
     with M._data_lock:
-        M.model_status = "loading"
-    print(f"[llama] Sending load request for model '{M.MODEL_ID}'...")
+        if mode == "cpu":
+            M._cpu_model_status = "loading"
+        else:
+            M.model_status = "loading"
+    model_id = M.server_model_id(mode)
+    base = M.server_base(mode)
+    print(f"[llama] Sending load request for model '{model_id}' to {base}...")
     try:
         r = requests.post(
-            f"{M.LLAMA_BASE}/models/load", json={"model": M.MODEL_ID}, timeout=180
+            f"{base}/models/load", json={"model": model_id}, timeout=180
         )
         if r.status_code in (200, 201):
             for i in range(30):
-                if M.is_llama_alive():
-                    print(f"[llama] Model ready (attempt {i+1})")
+                if M.is_llama_alive(base):
+                    print(f"[llama] {mode} model ready (attempt {i+1})")
                     with M._data_lock:
-                        M.model_status = "chat_loaded"
-                        M._last_llm_use = time.time()  # Reset idle timer upon loading
+                        if mode == "cpu":
+                            M._cpu_model_status = "chat_loaded"
+                            M._cpu_last_llm_use = time.time()
+                        else:
+                            M.model_status = "chat_loaded"
+                            M._last_llm_use = time.time()  # Reset idle timer upon loading
                     return True
                 time.sleep(2)
         else:
@@ -66,27 +156,34 @@ def load_llama_model():
         print(f"[llama] Load exception: {e}")
 
     # Fallback check: verify if the server is alive and responding anyway
-    if M.is_llama_alive():
+    if M.is_llama_alive(base):
         with M._data_lock:
-            M.model_status = "chat_loaded"
-            M._last_llm_use = time.time()  # Reset idle timer upon loading
+            if mode == "cpu":
+                M._cpu_model_status = "chat_loaded"
+                M._cpu_last_llm_use = time.time()
+            else:
+                M.model_status = "chat_loaded"
+                M._last_llm_use = time.time()  # Reset idle timer upon loading
         return True
 
     with M._data_lock:
-        M.model_status = "unloaded"
+        if mode == "cpu":
+            M._cpu_model_status = "unloaded"
+        else:
+            M.model_status = "unloaded"
     return False
 
 
-def _llm_worker(task_id, sid, round_num, msgs):
+def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
     try:
         if M.estimate_tokens(msgs) > M.AUTO_COMPACT_THRESHOLD:
             M.set_status(task_id, "Context is full — compressing older messages...")
-        messages = M.prepare_context_for_llm(sid, msgs)
+        messages = M.prepare_context_for_llm(sid, msgs, mode)
         tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
         if tool_msgs:
             print(f"[llm_round] Round {round_num} includes {len(tool_msgs)} tool message(s) with search results")  # DEBUG
         payload = {
-            "model": M.MODEL_ID,
+            "model": M.server_model_id(mode),
             "messages": messages,
             "tools": M.TOOLS,
             "tool_choice": "auto",
@@ -95,7 +192,7 @@ def _llm_worker(task_id, sid, round_num, msgs):
             #"reasoning_effort": "medium",
         }
         payload["stream"] = True
-        r = requests.post(M.LLAMA_URL, json=payload, stream=True, timeout=600)
+        r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
         if r.status_code != 200:
             err_body = r.text[:500] if r.text else f"HTTP {r.status_code}"
             raise RuntimeError(f"LLM server returned {r.status_code}: {err_body}")
@@ -180,11 +277,12 @@ def _llm_worker(task_id, sid, round_num, msgs):
 
 
 def _start_llm_round(task_id, sid, round_num):
-    M._ensure_llama_mode_for_task(task_id)
+    mode = M.task_mode(task_id)
+    M.ensure_llama_server(mode)
     with M._data_lock:
-        ms = M.model_status
+        ms = M._cpu_model_status if mode == "cpu" else M.model_status
     if ms != "chat_loaded":
-        M.load_llama_model()
+        M.load_llama_model(mode)
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
@@ -192,8 +290,8 @@ def _start_llm_round(task_id, sid, round_num):
         t["_state"] = "llm_waiting"
         t["_round"] = round_num
         messages = list(M.sessions.get(sid, []))
-    print(f"[llm_round] Starting round {round_num} for task {task_id} with {len(messages)} raw messages")  # DEBUG
+    print(f"[llm_round] Starting round {round_num} for task {task_id} on {mode} server with {len(messages)} raw messages")  # DEBUG
     M.set_status(
         task_id, "Thinking..." if round_num == 0 else f"Thinking (round {round_num})..."
     )
-    M._llm_pool.submit(M._llm_worker, task_id, sid, round_num, messages)
+    M._llm_pool.submit(M._llm_worker, task_id, sid, round_num, messages, mode)

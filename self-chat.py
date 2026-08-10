@@ -387,6 +387,7 @@ def wait_for_user_to_leave():
     while True:
         real = active_real_users()
         if not real:
+            print("Resuming agent workflow")
             return
         print(
             f"[wait] Real user(s) active ({', '.join(real)}) "

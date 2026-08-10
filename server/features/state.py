@@ -87,10 +87,15 @@ _tool_pool = ThreadPoolExecutor(max_workers=2)
 _location_events = {}
 
 # Scalars the engine reads and rebinds at runtime.
+#
+# There are TWO llama-servers running concurrently: the GPU server on 8081
+# serves interactive chat UI users, and the CPU server on 8079 serves automated
+# self-chat agents. Each keeps its own model status and idle timestamp.
 model_status = "unloaded"
-_llama_mode = "gpu"  # "gpu" (interactive) or "cpu" (self-chat agent runs)
+_cpu_model_status = "unloaded"
 _last_tps = None
 _last_llm_use = time.time()
+_cpu_last_llm_use = time.time()
 _client_location = None
 _overheated = False
 _gpu_temp = None

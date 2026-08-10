@@ -5,6 +5,13 @@ import os
 LLAMA_BASE = "http://localhost:8081"
 LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
 
+# The CPU-backed llama-server that serves automated self-chat agents
+# (editor/moderator/registered agents). It runs CONCURRENTLY with the GPU
+# llama-server on its own port so background agent runs never compete with
+# interactive UI users for VRAM.
+LLAMA_BASE_CPU = "http://localhost:8079"
+LLAMA_URL_CPU = f"{LLAMA_BASE_CPU}/v1/chat/completions"
+
 VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
 COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080/search")
@@ -13,8 +20,43 @@ HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
 PORT = 3001
 REASONING_BUDGET = 4096
 
-with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
-    MODEL_ID = file.read().strip()
+# model.json holds the LLM model filenames (relative to ~/local-ai-files/my-models/)
+# per runtime mode: "gpu" for interactive chat UI users, "cpu" for automated
+# self-chat agents (editor/moderator/registered agents). Falls back to the legacy
+# single-model model.txt when model.json is missing or has no usable entries.
+MODEL_CONFIG_FILE = os.path.expanduser("~/local-ai-files/model.json")
+
+
+def _load_model_ids(model_file, legacy_file):
+    """Return the (gpu, cpu) model ids for the given config files.
+
+    ``model_file`` is the JSON config holding per-mode ids; ``legacy_file`` is
+    the plain-text single-model file used as a fallback.
+    """
+    gpu = ""
+    cpu = ""
+    try:
+        with open(model_file, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if isinstance(data, dict):
+            gpu = str(data.get("gpu") or data.get("default") or "").strip()
+            cpu = str(data.get("cpu") or gpu).strip()
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    if not gpu:
+        try:
+            with open(legacy_file, "r") as file:
+                gpu = file.read().strip()
+        except (FileNotFoundError, OSError):
+            pass
+        if not cpu:
+            cpu = gpu
+    return gpu, cpu
+
+
+MODEL_ID, MODEL_ID_CPU = _load_model_ids(
+    MODEL_CONFIG_FILE, os.path.expanduser("~/local-ai-files/model.txt")
+)
 
 COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
@@ -34,6 +76,12 @@ LLAMA_SERVER_ARGS = [
     #"--no-kv-offload",     # Use it to move the kv cache to RAM
     "-ctk", "q8_0",            # Quantize Key cache to 8-bit (saves 50% VRAM)
     "-ctv", "q8_0",            # Quantize Value cache to 8-bit (saves 50% VRAM)
+    # Keep the multimodal projector (mmproj) in RAM. On the 4 GiB card the
+    # mmproj (~950 MiB) + model weights nearly fill VRAM, leaving no room for
+    # the CPU llama-server's worker buffers — its /models/load then fails with
+    # cudaMalloc OOM. Slower image understanding, but keeps agents + UI usable
+    # concurrently.
+    "--no-mmproj-offload",
 
     # Reasoning & Thinking Limits
     "--reasoning-budget", str(REASONING_BUDGET),
@@ -50,7 +98,9 @@ LLAMA_SERVER_ARGS = [
 # Second set of llama-server arguments used when processing automated
 # self-chat messages (editor/moderator/agent runs). These are background,
 # non-interactive jobs, so they deliberately run the model on the CPU only —
-# slower, but they never compete with interactive users for VRAM.
+# slower, but they never compete with interactive users for VRAM. This server
+# runs on its own port (8079) CONCURRENTLY with the GPU server on 8081, so the
+# two are started and stopped independently (see restart_llama_server).
 LLAMA_SERVER_ARGS_CPU = [
     "--host", "0.0.0.0",
     "--port", "8079",
@@ -64,6 +114,10 @@ LLAMA_SERVER_ARGS_CPU = [
     "-ctk", "q8_0",            # Quantized KV cache keeps RAM usage low
     "-ctv", "q8_0",
     "-nkvo",
+    # Keep the multimodal projector (mmproj) in RAM too. llama-server
+    # offloads the mmproj to the GPU by DEFAULT even with --n-gpu-layers 0,
+    # which cudaMalloc-OOMs on the 4 GiB card while the GPU server is loaded.
+    "--no-mmproj-offload",
 
     # Reasoning & Thinking Limits
     "--reasoning-budget", str(REASONING_BUDGET),

@@ -96,7 +96,7 @@ class TestCompactMessagesCopy:
     def test_long_list_gets_summary(self, chat_webui, monkeypatch):
         monkeypatch.setattr(
             chat_webui, "_summarize_with_llm",
-            lambda text: "SUMMARY OF CONVO",
+            lambda text, mode="gpu": "SUMMARY OF CONVO",
         )
         msgs = [{"role": "user", "content": "msg-%d" % i} for i in range(20)]
         out = chat_webui.compact_messages_copy(msgs)
@@ -108,7 +108,9 @@ class TestCompactMessagesCopy:
         assert len(msgs) == 20
 
     def test_summary_failure_keeps_original(self, chat_webui, monkeypatch):
-        monkeypatch.setattr(chat_webui, "_summarize_with_llm", lambda text: None)
+        monkeypatch.setattr(
+            chat_webui, "_summarize_with_llm", lambda text, mode="gpu": None
+        )
         msgs = [{"role": "user", "content": "msg-%d" % i} for i in range(20)]
         out = chat_webui.compact_messages_copy(msgs)
         assert out == msgs
@@ -164,7 +166,7 @@ class TestPrepareContextForLLM:
 
     def test_above_threshold_compresses(self, chat_webui, monkeypatch):
         monkeypatch.setattr(
-            chat_webui, "_summarize_with_llm", lambda text: "compressed summary"
+            chat_webui, "_summarize_with_llm", lambda text, mode="gpu": "compressed summary"
         )
         sid = "s2"
         big = [{"role": "user", "content": "x" * 5000} for _ in range(30)]
@@ -813,7 +815,9 @@ class TestEstimateTokensMore:
 
 class TestCompactMessagesCopyMore:
     def test_keep_messages_zero(self, chat_webui, monkeypatch):
-        monkeypatch.setattr(chat_webui, "_summarize_with_llm", lambda text: "S")
+        monkeypatch.setattr(
+            chat_webui, "_summarize_with_llm", lambda text, mode="gpu": "S"
+        )
         msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
         out = chat_webui.compact_messages_copy(msgs, keep_messages=0)
         assert out[0]["role"] == "system"
@@ -821,7 +825,9 @@ class TestCompactMessagesCopyMore:
         assert "S" in out[1]["content"]
 
     def test_list_content_parts(self, chat_webui, monkeypatch):
-        monkeypatch.setattr(chat_webui, "_summarize_with_llm", lambda text: text)
+        monkeypatch.setattr(
+            chat_webui, "_summarize_with_llm", lambda text, mode="gpu": text
+        )
         msgs = [{"role": "user", "content": [{"type": "text", "text": "part1"}, {"type": "image_url", "image_url": {"url": "x"}}, "junk"]} for _ in range(15)]
         out = chat_webui.compact_messages_copy(msgs)
         assert "part1" in out[0]["content"]
@@ -829,13 +835,17 @@ class TestCompactMessagesCopyMore:
         assert "junk" not in out[0]["content"]
 
     def test_empty_content_returns_original(self, chat_webui, monkeypatch):
-        monkeypatch.setattr(chat_webui, "_summarize_with_llm", lambda text: "S")
+        monkeypatch.setattr(
+            chat_webui, "_summarize_with_llm", lambda text, mode="gpu": "S"
+        )
         msgs = [{"role": "user", "content": ""} for _ in range(15)]
         out = chat_webui.compact_messages_copy(msgs)
         assert out == msgs
 
     def test_system_message_with_summary(self, chat_webui, monkeypatch):
-        monkeypatch.setattr(chat_webui, "_summarize_with_llm", lambda text: "S")
+        monkeypatch.setattr(
+            chat_webui, "_summarize_with_llm", lambda text, mode="gpu": "S"
+        )
         msgs = [{"role": "system", "content": "sys"}] + [{"role": "user", "content": "m%d" % i} for i in range(15)]
         out = chat_webui.compact_messages_copy(msgs)
         assert out[0]["role"] == "system"
@@ -905,7 +915,7 @@ class TestLlamaModelLifecycle:
             text = "err"
 
         monkeypatch.setattr(chat_webui.requests, "post", lambda *a, **k: Resp())
-        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda: True)
+        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda base=None: True)
         assert chat_webui.unload_llama_model() is False
         assert chat_webui.model_status == "chat_loaded"
 
@@ -916,7 +926,7 @@ class TestLlamaModelLifecycle:
             raise RuntimeError("down")
 
         monkeypatch.setattr(chat_webui.requests, "post", boom)
-        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda: False)
+        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda base=None: False)
         assert chat_webui.unload_llama_model() is False
         assert chat_webui.model_status == "unloaded"
 
@@ -927,7 +937,7 @@ class TestLlamaModelLifecycle:
             text = "ok"
 
         monkeypatch.setattr(chat_webui.requests, "post", lambda *a, **k: Resp())
-        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda: True)
+        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda base=None: True)
         monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
         assert chat_webui.load_llama_model() is True
         assert chat_webui.model_status == "chat_loaded"
@@ -939,7 +949,7 @@ class TestLlamaModelLifecycle:
             text = "ok"
 
         monkeypatch.setattr(chat_webui.requests, "post", lambda *a, **k: Resp())
-        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda: False)
+        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda base=None: False)
         monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
         assert chat_webui.load_llama_model() is False
         assert chat_webui.model_status == "unloaded"
@@ -951,7 +961,7 @@ class TestLlamaModelLifecycle:
             text = "busy"
 
         monkeypatch.setattr(chat_webui.requests, "post", lambda *a, **k: Resp())
-        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda: True)
+        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda base=None: True)
         monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
         assert chat_webui.load_llama_model() is True
 
@@ -962,9 +972,110 @@ class TestLlamaModelLifecycle:
             raise RuntimeError("down")
 
         monkeypatch.setattr(chat_webui.requests, "post", boom)
-        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda: False)
+        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda base=None: False)
         monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
         assert chat_webui.load_llama_model() is False
+
+
+class TestActiveModelId:
+    def test_gpu_mode_uses_gpu_model(self, chat_webui):
+        assert chat_webui.active_model_id("gpu") == chat_webui.MODEL_ID
+
+    def test_cpu_mode_uses_cpu_model(self, chat_webui):
+        assert chat_webui.active_model_id("cpu") == chat_webui.MODEL_ID_CPU
+
+    def test_load_uses_cpu_model_in_cpu_mode(self, chat_webui, monkeypatch):
+        chat_webui._cpu_model_status = "unloaded"
+        sent = {}
+
+        class Resp:
+            status_code = 200
+            text = "ok"
+
+        def fake_post(*a, **k):
+            sent.update(k)
+            return Resp()
+
+        monkeypatch.setattr(chat_webui.requests, "post", fake_post)
+        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda base=None: True)
+        monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
+        assert chat_webui.load_llama_model("cpu") is True
+        assert sent["json"]["model"] == chat_webui.MODEL_ID_CPU
+        assert chat_webui._cpu_model_status == "chat_loaded"
+
+    def test_load_uses_gpu_model_in_gpu_mode(self, chat_webui, monkeypatch):
+        chat_webui.model_status = "unloaded"
+        sent = {}
+
+        class Resp:
+            status_code = 200
+            text = "ok"
+
+        def fake_post(*a, **k):
+            sent.update(k)
+            return Resp()
+
+        monkeypatch.setattr(chat_webui.requests, "post", fake_post)
+        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda base=None: True)
+        monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
+        assert chat_webui.load_llama_model("gpu") is True
+        assert sent["json"]["model"] == chat_webui.MODEL_ID
+        assert chat_webui.model_status == "chat_loaded"
+
+    def test_cpu_load_leaves_gpu_status_alone(self, chat_webui, monkeypatch):
+        chat_webui.model_status = "unloaded"
+        chat_webui._cpu_model_status = "unloaded"
+
+        class Resp:
+            status_code = 200
+            text = "ok"
+
+        monkeypatch.setattr(chat_webui.requests, "post", lambda *a, **k: Resp())
+        monkeypatch.setattr(chat_webui, "is_llama_alive", lambda base=None: True)
+        monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
+        assert chat_webui.load_llama_model("cpu") is True
+        assert chat_webui._cpu_model_status == "chat_loaded"
+        assert chat_webui.model_status == "unloaded"
+
+    def test_task_mode_from_user(self, chat_webui):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        chat_webui.tasks["t1"] = {"_user": "editor"}
+        chat_webui.tasks["t2"] = {"_user": "alice"}
+        chat_webui.tasks["t3"] = {}
+        assert chat_webui.task_mode("t1") == "cpu"
+        assert chat_webui.task_mode("t2") == "gpu"
+        assert chat_webui.task_mode("t3") == "gpu"
+        assert chat_webui.task_mode("ghost") == "gpu"
+
+    def test_server_urls(self, chat_webui):
+        assert chat_webui.server_url("gpu") == chat_webui.LLAMA_URL
+        assert chat_webui.server_url("cpu") == chat_webui.LLAMA_URL_CPU
+        assert chat_webui.server_base("gpu") == chat_webui.LLAMA_BASE
+        assert chat_webui.server_base("cpu") == chat_webui.LLAMA_BASE_CPU
+
+    def test_server_status_and_last_use(self, chat_webui):
+        chat_webui.model_status = "chat_loaded"
+        chat_webui._cpu_model_status = "loading"
+        chat_webui._last_llm_use = 111.0
+        chat_webui._cpu_last_llm_use = 222.0
+        assert chat_webui.server_status("gpu") == "chat_loaded"
+        assert chat_webui.server_status("cpu") == "loading"
+        assert chat_webui.server_last_use("gpu") == 111.0
+        assert chat_webui.server_last_use("cpu") == 222.0
+
+    def test_unload_cpu_server_tracks_own_status(self, chat_webui, monkeypatch):
+        chat_webui.model_status = "chat_loaded"
+        chat_webui._cpu_model_status = "chat_loaded"
+
+        class Resp:
+            status_code = 200
+            text = "ok"
+
+        monkeypatch.setattr(chat_webui.requests, "post", lambda *a, **k: Resp())
+        assert chat_webui.unload_llama_model("cpu") is True
+        assert chat_webui._cpu_model_status == "unloaded"
+        assert chat_webui.model_status == "chat_loaded"
 
 
 class TestSystemHelpers:
@@ -1030,7 +1141,7 @@ class TestSystemHelpers:
 class TestRestartServers:
     def test_restart_healthy(self, chat_webui, monkeypatch, tmp_path):
         killed = []
-        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: killed.append("llama"))
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda mode=None: killed.append(mode))
         monkeypatch.setattr(chat_webui, "kill_comfyui", lambda: killed.append("comfy"))
         class Resp:
             status_code = 200
@@ -1049,13 +1160,18 @@ class TestRestartServers:
         monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
         monkeypatch.setattr(chat_webui.os.path, "expanduser", lambda p: str(tmp_path))
         chat_webui.restart_servers()
-        assert len(popens) == 2
-        assert len(opened) == 2
-        assert killed == ["llama", "comfy"]
+        # ComfyUI + GPU llama-server + CPU llama-server
+        assert len(popens) == 3
+        assert len(opened) == 3
+        assert killed[0] is None
+        assert killed[1] == "comfy"
+        # GPU args on 8081, CPU args on 8079
+        assert popens[1][0][1:] == chat_webui.LLAMA_SERVER_ARGS
+        assert popens[2][0][1:] == chat_webui.LLAMA_SERVER_ARGS_CPU
 
     def test_restart_timeout_kills(self, chat_webui, monkeypatch, tmp_path):
         killed = []
-        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: killed.append("llama"))
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda mode=None: killed.append(mode))
         monkeypatch.setattr(chat_webui, "kill_comfyui", lambda: None)
 
         def boom(*a, **k):
@@ -1075,14 +1191,16 @@ class TestRestartServers:
         monkeypatch.setattr(chat_webui.time, "time", fake_time)
         monkeypatch.setattr(chat_webui.os.path, "expanduser", lambda p: str(tmp_path))
         chat_webui.restart_servers()
-        assert killed.count("llama") == 2
+        # one full kill + one timeout kill per llama-server
+        assert killed.count(None) == 1
+        assert killed.count("gpu") == 1
+        assert killed.count("cpu") == 1
 
 
 class TestRestartLlamaServer:
-    def test_switches_to_cpu(self, chat_webui, monkeypatch, tmp_path):
-        chat_webui._llama_mode = "gpu"
+    def test_restarts_cpu_server(self, chat_webui, monkeypatch, tmp_path):
         killed = []
-        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: killed.append("llama"))
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda mode=None: killed.append(mode))
         monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
         monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: type("R", (), {"status_code": 200})())
         popens = []
@@ -1091,24 +1209,15 @@ class TestRestartLlamaServer:
         real_open = open
         monkeypatch.setattr(builtins, "open", lambda path, mode: real_open(path, mode))
         chat_webui.restart_llama_server("cpu")
-        assert chat_webui._llama_mode == "cpu"
-        assert killed == ["llama"]
+        assert killed == ["cpu"]
+        assert chat_webui._cpu_model_status == "unloaded"
         assert len(popens) == 1
         assert popens[0][0][0] == chat_webui.LLAMA_SERVER_PATH
         assert popens[0][0][1:] == chat_webui.LLAMA_SERVER_ARGS_CPU
 
-    def test_noop_when_already_cpu(self, chat_webui, monkeypatch):
-        chat_webui._llama_mode = "cpu"
-        called = []
-        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: called.append("k"))
-        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: called.append("g"))
-        chat_webui.restart_llama_server("cpu")
-        assert called == []
-
-    def test_switches_back_to_gpu(self, chat_webui, monkeypatch, tmp_path):
-        chat_webui._llama_mode = "cpu"
+    def test_restarts_gpu_server(self, chat_webui, monkeypatch, tmp_path):
         killed = []
-        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: killed.append("llama"))
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda mode=None: killed.append(mode))
         monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
         monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: type("R", (), {"status_code": 200})())
         popens = []
@@ -1117,12 +1226,29 @@ class TestRestartLlamaServer:
         real_open = open
         monkeypatch.setattr(builtins, "open", lambda path, mode: real_open(path, mode))
         chat_webui.restart_llama_server("gpu")
-        assert chat_webui._llama_mode == "gpu"
+        assert killed == ["gpu"]
+        assert chat_webui.model_status == "unloaded"
         assert popens[0][0][1:] == chat_webui.LLAMA_SERVER_ARGS
 
-    def test_keeps_mode_when_start_fails(self, chat_webui, monkeypatch, tmp_path):
-        chat_webui._llama_mode = "gpu"
-        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda: None)
+    def test_kill_is_mode_specific(self, chat_webui, monkeypatch):
+        calls = []
+        monkeypatch.setattr(chat_webui.subprocess, "run", lambda *a, **k: calls.append(a[0]))
+        monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
+        chat_webui.kill_llama_server("cpu")
+        assert calls == [
+            ["pkill", "-f", "llama-server.*--port 8079"],
+            ["pkill", "-9", "-f", "llama-server.*--port 8079"],
+        ]
+        calls.clear()
+        chat_webui.kill_llama_server("gpu")
+        assert calls == [
+            ["pkill", "-f", "llama-server.*--port 8081"],
+            ["pkill", "-9", "-f", "llama-server.*--port 8081"],
+        ]
+
+    def test_restart_start_failure_marks_unloaded(self, chat_webui, monkeypatch, tmp_path):
+        killed = []
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda mode=None: killed.append(mode))
         monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
         state = {"t": 1000.0}
 
@@ -1137,44 +1263,45 @@ class TestRestartLlamaServer:
         real_open = open
         monkeypatch.setattr(builtins, "open", lambda path, mode: real_open(path, mode))
         chat_webui.restart_llama_server("cpu")
-        assert chat_webui._llama_mode == "gpu"
+        assert chat_webui._cpu_model_status == "unloaded"
+        assert killed == ["cpu", "cpu"]  # restart kill + startup-timeout kill
 
 
-class TestEnsureLlamaModeForTask:
-    def test_agent_user_needs_cpu(self, chat_webui, monkeypatch):
+class TestEnsureLlamaServerForTask:
+    def test_agent_user_ensures_cpu(self, chat_webui, monkeypatch):
         chat_webui._agent_users.clear()
         chat_webui._agent_users.add("editor")
         chat_webui.tasks["t1"] = {"_user": "editor"}
-        chat_webui._llama_mode = "gpu"
-        switched = []
-        monkeypatch.setattr(chat_webui, "restart_llama_server", lambda m: switched.append(m))
-        chat_webui._ensure_llama_mode_for_task("t1")
-        assert switched == ["cpu"]
+        ensured = []
+        monkeypatch.setattr(chat_webui, "ensure_llama_server", lambda mode: ensured.append(mode))
+        chat_webui._ensure_llama_server_for_task("t1")
+        assert ensured == ["cpu"]
 
-    def test_normal_user_needs_gpu(self, chat_webui, monkeypatch):
+    def test_normal_user_ensures_gpu(self, chat_webui, monkeypatch):
         chat_webui._agent_users.clear()
         chat_webui.tasks["t1"] = {"_user": "alice"}
-        chat_webui._llama_mode = "gpu"
-        switched = []
-        monkeypatch.setattr(chat_webui, "restart_llama_server", lambda m: switched.append(m))
-        chat_webui._ensure_llama_mode_for_task("t1")
-        assert switched == []
-
-    def test_missing_task_is_noop(self, chat_webui, monkeypatch):
-        chat_webui.tasks.pop("ghost", None)
-        switched = []
-        monkeypatch.setattr(chat_webui, "restart_llama_server", lambda m: switched.append(m))
-        chat_webui._ensure_llama_mode_for_task("ghost")
-        assert switched == []
+        ensured = []
+        monkeypatch.setattr(chat_webui, "ensure_llama_server", lambda mode: ensured.append(mode))
+        chat_webui._ensure_llama_server_for_task("t1")
+        assert ensured == ["gpu"]
 
     def test_user_with_no_name_is_gpu(self, chat_webui, monkeypatch):
         chat_webui._agent_users.clear()
         chat_webui.tasks["t1"] = {"session_id": "s1"}
-        chat_webui._llama_mode = "cpu"
-        switched = []
-        monkeypatch.setattr(chat_webui, "restart_llama_server", lambda m: switched.append(m))
-        chat_webui._ensure_llama_mode_for_task("t1")
-        assert switched == ["gpu"]
+        ensured = []
+        monkeypatch.setattr(chat_webui, "ensure_llama_server", lambda mode: ensured.append(mode))
+        chat_webui._ensure_llama_server_for_task("t1")
+        assert ensured == ["gpu"]
+
+    def test_missing_task_is_noop(self, chat_webui, monkeypatch):
+        chat_webui.tasks.pop("ghost", None)
+        ensured = []
+        monkeypatch.setattr(chat_webui, "ensure_llama_server", lambda mode: ensured.append(mode))
+        chat_webui._ensure_llama_server_for_task("ghost")
+        assert ensured == []
+
+
+class TestEnsureComfyuiRunning:
     def test_already_running(self, chat_webui, monkeypatch):
         class Resp:
             status_code = 200
@@ -1641,10 +1768,10 @@ def _noop_sleep(chat_webui, monkeypatch):
 class TestGenerateImage:
     def _setup(self, chat_webui, temp_paths, monkeypatch):
         chat_webui.tasks["t1"] = {"session_id": "s1", "_user": "alice", "status": "working"}
-        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda: None)
+        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda mode="gpu": None)
         monkeypatch.setattr(chat_webui, "ensure_comfyui_running", lambda: None)
         monkeypatch.setattr(chat_webui, "free_comfyui_vram", lambda: True)
-        monkeypatch.setattr(chat_webui, "load_llama_model", lambda: True)
+        monkeypatch.setattr(chat_webui, "load_llama_model", lambda mode="gpu": True)
         _noop_sleep(chat_webui, monkeypatch)
 
     def test_comfyui_error(self, chat_webui, temp_paths, monkeypatch):
@@ -1786,10 +1913,10 @@ class TestGenerateImage:
 class TestEditImage:
     def _setup(self, chat_webui, temp_paths, monkeypatch):
         chat_webui.tasks["t1"] = {"session_id": "s1", "_user": "alice", "status": "working"}
-        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda: None)
+        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda mode="gpu": None)
         monkeypatch.setattr(chat_webui, "ensure_comfyui_running", lambda: None)
         monkeypatch.setattr(chat_webui, "free_comfyui_vram", lambda: True)
-        monkeypatch.setattr(chat_webui, "load_llama_model", lambda: True)
+        monkeypatch.setattr(chat_webui, "load_llama_model", lambda mode="gpu": True)
         _noop_sleep(chat_webui, monkeypatch)
 
     def test_no_image(self, chat_webui, temp_paths, monkeypatch):
@@ -1962,7 +2089,9 @@ class TestPrepareSessionFull:
         chat_webui.sessions_meta["s1"] = {"name": "New Chat", "system_prompts": [{"name": "Extra", "content": "extra stuff"}], "created": 1, "updated": 1}
         chat_webui.model_status = "unloaded"
         load_calls = []
-        monkeypatch.setattr(chat_webui, "load_llama_model", lambda: load_calls.append(1))
+        monkeypatch.setattr(
+            chat_webui, "load_llama_model", lambda mode="gpu": load_calls.append(1)
+        )
         chat_webui.set_client_location("Kolkata")
         chat_webui._prepare_session("t1", "s1", "hello there", "aGVsbG8=", "YXVkaW8=", "2026-08-09T10:00:00Z")
         sys_msg = chat_webui.sessions["s1"][0]
@@ -2055,6 +2184,7 @@ class TestStartLLMRound:
                 submitted.append((fn, a, k))
 
         monkeypatch.setattr(chat_webui, "_llm_pool", FakePool())
+        monkeypatch.setattr(chat_webui, "ensure_llama_server", lambda mode="gpu": None)
         chat_webui.model_status = "chat_loaded"
         chat_webui._start_llm_round("t1", "s1", 0)
         assert chat_webui.tasks["t1"]["_state"] == "llm_waiting"
@@ -2065,7 +2195,10 @@ class TestStartLLMRound:
         chat_webui.tasks["t1"] = {"session_id": "s1"}
         chat_webui.model_status = "unloaded"
         load_calls = []
-        monkeypatch.setattr(chat_webui, "load_llama_model", lambda: load_calls.append(1))
+        monkeypatch.setattr(chat_webui, "ensure_llama_server", lambda mode="gpu": None)
+        monkeypatch.setattr(
+            chat_webui, "load_llama_model", lambda mode="gpu": load_calls.append(1)
+        )
         class FakePool:
             def submit(self, fn, *a, **k):
                 pass
@@ -2081,6 +2214,8 @@ class TestStartLLMRound:
                 raise AssertionError("should not submit")
 
         monkeypatch.setattr(chat_webui, "_llm_pool", FakePool())
+        monkeypatch.setattr(chat_webui, "ensure_llama_server", lambda mode="gpu": None)
+        monkeypatch.setattr(chat_webui, "load_llama_model", lambda mode="gpu": False)
         chat_webui._start_llm_round("ghost", "s1", 0)
 
 
@@ -2122,6 +2257,43 @@ class TestLLMWorker:
         assert msg["reasoning_content"] == "think "
         assert "tool_calls" not in msg
 
+    def test_cpu_mode_sends_cpu_model(self, chat_webui, temp_paths, monkeypatch):
+        events = []
+        chat_webui._event_post = lambda *a, **k: events.append((a, k))
+        chat_webui.sessions.clear()
+        chat_webui.sessions["s1"] = [{"role": "user", "content": "hi"}]
+        chat_webui.tasks["t1"] = {"session_id": "s1", "reasoning": ""}
+        sent = {}
+
+        def fake_post(*a, **k):
+            sent.update(k)
+            return self._stream(
+                ['data: {"choices": [{"delta": {"content": "ok"}}]}', "data: [DONE]"]
+            )
+
+        monkeypatch.setattr(chat_webui.requests, "post", fake_post)
+        chat_webui._llm_worker("t1", "s1", 0, chat_webui.sessions["s1"], "cpu")
+        assert sent["json"]["model"] == chat_webui.MODEL_ID_CPU
+        assert events and events[0][0][0] == "llm_ok"
+
+    def test_gpu_mode_sends_gpu_model(self, chat_webui, temp_paths, monkeypatch):
+        events = []
+        chat_webui._event_post = lambda *a, **k: events.append((a, k))
+        chat_webui.sessions.clear()
+        chat_webui.sessions["s1"] = [{"role": "user", "content": "hi"}]
+        chat_webui.tasks["t1"] = {"session_id": "s1", "reasoning": ""}
+        sent = {}
+
+        def fake_post(*a, **k):
+            sent.update(k)
+            return self._stream(
+                ['data: {"choices": [{"delta": {"content": "ok"}}]}', "data: [DONE]"]
+            )
+
+        monkeypatch.setattr(chat_webui.requests, "post", fake_post)
+        chat_webui._llm_worker("t1", "s1", 0, chat_webui.sessions["s1"], "gpu")
+        assert sent["json"]["model"] == chat_webui.MODEL_ID
+
     def test_tool_calls_accumulated(self, chat_webui, temp_paths, monkeypatch):
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
@@ -2154,7 +2326,9 @@ class TestLLMWorker:
     def test_context_compression_triggered(self, chat_webui, temp_paths, monkeypatch):
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
-        monkeypatch.setattr(chat_webui, "_summarize_with_llm", lambda text: "compressed")
+        monkeypatch.setattr(
+            chat_webui, "_summarize_with_llm", lambda text, mode="gpu": "compressed"
+        )
         chat_webui.sessions.clear()
         chat_webui.sessions["s1"] = [{"role": "user", "content": "x" * 50000} for _ in range(30)]
         chat_webui.tasks["t1"] = {"session_id": "s1", "reasoning": ""}
@@ -2205,7 +2379,7 @@ class TestLLMWorker:
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(
             chat_webui, "prepare_context_for_llm",
-            lambda sid, msgs: [{"role": "user", "content": "q"}, {"role": "tool", "tool_call_id": "c1", "content": "res"}],
+            lambda sid, msgs, mode="gpu": [{"role": "user", "content": "q"}, {"role": "tool", "tool_call_id": "c1", "content": "res"}],
         )
         chat_webui.sessions.clear()
         chat_webui.sessions["s1"] = [{"role": "user", "content": "hi"}]
@@ -2450,7 +2624,7 @@ class TestQueueWorker:
 class TestIdleUnloadLoop:
     def test_unloads_after_idle(self, chat_webui, monkeypatch):
         unloaded = []
-        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda: unloaded.append(1))
+        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda mode="gpu": unloaded.append(1))
         calls = []
 
         def fake_sleep(secs):
@@ -2473,7 +2647,7 @@ class TestIdleUnloadLoop:
 
     def test_no_unload_when_not_loaded(self, chat_webui, monkeypatch):
         unloaded = []
-        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda: unloaded.append(1))
+        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda mode="gpu": unloaded.append(1))
         calls = []
 
         def fake_sleep(secs):
@@ -2496,7 +2670,7 @@ class TestIdleUnloadLoop:
 
     def test_no_unload_when_queue_active(self, chat_webui, monkeypatch):
         unloaded = []
-        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda: unloaded.append(1))
+        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda mode="gpu": unloaded.append(1))
         calls = []
 
         def fake_sleep(secs):
@@ -2623,7 +2797,7 @@ class TestThermalMonitor:
 
     def test_overheat_and_cooldown(self, chat_webui, monkeypatch):
         unloaded = []
-        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda: unloaded.append(1))
+        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda mode="gpu": unloaded.append(1))
         monkeypatch.setattr(chat_webui, "get_ram_usage", lambda: 30)
         temps = iter([90, 60, None])
 
@@ -2677,7 +2851,7 @@ class TestThermalMonitor:
     def test_busy_skips_actions(self, chat_webui, monkeypatch):
         unloaded = []
         freed = []
-        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda: unloaded.append(1))
+        monkeypatch.setattr(chat_webui, "unload_llama_model", lambda mode="gpu": unloaded.append(1))
         monkeypatch.setattr(chat_webui, "free_comfyui_vram", lambda: freed.append(1))
         monkeypatch.setattr(chat_webui, "get_ram_usage", lambda: 30)
         monkeypatch.setattr(chat_webui, "get_gpu_temp", lambda: 90)

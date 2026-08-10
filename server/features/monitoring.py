@@ -1,4 +1,14 @@
-"""Health monitoring, server lifecycle and the background maintenance loops."""
+"""Health monitoring, server lifecycle and the background maintenance loops.
+
+Two llama-server processes run concurrently on separate ports:
+
+* the **GPU** server on ``LLAMA_BASE`` (8081) for interactive chat UI users, and
+* the **CPU** server on ``LLAMA_BASE_CPU`` (8079) for automated self-chat
+  agents.
+
+Each is started, killed, health-checked and idle-unloaded independently so an
+agent run never disturbs interactive users (and vice versa).
+"""
 
 import os
 import subprocess
@@ -9,8 +19,11 @@ import requests
 
 from server.features.state import M
 
+_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079"}
+
 
 def model_status_snapshot():
+    # The UI reports the interactive (GPU) server's state.
     with M._data_lock:
         return {
             "model": M.model_status,
@@ -45,18 +58,31 @@ def get_ram_usage():
         return None
 
 
-def kill_llama_server():
-    subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
+def kill_llama_server(mode=None):
+    """Kill llama-server process(es).
+
+    ``mode`` is ``"gpu"`` (port 8081), ``"cpu"`` (port 8079) or ``None`` to
+    kill both servers at once (emergency RAM evacuation, full restart).
+    """
+    if mode is None:
+        subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
+        time.sleep(1)
+        subprocess.run(["pkill", "-9", "-f", "llama-server"], capture_output=True)
+        return
+    port = _LLAMA_PORTS[mode]
+    pattern = f"llama-server.*--port {port}"
+    subprocess.run(["pkill", "-f", pattern], capture_output=True)
     time.sleep(1)
-    subprocess.run(["pkill", "-9", "-f", "llama-server"], capture_output=True)
+    subprocess.run(["pkill", "-9", "-f", pattern], capture_output=True)
 
 
 def kill_comfyui():
     subprocess.run(["pkill", "-f", "main.py.*lowvram"], capture_output=True)
 
 
-def _start_llama_process(args):
-    """Launch llama-server with the given argument list and wait for health."""
+def _start_llama_process(args, mode="gpu"):
+    """Launch a llama-server with the given argument list and wait for health."""
+    base = M.LLAMA_BASE_CPU if mode == "cpu" else M.LLAMA_BASE
     log_dir = os.path.expanduser("~/local-ai-files")
     llm_log = open(os.path.join(log_dir, "llama-server.log"), "a")
     subprocess.Popen(
@@ -69,51 +95,52 @@ def _start_llama_process(args):
     while time.time() < deadline:
         time.sleep(2)
         try:
-            r = requests.get(f"{M.LLAMA_BASE}/health", timeout=3)
+            r = requests.get(f"{base}/health", timeout=3)
             if r.status_code == 200:
-                print("[restart] llama-server healthy")
+                print(f"[restart] llama-server ({mode}) healthy on {base}")
                 return True
         except Exception:
             pass
-    print("[restart] llama-server did not respond within 2 minutes — killing")
-    M.kill_llama_server()
+    print(f"[restart] llama-server ({mode}) did not respond within 2 minutes — killing")
+    M.kill_llama_server(mode)
     return False
 
 
 def restart_llama_server(mode):
-    """Restart llama-server using the GPU or CPU argument set.
-
-    ``mode`` is ``"gpu"`` (interactive users — the full VRAM config) or
-    ``"cpu"`` (automated self-chat jobs — the CPU-only config). No-op when the
-    server is already running in the requested mode.
-    """
-    if M._llama_mode == mode:
-        return
-    print(f"[llama] Switching llama-server to {mode} mode")
-    M.kill_llama_server()
+    """Restart the llama-server for ``mode`` (``"gpu"`` or ``"cpu"``) using its
+    own argument set and port, leaving the other server untouched."""
+    print(f"[llama] Restarting llama-server ({mode})")
+    M.kill_llama_server(mode)
     time.sleep(1)
     with M._data_lock:
-        M.model_status = "unloaded"
+        if mode == "cpu":
+            M._cpu_model_status = "unloaded"
+        else:
+            M.model_status = "unloaded"
     args = M.LLAMA_SERVER_ARGS if mode == "gpu" else M.LLAMA_SERVER_ARGS_CPU
-    if _start_llama_process(args):
-        M._llama_mode = mode
+    _start_llama_process(args, mode)
 
 
-def _ensure_llama_mode_for_task(task_id):
-    """Make sure llama-server runs in the mode the task's author needs.
+def ensure_llama_server(mode):
+    """Make sure the llama-server for ``mode`` is running, starting it if not."""
+    base = M.LLAMA_BASE_CPU if mode == "cpu" else M.LLAMA_BASE
+    if M.is_llama_alive(base):
+        return
+    print(f"[llama] {mode} llama-server not reachable — starting...")
+    restart_llama_server(mode)
 
-    Tasks posted by agent users (self-chat: editor, moderator, ...) run the
-    model on the CPU; tasks from interactive users keep the GPU config.
+
+def _ensure_llama_server_for_task(task_id):
+    """Make sure the llama-server the task's author needs is running.
+
+    Tasks posted by agent users (self-chat: editor, moderator, ...) run on the
+    CPU server; tasks from interactive users use the GPU server.
     """
     with M._data_lock:
-        t = M.tasks.get(task_id)
-        if not t:
+        if task_id not in M.tasks:
             return
-        user = t.get("_user", "")
-    needed = "cpu" if user in M._agent_users else "gpu"
-    if M._llama_mode != needed:
-        print(f"[llama] Task {task_id} user '{user}' needs {needed} mode")
-        M.restart_llama_server(needed)
+    mode = M.task_mode(task_id)
+    M.ensure_llama_server(mode)
 
 
 def restart_servers():
@@ -140,8 +167,9 @@ def restart_servers():
     )
     with M._data_lock:
         M.model_status = "unloaded"
-    _start_llama_process(M.LLAMA_SERVER_ARGS)
-    M._llama_mode = "gpu"
+        M._cpu_model_status = "unloaded"
+    _start_llama_process(M.LLAMA_SERVER_ARGS, "gpu")
+    _start_llama_process(M.LLAMA_SERVER_ARGS_CPU, "cpu")
 
 
 def ensure_comfyui_running():
@@ -191,14 +219,15 @@ def _idle_unload_loop():
         with M._queue_lock:
             queue_active = len(M._task_queue) > 0 or M._current_task_id is not None
 
-        with M._data_lock:
-            ms = M.model_status
-            lu = M._last_llm_use
-
-        # Only unload if loaded, inactive for > 300s, and no queue tasks pending
-        if ms == "chat_loaded" and (time.time() - lu > 300) and not queue_active:
-            print("[idle] No LLM activity for 300s, releasing VRAM model weights...")
-            M.unload_llama_model()
+        # Each llama-server unloads independently once its own model has been
+        # idle for > 300s (and no tasks are queued anywhere).
+        for mode in ("gpu", "cpu"):
+            with M._data_lock:
+                ms = M._cpu_model_status if mode == "cpu" else M.model_status
+                lu = M._cpu_last_llm_use if mode == "cpu" else M._last_llm_use
+            if ms == "chat_loaded" and (time.time() - lu > 300) and not queue_active:
+                print(f"[idle] No {mode} LLM activity for 300s, releasing model weights...")
+                M.unload_llama_model(mode)
 
 
 def _reminder_loop():
@@ -270,8 +299,8 @@ def _thermal_monitor():
                 with M._data_lock:
                     ms = M.model_status
                 if ms == "chat_loaded":
-                    print("[thermal] Overheated — unloading chat model")
-                    M.unload_llama_model()
+                    print("[thermal] Overheated — unloading GPU chat model")
+                    M.unload_llama_model("gpu")
                 elif ms == "image_active":
                     print("[thermal] Overheated — freeing ComfyUI VRAM")
                     M.free_comfyui_vram()

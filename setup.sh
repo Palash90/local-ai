@@ -108,11 +108,14 @@ fi
 # ──────────────────────────────────────────────
 echo "==> Creating config files..."
 
-if [ ! -f "$FILES_DIR/model.txt" ]; then
-    cat > "$FILES_DIR/model.txt" << 'MODELEOF'
-gemma4-e2b
+if [ ! -f "$FILES_DIR/model.json" ]; then
+    cat > "$FILES_DIR/model.json" << 'MODELEOF'
+{
+  "gpu": "gemma4-e2b",
+  "cpu": "gemma4-e4b-q4"
+}
 MODELEOF
-    echo "    $FILES_DIR/model.txt (default LLM; edit if you download a different model)"
+    echo "    $FILES_DIR/model.json (GPU model for the chat UI, CPU model for self-chat agents; edit if you download different models)"
 fi
 
 if [ ! -f "$FILES_DIR/models.json" ]; then
@@ -266,8 +269,9 @@ echo "    Download whatever you need, then run the app. Nothing else to configur
 echo ""
 echo "    1. LLM (chat) — your choice:"
 echo "       Place a GGUF model into:  $FILES_DIR/my-models/"
-echo "       The default is:           $(cat "$FILES_DIR/model.txt")"
-echo "       (edit $FILES_DIR/model.txt if you download a different model)"
+echo "       GPU model (chat UI):      $(python3 -c "import json;print(json.load(open('$FILES_DIR/model.json'))['gpu'])" 2>/dev/null)"
+echo "       CPU model (self-chat):    $(python3 -c "import json;print(json.load(open('$FILES_DIR/model.json'))['cpu'])" 2>/dev/null)"
+echo "       (edit $FILES_DIR/model.json if you download different models)"
 echo ""
 echo "    2. Image model z_image — place these files:"
 echo "       $LOCAL_AI_HOME/ComfyUI/models/diffusion_models/z_image_turbo_bf16.safetensors"
