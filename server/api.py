@@ -440,6 +440,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 )
             else:
                 self.send_json({"error": "Invalid credentials"}, status=401)
+        elif self.path == "/api/leaving":
+            # Fired via navigator.sendBeacon on pagehide — beacons can't set
+            # custom headers, so the token travels in the body instead of
+            # X-Auth-Token. This does NOT invalidate the token (unlike
+            # /api/logout) — it just marks the heartbeat stale so
+            # _human_priority_active() sees this user as gone right away,
+            # instead of waiting out the full ACTIVE_WINDOW_SECONDS timeout.
+            # The timeout stays in place as a fallback for crashes/force-quits
+            # where pagehide never fires.
+            token = self.headers.get("X-Auth-Token", "")
+            if not token:
+                length = int(self.headers.get("Content-Length", 0))
+                if length:
+                    try:
+                        body = json.loads(self.rfile.read(length))
+                        token = body.get("token", "")
+                    except Exception:
+                        token = ""
+            with _tokens_lock:
+                entry = _active_tokens.get(token)
+                if entry:
+                    entry["last_seen"] = 0
+            self.send_json({"ok": True})
         elif self.path == "/api/logout":
             token = self.headers.get("X-Auth-Token", "")
             with _tokens_lock:

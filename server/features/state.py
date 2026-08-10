@@ -17,7 +17,7 @@ import queue as _queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-
+from server.config import CPU_PARALLEL_SLOTS
 
 class _Registry:
     """Holds the single entrypoint module reference."""
@@ -88,8 +88,14 @@ _event_queue = _queue.Queue()
 # Serializes image generation/editing so VRAM management (llama unload/free/load)
 # and the ``image_active`` model status never race between concurrent chats.
 _image_queue = _queue.Queue()
-_llm_pool = ThreadPoolExecutor(max_workers=1)
-_tool_pool = ThreadPoolExecutor(max_workers=2)
+# One LLM-round pool and one tool-call pool PER LANE. These used to be single
+# shared pools (_llm_pool max_workers=1, _tool_pool max_workers=2) — even after
+# splitting task admission into gpu/cpu lanes, actually *running* a round or a
+# tool call still funneled through those single shared pools, so a GPU (UI)
+# task and a CPU (agent) task would still block on each other's turn in the
+# pool. Splitting per-lane makes them genuinely independent end-to-end.
+_llm_pools = {"gpu": ThreadPoolExecutor(max_workers=1), "cpu": ThreadPoolExecutor(max_workers=CPU_PARALLEL_SLOTS)}
+_tool_pools = {"gpu": ThreadPoolExecutor(max_workers=2), "cpu": ThreadPoolExecutor(max_workers=2)}
 
 _location_events = {}
 

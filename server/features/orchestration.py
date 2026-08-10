@@ -196,8 +196,9 @@ def _event_loop():
                         M.sessions[sid].append(assistant_msg)
                         M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
                 M.save_sessions()
+                tool_mode = M.task_mode(task_id)
                 for i, tc in enumerate(msg["tool_calls"]):
-                    M._tool_pool.submit(
+                    M._tool_pools[tool_mode].submit(
                         M._tool_worker,
                         task_id,
                         sid,
@@ -279,6 +280,30 @@ def _event_loop():
                     M._set_task_error(task_id, "Max tool rounds exceeded", data["sid"])
 
 
+def _human_priority_active():
+    """True while a human UI user is likely to want the GPU soon.
+
+    Self-chat agents (CPU lane) defer to this: they have all day, a human's
+    session is short, so agents should not start new work while a human is
+    around, even if the GPU lane happens to be momentarily idle between
+    messages. "Around" is: the GPU lane currently has work queued/running, or
+    a non-agent auth token has been seen within ACTIVE_WINDOW_SECONDS (the
+    browser's periodic /api/model-status poll acts as a heartbeat while a
+    tab is open).
+    """
+    with M._queue_locks["gpu"]:
+        if M._current_task_ids["gpu"] is not None or M._task_queues["gpu"]:
+            return True
+    now = time.time()
+    with M._tokens_lock:
+        for token, entry in M._active_tokens.items():
+            if token in M._agent_tokens or entry.get("user") in M._agent_users:
+                continue
+            if now - entry.get("last_seen", 0) <= M.ACTIVE_WINDOW_SECONDS:
+                return True
+    return False
+
+
 def _queue_worker(mode):
     """Drain the task queue for ``mode`` ("gpu" for interactive UI users,
     "cpu" for self-chat agents).
@@ -288,11 +313,22 @@ def _queue_worker(mode):
     interactive UI user in the GPU lane wait in line — they only share
     physical hardware if they both actually need the GPU (chat model load or
     image generation), which is arbitrated separately.
+
+    The CPU lane additionally yields to any human presence (see
+    ``_human_priority_active``) before starting its *next* task. An
+    already-running self-chat round is never interrupted — it runs on its own
+    hardware and was already established not to block the GPU lane — this
+    only holds the CPU lane from picking up new work while a human is around.
     """
     queue_lock = M._queue_locks[mode]
     queue_cond = M._queue_conds[mode]
     task_queue = M._task_queues[mode]
     while True:
+        if mode == "cpu":
+            # If a human is currently active in the UI, hold off agent tasks
+            while _human_priority_active():
+                time.sleep(1.0)
+                
         item = None
         with queue_lock:
             while not task_queue:
@@ -310,6 +346,17 @@ def _queue_worker(mode):
                         M.tasks[tid] = {
                             "status": "waiting",
                             "message": f"Server paused — {label}. Will resume shortly.",
+                            "session_id": qitem["session_id"],
+                        }
+                queue_cond.wait(5)
+                continue
+            if mode == "cpu" and M._human_priority_active():
+                for qitem in task_queue:
+                    tid = qitem["task_id"]
+                    if tid in M.tasks:
+                        M.tasks[tid] = {
+                            "status": "waiting",
+                            "message": "Yielding to an active user session...",
                             "session_id": qitem["session_id"],
                         }
                 queue_cond.wait(5)

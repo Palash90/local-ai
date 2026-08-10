@@ -91,7 +91,7 @@ from server.features.state import (  # noqa: E402
     _image_queue,
     _last_llm_use,
     _last_tps,
-    _llm_pool,
+    _llm_pools,
     _location_events,
     _model_transition_lock,
     _overheated,
@@ -100,7 +100,7 @@ from server.features.state import (  # noqa: E402
     _ram_evacuating,
     _task_queues,
     _tokens_lock,
-    _tool_pool,
+    _tool_pools,
     _users_cache,
     _users_cache_time,
     model_status,
@@ -156,9 +156,11 @@ from server.features.context import (  # noqa: E402
 )
 
 from server.features.llm import (  # noqa: E402
+    _consult_worker,
     _llm_worker,
     _start_llm_round,
     active_model_id,
+    consult_expert_model,
     is_llama_alive,
     load_llama_model,
     server_base,

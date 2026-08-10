@@ -20,6 +20,31 @@ import requests
 from server.features.state import M
 
 
+def _consult_worker(*args, **kwargs):
+    # Implement worker call or redirect to your task handler
+    pass
+
+
+def consult_expert_model(prompt: str, mode: str = "cpu", **kwargs):
+    """
+    Executes a prompt against the expert/agent model pool.
+    """
+    from server.features.state import _llm_pools, _human_priority_active
+    import time
+
+    # Pause CPU execution if a human user is active
+    if mode == "cpu":
+        while _human_priority_active():
+            time.sleep(1.0)
+
+    # Submit task to the designated LLM thread pool
+    pool = _llm_pools.get(mode, _llm_pools["cpu"])
+    
+    # Add your model invocation / API request logic here
+    # future = pool.submit(your_llm_call_function, prompt, **kwargs)
+    # return future.result()
+
+
 def task_mode(task_id):
     """Return the llama-server mode a task must run on.
 
@@ -294,4 +319,5 @@ def _start_llm_round(task_id, sid, round_num):
     M.set_status(
         task_id, "Thinking..." if round_num == 0 else f"Thinking (round {round_num})..."
     )
-    M._llm_pool.submit(M._llm_worker, task_id, sid, round_num, messages, mode)
+    pool = M._llm_pools.get(mode, M._llm_pools["cpu"])
+    pool.submit(M._llm_worker, task_id, sid, round_num, messages, mode)

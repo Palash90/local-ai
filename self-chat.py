@@ -384,6 +384,8 @@ def active_real_users():
 
 
 def wait_for_user_to_leave():
+    return
+'''
     while True:
         real = active_real_users()
         if not real:
@@ -393,8 +395,8 @@ def wait_for_user_to_leave():
             f"[wait] Real user(s) active ({', '.join(real)}) "
             f"— pausing self-chat until they log out..."
         )
-        time.sleep(POLL_INTERVAL_SECONDS)
-
+        #time.sleep(POLL_INTERVAL_SECONDS)
+'''
 
 def call_llm(token, session_id, message, image_b64=None):
     headers = {"X-Auth-Token": token}

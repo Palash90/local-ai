@@ -19,6 +19,7 @@ COMFYUI_URL = "http://localhost:8188"
 HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
 PORT = 3001
 REASONING_BUDGET = 4096
+CPU_PARALLEL_SLOTS = 4  # Set to desired number of concurrent CPU agent slots
 
 # model.json holds the LLM model filenames (relative to ~/local-ai-files/my-models/)
 # per runtime mode: "gpu" for interactive chat UI users, "cpu" for automated
@@ -109,8 +110,8 @@ LLAMA_SERVER_ARGS_CPU = [
 
     # CPU-only execution — no layers offloaded to the GPU.
     "--n-gpu-layers", "0",
-    "-fa", "on",
-    "--ctx-size", "32768",
+    "-fa", "off",
+    "--ctx-size", "131072",
     "-ctk", "q8_0",            # Quantized KV cache keeps RAM usage low
     "-ctv", "q8_0",
     "-nkvo",
