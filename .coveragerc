@@ -1,9 +1,5 @@
 [run]
-source =
-    chat-webui.py
-    self-chat.py
-    markdown_hosting.py
-    server
+source = .
 
 [report]
 omit =

@@ -1,8 +1,12 @@
 import base64
+import importlib.util
 import json
 import os
+import sys
 
 import pytest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class FakeResp:
@@ -634,3 +638,478 @@ class TestDryRun:
         assert "Write a mystery" in out
         assert "ENVIRONMENT" in out
         assert "genre:       Drama" in out
+
+    def test_script_enforcement_and_missing_files(self, self_chat, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(self_chat, "TASKS", [
+            {"task": "Bengali mystery", "genre": "Mystery", "languages": ["bengali", "English"],
+             "mediums": ["audio", "text"], "roles": ["free", "premium"], "details": "x",
+             "checklist": {"editor": ["Check A"]}},
+        ])
+        monkeypatch.setattr(self_chat, "TASKS_SOURCE", "/tmp/opencode/tasks.json")
+        monkeypatch.setattr(self_chat, "GENRE_CHECKLISTS_FILE", str(tmp_path / "missing_gc.json"))
+        monkeypatch.setattr(self_chat, "SELF_CHAT_PROMPT_FILE", str(tmp_path / "missing_self.txt"))
+        unhandled = tmp_path / "editor.txt"
+        unhandled.write_text("%unknown% placeholder\n")
+        monkeypatch.setattr(self_chat, "EDITOR_PROMPT_FILE", str(unhandled))
+        handled = tmp_path / "moderator.txt"
+        handled.write_text("%genre% %checklist% rest\n")
+        monkeypatch.setattr(self_chat, "MODERATOR_PROMPT_FILE", str(handled))
+        self_chat.run_dry_run()
+        out = capsys.readouterr().out
+        assert "script enforcement active (bengali/hindi)" in out
+        assert "no audio tool exists" in out
+        assert "MISSING — falling back to empty checklists" in out
+        assert "MISSING" in out
+        assert "UNHANDLED placeholders" in out
+        assert "ok (2 placeholder" in out
+
+
+class TestLoadGenreChecklists:
+    def test_missing_file_returns_empty(self, self_chat, monkeypatch, capsys):
+        monkeypatch.setattr(self_chat, "GENRE_CHECKLISTS_FILE", "/nonexistent/genre.json")
+        assert self_chat.load_genre_checklists() == {}
+        assert "Could not load" in capsys.readouterr().out
+
+    def test_merges_extra(self, self_chat, monkeypatch, tmp_path):
+        p = tmp_path / "gc.json"
+        p.write_text(json.dumps({"Drama": {"editor": ["A"]}}))
+        monkeypatch.setattr(self_chat, "GENRE_CHECKLISTS_FILE", str(p))
+        out = self_chat.load_genre_checklists({"Extra": {"editor": ["B"]}})
+        assert out["Drama"]["editor"] == ["A"]
+        assert out["Extra"]["editor"] == ["B"]
+
+
+class TestWaitForUserToLeave:
+    def test_is_noop(self, self_chat):
+        assert self_chat.wait_for_user_to_leave() is None
+
+
+class TestCallLlm:
+    def _post_get(self, self_chat, monkeypatch, post_payload, get_payloads):
+        sleeps = []
+        monkeypatch.setattr(self_chat.time, "sleep", lambda s: sleeps.append(s))
+
+        def fake_post(*a, **k):
+            return FakeResp(post_payload)
+
+        seq = iter(get_payloads)
+        monkeypatch.setattr(self_chat.requests, "post", fake_post)
+        monkeypatch.setattr(self_chat.requests, "get", lambda *a, **k: FakeResp(next(seq)))
+        return sleeps
+
+    def test_success(self, self_chat, monkeypatch):
+        self._post_get(self_chat, monkeypatch, {"task_id": "T1"},
+                       [{"status": "done", "response": "hello", "image": "/i.png",
+                         "_search_details": [{"q": 1}]}])
+        out = self_chat.call_llm("tok", "S", "msg", image_b64="B64")
+        assert out == {"text": "hello", "image": "/i.png", "searches": [{"q": 1}]}
+
+    def test_polls_until_done(self, self_chat, monkeypatch):
+        sleeps = self._post_get(self_chat, monkeypatch, {"task_id": "T1"},
+                                [{"status": "working"}, {"status": "done", "response": "x"}])
+        out = self_chat.call_llm("tok", "S", "msg")
+        assert out["text"] == "x"
+        assert sleeps == [10.0]
+
+    def test_error_status_raises(self, self_chat, monkeypatch):
+        self._post_get(self_chat, monkeypatch, {"task_id": "T1"}, [{"status": "error", "why": "bad"}])
+        with pytest.raises(RuntimeError, match="Task failed"):
+            self_chat.call_llm("tok", "S", "msg")
+
+    def test_submit_http_error(self, self_chat, monkeypatch):
+        self._post_get(self_chat, monkeypatch, None, [])
+        monkeypatch.setattr(self_chat.requests, "post", lambda *a, **k: FakeResp(status=400))
+        with pytest.raises(RuntimeError):
+            self_chat.call_llm("tok", "S", "msg")
+
+    def test_status_http_error(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.requests, "post", lambda *a, **k: FakeResp({"task_id": "T1"}))
+        monkeypatch.setattr(self_chat.requests, "get", lambda *a, **k: FakeResp(status=500))
+        with pytest.raises(RuntimeError):
+            self_chat.call_llm("tok", "S", "msg")
+
+
+class TestProposeTitle:
+    def test_success(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "call_llm", lambda *a, **k: {"text": "My Great Title"})
+        assert self_chat.propose_title("tok", "S", "Task", "English", "Drama", "story...") == "My Great Title"
+
+    def test_empty_falls_back_to_task(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "call_llm", lambda *a, **k: {"text": ""})
+        assert self_chat.propose_title("tok", "S", "Task X", "English", "Drama", "s") == "Task X"
+
+    def test_exception_falls_back(self, self_chat, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("offline")
+        monkeypatch.setattr(self_chat, "call_llm", boom)
+        assert self_chat.propose_title("tok", "S", "Task Y", "English", "Drama", "s") == "Task Y"
+
+
+class TestEmbedStoryImage:
+    def _comfy(self, tmp_path, rel="user/pic.png", data=b"imgdata"):
+        root = tmp_path / "comfy"
+        full = root / rel
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_bytes(data)
+        return root
+
+    def test_success_copies(self, self_chat, monkeypatch, tmp_path):
+        root = self._comfy(tmp_path)
+        monkeypatch.setattr(self_chat.os.path, "expanduser", lambda p: str(root))
+        stories = tmp_path / "stories"
+        stories.mkdir()
+        name = self_chat.embed_story_image("/output/user/pic.png", str(stories), 1, "Kolpo", 0)
+        assert name == "img_r1_Kolpo_0.png"
+        assert (stories / name).read_bytes() == b"imgdata"
+
+    def test_missing_file_returns_none(self, self_chat, monkeypatch, tmp_path):
+        monkeypatch.setattr(self_chat.os.path, "expanduser", lambda p: str(tmp_path))
+        assert self_chat.embed_story_image("/output/user/nope.png", str(tmp_path), 1, "A", 0) is None
+
+    def test_copy_error_returns_none(self, self_chat, monkeypatch, tmp_path):
+        root = self._comfy(tmp_path)
+        monkeypatch.setattr(self_chat.os.path, "expanduser", lambda p: str(root))
+
+        def boom(src, dst):
+            raise OSError("denied")
+        monkeypatch.setattr(self_chat.shutil, "copy", boom)
+        assert self_chat.embed_story_image("/output/user/pic.png", str(tmp_path), 1, "A", 0) is None
+
+
+class TestFileToB64:
+    def test_encodes(self, self_chat, tmp_path):
+        p = tmp_path / "a.bin"
+        p.write_bytes(b"\x00\x01\xff")
+        assert self_chat.file_to_b64(str(p)) == base64.b64encode(b"\x00\x01\xff").decode()
+
+
+class TestApplyTitleNoHeading:
+    def test_inserts_heading_when_missing(self, self_chat, tmp_path):
+        fname = tmp_path / "plain.md"
+        fname.write_text("Body without heading\n")
+        new_dir, new_fname = self_chat.apply_title("Fresh", str(tmp_path), str(fname))
+        assert new_fname == str(fname)
+        with open(new_fname) as f:
+            assert f.readline().strip() == "# Fresh"
+
+
+class TestAppendStoryEntryImage:
+    def test_appends_embedded_image(self, self_chat, monkeypatch, tmp_path):
+        root = tmp_path / "comfy"
+        (root / "user").mkdir(parents=True)
+        (root / "user" / "pic.png").write_bytes(b"P")
+        monkeypatch.setattr(self_chat.os.path, "expanduser", lambda p: str(root))
+        fname = str(tmp_path / "story.md")
+        with open(fname, "w") as f:
+            f.write("# Title\n")
+        entry = {"speaker": "Kolpo", "message": 2, "text": "hi", "image": "/output/user/pic.png", "searches": None}
+        self_chat.append_story_entry(entry, fname, {}, str(tmp_path), 1, 0)
+        content = open(fname).read()
+        assert "![Kolpo](img_r1_Kolpo_0.png)" in content
+        assert os.path.isfile(str(tmp_path / "img_r1_Kolpo_0.png"))
+
+
+class TestRunSingleConversation:
+    def _setup(self, self_chat, monkeypatch, tmp_path, script):
+        monkeypatch.setattr(self_chat, "STORY_BASE_DIR", str(tmp_path / "stories"))
+        monkeypatch.setattr(self_chat, "create_session", lambda token, name, **k: f"sid-{name}")
+        monkeypatch.setattr(self_chat, "wait_for_user_to_leave", lambda: None)
+        monkeypatch.setattr(self_chat.time, "sleep", lambda s: None)
+        monkeypatch.setattr(self_chat.random, "sample", lambda seq, k: list(seq)[:k])
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        monkeypatch.setattr(self_chat, "image_url_to_b64", lambda url: "b64data" if url else None)
+        monkeypatch.setattr(self_chat, "propose_title", lambda *a, **k: "Mocked Title")
+        monkeypatch.setattr(self_chat, "run_editor", lambda *a, **k: None)
+        moderated = []
+        monkeypatch.setattr(self_chat, "run_moderator", lambda *a, **k: moderated.append(1) or {"verdict": "GREEN"})
+
+        calls = []
+
+        def fake_llm(token, session_id, message, image_b64=None):
+            calls.append({"token": token, "session": session_id, "message": message, "image": image_b64})
+            return script[len(calls) - 1]
+
+        monkeypatch.setattr(self_chat, "call_llm", fake_llm)
+        return calls, moderated
+
+    def _run(self, self_chat, mediums=("text",), languages=("English",)):
+        return self_chat.run_single_conversation(
+            "ta", "tb", 1, "Task", list(mediums), list(languages), ["free"], "Drama", "", {}
+        )
+
+    def test_happy_path_with_image_and_searches(self, self_chat, monkeypatch, tmp_path):
+        script = [
+            {"text": "Plan set.", "image": None, "searches": None},
+            {"text": "Scene attached.",
+             "image": "/output/user/scene.png",
+             "searches": [{"query": "kitten facts", "results": [
+                 {"url": "http://k", "title": "Kitten Wiki", "snippet": "All about kittens"}]}, "garbage"]},
+            {"text": "Story complete. [END CONVERSATION]", "image": None, "searches": None},
+        ]
+        calls, moderated = self._setup(self_chat, monkeypatch, tmp_path, script)
+
+        def fake_editor(stories_dir, fname, task, genre, **k):
+            ed = fname.replace(".md", ".edited.md")
+            with open(fname, encoding="utf-8") as f:
+                content = f.read()
+            with open(ed, "w", encoding="utf-8") as f:
+                f.write(content + "\n\nMinor polish.\n")
+            return ed
+
+        monkeypatch.setattr(self_chat, "run_editor", fake_editor)
+        transcript, sa, sb, fname = self._run(self_chat)
+        assert len(transcript) == 3
+        assert moderated == [1]
+        assert calls[2]["image"] == "b64data"
+        assert "WEB SEARCH REPORTS SHARED" in calls[2]["message"]
+        assert "Kitten Wiki" in calls[2]["message"]
+        assert os.path.isfile(fname)
+
+    def test_red_auto_verdict(self, self_chat, monkeypatch, tmp_path):
+        script = [{"text": "Done. [END CONVERSATION]", "image": None, "searches": None}]
+        calls, moderated = self._setup(self_chat, monkeypatch, tmp_path, script)
+        transcript, *_ = self._run(self_chat, mediums=("audio", "text"))
+        assert moderated == []
+        verdicts = []
+        for root, _dirs, files in os.walk(tmp_path / "stories"):
+            for fn in files:
+                if fn.endswith(".moderation.json"):
+                    verdicts.append(os.path.join(root, fn))
+        assert verdicts
+        with open(verdicts[0]) as f:
+            assert json.load(f)["verdict"] == "RED"
+
+    def test_empty_reply_retry_succeeds(self, self_chat, monkeypatch, tmp_path):
+        script = [
+            {"text": "", "image": None, "searches": None},
+            {"text": "Retry content", "image": None, "searches": None},
+            {"text": "B final. [END CONVERSATION]", "image": None, "searches": None},
+        ]
+        calls, _ = self._setup(self_chat, monkeypatch, tmp_path, script)
+        transcript, *_ = self._run(self_chat)
+        assert len(transcript) == 2
+        assert "SYSTEM ERROR: Your previous output was empty" in calls[1]["message"]
+
+    def test_double_empty_aborts(self, self_chat, monkeypatch, tmp_path):
+        script = [
+            {"text": "", "image": None, "searches": None},
+            {"text": "", "image": None, "searches": None},
+        ]
+        calls, _ = self._setup(self_chat, monkeypatch, tmp_path, script)
+        transcript, *_ = self._run(self_chat)
+        assert transcript == []
+
+    def test_duplicate_retry_and_message_cap(self, self_chat, monkeypatch, tmp_path):
+        replies = ["One", "Two", "Two", "Two revised", "Three", "Four", "Five",
+                   "Six", "Seven", "Eight", "Nine", "Ten"]
+        script = [{"text": r, "image": None, "searches": None} for r in replies]
+        calls, _ = self._setup(self_chat, monkeypatch, tmp_path, script)
+        transcript, *_ = self._run(self_chat)
+        assert len(transcript) == 11
+        assert "identical to your partner" in calls[3]["message"]
+
+
+class TestRunEditor:
+    def _stubs(self, self_chat, monkeypatch, tmp_path):
+        monkeypatch.setattr(self_chat, "login", lambda u, p: "tok")
+        monkeypatch.setattr(self_chat, "register_agent_tokens", lambda *a, **k: None)
+        monkeypatch.setattr(self_chat, "delete_session", lambda *a, **k: True)
+        prompt = tmp_path / "editor_prompt.txt"
+        prompt.write_text("Edit: %genre% %mediums% %language% %details% %checklist%")
+        monkeypatch.setattr(self_chat, "EDITOR_PROMPT_FILE", str(prompt))
+        monkeypatch.setattr(self_chat, "create_session", lambda *a, **k: "sid")
+
+    def _story(self, tmp_path, with_image=False):
+        fname = tmp_path / "story_r1_20260811_123456.md"
+        content = "# Story\n\n**Task prompt:** t\n"
+        if with_image:
+            (tmp_path / "img.png").write_bytes(b"IMG")
+            content += "\n![scene](img.png)\n"
+        fname.write_text(content)
+        return fname
+
+    def test_success_with_image(self, self_chat, monkeypatch, tmp_path):
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        fname = self._story(tmp_path, with_image=True)
+        results = iter([
+            {"text": "seen it"},
+            {"text": "```markdown\nRevised story\n```"},
+        ])
+        monkeypatch.setattr(self_chat, "call_llm", lambda *a, **k: next(results))
+        out = self_chat.run_editor(str(tmp_path), str(fname), "t", "Drama", mediums=["text"],
+                                   language="English", details="d", checklist={"editor": ["C"]})
+        assert out == str(fname).replace(".md", ".edited.md")
+        assert os.path.isfile(out)
+        assert "Revised story" in open(out).read()
+
+    def test_login_failure(self, self_chat, monkeypatch, tmp_path):
+        def boom(u, p):
+            raise RuntimeError("auth")
+        monkeypatch.setattr(self_chat, "login", boom)
+        out = self_chat.run_editor(str(tmp_path), "x.md", "t", "Drama")
+        assert out is None
+
+    def test_prompt_read_error(self, self_chat, monkeypatch, tmp_path):
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        monkeypatch.setattr(self_chat, "EDITOR_PROMPT_FILE", str(tmp_path / "missing.txt"))
+        assert self_chat.run_editor(str(tmp_path), "x.md", "t", "Drama") is None
+
+    def test_empty_revision(self, self_chat, monkeypatch, tmp_path):
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        fname = self._story(tmp_path)
+        monkeypatch.setattr(self_chat, "call_llm", lambda *a, **k: {"text": "```markdown\n\n```"})
+        assert self_chat.run_editor(str(tmp_path), str(fname), "t", "Drama") is None
+
+    def test_phase_exception(self, self_chat, monkeypatch, tmp_path):
+        deleted = []
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        monkeypatch.setattr(self_chat, "delete_session", lambda *a, **k: deleted.append(a) or True)
+        fname = self._story(tmp_path)
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(self_chat, "call_llm", boom)
+        assert self_chat.run_editor(str(tmp_path), str(fname), "t", "Drama") is None
+        assert deleted == [("tok", "sid")]
+
+
+class TestRunModerator:
+    def _stubs(self, self_chat, monkeypatch, tmp_path):
+        monkeypatch.setattr(self_chat, "login", lambda u, p: "tok")
+        monkeypatch.setattr(self_chat, "register_agent_tokens", lambda *a, **k: None)
+        monkeypatch.setattr(self_chat, "delete_session", lambda *a, **k: True)
+        prompt = tmp_path / "moderator_prompt.txt"
+        prompt.write_text("Moderate: %genre% %checklist%")
+        monkeypatch.setattr(self_chat, "MODERATOR_PROMPT_FILE", str(prompt))
+        monkeypatch.setattr(self_chat, "create_session", lambda *a, **k: "sid")
+
+    def _story(self, tmp_path, with_image=False):
+        fname = tmp_path / "story_r2_20260811_123456.md"
+        content = "# Story\n\n**Task prompt:** t\n"
+        if with_image:
+            (tmp_path / "img.png").write_bytes(b"IMG")
+            content += "\n![scene](img.png)\n"
+        fname.write_text(content)
+        return fname
+
+    def test_green_with_image(self, self_chat, monkeypatch, tmp_path):
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        fname = self._story(tmp_path, with_image=True)
+        results = iter([
+            {"text": "seen it"},
+            {"text": "VERDICT: GREEN\nREASONS: all good"},
+        ])
+        monkeypatch.setattr(self_chat, "call_llm", lambda *a, **k: next(results))
+        data = self_chat.run_moderator(str(tmp_path), str(fname), "t", "Drama")
+        assert data["verdict"] == "GREEN"
+        verdict_path = str(fname).replace(".md", ".moderation.json")
+        assert os.path.isfile(verdict_path)
+        with open(verdict_path) as f:
+            assert json.load(f)["verdict"] == "GREEN"
+
+    def test_red_bare(self, self_chat, monkeypatch, tmp_path):
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        fname = self._story(tmp_path)
+        monkeypatch.setattr(self_chat, "call_llm", lambda *a, **k: {"text": "This is RED overall"})
+        data = self_chat.run_moderator(str(tmp_path), str(fname), "t", "Drama")
+        assert data["verdict"] == "RED"
+
+    def test_green_bare(self, self_chat, monkeypatch, tmp_path):
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        fname = self._story(tmp_path)
+        monkeypatch.setattr(self_chat, "call_llm", lambda *a, **k: {"text": "Overall this is GREEN"})
+        data = self_chat.run_moderator(str(tmp_path), str(fname), "t", "Drama")
+        assert data["verdict"] == "GREEN"
+
+    def test_unknown(self, self_chat, monkeypatch, tmp_path):
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        fname = self._story(tmp_path)
+        monkeypatch.setattr(self_chat, "call_llm", lambda *a, **k: {"text": "maybe fine"})
+        data = self_chat.run_moderator(str(tmp_path), str(fname), "t", "Drama")
+        assert data["verdict"] == "UNKNOWN"
+
+    def test_login_failure(self, self_chat, monkeypatch, tmp_path):
+        def boom(u, p):
+            raise RuntimeError("auth")
+        monkeypatch.setattr(self_chat, "login", boom)
+        assert self_chat.run_moderator(str(tmp_path), "x.md", "t", "Drama") is None
+
+    def test_prompt_read_error(self, self_chat, monkeypatch, tmp_path):
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        monkeypatch.setattr(self_chat, "MODERATOR_PROMPT_FILE", str(tmp_path / "missing.txt"))
+        assert self_chat.run_moderator(str(tmp_path), "x.md", "t", "Drama") is None
+
+    def test_phase_exception(self, self_chat, monkeypatch, tmp_path):
+        deleted = []
+        self._stubs(self_chat, monkeypatch, tmp_path)
+        monkeypatch.setattr(self_chat, "delete_session", lambda *a, **k: deleted.append(a) or True)
+        fname = self._story(tmp_path)
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(self_chat, "call_llm", boom)
+        assert self_chat.run_moderator(str(tmp_path), str(fname), "t", "Drama") is None
+        assert deleted == [("tok", "sid")]
+
+
+class TestRunForever:
+    def test_audio_guard_and_rounds(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "TASKS", [
+            {"task": "Audio task", "mediums": ["audio"], "languages": ["English"]},
+            {"task": "Normal task", "mediums": ["text"], "languages": ["English"],
+             "roles": ["free"], "genre": "Drama"},
+        ])
+        monkeypatch.setattr(self_chat, "login", lambda u, p: f"tok-{u}")
+        monkeypatch.setattr(self_chat, "register_agent_tokens", lambda *a, **k: None)
+        rounds = []
+        monkeypatch.setattr(self_chat, "run_single_conversation",
+                            lambda *a, **k: rounds.append(a) or ([{"speaker": "A"}], "sa", "sb", "/x/story.md"))
+        deleted = []
+        monkeypatch.setattr(self_chat, "delete_session", lambda *a, **k: deleted.append(a) or True)
+
+        def fake_sleep(s):
+            fake_sleep.calls += 1
+            if fake_sleep.calls >= 2:
+                raise KeyboardInterrupt
+        fake_sleep.calls = 0
+        monkeypatch.setattr(self_chat.time, "sleep", fake_sleep)
+        self_chat.run_forever()
+        assert len(rounds) == 2
+        assert rounds[0][3] == "Normal task"
+        assert len(deleted) == 4
+
+
+class TestModuleScopes:
+    def _reload(self, pre):
+        name = "self_chat_reload"
+        sys.modules.pop(name, None)
+        spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, "self-chat.py"))
+        mod = importlib.util.module_from_spec(spec)
+        pre()
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_no_tasks_exits(self, tmp_path, monkeypatch):
+        tasks = tmp_path / "tasks.json"
+        tasks.write_text(json.dumps([]))
+
+        def pre():
+            os.environ["SELF_CHAT_PASSWORD"] = "test-pass"
+            monkeypatch.setattr(sys, "argv", ["self-chat.py", "--config", str(tasks)])
+            monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+        with pytest.raises(SystemExit) as ei:
+            self._reload(pre)
+        assert ei.value.code == 1
+
+    def test_dry_run_exits(self, tmp_path, monkeypatch):
+        tasks = tmp_path / "tasks.json"
+        tasks.write_text(json.dumps([{"task": "One", "languages": ["English"], "mediums": ["text"]}]))
+
+        def pre():
+            os.environ["SELF_CHAT_PASSWORD"] = "test-pass"
+            monkeypatch.setattr(sys, "argv", ["self-chat.py", "--config", str(tasks), "--dry-run"])
+            monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+        with pytest.raises(SystemExit) as ei:
+            self._reload(pre)
+        assert ei.value.code == 0

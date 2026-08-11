@@ -2183,7 +2183,7 @@ class TestStartLLMRound:
             def submit(self, fn, *a, **k):
                 submitted.append((fn, a, k))
 
-        monkeypatch.setattr(chat_webui, "_llm_pool", FakePool())
+        monkeypatch.setattr(chat_webui, "_llm_pools", {"gpu": FakePool(), "cpu": FakePool()})
         monkeypatch.setattr(chat_webui, "ensure_llama_server", lambda mode="gpu": None)
         chat_webui.model_status = "chat_loaded"
         chat_webui._start_llm_round("t1", "s1", 0)
@@ -2203,7 +2203,7 @@ class TestStartLLMRound:
             def submit(self, fn, *a, **k):
                 pass
 
-        monkeypatch.setattr(chat_webui, "_llm_pool", FakePool())
+        monkeypatch.setattr(chat_webui, "_llm_pools", {"gpu": FakePool(), "cpu": FakePool()})
         chat_webui._start_llm_round("t1", "s1", 1)
         assert load_calls
 
@@ -2213,7 +2213,7 @@ class TestStartLLMRound:
             def submit(self, fn, *a, **k):
                 raise AssertionError("should not submit")
 
-        monkeypatch.setattr(chat_webui, "_llm_pool", FakePool())
+        monkeypatch.setattr(chat_webui, "_llm_pools", {"gpu": FakePool(), "cpu": FakePool()})
         monkeypatch.setattr(chat_webui, "ensure_llama_server", lambda mode="gpu": None)
         monkeypatch.setattr(chat_webui, "load_llama_model", lambda mode="gpu": False)
         chat_webui._start_llm_round("ghost", "s1", 0)
@@ -2417,8 +2417,8 @@ class TestEventLoop:
             def submit(self, fn, *a, **k):
                 pass
 
-        monkeypatch.setattr(chat_webui, "_llm_pool", FakePool())
-        monkeypatch.setattr(chat_webui, "_tool_pool", FakePool())
+        monkeypatch.setattr(chat_webui, "_llm_pools", {"gpu": FakePool(), "cpu": FakePool()})
+        monkeypatch.setattr(chat_webui, "_tool_pools", {"gpu": FakePool(), "cpu": FakePool()})
 
         def _target():
             try:
@@ -2560,10 +2560,10 @@ class TestQueueWorker:
     def test_normal_flow(self, chat_webui, temp_paths, monkeypatch):
         posted = []
         monkeypatch.setattr(chat_webui, "_event_post", lambda *a, **k: posted.append((a, k)))
-        chat_webui._task_queue[:] = []
+        chat_webui._task_queues["gpu"][:] = []
         chat_webui.tasks["t1"] = {"status": "working", "session_id": "s1", "_original_message": "hi"}
-        chat_webui._task_queue.append({"task_id": "t1", "session_id": "s1", "message": "hi", "user": "alice"})
-        monkeypatch.setattr(chat_webui, "_queue_cond", self._fake_cond(chat_webui))
+        chat_webui._task_queues["gpu"].append({"task_id": "t1", "session_id": "s1", "message": "hi", "user": "alice"})
+        monkeypatch.setitem(chat_webui._queue_conds, "gpu", self._fake_cond(chat_webui))
 
         def fake_sleep(secs):
             with chat_webui._data_lock:
@@ -2571,20 +2571,20 @@ class TestQueueWorker:
 
         monkeypatch.setattr(chat_webui.time, "sleep", fake_sleep)
         with pytest.raises(StopIteration):
-            chat_webui._queue_worker()
+            chat_webui._queue_worker("gpu")
         assert posted and posted[0][0][0] == "start"
         assert posted[0][1]["user"] == "alice"
 
     def test_overheated_waiting(self, chat_webui, temp_paths, monkeypatch):
         posted = []
         monkeypatch.setattr(chat_webui, "_event_post", lambda *a, **k: posted.append((a, k)))
-        chat_webui._task_queue[:] = []
+        chat_webui._task_queues["gpu"][:] = []
         chat_webui._overheated = True
         chat_webui.tasks["t1"] = {"status": "queued", "session_id": "s1"}
         chat_webui.tasks["t2"] = {"status": "queued", "session_id": "s2"}
-        chat_webui._task_queue.append({"task_id": "t1", "session_id": "s1", "message": "a", "user": "u"})
-        chat_webui._task_queue.append({"task_id": "t2", "session_id": "s2", "message": "b", "user": "u"})
-        monkeypatch.setattr(chat_webui, "_queue_cond", self._fake_cond(chat_webui))
+        chat_webui._task_queues["gpu"].append({"task_id": "t1", "session_id": "s1", "message": "a", "user": "u"})
+        chat_webui._task_queues["gpu"].append({"task_id": "t2", "session_id": "s2", "message": "b", "user": "u"})
+        monkeypatch.setitem(chat_webui._queue_conds, "gpu", self._fake_cond(chat_webui))
 
         def fake_sleep(secs):
             with chat_webui._data_lock:
@@ -2593,18 +2593,18 @@ class TestQueueWorker:
 
         monkeypatch.setattr(chat_webui.time, "sleep", fake_sleep)
         with pytest.raises(StopIteration):
-            chat_webui._queue_worker()
+            chat_webui._queue_worker("gpu")
         assert len(posted) == 2
         assert chat_webui.tasks["t1"]["status"] == "done"
 
     def test_ram_evacuating_waiting(self, chat_webui, temp_paths, monkeypatch):
         posted = []
         monkeypatch.setattr(chat_webui, "_event_post", lambda *a, **k: posted.append((a, k)))
-        chat_webui._task_queue[:] = []
+        chat_webui._task_queues["gpu"][:] = []
         chat_webui._ram_evacuating = True
         chat_webui.tasks["t1"] = {"status": "queued", "session_id": "s1"}
-        chat_webui._task_queue.append({"task_id": "t1", "session_id": "s1", "message": "a", "user": "u"})
-        monkeypatch.setattr(chat_webui, "_queue_cond", self._fake_cond(chat_webui))
+        chat_webui._task_queues["gpu"].append({"task_id": "t1", "session_id": "s1", "message": "a", "user": "u"})
+        monkeypatch.setitem(chat_webui._queue_conds, "gpu", self._fake_cond(chat_webui))
 
         def fake_sleep(secs):
             with chat_webui._data_lock:
@@ -2612,8 +2612,126 @@ class TestQueueWorker:
 
         monkeypatch.setattr(chat_webui.time, "sleep", fake_sleep)
         with pytest.raises(StopIteration):
-            chat_webui._queue_worker()
+            chat_webui._queue_worker("gpu")
         assert len(posted) == 1
+
+    def test_cpu_lane_normal_flow(self, chat_webui, temp_paths, monkeypatch):
+        from server.features import orchestration as orch
+
+        posted = []
+        monkeypatch.setattr(chat_webui, "_event_post", lambda *a, **k: posted.append((a, k)))
+        chat_webui._task_queues["cpu"][:] = []
+        chat_webui.tasks["t1"] = {"status": "working", "session_id": "s1", "_original_message": "hi"}
+        chat_webui._task_queues["cpu"].append({"task_id": "t1", "session_id": "s1", "message": "hi", "user": "alice"})
+        monkeypatch.setitem(chat_webui._queue_conds, "cpu", self._fake_cond(chat_webui))
+        monkeypatch.setattr(orch, "_human_priority_active", lambda: False)
+        monkeypatch.setattr(chat_webui, "_human_priority_active", lambda: False)
+
+        def fake_sleep(secs):
+            with chat_webui._data_lock:
+                chat_webui.tasks["t1"]["status"] = "done"
+
+        monkeypatch.setattr(chat_webui.time, "sleep", fake_sleep)
+        with pytest.raises(StopIteration):
+            chat_webui._queue_worker("cpu")
+        assert posted and posted[0][0][0] == "start"
+        assert posted[0][1]["user"] == "alice"
+
+    def test_cpu_lane_holds_off_while_human_active(self, chat_webui, temp_paths, monkeypatch):
+        from server.features import orchestration as orch
+
+        posted = []
+        monkeypatch.setattr(chat_webui, "_event_post", lambda *a, **k: posted.append((a, k)))
+        chat_webui._task_queues["cpu"][:] = []
+        chat_webui.tasks["t1"] = {"status": "queued", "session_id": "s1"}
+        chat_webui._task_queues["cpu"].append({"task_id": "t1", "session_id": "s1", "message": "hi", "user": "u"})
+        monkeypatch.setitem(chat_webui._queue_conds, "cpu", self._fake_cond(chat_webui))
+
+        holds = {"n": 0}
+        sleeps = []
+
+        def priority():
+            holds["n"] += 1
+            return holds["n"] == 1
+
+        monkeypatch.setattr(orch, "_human_priority_active", priority)
+        monkeypatch.setattr(chat_webui, "_human_priority_active", lambda: False)
+
+        def fake_sleep(secs):
+            sleeps.append(secs)
+            with chat_webui._data_lock:
+                chat_webui.tasks["t1"]["status"] = "done"
+
+        monkeypatch.setattr(chat_webui.time, "sleep", fake_sleep)
+        with pytest.raises(StopIteration):
+            chat_webui._queue_worker("cpu")
+        assert 1.0 in sleeps
+        assert len(posted) == 1
+
+    def test_cpu_lane_yields_to_active_user(self, chat_webui, temp_paths, monkeypatch):
+        from server.features import orchestration as orch
+
+        posted = []
+        monkeypatch.setattr(chat_webui, "_event_post", lambda *a, **k: posted.append((a, k)))
+        chat_webui._task_queues["cpu"][:] = []
+        chat_webui.tasks["t1"] = {"status": "queued", "session_id": "s1"}
+        chat_webui._task_queues["cpu"].append({"task_id": "t1", "session_id": "s1", "message": "hi", "user": "u"})
+        monkeypatch.setitem(chat_webui._queue_conds, "cpu", self._fake_cond(chat_webui))
+        monkeypatch.setattr(orch, "_human_priority_active", lambda: False)
+
+        calls = {"n": 0}
+        statuses_seen = []
+
+        def priority():
+            calls["n"] += 1
+            return calls["n"] == 1
+
+        monkeypatch.setattr(chat_webui, "_human_priority_active", priority)
+
+        def fake_sleep(secs):
+            with chat_webui._data_lock:
+                statuses_seen.append(chat_webui.tasks["t1"].get("status"))
+                chat_webui.tasks["t1"]["status"] = "done"
+
+        monkeypatch.setattr(chat_webui.time, "sleep", fake_sleep)
+        with pytest.raises(StopIteration):
+            chat_webui._queue_worker("cpu")
+        assert len(posted) == 1
+        assert "waiting" in statuses_seen
+        assert chat_webui.tasks["t1"]["status"] == "done"
+
+
+class TestHumanPriorityActive:
+    def test_true_when_gpu_queue_active(self, chat_webui):
+        chat_webui._current_task_ids["gpu"] = None
+        chat_webui._task_queues["gpu"][:] = []
+        chat_webui._task_queues["gpu"].append({"task_id": "x"})
+        assert chat_webui._human_priority_active() is True
+
+    def test_true_when_gpu_task_running(self, chat_webui):
+        chat_webui._current_task_ids["gpu"] = "t1"
+        chat_webui._task_queues["gpu"][:] = []
+        assert chat_webui._human_priority_active() is True
+
+    def test_true_when_human_token_recent(self, chat_webui):
+        chat_webui._current_task_ids["gpu"] = None
+        chat_webui._task_queues["gpu"][:] = []
+        chat_webui._agent_tokens = {"ag-tok"}
+        chat_webui._agent_users = {"kolpo"}
+        chat_webui._active_tokens = {
+            "human-tok": {"user": "alice", "last_seen": time.time()},
+            "ag-tok": {"user": "kolpo", "last_seen": time.time()},
+            "stale-tok": {"user": "bob", "last_seen": 0},
+        }
+        assert chat_webui._human_priority_active() is True
+
+    def test_false_when_no_human_activity(self, chat_webui):
+        chat_webui._current_task_ids["gpu"] = None
+        chat_webui._task_queues["gpu"][:] = []
+        chat_webui._agent_tokens = set()
+        chat_webui._agent_users = set()
+        chat_webui._active_tokens = {"stale-tok": {"user": "bob", "last_seen": 0}}
+        assert chat_webui._human_priority_active() is False
 
 
 # ---------------------------------------------------------------------------
@@ -2636,8 +2754,10 @@ class TestIdleUnloadLoop:
         chat_webui.model_status = "chat_loaded"
         old_llm_use = chat_webui._last_llm_use
         chat_webui._last_llm_use = 0
-        chat_webui._task_queue[:] = []
-        chat_webui._current_task_id = None
+        chat_webui._task_queues["gpu"][:] = []
+        chat_webui._task_queues["cpu"][:] = []
+        chat_webui._current_task_ids["gpu"] = None
+        chat_webui._current_task_ids["cpu"] = None
         try:
             with pytest.raises(StopIteration):
                 chat_webui._idle_unload_loop()
@@ -2659,8 +2779,10 @@ class TestIdleUnloadLoop:
         chat_webui.model_status = "unloaded"
         old_llm_use = chat_webui._last_llm_use
         chat_webui._last_llm_use = 0
-        chat_webui._task_queue[:] = []
-        chat_webui._current_task_id = None
+        chat_webui._task_queues["gpu"][:] = []
+        chat_webui._task_queues["cpu"][:] = []
+        chat_webui._current_task_ids["gpu"] = None
+        chat_webui._current_task_ids["cpu"] = None
         try:
             with pytest.raises(StopIteration):
                 chat_webui._idle_unload_loop()
@@ -2682,8 +2804,10 @@ class TestIdleUnloadLoop:
         chat_webui.model_status = "chat_loaded"
         old_llm_use = chat_webui._last_llm_use
         chat_webui._last_llm_use = 0
-        chat_webui._task_queue[:] = []
-        chat_webui._current_task_id = "t1"
+        chat_webui._task_queues["gpu"][:] = []
+        chat_webui._task_queues["cpu"][:] = []
+        chat_webui._current_task_ids["gpu"] = "t1"
+        chat_webui._current_task_ids["cpu"] = None
         try:
             with pytest.raises(StopIteration):
                 chat_webui._idle_unload_loop()
@@ -2735,24 +2859,26 @@ class TestEvacuateRam:
 
     def test_requeues_current_task(self, chat_webui, monkeypatch):
         killed, restarted = self._stubs(chat_webui, monkeypatch, ram_values=[40])
-        chat_webui._current_task_id = "t1"
+        chat_webui._current_task_ids["gpu"] = "t1"
+        chat_webui._current_task_ids["cpu"] = None
         chat_webui.tasks["t1"] = {"session_id": "s1", "status": "working", "_original_message": "hi", "_original_image": None}
-        chat_webui._task_queue[:] = []
+        chat_webui._task_queues["gpu"][:] = []
         old_flag = chat_webui._ram_evacuating
         try:
             chat_webui._evacuate_ram()
         finally:
             chat_webui._ram_evacuating = old_flag
         assert chat_webui.tasks["t1"]["status"] == "error"
-        assert len(chat_webui._task_queue) == 1
-        assert chat_webui._task_queue[0]["task_id"] == "t1"
+        assert len(chat_webui._task_queues["gpu"]) == 1
+        assert chat_webui._task_queues["gpu"][0]["task_id"] == "t1"
         assert killed == ["llama", "comfy"]
         assert restarted == [1]
         assert chat_webui._ram_evacuating is False
 
     def test_no_current_task(self, chat_webui, monkeypatch):
         killed, restarted = self._stubs(chat_webui, monkeypatch, ram_values=[40])
-        chat_webui._current_task_id = None
+        chat_webui._current_task_ids["gpu"] = None
+        chat_webui._current_task_ids["cpu"] = None
         old_flag = chat_webui._ram_evacuating
         try:
             chat_webui._evacuate_ram()
@@ -2763,15 +2889,16 @@ class TestEvacuateRam:
 
     def test_done_task_not_requeued(self, chat_webui, monkeypatch):
         killed, restarted = self._stubs(chat_webui, monkeypatch, ram_values=[40])
-        chat_webui._current_task_id = "t1"
+        chat_webui._current_task_ids["gpu"] = "t1"
+        chat_webui._current_task_ids["cpu"] = None
         chat_webui.tasks["t1"] = {"session_id": "s1", "status": "done", "_original_message": "hi"}
-        chat_webui._task_queue[:] = []
+        chat_webui._task_queues["gpu"][:] = []
         old_flag = chat_webui._ram_evacuating
         try:
             chat_webui._evacuate_ram()
         finally:
             chat_webui._ram_evacuating = old_flag
-        assert chat_webui._task_queue == []
+        assert chat_webui._task_queues["gpu"] == []
 
     def test_ram_wait_none(self, chat_webui, monkeypatch):
         killed, restarted = self._stubs(chat_webui, monkeypatch, ram_values=[None, 40])
@@ -2818,7 +2945,8 @@ class TestThermalMonitor:
         monkeypatch.setattr(chat_webui.time, "sleep", fake_sleep)
         chat_webui._overheated = False
         chat_webui.model_status = "chat_loaded"
-        chat_webui._current_task_id = None
+        chat_webui._current_task_ids["gpu"] = None
+        chat_webui._current_task_ids["cpu"] = None
         chat_webui._ram_evacuating = False
         try:
             with pytest.raises(StopIteration):
@@ -2838,7 +2966,8 @@ class TestThermalMonitor:
         monkeypatch.setattr(chat_webui.time, "sleep", self._stop_after(2))
         chat_webui._overheated = True
         chat_webui.model_status = "image_active"
-        chat_webui._current_task_id = None
+        chat_webui._current_task_ids["gpu"] = None
+        chat_webui._current_task_ids["cpu"] = None
         chat_webui._ram_evacuating = False
         try:
             with pytest.raises(StopIteration):
@@ -2859,7 +2988,8 @@ class TestThermalMonitor:
         monkeypatch.setattr(chat_webui.time, "sleep", self._stop_after(2))
         chat_webui._overheated = True
         chat_webui.model_status = "chat_loaded"
-        chat_webui._current_task_id = "t1"
+        chat_webui._current_task_ids["gpu"] = "t1"
+        chat_webui._current_task_ids["cpu"] = None
         chat_webui._ram_evacuating = False
         try:
             with pytest.raises(StopIteration):

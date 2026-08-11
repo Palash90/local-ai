@@ -113,7 +113,6 @@ LLAMA_SERVER_ARGS_CPU = [
     "-fa", "off",
     "--ctx-size", "131072",
     "-ctk", "q8_0",            # Quantized KV cache keeps RAM usage low
-    "-ctv", "q8_0",
     "-nkvo",
     # Keep the multimodal projector (mmproj) in RAM too. llama-server
     # offloads the mmproj to the GPU by DEFAULT even with --n-gpu-layers 0,
@@ -124,7 +123,6 @@ LLAMA_SERVER_ARGS_CPU = [
     "--reasoning-budget", str(REASONING_BUDGET),
     "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
 
-    # Gemma 4 Sampling Preset
     "--temp", "1.0",
     "--top-p", "0.95",
     "--top-k", "64",

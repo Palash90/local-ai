@@ -306,7 +306,7 @@ class TestChat:
         assert r.status == 200
         task_id = r.json["task_id"]
         assert task_id
-        assert any(t["task_id"] == task_id for t in env["chat"]._task_queue)
+        assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
         st = env["handler"]("/api/status/%s" % task_id)
         assert st.json["status"] == "queued"
 
@@ -314,7 +314,7 @@ class TestChat:
         env = api_env
         sid = _create_session(env, env["auth_a"])
         for _ in range(env["chat"].MAX_QUEUE_SIZE):
-            env["chat"]._task_queue.append({"task_id": "filler-%d" % _, "session_id": sid})
+            env["chat"]._task_queues["gpu"].append({"task_id": "filler-%d" % _, "session_id": sid})
         r = env["handler"]("/api/chat", method="POST",
                            data={"message": "hello", "session_id": sid},
                            headers=env["auth_a"])

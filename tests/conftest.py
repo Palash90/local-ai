@@ -40,9 +40,26 @@ _CHAT_STATE = [
     "sessions", "sessions_meta", "tasks", "_active_tokens", "_agent_tokens",
     "_agent_users", "_effective_contexts", "_client_location",
     "_users_cache", "_users_cache_time", "model_status", "_cpu_model_status",
-    "_last_tps", "_current_task_id", "_overheated", "_gpu_temp",
-    "_event_post",
+    "_last_tps", "_current_task_ids", "_overheated", "_gpu_temp",
+    "_event_post", "_ram_evacuating",
 ]
+
+
+def _drain_image_queue(q):
+    while True:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            return
+
+
+def _clear_task_queues(chat_webui):
+    queues = getattr(chat_webui, "_task_queues", None)
+    if isinstance(queues, dict):
+        for lane in queues.values():
+            lane[:] = []
+    elif queues is not None:
+        queues[:] = []
 
 
 @pytest.fixture(autouse=True)
@@ -52,14 +69,14 @@ def _reset_chat_state(chat_webui):
         if hasattr(chat_webui, name):
             snapshots[name] = getattr(chat_webui, name)
     try:
-        chat_webui._task_queue[:] = []
-        chat_webui._image_queue = queue.Queue()
+        _clear_task_queues(chat_webui)
+        _drain_image_queue(chat_webui._image_queue)
         yield
     finally:
         for name, value in snapshots.items():
             setattr(chat_webui, name, value)
-        chat_webui._task_queue[:] = []
-        chat_webui._image_queue = queue.Queue()
+        _clear_task_queues(chat_webui)
+        _drain_image_queue(chat_webui._image_queue)
 
 
 @pytest.fixture

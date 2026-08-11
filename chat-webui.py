@@ -212,6 +212,7 @@ from server.features.orchestration import (  # noqa: E402
     _event_loop,
     _event_post,
     _finalize_task,
+    _human_priority_active,
     _queue_worker,
     _set_task_error,
     _task_user,
