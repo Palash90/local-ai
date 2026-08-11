@@ -281,16 +281,10 @@ def _event_loop():
 
 
 def _human_priority_active():
-    """True while a human UI user is likely to want the GPU soon.
-
-    Self-chat agents (CPU lane) defer to this: they have all day, a human's
-    session is short, so agents should not start new work while a human is
-    around, even if the GPU lane happens to be momentarily idle between
-    messages. "Around" is: the GPU lane currently has work queued/running, or
-    a non-agent auth token has been seen within ACTIVE_WINDOW_SECONDS (the
-    browser's periodic /api/model-status poll acts as a heartbeat while a
-    tab is open).
-    """
+    '''
+    # Removed the following check as self-agent bots will continue on CPU
+    # Not needed anymore
+    
     with M._queue_locks["gpu"]:
         if M._current_task_ids["gpu"] is not None or M._task_queues["gpu"]:
             return True
@@ -301,6 +295,7 @@ def _human_priority_active():
                 continue
             if now - entry.get("last_seen", 0) <= M.ACTIVE_WINDOW_SECONDS:
                 return True
+    '''
     return False
 
 

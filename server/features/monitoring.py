@@ -84,7 +84,7 @@ def _start_llama_process(args, mode="gpu"):
     """Launch a llama-server with the given argument list and wait for health."""
     base = M.LLAMA_BASE_CPU if mode == "cpu" else M.LLAMA_BASE
     log_dir = os.path.expanduser("~/local-ai-files")
-    llm_log = open(os.path.join(log_dir, "llama-server.log"), "a")
+    llm_log = open(os.path.join(log_dir, f"{mode}-llama-server.log"), "a")
     subprocess.Popen(
         [M.LLAMA_SERVER_PATH] + args,
         stdout=llm_log,
