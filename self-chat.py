@@ -42,9 +42,9 @@ USERNAME_B = "kaya"
 PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
-POLL_INTERVAL_SECONDS = 10.0
-SLEEP_BETWEEN_TURNS = 2.0
-MAX_MESSAGES_PER_AGENT = 6
+POLL_INTERVAL_SECONDS = 1.0
+SLEEP_BETWEEN_TURNS = 1.0
+MAX_MESSAGES_PER_AGENT = 3
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
 STARTING_CONVERSATION = open(SELF_CHAT_PROMPT_FILE).read()
@@ -95,6 +95,7 @@ def _parse_tasks(items):
         details = (item.get("details") or "").strip()
         checklist = item.get("checklist") or {}
         path = (item.get("path") or "").strip() or None
+        inactive = item.get("inactive") or False
         tasks.append(
             {
                 "task": task,
@@ -105,6 +106,7 @@ def _parse_tasks(items):
                 "details": details,
                 "checklist": checklist,
                 "path": path,
+                "inactive": inactive
             }
         )
     return tasks
@@ -208,10 +210,12 @@ def run_dry_run():
         details = spec.get("details") or ""
         checklist = spec.get("checklist") or {}
         source = "task" if checklist else "genre/default"
+        inactive = spec.get('inactive') or False
 
         print(f"=== Task {idx}: {task}")
         print(f"  genre:       {genre}   (checklist source: {source})")
         print(f"  path:        {spec.get('path') or STORY_BASE_DIR}")
+        print(f"  inactive:        {inactive}")
         print(f"  languages:   {', '.join(languages)}")
         for lang in languages:
             if (lang or "").strip().lower() in _SCRIPT_RANGES:
@@ -613,7 +617,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
         print(f"[verify] {len(problems)} problem(s) found — auto-RED, skipping moderator LLM call:")
         for p in problems:
             print(f"[verify]   - {p}")
-        verdict_path = fname.replace(".md", ".moderation.json")
+        verdict_path = (edited_path if edited_path else fname).replace(".md", ".moderation.json")
         data = {
             "verdict": "RED",
             "reasons": "Automatic RED (deterministic check, no LLM call):\n" + "\n".join(f"- {p}" for p in problems),
@@ -1095,6 +1099,12 @@ def run_forever():
             details = spec.get("details") or ""
             checklist = spec.get("checklist") or {}
             path = spec.get("path")
+            inactive = spec.get("inactive") or False
+            if inactive:
+                print(f"Task {task} is inactive, skipping the task")
+                task_index += 1
+                continue
+
             if "audio" in mediums:
                 print(
                     f"[guard] Task declares 'audio', but no audio tool exists in TOOLS — "
