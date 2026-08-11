@@ -76,6 +76,7 @@ LLAMA_SERVER_ARGS = [
     "--ctx-size", "32768",       # Overridden to 32k as requested
     "-ctk", "q8_0",
     "-ctv", "q8_0",
+    "--no-mmproj-offload",
 
     # Threads & Batching
     "-t", "8",
