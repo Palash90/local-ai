@@ -1125,7 +1125,7 @@ def run_forever():
             round_number += 1
             task_index += 1
             elapsed = time.time() - start_time
-            print(f"Total time elapsed in this round {elapsed:.2f} seconds\n")
+            print(f"Total time elapsed in round {round_number} - {elapsed:.2f} seconds\n")
             print("Autonomous organization is in vacation...")
             time.sleep(SLEEP_BETWEEN_ROUNDS)
             print("Vacation over")

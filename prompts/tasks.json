@@ -1,0 +1,129 @@
+[
+  {
+    "task": "A bedtime story for kids",
+    "details": "Perform a web search to find a recent, lighthearted, funny news event appropriate for children aged 5 to 12. Choose one real-world event as the basis for the plot, write a gentle and soothing bedtime story around it, and include exactly one warm, child-friendly embedded image illustration that matches the climax scene.",
+    "genre": "Bedtime Stories",
+    "roles": [
+      "free"
+    ],
+    "languages": [
+      "Bengali",
+      "English"
+    ],
+    "mediums": [
+      "image",
+      "text"
+    ]
+  },
+  {
+    "task": "Satire column on different office cultures",
+    "details": "Draft a witty, humorous satirical piece exploring generic corporate workplace tropes and absurd office dynamics (such as reply-all email threads, endless status meetings, and buzzword-heavy memos). Focus strictly on institutional work culture as a whole—do not name, reference, or caricature any real company, brand, or individual.",
+    "genre": "Satire",
+    "roles": [
+      "free"
+    ],
+    "languages": [
+      "English",
+      "Bangla"
+    ],
+    "mediums": [
+      "text"
+    ]
+  },
+  {
+    "task": "A science article for kids",
+    "details": "Perform a web search for fascinating, real-world science updates or curious facts. Select one compelling discovery or phenomenon and write an engaging, easy-to-understand educational summary tailored for young readers. Ensure all factual claims map directly to retrieved search sources.",
+    "genre": "News",
+    "roles": [
+      "free"
+    ],
+    "languages": [
+      "English",
+      "Bengali",
+      "Hindi"
+    ],
+    "mediums": [
+      "text"
+    ]
+  },
+  {
+    "task": "Traditional Festival Sweet Recipe & Cultural Story",
+    "details": "Draft a detailed recipe guide for a real, traditional festival sweet. The write-up must include an exact ingredient list with clear measurements, numbered step-by-step preparation instructions, and brief cultural context regarding its festive significance. Embed an image matching the finished dish.",
+    "genre": "Food & Recipes",
+    "roles": [
+      "free"
+    ],
+    "languages": [
+      "English",
+      "Bengali",
+      "Hindi"
+    ],
+    "mediums": [
+      "image",
+      "text"
+    ]
+  },
+  {
+    "task": "Futuristic Invention Pitch & Conceptual Breakdown",
+    "details": "Perform a web search on emerging technology trends. Conceptualize an innovative, futuristic product or invention addressing a real-world problem (e.g., sustainable energy, smart urban living, or productivity). Provide a detailed breakdown covering its core mechanism, real-world application, and potential impact.",
+    "genre": "News",
+    "roles": [
+      "free"
+    ],
+    "languages": [
+      "English",
+      "Bangla"
+    ],
+    "mediums": [
+      "text"
+    ]
+  },
+  {
+    "task": "Bone-Chilling Real-World Adventure",
+    "details": "Perform a web search to research a real historical survival, exploration, or wilderness incident (such as deep-sea exploration, extreme mountain survival, or cave rescues). Write a suspenseful, realistic narrative capturing the psychological dread and physical struggle. All core events must remain grounded in verified real-world facts.",
+    "genre": "Adventure & Horror",
+    "roles": [
+      "premium"
+    ],
+    "languages": [
+      "English",
+      "Bengali",
+      "Hindi"
+    ],
+    "mediums": [
+      "text"
+    ]
+  },
+  {
+    "task": "Psychological Horror Short Story",
+    "details": "Craft an atmospheric horror tale centered on psychological tension, isolation, or supernatural uncanny elements. Focus on sensory horror, pacing, and creeping dread rather than shock value. Ensure the narrative resolves with a unsettling climax.",
+    "genre": "Adventure & Horror",
+    "roles": [
+      "premium"
+    ],
+    "languages": [
+      "English",
+      "Bangla"
+    ],
+    "mediums": [
+      "image",
+      "text"
+    ]
+  },
+  {
+    "task": "Historical Mystery & Unsolved Legend",
+    "details": "Perform a web search for a famous unsolved historical mystery or local folklore. Draft an intriguing narrative exploration around the event that balances historical facts with atmospheric storytelling.",
+    "genre": "Adventure & Horror",
+    "roles": [
+      "premium"
+    ],
+    "languages": [
+      "English",
+      "Bengali",
+      "Hindi"
+    ],
+    "mediums": [
+      "text"
+    ]
+  }
+]
