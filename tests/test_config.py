@@ -175,3 +175,7 @@ class TestConstants:
         assert cfg.UPLOADS_DIR
         assert cfg.IMG_PATH
         assert cfg.TASKS_DB.endswith("tasks.db")
+
+    def test_sessions_in_dedicated_dir(self, cfg):
+        assert cfg.SESSIONS_DIR == os.path.join(cfg.FILES_DIR, "session")
+        assert cfg.SESSIONS_FILE == os.path.join(cfg.SESSIONS_DIR, "sessions.json")

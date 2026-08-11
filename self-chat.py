@@ -94,6 +94,7 @@ def _parse_tasks(items):
         genre = (item.get("genre") or "").strip() or "General"
         details = (item.get("details") or "").strip()
         checklist = item.get("checklist") or {}
+        path = (item.get("path") or "").strip() or None
         tasks.append(
             {
                 "task": task,
@@ -103,6 +104,7 @@ def _parse_tasks(items):
                 "roles": roles,
                 "details": details,
                 "checklist": checklist,
+                "path": path,
             }
         )
     return tasks
@@ -209,6 +211,7 @@ def run_dry_run():
 
         print(f"=== Task {idx}: {task}")
         print(f"  genre:       {genre}   (checklist source: {source})")
+        print(f"  path:        {spec.get('path') or STORY_BASE_DIR}")
         print(f"  languages:   {', '.join(languages)}")
         for lang in languages:
             if (lang or "").strip().lower() in _SCRIPT_RANGES:
@@ -468,7 +471,7 @@ def build_input(speaker, message_number, incoming, lang, task):
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None):
+def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None, path=None):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
@@ -498,7 +501,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     incoming = ""
     shared_image_b64 = None
 
-    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre)
+    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre, path)
     citations = {}
 
     while True:
@@ -702,8 +705,8 @@ def apply_title(title, stories_dir, fname):
     return stories_dir, fname
 
 
-def start_story(round_number, task, title, mediums, language, roles=None, genre="General"):
-    base_dir = STORY_BASE_DIR
+def start_story(round_number, task, title, mediums, language, roles=None, genre="General", path=None):
+    base_dir = path or STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
@@ -1091,6 +1094,7 @@ def run_forever():
             genre = spec.get("genre") or "General"
             details = spec.get("details") or ""
             checklist = spec.get("checklist") or {}
+            path = spec.get("path")
             if "audio" in mediums:
                 print(
                     f"[guard] Task declares 'audio', but no audio tool exists in TOOLS — "
@@ -1102,7 +1106,7 @@ def run_forever():
             print(f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n")
             start_time = time.time()
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist
+                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist, path
             )
             # save_transcript(transcript, round_number)
             if not keep_sessions:

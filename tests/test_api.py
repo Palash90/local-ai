@@ -818,6 +818,29 @@ class TestLogMessage:
         h.log_message("x")
 
 
+class TestBrokenPipe:
+    class _BrokenWFile:
+        def write(self, data):
+            raise BrokenPipeError("[Errno 32] Broken pipe")
+
+    def test_send_json_swallows_broken_pipe(self, handler, chat_webui):
+        from conftest import HandlerHarness
+
+        chat_webui.tasks["t1"] = {"status": "working"}
+        hh = HandlerHarness("/api/status/t1", method="GET")
+        hh.handler.wfile = self._BrokenWFile()
+        hh.dispatch()  # must not raise
+
+    def test_status_endpoint_survives_disconnect(self, handler, chat_webui):
+        from conftest import HandlerHarness
+
+        chat_webui.tasks["t1"] = {"status": "done", "response": "hi"}
+        hh = HandlerHarness("/api/status/t1", method="GET")
+        hh.handler.wfile = self._BrokenWFile()
+        hh.dispatch()
+        assert chat_webui.tasks["t1"]["status"] == "done"
+
+
 
 def test_debug_env(api_env):
     import os

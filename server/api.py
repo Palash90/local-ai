@@ -192,7 +192,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Type", "image/png")
                 self.end_headers()
                 with open(fpath, "rb") as f:
-                    self.wfile.write(f.read())
+                    self._safe_write(f.read())
                 return
             self.send_error(404)
         elif self.path.startswith("/uploads/"):
@@ -204,7 +204,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Disposition", "inline")
                 self.end_headers()
                 with open(fpath, "rb") as f:
-                    self.wfile.write(f.read())
+                    self._safe_write(f.read())
                 return
             self.send_error(404)
         elif self.path.startswith("/api/status/"):
@@ -263,7 +263,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            self.wfile.write(read_index_html().encode())
+            self._safe_write(read_index_html().encode())
         else:
             DIST_DIR = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dist"
@@ -276,7 +276,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Cache-Control", "public, max-age=31536000, immutable")
                 self.end_headers()
                 with open(fpath, "rb") as f:
-                    self.wfile.write(f.read())
+                    self._safe_write(f.read())
             elif self.path.startswith("/api/") or "." in os.path.basename(self.path):
                 if self.path == "/api/tasks":
                     user = get_current_user(self.headers)
@@ -292,7 +292,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
-                self.wfile.write(read_index_html().encode())
+                self._safe_write(read_index_html().encode())
 
     def do_DELETE(self):
         if self.path.startswith("/api/sessions/"):
@@ -708,12 +708,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def _safe_write(self, data):
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def send_json(self, data, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self._safe_write(json.dumps(data).encode())
 
     def log_message(self, format, *args):
         pass

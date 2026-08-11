@@ -63,6 +63,18 @@ class TestParseTasks:
         tasks = self_chat._parse_tasks([{"task": "T"}])
         assert tasks[0]["genre"] == "General"
 
+    def test_path_parsed(self, self_chat):
+        tasks = self_chat._parse_tasks([{"task": "T", "path": "/custom/dir"}])
+        assert tasks[0]["path"] == "/custom/dir"
+
+    def test_path_defaults_to_none(self, self_chat):
+        tasks = self_chat._parse_tasks([{"task": "T"}])
+        assert tasks[0]["path"] is None
+
+    def test_blank_path_defaults_to_none(self, self_chat):
+        tasks = self_chat._parse_tasks([{"task": "T", "path": "   "}])
+        assert tasks[0]["path"] is None
+
 
 class TestLoadConfigFile:
     def test_missing_file(self, self_chat):
@@ -78,11 +90,12 @@ class TestLoadConfigFile:
     def test_dict_with_tasks_and_checklists(self, self_chat, tmp_path):
         p = tmp_path / "cfg.json"
         p.write_text(json.dumps({
-            "tasks": [{"task": "One"}],
+            "tasks": [{"task": "One", "path": "/custom"}],
             "genre_checklists": {"Drama": {"editor": ["Check A"]}},
         }))
         tasks, checklists = self_chat.load_config_file(str(p))
         assert [t["task"] for t in tasks] == ["One"]
+        assert tasks[0]["path"] == "/custom"
         assert checklists == {"Drama": {"editor": ["Check A"]}}
 
     def test_plain_list(self, self_chat, tmp_path):
@@ -445,6 +458,28 @@ class TestStartStory:
         assert "**Mediums:** image , text" in content
         assert os.path.isdir(stories_dir)
 
+    def test_custom_path_used(self, self_chat, monkeypatch, tmp_path):
+        base = tmp_path / "stories"
+        custom = tmp_path / "custom_stories"
+        monkeypatch.setattr(self_chat, "STORY_BASE_DIR", str(base))
+        stories_dir, fname = self_chat.start_story(
+            1, "My Task", "My Task", ["image", "text"], "English", ["free"], "Drama", str(custom)
+        )
+        assert os.path.isfile(fname)
+        assert str(custom) in stories_dir
+        assert str(custom) in fname
+        assert not os.path.exists(base)
+
+    def test_defaults_to_base_dir(self, self_chat, monkeypatch, tmp_path):
+        base = tmp_path / "stories"
+        monkeypatch.setattr(self_chat, "STORY_BASE_DIR", str(base))
+        stories_dir, fname = self_chat.start_story(
+            1, "My Task", "My Task", ["text"], "English", ["free"], "Drama"
+        )
+        assert os.path.isfile(fname)
+        assert str(base) in stories_dir
+        assert str(base) in fname
+
 
 class TestApplyTitle:
     def test_renames_folder(self, self_chat, monkeypatch, tmp_path):
@@ -629,7 +664,8 @@ class TestDryRun:
     def test_prints_plan(self, self_chat, monkeypatch, capsys):
         monkeypatch.setattr(self_chat, "TASKS", [
             {"task": "Write a mystery", "genre": "Drama", "languages": ["English"],
-             "mediums": ["image"], "roles": ["free"], "details": "keep it short", "checklist": {}},
+             "mediums": ["image"], "roles": ["free"], "details": "keep it short",
+             "checklist": {}, "path": "/custom/dir"},
         ])
         monkeypatch.setattr(self_chat, "TASKS_SOURCE", "/tmp/opencode/tasks.json")
         self_chat.run_dry_run()
@@ -638,6 +674,7 @@ class TestDryRun:
         assert "Write a mystery" in out
         assert "ENVIRONMENT" in out
         assert "genre:       Drama" in out
+        assert "path:        /custom/dir" in out
 
     def test_script_enforcement_and_missing_files(self, self_chat, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(self_chat, "TASKS", [
@@ -908,6 +945,17 @@ class TestRunSingleConversation:
         assert len(transcript) == 11
         assert "identical to your partner" in calls[3]["message"]
 
+    def test_custom_path_used(self, self_chat, monkeypatch, tmp_path):
+        script = [{"text": "Done. [END CONVERSATION]", "image": None, "searches": None}]
+        self._setup(self_chat, monkeypatch, tmp_path, script)
+        custom = tmp_path / "custom_stories"
+        _transcript, _sa, _sb, fname = self_chat.run_single_conversation(
+            "ta", "tb", 1, "Task", ["text"], ["English"], ["free"], "Drama", "", {}, str(custom)
+        )
+        assert os.path.isfile(fname)
+        assert str(custom) in fname
+        assert not os.path.isdir(str(tmp_path / "stories"))
+
 
 class TestRunEditor:
     def _stubs(self, self_chat, monkeypatch, tmp_path):
@@ -1057,7 +1105,7 @@ class TestRunForever:
         monkeypatch.setattr(self_chat, "TASKS", [
             {"task": "Audio task", "mediums": ["audio"], "languages": ["English"]},
             {"task": "Normal task", "mediums": ["text"], "languages": ["English"],
-             "roles": ["free"], "genre": "Drama"},
+             "roles": ["free"], "genre": "Drama", "path": "/custom/dir"},
         ])
         monkeypatch.setattr(self_chat, "login", lambda u, p: f"tok-{u}")
         monkeypatch.setattr(self_chat, "register_agent_tokens", lambda *a, **k: None)
@@ -1076,6 +1124,7 @@ class TestRunForever:
         self_chat.run_forever()
         assert len(rounds) == 2
         assert rounds[0][3] == "Normal task"
+        assert rounds[0][10] == "/custom/dir"
         assert len(deleted) == 4
 
 

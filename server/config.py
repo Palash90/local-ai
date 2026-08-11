@@ -132,8 +132,8 @@ LLAMA_SERVER_ARGS_CPU = [
 ]
 
 FILES_DIR = os.path.expanduser("~/local-ai-files")
-SESSIONS_FILE = os.path.join(FILES_DIR, "sessions.json")
-SESSIONS_DIR = FILES_DIR
+SESSIONS_DIR = os.path.join(FILES_DIR, "session")
+SESSIONS_FILE = os.path.join(SESSIONS_DIR, "sessions.json")
 IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")

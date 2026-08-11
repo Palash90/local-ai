@@ -52,6 +52,7 @@ def _load_extra_prompts(items):
 
 
 def load_sessions():
+    os.makedirs(M.SESSIONS_DIR, exist_ok=True)
     with M._data_lock:
         M.sessions.clear()
         M.sessions_meta.clear()
@@ -84,6 +85,7 @@ def load_sessions():
 
 
 def save_sessions():
+    os.makedirs(M.SESSIONS_DIR, exist_ok=True)
     by_user = {}
     with M._data_lock:
         for sid in M.sessions:
