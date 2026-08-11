@@ -53,8 +53,8 @@ SLEEP_BETWEEN_ROUNDS = 900
 
 USERNAME_EDITOR = "editor"
 USERNAME_MODERATOR = "moderator"
-EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/editor_prompt.txt"
-MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/moderator_prompt.txt"
+EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/context/editor.txt"
+MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/context/moderator.txt"
 
 DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 
@@ -92,7 +92,7 @@ def _parse_tasks(items):
         if isinstance(roles, str):
             roles = [r.strip() for r in roles.split(",")]
         genre = (item.get("genre") or "").strip() or "General"
-        details = (item.get("details") or "").strip()
+        details = (item.get("details") or "").strip() if type(item) == 'str' else str(item.get("details"))
         checklist = item.get("checklist") or {}
         path = (item.get("path") or "").strip() or None
         inactive = item.get("inactive") or False
