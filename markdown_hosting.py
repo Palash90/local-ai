@@ -300,9 +300,11 @@ async def index(request: Request):
         <title>Story Collections</title>
         <style>
             * {{ box-sizing: border-box; }}
-            html {{ -webkit-text-size-adjust: 100%; }}
-            body {{ font-family: Georgia, 'Times New Roman', serif; max-width: 42em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
+            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
+            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
             h1, h2, h3 {{ color: #333; line-height: 1.3; }}
+            ul {{ margin: 0 0 1.2em; padding-left: 1.4em; }}
+            li {{ margin-bottom: 0.6em; }}
             a {{ color: #06c; text-decoration: none; }}
             .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; font-family: sans-serif; font-size: 14px; }}
             .topbar .logged {{ margin: 0; color: #555; }}
@@ -312,7 +314,7 @@ async def index(request: Request):
             .topbar button.primary {{ background: #06c; color: #fff; border-color: #06c; }}
             .topbar #login-msg {{ color: #c44; font-size: 12px; width: 100%; }}
             @media (max-width: 600px) {{
-                body {{ padding: 12px; }}
+                body {{ padding: 12px; font-size: 19px; }}
                 .topbar {{ flex-direction: column; align-items: stretch; }}
                 .topbar .login {{ flex-direction: column; align-items: stretch; }}
                 .topbar input {{ width: 100%; }}
@@ -483,22 +485,23 @@ async def read_story(
         <title>{story_id.replace('-', ' ').title()}</title>
         <style>
             * {{ box-sizing: border-box; }}
-            html {{ -webkit-text-size-adjust: 100%; }}
-            body {{ font-family: Georgia, 'Times New Roman', serif; max-width: 42em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
+            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
+            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
             article {{ overflow-wrap: break-word; }}
+            article p, article li {{ font-size: 1em; }}
             img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 20px 0; display: block; }}
-            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 13px; }}
+            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
             a.back {{ color: #666; text-decoration: none; }}
-            .topbar button {{ background: none; border: 1px solid #c44; color: #c44; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-family: sans-serif; font-size: 13px; }}
+            .topbar button {{ background: none; border: 1px solid #c44; color: #c44; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-family: sans-serif; font-size: 14px; }}
             blockquote {{ border-left: 4px solid #ddd; margin: 0 0 1em; padding: 0 0 0 16px; color: #555; }}
-            code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; }}
+            code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.85em; }}
             pre {{ background: #f0f0f0; padding: 12px; border-radius: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
-            pre code {{ background: none; padding: 0; }}
+            pre code {{ background: none; padding: 0; font-size: 0.85em; }}
             .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 1em 0; }}
-            table {{ border-collapse: collapse; }}
+            table {{ border-collapse: collapse; font-size: 0.9em; }}
             th, td {{ border: 1px solid #ccc; padding: 6px 10px; }}
             @media (max-width: 600px) {{
-                body {{ padding: 12px; }}
+                body {{ padding: 12px; font-size: 19px; }}
                 .topbar {{ flex-direction: column; align-items: stretch; }}
                 .topbar button {{ width: 100%; }}
             }}
