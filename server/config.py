@@ -111,7 +111,7 @@ LLAMA_SERVER_ARGS_CPU = [
     # CPU-only execution — no layers offloaded to the GPU.
     "--n-gpu-layers", "0",
     "-fa", "off",
-    "--ctx-size", "131072",
+    "--ctx-size", "32768",
     "-ctk", "q8_0",            # Quantized KV cache keeps RAM usage low
     "-nkvo",
     # Keep the multimodal projector (mmproj) in RAM too. llama-server
@@ -127,7 +127,8 @@ LLAMA_SERVER_ARGS_CPU = [
     "--top-p", "0.95",
     "--top-k", "64",
     "--min-p", "0.0",
-    "--repeat-penalty", "1.0"
+    "--repeat-penalty", "1.0",
+    "--device", "none"
 ]
 
 FILES_DIR = os.path.expanduser("~/local-ai-files")
