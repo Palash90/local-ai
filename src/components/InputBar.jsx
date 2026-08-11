@@ -15,7 +15,7 @@ const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
 const DOC_EXTS = new Set(['.pdf', '.xls', '.xlsx', '.doc', '.docx'])
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 
-export default function InputBar({ onSend, hasPending, micRecording, onMicToggle }) {
+export default function InputBar({ onSend, hasPending }) {
   const [text, setText] = useState('')
   const [attachedImage, setAttachedImage] = useState(null)
   const [attachedFile, setAttachedFile] = useState(null)
@@ -186,9 +186,6 @@ export default function InputBar({ onSend, hasPending, micRecording, onMicToggle
         onKeyDown={handleKeyDown}
         onInput={handleInput}
       />
-      {
-        // <button id="mic-btn" className={micRecording ? 'recording' : ''} onClick={onMicToggle}>&#127908;</button> 
-      }
       <button id="send-btn" onClick={handleSend}><span className="send-icon">&#10148;</span><span className="send-text">{hasPending ? 'Queue' : 'Send'}</span></button>
     </div>
   )

@@ -5,6 +5,13 @@ import os
 LLAMA_BASE = "http://localhost:8081"
 LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
 
+# The CPU-backed llama-server that serves automated self-chat agents
+# (editor/moderator/registered agents). It runs CONCURRENTLY with the GPU
+# llama-server on its own port so background agent runs never compete with
+# interactive UI users for VRAM.
+LLAMA_BASE_CPU = "http://localhost:8079"
+LLAMA_URL_CPU = f"{LLAMA_BASE_CPU}/v1/chat/completions"
+
 VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
 COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080/search")
@@ -12,9 +19,45 @@ COMFYUI_URL = "http://localhost:8188"
 HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
 PORT = 3001
 REASONING_BUDGET = 4096
+CPU_PARALLEL_SLOTS = 4  # Set to desired number of concurrent CPU agent slots
 
-with open(os.path.expanduser("~/local-ai-files/model.txt"), "r") as file:
-    MODEL_ID = file.read().strip()
+# model.json holds the LLM model filenames (relative to ~/local-ai-files/my-models/)
+# per runtime mode: "gpu" for interactive chat UI users, "cpu" for automated
+# self-chat agents (editor/moderator/registered agents). Falls back to the legacy
+# single-model model.txt when model.json is missing or has no usable entries.
+MODEL_CONFIG_FILE = os.path.expanduser("~/local-ai-files/model.json")
+
+
+def _load_model_ids(model_file, legacy_file):
+    """Return the (gpu, cpu) model ids for the given config files.
+
+    ``model_file`` is the JSON config holding per-mode ids; ``legacy_file`` is
+    the plain-text single-model file used as a fallback.
+    """
+    gpu = ""
+    cpu = ""
+    try:
+        with open(model_file, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if isinstance(data, dict):
+            gpu = str(data.get("gpu") or data.get("default") or "").strip()
+            cpu = str(data.get("cpu") or gpu).strip()
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    if not gpu:
+        try:
+            with open(legacy_file, "r") as file:
+                gpu = file.read().strip()
+        except (FileNotFoundError, OSError):
+            pass
+        if not cpu:
+            cpu = gpu
+    return gpu, cpu
+
+
+MODEL_ID, MODEL_ID_CPU = _load_model_ids(
+    MODEL_CONFIG_FILE, os.path.expanduser("~/local-ai-files/model.txt")
+)
 
 COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
@@ -27,30 +70,33 @@ LLAMA_SERVER_ARGS = [
     "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
     "--jinja",
 
-    # GPU / VRAM Allocations
-    "--n-gpu-layers", LLAMA_GEMMA_NGL,
-    "-fa", "on",  # Flash attention lowers VRAM footprint
-    "--ctx-size", "32768",  # 32k context; KV cache quantized to q8_0 to fit VRAM
-    #"--no-kv-offload",     # Use it to move the kv cache to RAM
-    "-ctk", "q8_0",            # Quantize Key cache to 8-bit (saves 50% VRAM)
-    "-ctv", "q8_0",            # Quantize Value cache to 8-bit (saves 50% VRAM)
+    # GPU / VRAM & Performance
+    "-ngl", LLAMA_GEMMA_NGL,
+    "-fa", "on",
+    "--ctx-size", "24576",       # Overridden to 32k as requested
+    "-ctk", "q8_0",
+    "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q4_0
+    "--no-mmproj-offload",
 
-    # Reasoning & Thinking Limits
-    "--reasoning-budget", str(REASONING_BUDGET),
-    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+    # Threads & Batching
+    "-t", "8",
+    "-tb", "8",
+    "-ub", "512",
+    "--timeout", "3600",
 
-    # Gemma 4 Sampling Preset
+    # Sampling Parameters
     "--temp", "1.0",
     "--top-p", "0.95",
     "--top-k", "64",
-    "--min-p", "0.0",
-    "--repeat-penalty", "1.0"
+    "--min-p", "0.05"
 ]
 
 # Second set of llama-server arguments used when processing automated
 # self-chat messages (editor/moderator/agent runs). These are background,
 # non-interactive jobs, so they deliberately run the model on the CPU only —
-# slower, but they never compete with interactive users for VRAM.
+# slower, but they never compete with interactive users for VRAM. This server
+# runs on its own port (8079) CONCURRENTLY with the GPU server on 8081, so the
+# two are started and stopped independently (see restart_llama_server).
 LLAMA_SERVER_ARGS_CPU = [
     "--host", "0.0.0.0",
     "--port", "8079",
@@ -59,27 +105,30 @@ LLAMA_SERVER_ARGS_CPU = [
 
     # CPU-only execution — no layers offloaded to the GPU.
     "--n-gpu-layers", "0",
-    "-fa", "on",
+    "-fa", "off",
     "--ctx-size", "32768",
     "-ctk", "q8_0",            # Quantized KV cache keeps RAM usage low
-    "-ctv", "q8_0",
     "-nkvo",
+    # Keep the multimodal projector (mmproj) in RAM too. llama-server
+    # offloads the mmproj to the GPU by DEFAULT even with --n-gpu-layers 0,
+    # which cudaMalloc-OOMs on the 4 GiB card while the GPU server is loaded.
+    "--no-mmproj-offload",
 
     # Reasoning & Thinking Limits
     "--reasoning-budget", str(REASONING_BUDGET),
     "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
 
-    # Gemma 4 Sampling Preset
     "--temp", "1.0",
     "--top-p", "0.95",
     "--top-k", "64",
     "--min-p", "0.0",
-    "--repeat-penalty", "1.0"
+    "--repeat-penalty", "1.0",
+    "--device", "none"
 ]
 
 FILES_DIR = os.path.expanduser("~/local-ai-files")
-SESSIONS_FILE = os.path.join(FILES_DIR, "sessions.json")
-SESSIONS_DIR = FILES_DIR
+SESSIONS_DIR = os.path.join(FILES_DIR, "session")
+SESSIONS_FILE = os.path.join(SESSIONS_DIR, "sessions.json")
 IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")

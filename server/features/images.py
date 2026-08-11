@@ -58,7 +58,9 @@ def free_comfyui_vram():
 def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
     print(f"\n[image] Generating image for task {task_id} with the prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image generation...")
-    M.unload_llama_model()
+    # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
+    # The CPU server (self-chat agents) keeps running untouched.
+    M.unload_llama_model("gpu")
 
     user = M._task_user(task_id)
     gen_tag = str(uuid.uuid4())[:8]
@@ -239,7 +241,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
         M.set_status(task_id, "Freeing image generation VRAM...")
         M.free_comfyui_vram()
         M.set_status(task_id, "Loading chat model...")
-        M.load_llama_model()
+        M.load_llama_model("gpu")
     return result
 
 
@@ -299,7 +301,9 @@ def edit_image(
 
     print(f"\n[image_edit] Editing image for task {task_id} with prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image editing...")
-    M.unload_llama_model()
+    # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
+    # The CPU server (self-chat agents) keeps running untouched.
+    M.unload_llama_model("gpu")
 
     gen_tag = str(uuid.uuid4())[:8]
     prefix = f"{_safe_username(user)}/edit_{gen_tag}_"
@@ -449,7 +453,7 @@ def edit_image(
         M.set_status(task_id, "Freeing image generation VRAM...")
         M.free_comfyui_vram()
         M.set_status(task_id, "Loading chat model...")
-        M.load_llama_model()
+        M.load_llama_model("gpu")
 
     return result
 
@@ -563,8 +567,12 @@ def _image_worker():
         try:
             if tool_name == "generate_image":
                 result = _run_generate_image(task_id, args)
+                print("Waiting 5s for GPU to cool down")
+                time.sleep(5)
             elif tool_name == "edit_image":
                 result = _run_edit_image(task_id, sid, args, job.get("image_b64"))
+                print("Waiting 5s for GPU to cool down")
+                time.sleep(5)
             else:
                 result = json.dumps({"error": f"Unknown image tool: {tool_name}"})
         except Exception as e:

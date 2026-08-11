@@ -52,6 +52,7 @@ def _load_extra_prompts(items):
 
 
 def load_sessions():
+    os.makedirs(M.SESSIONS_DIR, exist_ok=True)
     with M._data_lock:
         M.sessions.clear()
         M.sessions_meta.clear()
@@ -84,6 +85,7 @@ def load_sessions():
 
 
 def save_sessions():
+    os.makedirs(M.SESSIONS_DIR, exist_ok=True)
     by_user = {}
     with M._data_lock:
         for sid in M.sessions:
@@ -189,7 +191,8 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
             )
         M.sessions_meta[sid]["updated"] = time.time()
     M.save_sessions()
+    mode = M.task_mode(task_id)
     with M._data_lock:
-        ms = M.model_status
+        ms = M._cpu_model_status if mode == "cpu" else M.model_status
     if ms != "chat_loaded":
-        M.load_llama_model()
+        M.load_llama_model(mode)

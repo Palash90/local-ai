@@ -88,12 +88,16 @@ def _finalize_task(task_id, sid, msg_content, body):
         "_image_model": image_model,
         "_search_details": search_details,
     }
+    mode = M.task_mode(task_id)
     with M._data_lock:
         if sid in M.sessions:
             M.sessions[sid].append(msg_entry)
             M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
-        M._last_tps = predicted_per_second
-        M._last_llm_use = time.time()  # Reset idle timer when task finishes
+        if mode == "gpu":
+            M._last_tps = predicted_per_second
+            M._last_llm_use = time.time()  # Reset GPU idle timer when task finishes
+        else:
+            M._cpu_last_llm_use = time.time()  # Reset CPU idle timer when task finishes
     M.save_sessions()
     with M._data_lock:
         if task_id in M.tasks:
@@ -148,7 +152,8 @@ def _event_loop():
                     "_user": user,
                     "_client_timestamp": client_ts,
                 }
-            M._current_task_id = task_id
+            # (The owning lane's _current_task_ids[mode] was already set by
+            # _queue_worker before this "start" event was posted.)
             M._prepare_session(task_id, sid, user_message, image_b64, audio_b64, client_ts)
             M._start_llm_round(task_id, sid, 0)
 
@@ -159,8 +164,12 @@ def _event_loop():
             round_num = data["round"]
             body = data["body"]
             msg = body["choices"][0]["message"]
+            mode = M.task_mode(task_id)
             with M._data_lock:
-                M._last_llm_use = time.time()
+                if mode == "cpu":
+                    M._cpu_last_llm_use = time.time()
+                else:
+                    M._last_llm_use = time.time()
             if msg.get("tool_calls"):
                 with M._data_lock:
                     tt = M.tasks.get(task_id)
@@ -187,8 +196,9 @@ def _event_loop():
                         M.sessions[sid].append(assistant_msg)
                         M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
                 M.save_sessions()
+                tool_mode = M.task_mode(task_id)
                 for i, tc in enumerate(msg["tool_calls"]):
-                    M._tool_pool.submit(
+                    M._tool_pools[tool_mode].submit(
                         M._tool_worker,
                         task_id,
                         sid,
@@ -270,17 +280,62 @@ def _event_loop():
                     M._set_task_error(task_id, "Max tool rounds exceeded", data["sid"])
 
 
-def _queue_worker():
+def _human_priority_active():
+    '''
+    # Removed the following check as self-agent bots will continue on CPU
+    # Not needed anymore
+    
+    with M._queue_locks["gpu"]:
+        if M._current_task_ids["gpu"] is not None or M._task_queues["gpu"]:
+            return True
+    now = time.time()
+    with M._tokens_lock:
+        for token, entry in M._active_tokens.items():
+            if token in M._agent_tokens or entry.get("user") in M._agent_users:
+                continue
+            if now - entry.get("last_seen", 0) <= M.ACTIVE_WINDOW_SECONDS:
+                return True
+    '''
+    return False
+
+
+def _queue_worker(mode):
+    """Drain the task queue for ``mode`` ("gpu" for interactive UI users,
+    "cpu" for self-chat agents).
+
+    Each lane runs on its own thread with its own lock/condition/queue, so a
+    self-chat agent task sitting in the CPU lane can never make an
+    interactive UI user in the GPU lane wait in line — they only share
+    physical hardware if they both actually need the GPU (chat model load or
+    image generation), which is arbitrated separately.
+
+    The CPU lane additionally yields to any human presence (see
+    ``_human_priority_active``) before starting its *next* task. An
+    already-running self-chat round is never interrupted — it runs on its own
+    hardware and was already established not to block the GPU lane — this
+    only holds the CPU lane from picking up new work while a human is around.
+    """
+    queue_lock = M._queue_locks[mode]
+    queue_cond = M._queue_conds[mode]
+    task_queue = M._task_queues[mode]
     while True:
+        if mode == "cpu":
+            # If a human is currently active in the UI, hold off agent tasks
+            while _human_priority_active():
+                time.sleep(1.0)
+                
         item = None
-        with M._queue_lock:
-            while not M._task_queue:
-                M._queue_cond.wait()
+        with queue_lock:
+            while not task_queue:
+                queue_cond.wait()
             with M._data_lock:
                 oh = M._overheated
-            if oh or M._ram_evacuating:
+            # GPU overheating only pauses the GPU lane — the CPU lane runs on
+            # the CPU server and is unaffected. RAM pressure affects the whole
+            # box, so it pauses both lanes.
+            if (oh and mode == "gpu") or M._ram_evacuating:
                 label = "GPU overheating" if oh else "RAM pressure — restarting servers"
-                for qitem in M._task_queue:
+                for qitem in task_queue:
                     tid = qitem["task_id"]
                     if tid in M.tasks:
                         M.tasks[tid] = {
@@ -288,10 +343,21 @@ def _queue_worker():
                             "message": f"Server paused — {label}. Will resume shortly.",
                             "session_id": qitem["session_id"],
                         }
-                M._queue_cond.wait(5)
+                queue_cond.wait(5)
                 continue
-            item = M._task_queue.pop(0)
-            M._current_task_id = item["task_id"]
+            if mode == "cpu" and M._human_priority_active():
+                for qitem in task_queue:
+                    tid = qitem["task_id"]
+                    if tid in M.tasks:
+                        M.tasks[tid] = {
+                            "status": "waiting",
+                            "message": "Yielding to an active user session...",
+                            "session_id": qitem["session_id"],
+                        }
+                queue_cond.wait(5)
+                continue
+            item = task_queue.pop(0)
+            M._current_task_ids[mode] = item["task_id"]
         M._event_post(
             "start",
             item["task_id"],
@@ -302,13 +368,15 @@ def _queue_worker():
             user=item.get("user", ""),
             client_timestamp=item.get("client_timestamp"),
         )
-        # Wait for this task to finish (status becomes "done", "error" or "cancelled") before dequeuing the next
+        # Wait for this task to finish (status becomes "done", "error" or "cancelled")
+        # before dequeuing the next item IN THIS LANE. The other lane's worker
+        # keeps running independently the whole time.
         while True:
             with M._data_lock:
                 st = M.tasks.get(item["task_id"], {}).get("status")
             if st in ("done", "error", "cancelled"):
                 break
             time.sleep(0.5)
-        with M._queue_lock:
-            M._current_task_id = None
-            M._queue_cond.notify_all()
+        with queue_lock:
+            M._current_task_ids[mode] = None
+            queue_cond.notify_all()

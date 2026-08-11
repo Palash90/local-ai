@@ -279,36 +279,56 @@ async def index(request: Request):
     body = "".join(cards) or "<p>No story collections found yet.</p>"
     if username:
         auth_html = f"""
-        <p style="float:right; margin:0;">Logged in as <strong>{username}</strong>
-        <button id="logout-btn" style="margin-left:8px; background:none; border:1px solid #888; color:#888; border-radius:6px; padding:2px 10px; cursor:pointer; font-family:sans-serif; font-size:12px;">Log out</button></p>
+        <span class="logged">Logged in as <strong>{username}</strong></span>
+        <button id="logout-btn">Log out</button>
         """
     else:
         auth_html = f"""
-        <p style="float:right; margin:0;">
-            <input id="login-user" placeholder="Username" style="padding:4px 8px; border:1px solid #aaa; border-radius:6px; margin-right:4px;">
-            <input id="login-pass" type="password" placeholder="Password" style="padding:4px 8px; border:1px solid #aaa; border-radius:6px; margin-right:4px;">
-            <button id="login-btn" style="background:#06c; color:#fff; border:none; border-radius:6px; padding:5px 12px; cursor:pointer; font-family:sans-serif;">Log in</button>
-            <span id="login-msg" style="color:#c44; font-size:12px;"></span>
-        </p>
+        <span class="login">
+            <input id="login-user" placeholder="Username">
+            <input id="login-pass" type="password" placeholder="Password">
+            <button id="login-btn" class="primary">Log in</button>
+            <span id="login-msg"></span>
+        </span>
         """
     return f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>Story Collections</title>
         <style>
-            body {{ font-family: Georgia, serif; max-width: 750px; margin: 40px auto; padding: 0 20px; line-height: 1.8; background: #fafafa; color: #111; }}
-            h1, h2 {{ color: #333; }}
+            * {{ box-sizing: border-box; }}
+            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
+            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
+            h1, h2, h3 {{ color: #333; line-height: 1.3; }}
+            ul {{ margin: 0 0 1.2em; padding-left: 1.4em; }}
+            li {{ margin-bottom: 0.6em; }}
             a {{ color: #06c; text-decoration: none; }}
+            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; font-family: sans-serif; font-size: 14px; }}
+            .topbar .logged {{ margin: 0; color: #555; }}
+            .topbar .login {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
+            .topbar input {{ padding: 6px 8px; border: 1px solid #aaa; border-radius: 6px; font-size: 14px; }}
+            .topbar button {{ background: none; border: 1px solid #888; color: #888; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-family: sans-serif; font-size: 13px; }}
+            .topbar button.primary {{ background: #06c; color: #fff; border-color: #06c; }}
+            .topbar #login-msg {{ color: #c44; font-size: 12px; width: 100%; }}
+            @media (max-width: 600px) {{
+                body {{ padding: 12px; font-size: 19px; }}
+                .topbar {{ flex-direction: column; align-items: stretch; }}
+                .topbar .login {{ flex-direction: column; align-items: stretch; }}
+                .topbar input {{ width: 100%; }}
+            }}
             @media (prefers-color-scheme: dark) {{
                 body {{ background: #16181d; color: #e6e6e6; }}
-                h1, h2 {{ color: #f0f0f0; }}
+                h1, h2, h3 {{ color: #f0f0f0; }}
                 a {{ color: #7ab8ff; }}
+                .topbar .logged {{ color: #aaa; }}
             }}
         </style>
     </head>
     <body>
-        {auth_html}
+        <nav class="topbar">{auth_html}</nav>
         <h1>Story Collections</h1>
         {body}
         <script>
@@ -374,6 +394,9 @@ async def serve_story_image(
 def render_story_html(collection: str, story_id: str, content: str) -> str:
     """Render story markdown and rewrite image srcs to the authenticated media route."""
     html_content = markdown.markdown(content, extensions=['extra', 'tables', 'fenced_code'])
+    html_content = html_content.replace(
+        '<table>', '<div class="table-wrap"><table>'
+    ).replace('</table>', '</table></div>')
     return html_content.replace('src="', f'src="/media/{collection}/{story_id}/')
 
 
@@ -455,19 +478,33 @@ async def read_story(
 
     return f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>{story_id.replace('-', ' ').title()}</title>
         <style>
-            body {{ font-family: Georgia, serif; max-width: 750px; margin: 40px auto; padding: 0 20px; line-height: 1.8; background: #fafafa; color: #111; }}
+            * {{ box-sizing: border-box; }}
+            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
+            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
+            article {{ overflow-wrap: break-word; }}
+            article p, article li {{ font-size: 1em; }}
             img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 20px 0; display: block; }}
-            a.back {{ display: inline-block; margin-bottom: 20px; color: #666; text-decoration: none; font-family: sans-serif; }}
-            blockquote {{ border-left: 4px solid #ddd; margin: 0; padding-left: 16px; color: #555; }}
-            code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; }}
-            pre {{ background: #f0f0f0; padding: 12px; border-radius: 6px; overflow-x: auto; }}
-            pre code {{ background: none; padding: 0; }}
-            table {{ border-collapse: collapse; }}
+            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
+            a.back {{ color: #666; text-decoration: none; }}
+            .topbar button {{ background: none; border: 1px solid #c44; color: #c44; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-family: sans-serif; font-size: 14px; }}
+            blockquote {{ border-left: 4px solid #ddd; margin: 0 0 1em; padding: 0 0 0 16px; color: #555; }}
+            code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.85em; }}
+            pre {{ background: #f0f0f0; padding: 12px; border-radius: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+            pre code {{ background: none; padding: 0; font-size: 0.85em; }}
+            .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 1em 0; }}
+            table {{ border-collapse: collapse; font-size: 0.9em; }}
             th, td {{ border: 1px solid #ccc; padding: 6px 10px; }}
+            @media (max-width: 600px) {{
+                body {{ padding: 12px; font-size: 19px; }}
+                .topbar {{ flex-direction: column; align-items: stretch; }}
+                .topbar button {{ width: 100%; }}
+            }}
             @media (prefers-color-scheme: dark) {{
                 body {{ background: #16181d; color: #e6e6e6; }}
                 a.back {{ color: #999; }}
@@ -479,8 +516,10 @@ async def read_story(
         </style>
     </head>
     <body>
-        <a href="/" class="back">← Back to Collections</a>
-        <button id="delete-btn" style="float:right; background:none; border:1px solid #c44; color:#c44; border-radius:6px; padding:4px 12px; cursor:pointer; font-family:sans-serif; font-size:13px;">Delete story</button>
+        <nav class="topbar">
+            <a href="/" class="back">← Back to Collections</a>
+            <button id="delete-btn">Delete story</button>
+        </nav>
         {verdict_html}
         <article id="story-article">{html_content}</article>
         <script>

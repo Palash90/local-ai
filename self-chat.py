@@ -43,13 +43,13 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 10.0
-SLEEP_BETWEEN_TURNS = 2.0
-MAX_MESSAGES_PER_AGENT = 6
+SLEEP_BETWEEN_TURNS = 5.0
+MAX_MESSAGES_PER_AGENT = 15
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
 STARTING_CONVERSATION = open(SELF_CHAT_PROMPT_FILE).read()
 
-SLEEP_BETWEEN_ROUNDS = 300
+SLEEP_BETWEEN_ROUNDS = 900
 
 USERNAME_EDITOR = "editor"
 USERNAME_MODERATOR = "moderator"
@@ -94,6 +94,8 @@ def _parse_tasks(items):
         genre = (item.get("genre") or "").strip() or "General"
         details = (item.get("details") or "").strip()
         checklist = item.get("checklist") or {}
+        path = (item.get("path") or "").strip() or None
+        inactive = item.get("inactive") or False
         tasks.append(
             {
                 "task": task,
@@ -103,6 +105,8 @@ def _parse_tasks(items):
                 "roles": roles,
                 "details": details,
                 "checklist": checklist,
+                "path": path,
+                "inactive": inactive
             }
         )
     return tasks
@@ -206,9 +210,12 @@ def run_dry_run():
         details = spec.get("details") or ""
         checklist = spec.get("checklist") or {}
         source = "task" if checklist else "genre/default"
+        inactive = spec.get('inactive') or False
 
         print(f"=== Task {idx}: {task}")
         print(f"  genre:       {genre}   (checklist source: {source})")
+        print(f"  path:        {spec.get('path') or STORY_BASE_DIR}")
+        print(f"  inactive:        {inactive}")
         print(f"  languages:   {', '.join(languages)}")
         for lang in languages:
             if (lang or "").strip().lower() in _SCRIPT_RANGES:
@@ -384,16 +391,19 @@ def active_real_users():
 
 
 def wait_for_user_to_leave():
+    return
+'''
     while True:
         real = active_real_users()
         if not real:
+            print("Resuming agent workflow")
             return
         print(
             f"[wait] Real user(s) active ({', '.join(real)}) "
             f"— pausing self-chat until they log out..."
         )
-        time.sleep(POLL_INTERVAL_SECONDS)
-
+        #time.sleep(POLL_INTERVAL_SECONDS)
+'''
 
 def call_llm(token, session_id, message, image_b64=None):
     headers = {"X-Auth-Token": token}
@@ -465,7 +475,7 @@ def build_input(speaker, message_number, incoming, lang, task):
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None):
+def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None, path=None):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
@@ -495,7 +505,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     incoming = ""
     shared_image_b64 = None
 
-    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre)
+    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre, path)
     citations = {}
 
     while True:
@@ -607,7 +617,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
         print(f"[verify] {len(problems)} problem(s) found — auto-RED, skipping moderator LLM call:")
         for p in problems:
             print(f"[verify]   - {p}")
-        verdict_path = fname.replace(".md", ".moderation.json")
+        verdict_path = (edited_path if edited_path else fname).replace(".md", ".moderation.json")
         data = {
             "verdict": "RED",
             "reasons": "Automatic RED (deterministic check, no LLM call):\n" + "\n".join(f"- {p}" for p in problems),
@@ -699,8 +709,8 @@ def apply_title(title, stories_dir, fname):
     return stories_dir, fname
 
 
-def start_story(round_number, task, title, mediums, language, roles=None, genre="General"):
-    base_dir = STORY_BASE_DIR
+def start_story(round_number, task, title, mediums, language, roles=None, genre="General", path=None):
+    base_dir = path or STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
@@ -1088,6 +1098,13 @@ def run_forever():
             genre = spec.get("genre") or "General"
             details = spec.get("details") or ""
             checklist = spec.get("checklist") or {}
+            path = spec.get("path")
+            inactive = spec.get("inactive") or False
+            if inactive:
+                print(f"Task {task} is inactive, skipping the task")
+                task_index += 1
+                continue
+
             if "audio" in mediums:
                 print(
                     f"[guard] Task declares 'audio', but no audio tool exists in TOOLS — "
@@ -1099,7 +1116,7 @@ def run_forever():
             print(f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n")
             start_time = time.time()
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist
+                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist, path
             )
             # save_transcript(transcript, round_number)
             if not keep_sessions:

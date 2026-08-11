@@ -41,9 +41,9 @@ _effective_contexts_lock = None
 _image_url_rel = None
 _load_extra_prompts = None
 _location_events = None
-_queue_cond = None
-_queue_lock = None
-_task_queue = None
+_queue_conds = None
+_queue_locks = None
+_task_queues = None
 _tokens_lock = None
 context_token_report = None
 get_current_user = None
@@ -76,9 +76,9 @@ APP_STATE_NAMES = [
     "_image_url_rel",
     "_load_extra_prompts",
     "_location_events",
-    "_queue_cond",
-    "_queue_lock",
-    "_task_queue",
+    "_queue_conds",
+    "_queue_locks",
+    "_task_queues",
     "_tokens_lock",
     "context_token_report",
     "get_current_user",
@@ -192,7 +192,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Type", "image/png")
                 self.end_headers()
                 with open(fpath, "rb") as f:
-                    self.wfile.write(f.read())
+                    self._safe_write(f.read())
                 return
             self.send_error(404)
         elif self.path.startswith("/uploads/"):
@@ -204,7 +204,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Disposition", "inline")
                 self.end_headers()
                 with open(fpath, "rb") as f:
-                    self.wfile.write(f.read())
+                    self._safe_write(f.read())
                 return
             self.send_error(404)
         elif self.path.startswith("/api/status/"):
@@ -263,7 +263,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            self.wfile.write(read_index_html().encode())
+            self._safe_write(read_index_html().encode())
         else:
             DIST_DIR = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dist"
@@ -276,7 +276,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Cache-Control", "public, max-age=31536000, immutable")
                 self.end_headers()
                 with open(fpath, "rb") as f:
-                    self.wfile.write(f.read())
+                    self._safe_write(f.read())
             elif self.path.startswith("/api/") or "." in os.path.basename(self.path):
                 if self.path == "/api/tasks":
                     user = get_current_user(self.headers)
@@ -292,7 +292,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
-                self.wfile.write(read_index_html().encode())
+                self._safe_write(read_index_html().encode())
 
     def do_DELETE(self):
         if self.path.startswith("/api/sessions/"):
@@ -308,8 +308,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return
                 msgs = list(sessions.get(sid, []))
             # Cancel all queued/in-flight tasks for this session so they stop processing
-            with _queue_lock:
-                _task_queue[:] = [q for q in _task_queue if q.get("session_id") != sid]
+            for mode in ("gpu", "cpu"):
+                with _queue_locks[mode]:
+                    q = _task_queues[mode]
+                    q[:] = [item for item in q if item.get("session_id") != sid]
             with _data_lock:
                 for tid, t in tasks.items():
                     if t.get("session_id") == sid and t.get("status") not in ("done", "error"):
@@ -438,6 +440,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 )
             else:
                 self.send_json({"error": "Invalid credentials"}, status=401)
+        elif self.path == "/api/leaving":
+            # Fired via navigator.sendBeacon on pagehide — beacons can't set
+            # custom headers, so the token travels in the body instead of
+            # X-Auth-Token. This does NOT invalidate the token (unlike
+            # /api/logout) — it just marks the heartbeat stale so
+            # _human_priority_active() sees this user as gone right away,
+            # instead of waiting out the full ACTIVE_WINDOW_SECONDS timeout.
+            # The timeout stays in place as a fallback for crashes/force-quits
+            # where pagehide never fires.
+            token = self.headers.get("X-Auth-Token", "")
+            if not token:
+                length = int(self.headers.get("Content-Length", 0))
+                if length:
+                    try:
+                        body = json.loads(self.rfile.read(length))
+                        token = body.get("token", "")
+                    except Exception:
+                        token = ""
+            with _tokens_lock:
+                entry = _active_tokens.get(token)
+                if entry:
+                    entry["last_seen"] = 0
+            self.send_json({"ok": True})
         elif self.path == "/api/logout":
             token = self.headers.get("X-Auth-Token", "")
             with _tokens_lock:
@@ -496,12 +521,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "user": user,
                 "client_timestamp": body.get("client_timestamp"),
             }
-            with _queue_lock:
-                if len(_task_queue) >= MAX_QUEUE_SIZE:
+            # Route to the GPU lane (interactive UI users) or the CPU lane
+            # (self-chat agents) so the two never wait behind each other.
+            mode = "cpu" if user in _agent_users else "gpu"
+            with _queue_locks[mode]:
+                if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:
                     self.send_json({"error": "Server busy"}, status=503)
                     return
-                _task_queue.append(entry)
-                _queue_cond.notify()
+                _task_queues[mode].append(entry)
+                _queue_conds[mode].notify()
             with _data_lock:
                 tasks[task_id] = {
                     "status": "queued",
@@ -680,12 +708,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def _safe_write(self, data):
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def send_json(self, data, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self._safe_write(json.dumps(data).encode())
 
     def log_message(self, format, *args):
         pass
+
+async def handle_chat(user_message):
+    # Run both LLM calls in parallel to prevent waiting
+    user_response, bot_response = await asyncio.gather(
+        llm_call_user(user_message),
+        llm_call_bot(user_message)
+    )
+    return user_response, bot_response

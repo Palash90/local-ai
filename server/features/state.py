@@ -17,7 +17,7 @@ import queue as _queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-
+from server.config import CPU_PARALLEL_SLOTS
 
 class _Registry:
     """Holds the single entrypoint module reference."""
@@ -72,25 +72,43 @@ _model_transition_lock = threading.Lock()
 _data_lock = threading.Lock()
 
 MAX_QUEUE_SIZE = 5
-_task_queue = []
-_queue_lock = threading.Lock()
-_queue_cond = threading.Condition(_queue_lock)
-_current_task_id = None
+
+# Two independent task lanes so interactive UI (GPU) users and self-chat
+# agents (CPU) never queue behind each other. Each lane has its own list,
+# lock/condition and "currently running" marker. Only image-generation VRAM
+# choreography (see _image_queue in images.py) stays globally serialized,
+# since ComfyUI only has one physical GPU to render on regardless of which
+# lane requested the image.
+_task_queues = {"gpu": [], "cpu": []}
+_queue_locks = {"gpu": threading.Lock(), "cpu": threading.Lock()}
+_queue_conds = {mode: threading.Condition(lock) for mode, lock in _queue_locks.items()}
+_current_task_ids = {"gpu": None, "cpu": None}
 
 _event_queue = _queue.Queue()
 # Serializes image generation/editing so VRAM management (llama unload/free/load)
 # and the ``image_active`` model status never race between concurrent chats.
 _image_queue = _queue.Queue()
-_llm_pool = ThreadPoolExecutor(max_workers=1)
-_tool_pool = ThreadPoolExecutor(max_workers=2)
+# One LLM-round pool and one tool-call pool PER LANE. These used to be single
+# shared pools (_llm_pool max_workers=1, _tool_pool max_workers=2) — even after
+# splitting task admission into gpu/cpu lanes, actually *running* a round or a
+# tool call still funneled through those single shared pools, so a GPU (UI)
+# task and a CPU (agent) task would still block on each other's turn in the
+# pool. Splitting per-lane makes them genuinely independent end-to-end.
+_llm_pools = {"gpu": ThreadPoolExecutor(max_workers=1), "cpu": ThreadPoolExecutor(max_workers=CPU_PARALLEL_SLOTS)}
+_tool_pools = {"gpu": ThreadPoolExecutor(max_workers=2), "cpu": ThreadPoolExecutor(max_workers=2)}
 
 _location_events = {}
 
 # Scalars the engine reads and rebinds at runtime.
+#
+# There are TWO llama-servers running concurrently: the GPU server on 8081
+# serves interactive chat UI users, and the CPU server on 8079 serves automated
+# self-chat agents. Each keeps its own model status and idle timestamp.
 model_status = "unloaded"
-_llama_mode = "gpu"  # "gpu" (interactive) or "cpu" (self-chat agent runs)
+_cpu_model_status = "unloaded"
 _last_tps = None
 _last_llm_use = time.time()
+_cpu_last_llm_use = time.time()
 _client_location = None
 _overheated = False
 _gpu_temp = None
@@ -104,6 +122,6 @@ AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 
 # Monitoring constants.
 TEMP_THRESHOLD_ON = 85
-TEMP_THRESHOLD_OFF = 65
+TEMP_THRESHOLD_OFF =75
 RAM_EVAC_THRESHOLD = 95
 RAM_RESUME_THRESHOLD = 70

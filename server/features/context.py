@@ -69,9 +69,9 @@ def trim_messages_for_context(messages):
     return trimmed
 
 
-def _summarize_with_llm(text):
+def _summarize_with_llm(text, mode="gpu"):
     payload = {
-        "model": M.MODEL_ID,
+        "model": M.server_model_id(mode),
         "messages": [
             {
                 "role": "system",
@@ -84,7 +84,7 @@ def _summarize_with_llm(text):
         "stream": False,
     }
     try:
-        r = requests.post(M.LLAMA_URL, json=payload, timeout=120)
+        r = requests.post(M.server_url(mode), json=payload, timeout=120)
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
     except Exception as e:
@@ -92,7 +92,7 @@ def _summarize_with_llm(text):
         return None
 
 
-def compact_messages_copy(messages, keep_messages=6):
+def compact_messages_copy(messages, keep_messages=6, mode="gpu"):
     """Return a compacted COPY of the message list (summary + recent messages)
     WITHOUT modifying the stored session. Old messages are summarized, not deleted."""
     msgs = list(messages)
@@ -120,7 +120,8 @@ def compact_messages_copy(messages, keep_messages=6):
     if not compact_text.strip():
         return ([sys_msg] + msgs) if sys_msg else msgs
     summary = M._summarize_with_llm(
-        f"Compress the following conversation into a short paragraph, keeping all important details:\n\n{compact_text}"
+        f"Compress the following conversation into a short paragraph, keeping all important details:\n\n{compact_text}",
+        mode,
     )
     if summary is None:
         return ([sys_msg] + msgs) if sys_msg else msgs
@@ -164,7 +165,7 @@ def sanitize_content_for_llm(messages):
     return sanitized
 
 
-def prepare_context_for_llm(sid, messages):
+def prepare_context_for_llm(sid, messages, mode="gpu"):
     """Build the message list to send to the LLM. When the conversation nears the
     context limit, old messages are summarized into a compressed context block —
     but the stored session is left untouched, so no messages are deleted."""
@@ -176,7 +177,7 @@ def prepare_context_for_llm(sid, messages):
             M._effective_contexts.pop(sid, None)
         return context
     print(f"[context] Session {sid} estimate {total} tokens exceeds threshold {M.AUTO_COMPACT_THRESHOLD}; building compressed context for LLM")
-    compacted = compact_messages_copy(messages)
+    compacted = compact_messages_copy(messages, mode=mode)
     context = trim_messages_for_context(compacted)
     print(f"[context] Compressed context built; estimate after: {estimate_tokens(context)}")
     with M._effective_contexts_lock:

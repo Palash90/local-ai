@@ -28,14 +28,11 @@ export default function App() {
   const [reminderCount, setReminderCount] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [lightboxSrc, setLightboxSrc] = useState(null)
-  const [micRecording, setMicRecording] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState({})
   const [showTasks, setShowTasks] = useState(false)
   const [showLocationPrompt, setShowLocationPrompt] = useState(false)
   const [locationTaskId, setLocationTaskId] = useState(null)
   const [locationError, setLocationError] = useState(null)
-  const mediaRecorderRef = useRef(null)
-  const audioChunksRef = useRef([])
   const sessionRef = useRef(null)
   const selectingRef = useRef(false)
   const pendingMessagesRef = useRef({})
@@ -208,7 +205,7 @@ export default function App() {
     const taskSid = currentSessionId
     setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
 
-    const userMsg = { role: 'user', content: text || (attachedFileLabel(image)), _timestamp: new Date().toISOString() }
+    const userMsg = { role: 'user', content: text || '\uD83D\uDCC4 file', _timestamp: new Date().toISOString() }
 
     try {
       const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined)
@@ -219,79 +216,6 @@ export default function App() {
         [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg, _startMs: Date.now() },
       }))
 
-      const stored = getStoredPending()
-      stored.push({ task_id: taskId, sid: taskSid })
-      setStoredPending(stored)
-    } catch (err) {
-      setMessages(prev => [...prev, userMsg, { role: 'assistant', content: 'Error: ' + err.message }])
-    }
-
-    setLoadingSessions(prev => {
-      const next = { ...prev }
-      next[taskSid] = (next[taskSid] || 1) - 1
-      if (!next[taskSid]) delete next[taskSid]
-      return next
-    })
-  }
-
-  function attachedFileLabel(image) {
-    return image ? '\uD83D\uDCC4 file' : '\uD83C\uDFA4 Audio message'
-  }
-
-  // ---- Audio ----
-  async function toggleMic() {
-    if (micRecording) {
-      stopRecording()
-      return
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' })
-      audioChunksRef.current = []
-      setMicRecording(true)
-      mediaRecorderRef.current = mr
-
-      mr.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data)
-      }
-
-      mr.onstop = () => {
-        setMicRecording(false)
-        stream.getTracks().forEach(t => t.stop())
-        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
-        const reader = new FileReader()
-        reader.onloadend = () => {
-          const b64 = reader.result.split(',')[1]
-          sendAudio(b64)
-        }
-        reader.readAsDataURL(blob)
-      }
-
-      mr.start()
-    } catch (e) {
-      alert('Microphone access denied: ' + e.message)
-    }
-  }
-
-  function stopRecording() {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop()
-    }
-  }
-
-  async function sendAudio(audioB64) {
-    if (!currentSessionId) return
-    const taskSid = currentSessionId
-    setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
-    const userMsg = { role: 'user', content: '\uD83C\uDFA4 Audio message', _timestamp: new Date().toISOString() }
-
-    try {
-      const data = await api.sendMessage(currentSessionId, '', undefined, audioB64)
-      const taskId = data.task_id
-      setPendingMessages(prev => ({
-        ...prev,
-        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg, _startMs: Date.now() },
-      }))
       const stored = getStoredPending()
       stored.push({ task_id: taskId, sid: taskSid })
       setStoredPending(stored)
@@ -508,8 +432,6 @@ export default function App() {
           <InputBar
             onSend={handleSend}
             hasPending={hasPendingForCurrent}
-            micRecording={micRecording}
-            onMicToggle={toggleMic}
           />
         </div>
         <ImageLightbox src={lightboxSrc} onClose={closeLightbox} />

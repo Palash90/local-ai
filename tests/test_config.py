@@ -40,6 +40,45 @@ class TestModelId:
         assert isinstance(cfg.MODEL_ID, str)
         assert cfg.MODEL_ID.strip()
 
+    def test_cpu_model_id_is_nonempty_string(self, cfg):
+        assert isinstance(cfg.MODEL_ID_CPU, str)
+        assert cfg.MODEL_ID_CPU.strip()
+
+
+class TestLoadModelIds:
+    def test_json_gpu_and_cpu(self, cfg, tmp_path):
+        f = tmp_path / "model.json"
+        f.write_text('{"gpu": "g1", "cpu": "c1"}')
+        assert cfg._load_model_ids(str(f), str(tmp_path / "model.txt")) == ("g1", "c1")
+
+    def test_json_missing_cpu_falls_back_to_gpu(self, cfg, tmp_path):
+        f = tmp_path / "model.json"
+        f.write_text('{"gpu": "g1"}')
+        assert cfg._load_model_ids(str(f), str(tmp_path / "model.txt")) == ("g1", "g1")
+
+    def test_json_default_key(self, cfg, tmp_path):
+        f = tmp_path / "model.json"
+        f.write_text('{"default": "d1"}')
+        assert cfg._load_model_ids(str(f), str(tmp_path / "model.txt")) == ("d1", "d1")
+
+    def test_invalid_json_falls_back_to_model_txt(self, cfg, tmp_path):
+        f = tmp_path / "model.json"
+        f.write_text("{ not json")
+        legacy = tmp_path / "model.txt"
+        legacy.write_text("legacy\n")
+        assert cfg._load_model_ids(str(f), str(legacy)) == ("legacy", "legacy")
+
+    def test_missing_json_falls_back_to_model_txt(self, cfg, tmp_path):
+        legacy = tmp_path / "model.txt"
+        legacy.write_text("legacy\n")
+        assert cfg._load_model_ids(str(tmp_path / "model.json"), str(legacy)) == (
+            "legacy",
+            "legacy",
+        )
+
+    def test_missing_both_returns_empty(self, cfg, tmp_path):
+        assert cfg._load_model_ids(str(tmp_path / "model.json"), str(tmp_path / "model.txt")) == ("", "")
+
 
 class TestTools:
     def test_all_expected_tools_present(self, cfg):
@@ -103,6 +142,7 @@ class TestConstants:
         assert "--port" in args
         assert str(cfg.PORT) in args or "8081" in args
         assert "--n-gpu-layers" in args
+        assert "--no-mmproj-offload" in args
 
     def test_llama_server_args_cpu(self, cfg):
         cpu_args = cfg.LLAMA_SERVER_ARGS_CPU
@@ -112,6 +152,8 @@ class TestConstants:
         ngl = cpu_args[cpu_args.index("--n-gpu-layers") + 1]
         assert ngl == "0"
         assert "--ctx-size" in cpu_args
+        assert "--no-mmproj-offload" in cpu_args
+        assert "--no-kv-offload" in cpu_args or "-nkvo" in cpu_args
 
     def test_llama_server_cpu_differs_from_gpu(self, cfg):
         assert cfg.LLAMA_SERVER_ARGS_CPU != cfg.LLAMA_SERVER_ARGS
@@ -133,3 +175,7 @@ class TestConstants:
         assert cfg.UPLOADS_DIR
         assert cfg.IMG_PATH
         assert cfg.TASKS_DB.endswith("tasks.db")
+
+    def test_sessions_in_dedicated_dir(self, cfg):
+        assert cfg.SESSIONS_DIR == os.path.join(cfg.FILES_DIR, "session")
+        assert cfg.SESSIONS_FILE == os.path.join(cfg.SESSIONS_DIR, "sessions.json")
