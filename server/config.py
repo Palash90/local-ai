@@ -70,30 +70,24 @@ LLAMA_SERVER_ARGS = [
     "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
     "--jinja",
 
-    # GPU / VRAM Allocations
-    "--n-gpu-layers", LLAMA_GEMMA_NGL,
-    "-fa", "on",  # Flash attention lowers VRAM footprint
-    "--ctx-size", "32768",  # 32k context; KV cache quantized to q8_0 to fit VRAM
-    #"--no-kv-offload",     # Use it to move the kv cache to RAM
-    "-ctk", "q8_0",            # Quantize Key cache to 8-bit (saves 50% VRAM)
-    "-ctv", "q8_0",            # Quantize Value cache to 8-bit (saves 50% VRAM)
-    # Keep the multimodal projector (mmproj) in RAM. On the 4 GiB card the
-    # mmproj (~950 MiB) + model weights nearly fill VRAM, leaving no room for
-    # the CPU llama-server's worker buffers — its /models/load then fails with
-    # cudaMalloc OOM. Slower image understanding, but keeps agents + UI usable
-    # concurrently.
-    "--no-mmproj-offload",
+    # GPU / VRAM & Performance
+    "-ngl", LLAMA_GEMMA_NGL,
+    "-fa", "on",
+    "--ctx-size", "32768",       # Overridden to 32k as requested
+    "-ctk", "q8_0",
+    "-ctv", "q8_0",
 
-    # Reasoning & Thinking Limits
-    "--reasoning-budget", str(REASONING_BUDGET),
-    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+    # Threads & Batching
+    "-t", "8",
+    "-tb", "8",
+    "-ub", "512",
+    "--timeout", "3600",
 
-    # Gemma 4 Sampling Preset
+    # Sampling Parameters
     "--temp", "1.0",
     "--top-p", "0.95",
     "--top-k", "64",
-    "--min-p", "0.0",
-    "--repeat-penalty", "1.0"
+    "--min-p", "0.05"
 ]
 
 # Second set of llama-server arguments used when processing automated

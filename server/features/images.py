@@ -567,8 +567,12 @@ def _image_worker():
         try:
             if tool_name == "generate_image":
                 result = _run_generate_image(task_id, args)
+                print("Waiting 5s for GPU to cool down")
+                time.sleep(5)
             elif tool_name == "edit_image":
                 result = _run_edit_image(task_id, sid, args, job.get("image_b64"))
+                print("Waiting 5s for GPU to cool down")
+                time.sleep(5)
             else:
                 result = json.dumps({"error": f"Unknown image tool: {tool_name}"})
         except Exception as e:
