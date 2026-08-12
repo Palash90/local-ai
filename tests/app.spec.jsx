@@ -1,5 +1,5 @@
 import React from 'react';
-import { test, expect } from '@playwright/experimental-ct-react';
+import { test, expect } from './fixtures.js';
 import App from '../src/App';
 
 function jsonResponse(status, body) {
@@ -36,7 +36,7 @@ async function stubAuthFlow(page, { taskStatus, chatResult }) {
       if (urlStr === '/api/model-status') {
         return { status: 200, json: async () => ({
           model: 'loaded', overheated: false, gpu_temp: 40,
-          predicted_per_second: 20, max_context: 32768, reminder_count: 0,
+          predicted_per_second: 20, max_context: 24576, reminder_count: 0,
         }) };
       }
       if (urlStr === '/api/chat') {

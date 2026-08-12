@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/experimental-ct-react';
+import { test, expect } from './fixtures.js';
 import { downloadFile } from '../src/utils.js';
 
 let events;

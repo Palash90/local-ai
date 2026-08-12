@@ -15,11 +15,19 @@ const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
 const DOC_EXTS = new Set(['.pdf', '.xls', '.xlsx', '.doc', '.docx'])
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result.split(',')[1])
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
 export default function InputBar({ onSend, hasPending }) {
   const [text, setText] = useState('')
   const [attachedImage, setAttachedImage] = useState(null)
   const [attachedFile, setAttachedFile] = useState(null)
-  const [attachedFileText, setAttachedFileText] = useState(null)
   const [attachedFileUrl, setAttachedFileUrl] = useState(null)
   const fileInputRef = useRef(null)
   const textareaRef = useRef(null)
@@ -29,11 +37,18 @@ export default function InputBar({ onSend, hasPending }) {
   function clearAttachments() {
     setAttachedImage(null)
     setAttachedFile(null)
-    setAttachedFileText(null)
     setAttachedFileUrl(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
     if (imagePreviewRef.current) imagePreviewRef.current.style.display = 'none'
   }
+
+  const uploadFileToServer = useCallback(async (file) => {
+    const b64 = await readFileAsBase64(file)
+    const data = await extractFile(file.name, b64)
+    if (!data.url) throw new Error(data.error || 'Could not process file')
+    setAttachedFile(data.name)
+    setAttachedFileUrl(data.url)
+  }, [])
 
   const handleFile = useCallback(async (e) => {
     const file = e.target.files[0]
@@ -77,57 +92,45 @@ export default function InputBar({ onSend, hasPending }) {
     }
 
     if (CODE_EXTS.has(ext)) {
-      const text = await file.text()
-      if (text.length > 1000000) {
-        alert('File too large (text exceeds 1000KB): ' + file.name)
-        return
+      try {
+        await uploadFileToServer(file)
+      } catch (err) {
+        clearAttachments()
+        alert('Error processing file: ' + err.message)
       }
-      setAttachedFile(file.name)
-      setAttachedFileText(text)
       return
     }
 
     if (DOC_EXTS.has(ext)) {
-      const reader = new FileReader()
-      reader.onload = async (ev) => {
-        const b64 = ev.target.result.split(',')[1]
-        try {
-          const data = await extractFile(file.name, b64)
-          if (data.url) {
-            setAttachedFile(data.name)
-            setAttachedFileUrl(data.url)
-          } else {
-            clearAttachments()
-            alert('Could not process ' + file.name + (data.error ? ': ' + data.error : ''))
-          }
-        } catch (err) {
-          clearAttachments()
-          alert('Error processing file: ' + err.message)
-        }
+      try {
+        await uploadFileToServer(file)
+      } catch (err) {
+        clearAttachments()
+        alert('Error processing file: ' + err.message)
       }
-      reader.readAsDataURL(file)
       return
     }
 
     const isCode = confirm('Unknown file type: ' + file.name + '. Is this a code/text file?')
     if (isCode) {
-      const t = await file.text()
-      setAttachedFile(file.name)
-      setAttachedFileText(t)
+      try {
+        await uploadFileToServer(file)
+      } catch (err) {
+        clearAttachments()
+        alert('Error processing file: ' + err.message)
+      }
     } else {
       clearAttachments()
     }
-  }, [])
+  }, [uploadFileToServer])
 
   async function handleSend() {
     if (sendingRef.current) return
     const msg = text.trim()
-    if (!msg && !attachedImage && !attachedFileText && !attachedFileUrl) return
+    if (!msg && !attachedImage && !attachedFileUrl) return
     sendingRef.current = true
     let finalText = msg
-    if (attachedFileText) {
-      finalText = '[FILE: ' + attachedFile + ']\n```\n' + attachedFileText + '\n```\n[END FILE]\n\n' + (msg || 'See attached file above.')
-    } else if (attachedFileUrl) {
+    if (attachedFileUrl) {
       finalText = '[FILE: ' + attachedFileUrl + '](' + attachedFile + ')\n\n' + (msg || 'See attached file above.')
     }
     try {
@@ -161,7 +164,6 @@ export default function InputBar({ onSend, hasPending }) {
 
   function removeAttachedFile() {
     setAttachedFile(null)
-    setAttachedFileText(null)
     setAttachedFileUrl(null)
   }
 

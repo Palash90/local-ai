@@ -644,12 +644,13 @@ class TestDeleteSessionDeep:
             env["chat"].sessions[sid] = [
                 {"role": "assistant", "_image_url": "/output/user/gen.png"},
                 {"role": "user", "content": "See [FILE: /uploads/doc.pdf] and [FILE: /uploads/other.txt]"},
+                {"role": "user", "content": "See [FILE: /uploads/code.py](script.py) and more"},
                 {"role": "user", "content": [{"type": "text", "text": "plain [FILE: /uploads/multi.txt]"}]},
             ]
             env["chat"].tasks["t9"] = {"session_id": sid, "status": "working"}
         img_dir = os.path.join(env["api"].IMG_PATH, "user")
         os.makedirs(img_dir, exist_ok=True)
-        for name in ["doc.pdf", "other.txt", "multi.txt"]:
+        for name in ["doc.pdf", "other.txt", "multi.txt", "code.py"]:
             with open(os.path.join(env["api"].UPLOADS_DIR, name), "w") as f:
                 f.write("x")
         with open(os.path.join(img_dir, "gen.png"), "w") as f:
@@ -661,6 +662,7 @@ class TestDeleteSessionDeep:
         assert env["chat"].tasks["t9"]["status"] == "cancelled"
         assert not os.path.exists(os.path.join(env["api"].UPLOADS_DIR, "doc.pdf"))
         assert not os.path.exists(os.path.join(env["api"].UPLOADS_DIR, "multi.txt"))
+        assert not os.path.exists(os.path.join(env["api"].UPLOADS_DIR, "code.py"))
         assert not os.path.exists(os.path.join(img_dir, "gen.png"))
         with env["chat"]._effective_contexts_lock:
             assert sid not in env["chat"]._effective_contexts

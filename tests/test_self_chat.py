@@ -937,12 +937,14 @@ class TestRunSingleConversation:
         assert transcript == []
 
     def test_duplicate_retry_and_message_cap(self, self_chat, monkeypatch, tmp_path):
-        replies = ["One", "Two", "Two", "Two revised", "Three", "Four", "Five",
-                   "Six", "Seven", "Eight", "Nine", "Ten"]
+        words = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet "
+                 "kilo lima mike november oscar papa quebec romeo sierra tango "
+                 "uniform victor whiskey xray yankee zulu").split()
+        replies = ["One", "Two", "Two", "Two revised"] + words
         script = [{"text": r, "image": None, "searches": None} for r in replies]
         calls, _ = self._setup(self_chat, monkeypatch, tmp_path, script)
         transcript, *_ = self._run(self_chat)
-        assert len(transcript) == 11
+        assert len(transcript) == 29
         assert "identical to your partner" in calls[3]["message"]
 
     def test_custom_path_used(self, self_chat, monkeypatch, tmp_path):

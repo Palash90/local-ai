@@ -73,7 +73,7 @@ LLAMA_SERVER_ARGS = [
     # GPU / VRAM & Performance
     "-ngl", LLAMA_GEMMA_NGL,
     "-fa", "on",
-    "--ctx-size", "24576",       # Overridden to 32k as requested
+    "--ctx-size", "24576",       # 24K context for interactive UI chat
     "-ctk", "q8_0",
     "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q4_0
     "--no-mmproj-offload",

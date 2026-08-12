@@ -1,5 +1,5 @@
 import React from 'react';
-import { test, expect } from '@playwright/experimental-ct-react';
+import { test, expect } from './fixtures.js';
 import TaskPanel from '../src/components/TaskPanel';
 
 const sampleTasks = [

@@ -585,7 +585,12 @@ class TestDispatchTool:
 
     def test_generate_image_success(self, chat_webui, monkeypatch):
         from server.features.images import _image_worker
+        import server.features.images as _images
 
+        class _FakeTime:
+            def sleep(self, *a, **k): pass
+            def time(self): return 0
+        monkeypatch.setattr(_images, "time", _FakeTime())
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(
@@ -651,7 +656,12 @@ class TestDispatchTool:
 
     def test_edit_image(self, chat_webui, monkeypatch):
         from server.features.images import _image_worker
+        import server.features.images as _images
 
+        class _FakeTime:
+            def sleep(self, *a, **k): pass
+            def time(self): return 0
+        monkeypatch.setattr(_images, "time", _FakeTime())
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(
@@ -1671,7 +1681,12 @@ class TestDispatchToolMore:
 
     def test_edit_image_no_file(self, chat_webui, monkeypatch):
         from server.features.images import _image_worker
+        import server.features.images as _images
 
+        class _FakeTime:
+            def sleep(self, *a, **k): pass
+            def time(self): return 0
+        monkeypatch.setattr(_images, "time", _FakeTime())
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(chat_webui, "edit_image", lambda **k: json.dumps({"error": "nope"}))
@@ -1688,7 +1703,12 @@ class TestDispatchToolMore:
 
     def test_generate_image_no_file(self, chat_webui, monkeypatch):
         from server.features.images import _image_worker
+        import server.features.images as _images
 
+        class _FakeTime:
+            def sleep(self, *a, **k): pass
+            def time(self): return 0
+        monkeypatch.setattr(_images, "time", _FakeTime())
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(chat_webui, "generate_image", lambda **k: json.dumps({"error": "timeout"}))
@@ -2702,18 +2722,22 @@ class TestQueueWorker:
 
 
 class TestHumanPriorityActive:
-    def test_true_when_gpu_queue_active(self, chat_webui):
+    """Human-priority gating was disabled: self-chat agents now run fully
+    independently on the CPU lane, so _human_priority_active() is a no-op that
+    always reports no human priority. These tests lock in that behavior."""
+
+    def test_false_even_when_gpu_queue_active(self, chat_webui):
         chat_webui._current_task_ids["gpu"] = None
         chat_webui._task_queues["gpu"][:] = []
         chat_webui._task_queues["gpu"].append({"task_id": "x"})
-        assert chat_webui._human_priority_active() is True
+        assert chat_webui._human_priority_active() is False
 
-    def test_true_when_gpu_task_running(self, chat_webui):
+    def test_false_even_when_gpu_task_running(self, chat_webui):
         chat_webui._current_task_ids["gpu"] = "t1"
         chat_webui._task_queues["gpu"][:] = []
-        assert chat_webui._human_priority_active() is True
+        assert chat_webui._human_priority_active() is False
 
-    def test_true_when_human_token_recent(self, chat_webui):
+    def test_false_even_when_human_token_recent(self, chat_webui):
         chat_webui._current_task_ids["gpu"] = None
         chat_webui._task_queues["gpu"][:] = []
         chat_webui._agent_tokens = {"ag-tok"}
@@ -2723,7 +2747,7 @@ class TestHumanPriorityActive:
             "ag-tok": {"user": "kolpo", "last_seen": time.time()},
             "stale-tok": {"user": "bob", "last_seen": 0},
         }
-        assert chat_webui._human_priority_active() is True
+        assert chat_webui._human_priority_active() is False
 
     def test_false_when_no_human_activity(self, chat_webui):
         chat_webui._current_task_ids["gpu"] = None

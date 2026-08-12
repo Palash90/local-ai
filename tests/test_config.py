@@ -141,7 +141,7 @@ class TestConstants:
         assert "--host" in args
         assert "--port" in args
         assert str(cfg.PORT) in args or "8081" in args
-        assert "--n-gpu-layers" in args
+        assert "--n-gpu-layers" in args or "-ngl" in args
         assert "--no-mmproj-offload" in args
 
     def test_llama_server_args_cpu(self, cfg):
@@ -157,7 +157,12 @@ class TestConstants:
 
     def test_llama_server_cpu_differs_from_gpu(self, cfg):
         assert cfg.LLAMA_SERVER_ARGS_CPU != cfg.LLAMA_SERVER_ARGS
-        gpu_ngl = cfg.LLAMA_SERVER_ARGS[cfg.LLAMA_SERVER_ARGS.index("--n-gpu-layers") + 1]
+        gpu_ngl = None
+        if "--n-gpu-layers" in cfg.LLAMA_SERVER_ARGS:
+            gpu_ngl = cfg.LLAMA_SERVER_ARGS[cfg.LLAMA_SERVER_ARGS.index("--n-gpu-layers") + 1]
+        elif "-ngl" in cfg.LLAMA_SERVER_ARGS:
+            gpu_ngl = cfg.LLAMA_SERVER_ARGS[cfg.LLAMA_SERVER_ARGS.index("-ngl") + 1]
+        assert gpu_ngl is not None
         assert gpu_ngl != "0"
 
     def test_image_models_nonempty(self, cfg):

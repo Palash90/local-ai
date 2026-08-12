@@ -1,5 +1,5 @@
 import React from 'react';
-import { test, expect } from '@playwright/experimental-ct-react';
+import { test, expect } from './fixtures.js';
 import StatusBox from '../src/components/StatusBox';
 
 test('StatusBox renders thinking by default', async ({ mount }) => {

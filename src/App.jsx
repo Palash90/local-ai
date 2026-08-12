@@ -20,7 +20,7 @@ export default function App() {
   const [tokenEstimate, setTokenEstimate] = useState(0)
   const [contextCompressed, setContextCompressed] = useState(false)
   const [rawTokenEstimate, setRawTokenEstimate] = useState(0)
-  const [maxContext, setMaxContext] = useState(32768)
+  const [maxContext, setMaxContext] = useState(24576)
   const [modelStatus, setModelStatus] = useState('unloaded')
   const [modelTps, setModelTps] = useState(null)
   const [overheated, setOverheated] = useState(false)

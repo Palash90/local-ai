@@ -389,7 +389,7 @@ class TestStoryContent:
 
 class TestDeleteStory:
     def test_deletes_folder(self, mh_client, mh, mh_make_user):
-        mh_make_user({"free": {"password": "s"}})
+        mh_make_user({"free": {"password": "s", "role": "admin"}})
         _write_story(mh, "free_stories")
         _login(mh_client, "free", "s")
         r = mh_client.delete("/story/free_stories/s1")
@@ -400,10 +400,16 @@ class TestDeleteStory:
         )
 
     def test_missing_story(self, mh_client, mh_make_user):
-        mh_make_user({"free": {"password": "s"}})
+        mh_make_user({"free": {"password": "s", "role": "admin"}})
         _login(mh_client, "free", "s")
         r = mh_client.delete("/story/free_stories/nope")
         assert r.status_code == 404
+
+    def test_non_admin_forbidden(self, mh_client, mh_make_user):
+        mh_make_user({"free": {"password": "s"}})
+        _login(mh_client, "free", "s")
+        r = mh_client.delete("/story/free_stories/s1")
+        assert r.status_code == 403
 
     def test_guest_blocked(self, mh_client, mh_make_user):
         mh_make_user({})
