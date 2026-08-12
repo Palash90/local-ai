@@ -449,8 +449,18 @@ async def serve_story_image(
 
 
 def render_story_html(collection: str, story_id: str, content: str) -> str:
-    """Render story markdown and rewrite image srcs to the authenticated media route."""
-    html_content = markdown.markdown(content, extensions=['extra', 'tables', 'fenced_code'])
+    """Render story markdown and rewrite image srcs to the authenticated media route.
+
+    pymdownx.arithmatex (generic mode) leaves $...$ / $$...$$ math untouched
+    but wraps it in <span class="arithmatex"> / <div class="arithmatex">
+    so the KaTeX auto-render script loaded on the story page can find and
+    typeset it client-side.
+    """
+    html_content = markdown.markdown(
+        content,
+        extensions=['extra', 'tables', 'fenced_code', 'pymdownx.arithmatex'],
+        extension_configs={'pymdownx.arithmatex': {'generic': True}},
+    )
     html_content = html_content.replace(
         '<table>', '<div class="table-wrap"><table>'
     ).replace('</table>', '</table></div>')
@@ -559,6 +569,9 @@ async def read_story(
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>{story_id.replace('-', ' ').title()}</title>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
         <style>
             * {{ box-sizing: border-box; }}
             html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
@@ -612,6 +625,25 @@ async def read_story(
         <script>
             const article = document.getElementById('story-article');
             let lastHtml = article.innerHTML;
+
+            function typesetMath() {{
+                if (typeof renderMathInElement !== 'function') {{
+                    // KaTeX scripts (deferred) may not have executed yet on first paint.
+                    setTimeout(typesetMath, 100);
+                    return;
+                }}
+                renderMathInElement(article, {{
+                    delimiters: [
+                        {{left: '\\\\[', right: '\\\\]', display: true}},
+                        {{left: '\\\\(', right: '\\\\)', display: false}},
+                        {{left: '$$', right: '$$', display: true}},
+                        {{left: '$', right: '$', display: false}}
+                    ],
+                    throwOnError: false
+                }});
+            }}
+            typesetMath();
+
             async function poll() {{
                 try {{
                     const r = await fetch('/story/{collection}/{story_id}/content');
@@ -627,6 +659,7 @@ async def read_story(
                             article.innerHTML = newHtml;
                         }}
                         lastHtml = newHtml;
+                        typesetMath();
                     }}
                 }} catch (e) {{}}
                 setTimeout(poll, 3000);

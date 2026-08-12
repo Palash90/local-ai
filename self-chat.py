@@ -42,9 +42,9 @@ USERNAME_B = "kaya"
 PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
-POLL_INTERVAL_SECONDS = 10.0
+POLL_INTERVAL_SECONDS = 2.0
 SLEEP_BETWEEN_TURNS = 5.0
-MAX_MESSAGES_PER_AGENT = 15
+MAX_MESSAGES_PER_AGENT = 4
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
 STARTING_CONVERSATION = open(SELF_CHAT_PROMPT_FILE).read()
@@ -53,8 +53,8 @@ SLEEP_BETWEEN_ROUNDS = 900
 
 USERNAME_EDITOR = "editor"
 USERNAME_MODERATOR = "moderator"
-EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/context/editor.txt"
-MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/context/moderator.txt"
+EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/editor.txt"
+MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/moderator.txt"
 
 DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 
@@ -96,6 +96,7 @@ def _parse_tasks(items):
         checklist = item.get("checklist") or {}
         path = (item.get("path") or "").strip() or None
         inactive = item.get("inactive") or False
+        context = item.get("context") or None
         tasks.append(
             {
                 "task": task,
@@ -106,7 +107,8 @@ def _parse_tasks(items):
                 "details": details,
                 "checklist": checklist,
                 "path": path,
-                "inactive": inactive
+                "inactive": inactive,
+                "context": context
             }
         )
     return tasks
@@ -442,12 +444,10 @@ def call_llm(token, session_id, message, image_b64=None):
             }
         if status == "error":
             raise RuntimeError(f"Task failed: {data}")
-        print(f"Polling break for {POLL_INTERVAL_SECONDS} seconds")
         time.sleep(POLL_INTERVAL_SECONDS)
-        print("Over")
 
 
-def build_input(speaker, message_number, incoming, lang, task):
+def build_input(speaker, message_number, incoming, lang, task, context):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
 
@@ -455,6 +455,10 @@ def build_input(speaker, message_number, incoming, lang, task):
         f"[SYSTEM DIRECTIVE: You are responding as {current_agent}. Your partner is {partner_agent}.]\n",
         f"[Turn {message_number}/{MAX_MESSAGES_PER_AGENT}]\n",
     ]
+
+    if context is not None:
+        print("Extra context", context)
+        lines.append(context)
 
     if message_number <= 2:
         lines.append(
@@ -476,7 +480,7 @@ def build_input(speaker, message_number, incoming, lang, task):
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None, path=None):
+def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None, path=None, context=None):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
@@ -522,6 +526,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
             "" if not transcript else incoming,
             language,
             task,
+            context
         )
 
         wait_for_user_to_leave()
@@ -1102,6 +1107,7 @@ def run_forever():
             details = spec.get("details") or ""
             checklist = spec.get("checklist") or {}
             path = spec.get("path")
+            context = spec.get('context') or None
             print(roles)
             if "admin" in roles:
                 path = f"{path}/admin"
@@ -1126,7 +1132,7 @@ def run_forever():
             print(f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n")
             start_time = time.time()
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist, path
+                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist, path, context
             )
             # save_transcript(transcript, round_number)
             if not keep_sessions:
