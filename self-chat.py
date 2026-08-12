@@ -442,8 +442,9 @@ def call_llm(token, session_id, message, image_b64=None):
             }
         if status == "error":
             raise RuntimeError(f"Task failed: {data}")
-
+        print(f"Polling break for {POLL_INTERVAL_SECONDS} seconds")
         time.sleep(POLL_INTERVAL_SECONDS)
+        print("Over")
 
 
 def build_input(speaker, message_number, incoming, lang, task):
@@ -587,7 +588,9 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
             if block:
                 incoming += "\n\n[WEB SEARCH REPORTS SHARED:]\n" + "\n".join(block)
         current_speaker = "B" if current_speaker == "A" else "A"
+        print(f"LLM Rest for {SLEEP_BETWEEN_TURNS} seconds")
         time.sleep(SLEEP_BETWEEN_TURNS)
+        print("LLM Rest Over")
 
     finalize_story(fname, citations)
 
@@ -1099,6 +1102,13 @@ def run_forever():
             details = spec.get("details") or ""
             checklist = spec.get("checklist") or {}
             path = spec.get("path")
+            print(roles)
+            if "admin" in roles:
+                path = f"{path}/admin"
+            if "premium" in roles:
+                path = f"{path}/premium"
+
+            print("The stories will be generated in this directory", path)
             inactive = spec.get("inactive") or False
             if inactive:
                 print(f"Task {task} is inactive, skipping the task")
@@ -1126,7 +1136,7 @@ def run_forever():
             task_index += 1
             elapsed = time.time() - start_time
             print(f"Total time elapsed in round {round_number} - {elapsed:.2f} seconds\n")
-            print("Autonomous organization is in vacation...")
+            print(f"Autonomous organization is in vacation for {SLEEP_BETWEEN_ROUNDS} seconds")
             time.sleep(SLEEP_BETWEEN_ROUNDS)
             print("Vacation over")
     except KeyboardInterrupt:
