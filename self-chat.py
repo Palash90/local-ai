@@ -62,6 +62,68 @@ DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 GENRE_CHECKLISTS_FILE = os.path.expanduser("~/local-ai-files/genre_checklists.json")
 
 
+GENRE_PERSONA_MAP_FILE = os.path.expanduser("~/local-ai-files/contexts/genre_persona_map.json")
+PERSONA_POOL_FILE = os.path.expanduser("~/local-ai-files/contexts/persona_pool.json")
+
+_persona_cycles = {}
+
+def load_json_file(filepath, fallback):
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"[persona] Could not load {filepath}: {e} — using fallback")
+        return fallback
+
+GENRE_PERSONA_MAP = load_json_file(GENRE_PERSONA_MAP_FILE, {})
+PERSONA_POOL = load_json_file(PERSONA_POOL_FILE, {})
+
+
+def pick_persona_round_robin(pool, genre, genre_map):
+    global _persona_cycles
+    allowed = genre_map.get(genre) or genre_map.get("default")
+    
+    # Hard safety rule: exclude Parent & Child from Adventure & Horror
+    if genre == "Adventure & Horror" and allowed:
+        allowed = [r for r in allowed if r != "Parent & Child"]
+
+    # Flatten pool: (relationship, mood, details_dict)
+    candidates = []
+    for rel, moods in pool.items():
+        if allowed and rel not in allowed:
+            continue
+        for mood, details in moods.items():
+            candidates.append((rel, mood, details))
+
+    if not candidates:
+        # Fallback default
+        fallback_details = {
+            "Kaya": {"role": "Colleague", "persona": "Creative and energetic problem solver"},
+            "Kolpo": {"role": "Colleague", "persona": "Methodical and structured partner"}
+        }
+        return "Colleagues", "Focused Collaboration", fallback_details
+
+    if genre not in _persona_cycles or _persona_cycles[genre]["idx"] >= len(_persona_cycles[genre]["pairs"]):
+        shuffled = list(candidates)
+        random.shuffle(shuffled)
+        _persona_cycles[genre] = {"pairs": shuffled, "idx": 0}
+
+    state = _persona_cycles[genre]
+    choice = state["pairs"][state["idx"]]
+    state["idx"] += 1
+    return choice  # Returns (relationship, mood, details_dict)
+
+
+def deep_merge(target, source):
+    """Recursively merge dictionary source into target."""
+    for key, value in source.items():
+        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
+            deep_merge(target[key], value)
+        else:
+            target[key] = value
+    return target
+
+
 def load_genre_checklists(extra=None):
     """Base checklists from genre_checklists.json, overridden per genre by any
     'genre_checklists' carried in a task config file."""
@@ -115,46 +177,52 @@ def _parse_tasks(items):
 
 
 def load_config_file(tasks_file):
-    """Load a task config file. Accepts either a plain task list or an object
-    with 'tasks' plus optional 'genre_checklists' (genre -> {editor, moderator}).
-    Returns (tasks, genre_checklists)."""
     if not os.path.isfile(tasks_file):
         print(f"Tasks file not found: {tasks_file}")
-        return [], {}
+        return [], {}, {}, {}
     with open(tasks_file, "r", encoding="utf-8") as f:
         try:
             data = json.load(f)
         except json.JSONDecodeError as e:
-            print(
-                f"[config] Invalid JSON in {tasks_file}: {e.msg} at line "
-                f"{e.lineno}, column {e.colno} (char {e.pos}). Check for "
-                "trailing commas after the last property/array item."
-            )
+            print(f"[config] Invalid JSON in {tasks_file}: {e.msg}")
             raise SystemExit(1) from e
+
     if isinstance(data, dict):
-        return _parse_tasks(data.get("tasks") or []), data.get("genre_checklists") or {}
-    return _parse_tasks(data), {}
+        tasks = _parse_tasks(data.get("tasks") or [])
+        checklists = data.get("genre_checklists") or {}
+        persona_map = data.get("genre_persona_map") or {}
+        persona_pool = data.get("persona_pool") or {}
+        return tasks, checklists, persona_map, persona_pool
+
+    return _parse_tasks(data), {}, {}, {}
 
 
 def load_tasks():
-    """Combine tasks from --config and/or the default file. No role tag => free.
-    Genre checklists from the config file override the default file's."""
     checklists = {}
+    persona_map = load_json_file(GENRE_PERSONA_MAP_FILE, {})
+    persona_pool = load_json_file(PERSONA_POOL_FILE, {})
+
     if args.config:
-        tasks, cfg_checklists = load_config_file(args.config)
+        tasks, cfg_checklists, cfg_persona_map, cfg_persona_pool = load_config_file(args.config)
         source = args.config
         checklists.update(cfg_checklists)
+        
+        # Merge config persona overrides
+        deep_merge(persona_map, cfg_persona_map)
+        deep_merge(persona_pool, cfg_persona_pool)
+
         if args.defaults:
-            defaults, def_checklists = load_config_file(DEFAULT_TASKS_FILE)
+            defaults, def_checklists, def_pmap, def_ppool = load_config_file(DEFAULT_TASKS_FILE)
             existing = {t["task"] for t in tasks}
             tasks.extend(t for t in defaults if t["task"] not in existing)
             checklists.update(def_checklists)
             source = f"{args.config} + defaults"
     else:
-        tasks, def_checklists = load_config_file(DEFAULT_TASKS_FILE)
+        tasks, def_checklists, def_pmap, def_ppool = load_config_file(DEFAULT_TASKS_FILE)
         checklists.update(def_checklists)
         source = DEFAULT_TASKS_FILE
-    return tasks, source, checklists
+
+    return tasks, source, checklists, persona_map, persona_pool
 
 
 def checklist_for(genre, role, task_checklist=None):
@@ -235,6 +303,10 @@ def run_dry_run():
         print(indent(checklist_for(genre, "editor", checklist)))
         print("  moderator checklist (resolved):")
         print(indent(checklist_for(genre, "moderator", checklist)))
+        print("ENVIRONMENT")    
+        print(f"  tasks source:        {TASKS_SOURCE}")
+        print(f"  persona map:         {len(GENRE_PERSONA_MAP)} genre mapping(s) active")
+        print(f"  persona pool:        {len(PERSONA_POOL)} relationship category(ies) active")
         print()
 
     print("=" * 68)
@@ -247,7 +319,11 @@ def run_dry_run():
         print(f"                         loaded ({len(GENRE_CHECKLISTS)} genre(s))")
 
     handled = {
-        SELF_CHAT_PROMPT_FILE: {"%task%", "%mediums%", "%_lang%", "%details%"},
+        SELF_CHAT_PROMPT_FILE: {
+            "%task%", "%mediums%", "%_lang%", "%details%", 
+            "%relationship%", "%mood%", "%kaya_role%", 
+            "%kaya_persona%", "%kolpo_role%", "%kolpo_persona%"
+        },
         EDITOR_PROMPT_FILE: {"%genre%", "%mediums%", "%language%", "%details%", "%checklist%"},
         MODERATOR_PROMPT_FILE: {"%genre%", "%mediums%", "%language%", "%details%", "%checklist%"},
     }
@@ -484,10 +560,32 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
+    # Pick persona tuple
+    relationship, mood, persona_details = pick_persona_round_robin(PERSONA_POOL, genre, GENRE_PERSONA_MAP)
+    
+    persona_info = {
+        "relationship": relationship,
+        "mood": mood,
+        "details": persona_details
+    }
+    
+    kaya_info = persona_details.get("Kaya", {})
+    kolpo_info = persona_details.get("Kolpo", {})
+
+    print(f"[persona] Genre: {genre} | Dynamic: {relationship} ({mood})")
+    print(f"[persona] Kaya: {kaya_info.get('role')} — {kaya_info.get('persona')}")
+    print(f"[persona] Kolpo: {kolpo_info.get('role')} — {kolpo_info.get('persona')}")
+
     s = STARTING_CONVERSATION.replace("%task%", task)
     s = s.replace("%mediums%", " , ".join(medium))
     s = s.replace("%_lang%", language)
     s = s.replace("%details%", details or "None")
+    s = s.replace("%relationship%", relationship)
+    s = s.replace("%mood%", mood)
+    s = s.replace("%kaya_role%", kaya_info.get("role", "Partner"))
+    s = s.replace("%kaya_persona%", kaya_info.get("persona", "Creative"))
+    s = s.replace("%kolpo_role%", kolpo_info.get("role", "Partner"))
+    s = s.replace("%kolpo_persona%", kolpo_info.get("persona", "Methodical"))
 
     print(s)
     prompt_block = {"name": "Self-Chat Directive", "content": s}
@@ -510,7 +608,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     incoming = ""
     shared_image_b64 = None
 
-    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre, path)
+    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre, path, persona_info)
     citations = {}
 
     while True:
@@ -718,7 +816,7 @@ def apply_title(title, stories_dir, fname):
     return stories_dir, fname
 
 
-def start_story(round_number, task, title, mediums, language, roles=None, genre="General", path=None):
+def start_story(round_number, task, title, mediums, language, roles=None, genre="General", path=None, persona_info = None):
     base_dir = path or STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
     now = datetime.now()
@@ -730,11 +828,14 @@ def start_story(round_number, task, title, mediums, language, roles=None, genre=
     os.makedirs(stories_dir, exist_ok=True)
     fname = os.path.join(stories_dir, f"story_r{round_number}_{timestamp}.md")
     roles = roles or ["free"]
+    rel = persona_info.get("relationship", "N/A") if persona_info else "N/A"
+    mood = persona_info.get("mood", "N/A") if persona_info else "N/A"
+
     header = [
         f"# {title}\n",
         f"*Round {round_number} · Generated on {now.strftime('%Y-%m-%d %H:%M:%S')}*\n\n",
         f"**Task prompt:** {task}\n\n",
-        f"**Genre:** {genre}\n\n",
+        f"**Genre:** {genre}  ·  **Dynamic:** {rel} ({mood})\n\n",
         f"**For roles:** {' , '.join(roles)}\n\n",
         f"**Mediums:** {' , '.join(mediums)}  ·  **Language(s):** {language}\n\n",
         "---\n\n",
@@ -1152,7 +1253,7 @@ def run_forever():
         print("\nManual Interruption")
 
 
-TASKS, TASKS_SOURCE, TASK_CHECKLISTS = load_tasks()
+TASKS, TASKS_SOURCE, TASK_CHECKLISTS, GENRE_PERSONA_MAP, PERSONA_POOL = load_tasks()
 if not TASKS:
     print("No tasks to run. Add tasks to a config file and restart.")
     raise SystemExit(1)
