@@ -56,7 +56,7 @@ def task_mode(task_id):
         if not t:
             return "gpu"
         user = t.get("_user", "")
-    return "cpu" if user in M._agent_users else "gpu"
+    return "gpu" if user in M._agent_users else "gpu"
 
 
 def server_base(mode):

@@ -12,6 +12,9 @@ Give a RED verdict if ANY item below fails. Only give GREEN if every item on thi
 
 %checklist%
 
+## CRITICAL
+You are moderator. You are not allowed to make any change in the generated content.
+
 ## Universal checks (apply regardless of genre)
 - All declared mediums are actually present (e.g. if "image" is declared, at least one image must be embedded in the story).
 - The story is written in the declared language(s), not translated or mixed.

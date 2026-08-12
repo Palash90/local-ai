@@ -43,13 +43,13 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 2.0
-SLEEP_BETWEEN_TURNS = 5.0
+SLEEP_BETWEEN_TURNS = 1.0
 MAX_MESSAGES_PER_AGENT = 4
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
 STARTING_CONVERSATION = open(SELF_CHAT_PROMPT_FILE).read()
 
-SLEEP_BETWEEN_ROUNDS = 900
+SLEEP_BETWEEN_ROUNDS = 10
 
 USERNAME_EDITOR = "editor"
 USERNAME_MODERATOR = "moderator"
@@ -637,7 +637,8 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
             json.dump(data, f, indent=2)
     else:
         print("=== Moderator phase ===")
-        run_moderator(stories_dir, fname, task, genre, editor_path=edited_path, mediums=medium, language=language, details=details, checklist=checklist)
+        print("Moderator Phase Skipped, not much value add")
+        # run_moderator(stories_dir, fname, task, genre, editor_path=edited_path, mediums=medium, language=language, details=details, checklist=checklist)
 
     return transcript, session_a, session_b, fname
 
@@ -978,7 +979,9 @@ def run_editor(stories_dir, fname, task, genre, mediums=None, language="", detai
                 token,
                 session_id,
                 f"This is the image referenced in the story as {img_fname}. "
-                "Look at it carefully; it is part of the story you must edit.",
+                "Look at it carefully; it is part of the story. Decide the quality of image."
+                "If it does not match the task expectation, flag it."
+                "But never add new image or edit existing one",
                 image_b64=file_to_b64(full),
             )
         wait_for_user_to_leave()

@@ -523,7 +523,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             }
             # Route to the GPU lane (interactive UI users) or the CPU lane
             # (self-chat agents) so the two never wait behind each other.
-            mode = "cpu" if user in _agent_users else "gpu"
+            mode = "gpu" if user in _agent_users else "gpu"
             with _queue_locks[mode]:
                 if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:
                     self.send_json({"error": "Server busy"}, status=503)

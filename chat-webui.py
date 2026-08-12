@@ -196,6 +196,7 @@ from server.features.monitoring import (  # noqa: E402
     _idle_unload_loop,
     _reminder_loop,
     _thermal_monitor,
+    _connection_manager,
     ensure_comfyui_running,
     ensure_llama_server,
     get_gpu_temp,
@@ -265,6 +266,7 @@ if __name__ == "__main__":
     threading.Thread(target=_idle_unload_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()
     threading.Thread(target=_reminder_loop, daemon=True).start()
+    threading.Thread(target=_connection_manager, daemon=True).start()
     print(f"Chat UI running on http://localhost:{PORT}")
     s = http.server.HTTPServer((HOST, PORT), Handler)
     try:

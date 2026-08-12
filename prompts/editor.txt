@@ -18,7 +18,12 @@ Check the content against every item below. Where you can fix a failure yourself
   Mediums, Language(s)).
 - Never remove existing image references (`![...](...)`) unless the image file is
   genuinely broken or missing.
+- Never add new sections or image or any new ideas to the existing work done by Kaya and Kolpo
 - Never remove the "## Citations & References" section if the original has one.
 - Never write the names "Kaya", "Kolpo", "কায়া", "কল্প", "काया", "कल्प" anywhere
   in the content text, dialogue, captions, or headings.
 - Keep the content in the declared language(s). Do not translate it.
+
+### CRITICAL TASK COMPLETION RULES
+- ONCE CONTENT IS EDITED, CHECK THE TASK LIST
+- IF ANY TASK IN THE PENDING STATUS GOT COMPLETED IN THE CONTENT, MARK THAT `THEME` COMPLETE

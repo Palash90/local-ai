@@ -73,12 +73,15 @@ Execution Rules for Collaboration:
      user — not just this run. Use it to guarantee variety: never repeat a
      subject, joke, scene, dish/recipe, or image concept that you have already
      used before, even in an unrelated task.
+   - FOR CHARACTERS, LOCATIONS, AMBIENCE IN YOUR CONTENT, DEFINE AS MANY FEATURES AS POSSIBLE.
+
    1. BEFORE agreeing on an idea in Phase 1:
       - Run `manage_tasks(operation="list")`.
       - Read every task whose title starts with "THEME:" — each one is a
         one-line record of a subject/premise/recipe/image concept used in a
         past piece of content.
    2. CHOOSING THE IDEA:
+      - AVOID CHOOSING THEMES, CHARACTER DETAILS OR AMBIENCE THOSE HAVE ALREADY BEEN MARKED COMPLETE IN THE TASKS.
       - Do not propose or settle on any subject, premise, joke, dish, or
         central image concept that duplicates or closely resembles an
         existing "THEME:" entry (same animal, same punchline, same recipe,
@@ -95,6 +98,7 @@ Execution Rules for Collaboration:
    4. Do NOT create a "THEME:" entry for anything other than the core creative
       concept — do not log individual scenes, minor details, or every image;
       one entry per piece of content is enough to prevent duplication.
+   5. [IMPORTANT]: ONCE THE THEME IS COMPLETE, UPDATE ITS STATUS TO `COMPLETE`
 
 5. Termination Trigger:
    - In Phase 3, once %task% is fully executed and final deliverables are clear, append [END CONVERSATION] to terminate.

@@ -9,6 +9,8 @@ import markdown
 from fastapi import FastAPI, HTTPException, Header, Request, Response, status
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
+import json
+from urllib.parse import quote
 
 app = FastAPI()
 
@@ -281,8 +283,13 @@ async def index(request: Request):
             lis = []
             for sid in sids:
                 badge = moderation_badge(story_moderation(os.path.join(root, sid)))
+                
+                # Safely quote path segments for URLs and escape HTML text display
+                encoded_sid = "/".join(quote(part) for part in sid.split("/"))
+                display_name = html.escape(sid.split("/")[-1])
+                
                 lis.append(
-                    f'<li><a href="/story/{name}/{sid}">{sid.split("/")[-1]}</a>{badge}</li>'
+                    f'<li><a href="/story/{name}/{encoded_sid}">{display_name}</a>{badge}</li>'
                 )
             sections.append(heading + "<ul>" + "".join(lis) + "</ul>")
         cards.append(
@@ -427,8 +434,6 @@ async def index(request: Request):
     </body>
     </html>
     """
-
-
 @app.get("/media/{collection}/{story_id:path}/{filename}")
 async def serve_story_image(
     collection: str, 
@@ -562,13 +567,18 @@ async def read_story(
 
     delete_button_html = '<button id="delete-btn">Delete story</button>' if is_admin else ""
 
+    # Escaped parameters for safe JavaScript injection and HTTP URL generation
+    story_id_js = json.dumps(story_id)
+    encoded_collection = quote(collection)
+    encoded_story_path = "/".join(quote(part) for part in story_id.split("/"))
+
     return f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>{story_id.replace('-', ' ').title()}</title>
+        <title>{html.escape(story_id.split('/')[-1].replace('-', ' ').title())}</title>
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
         <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
         <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
@@ -623,12 +633,12 @@ async def read_story(
         {verdict_html}
         <article id="story-article">{html_content}</article>
         <script>
+            const storyId = {story_id_js};
             const article = document.getElementById('story-article');
             let lastHtml = article.innerHTML;
 
             function typesetMath() {{
                 if (typeof renderMathInElement !== 'function') {{
-                    // KaTeX scripts (deferred) may not have executed yet on first paint.
                     setTimeout(typesetMath, 100);
                     return;
                 }}
@@ -646,7 +656,7 @@ async def read_story(
 
             async function poll() {{
                 try {{
-                    const r = await fetch('/story/{collection}/{story_id}/content');
+                    const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/content');
                     if (!r.ok) return;
                     const data = await r.json();
                     const newHtml = data.html;
@@ -669,9 +679,9 @@ async def read_story(
             const deleteBtn = document.getElementById('delete-btn');
             if (deleteBtn) {{
                 deleteBtn.addEventListener('click', async () => {{
-                    if (!confirm('Delete this story and all its images?')) return;
+                    if (!confirm(`Delete story "${{storyId}}" and all its images?`)) return;
                     try {{
-                        const r = await fetch('/story/{collection}/{story_id}', {{ method: 'DELETE' }});
+                        const r = await fetch('/story/{encoded_collection}/{encoded_story_path}', {{ method: 'DELETE' }});
                         if (r.ok) {{
                             window.location.href = '/';
                         }} else {{
