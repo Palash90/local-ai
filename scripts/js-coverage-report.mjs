@@ -4,36 +4,7 @@ import path from 'node:path';
 const RAW_DIR = path.resolve('coverage-js', 'raw');
 const ROOT = process.cwd();
 
-function isReportable(url) {
-  if (!url || url.startsWith('data:') || url.startsWith('blob:')) return false;
-  const q = url.split('?')[0];
-  if (q.startsWith('/@')) return false; // vite internals
-  if (q.includes('/node_modules/')) return false;
-  if (q.startsWith('/dist/')) return false;
-  if (q.startsWith('/tests/')) return false;
-  return true;
-}
-
-// byte offset -> 1-based line number via binary search over newline offsets
-function makeLineIndex(text) {
-  const nl = [-1];
-  for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) === 10) nl.push(i);
-  }
-  nl.push(text.length + 1);
-  return (offset) => {
-    let lo = 0;
-    let hi = nl.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (nl[mid] < offset) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  };
-}
-
-const merged = new Map(); // url -> { text, lines: Set<number> }
+const merged = new Map(); // file -> Set<1-based line>
 
 for (const file of fs.readdirSync(RAW_DIR)) {
   if (!file.endsWith('.json')) continue;
@@ -43,37 +14,27 @@ for (const file of fs.readdirSync(RAW_DIR)) {
   } catch {
     continue;
   }
-  for (const entry of entries) {
-    if (!isReportable(entry.url)) continue;
-    const text = entry.text || '';
-    let rec = merged.get(entry.url);
-    if (!rec) {
-      rec = { text, lines: new Set(), lineIndex: makeLineIndex(text) };
-      merged.set(entry.url, rec);
+  if (!Array.isArray(entries)) continue;
+  for (const e of entries) {
+    if (!e.file) continue;
+    if (e.file.startsWith('/node_modules/') || e.file.includes('/node_modules/')) continue;
+    if (!e.file.startsWith('src/')) continue;
+    let set = merged.get(e.file);
+    if (!set) {
+      set = new Set();
+      merged.set(e.file, set);
     }
-    const startLine = rec.lineIndex(0);
-    for (const r of entry.ranges || []) {
-      const start = Math.max(0, Math.min(r.start, text.length));
-      const end = Math.max(start, Math.min(r.end, text.length));
-      const l1 = rec.lineIndex(start);
-      const l2 = rec.lineIndex(Math.max(end - 1, start));
-      for (let l = l1; l <= l2; l++) rec.lines.add(l);
-    }
+    for (const l of e.lines || []) set.add(l + 1); // sourcemap lines are 0-based
   }
 }
 
 const rows = [];
-for (const [url, rec] of merged) {
-  const srcPath = url.split('?')[0].replace(/^\//, '');
-  const fsPath = path.join(ROOT, srcPath);
-  let total = 0;
-  if (fs.existsSync(fsPath)) {
-    total = fs.readFileSync(fsPath, 'utf8').split('\n').length;
-  } else {
-    total = Math.max(...rec.lines, 1);
-  }
-  const hit = rec.lines.size;
-  rows.push({ file: srcPath, hit, total, pct: total ? (hit / total) * 100 : 100 });
+for (const [file, hitLines] of merged) {
+  const fsPath = path.join(ROOT, file);
+  if (!fs.existsSync(fsPath)) continue;
+  const total = fs.readFileSync(fsPath, 'utf8').split('\n').length;
+  const hit = [...hitLines].filter((l) => l >= 1 && l <= total).length;
+  rows.push({ file, hit, total, pct: total ? (hit / total) * 100 : 100 });
 }
 
 rows.sort((a, b) => a.pct - b.pct);
@@ -81,7 +42,7 @@ rows.sort((a, b) => a.pct - b.pct);
 const allHit = rows.reduce((s, r) => s + r.hit, 0);
 const allTotal = rows.reduce((s, r) => s + r.total, 0);
 
-console.log('JS test coverage (V8, line-based, Chromium)');
+console.log('JS test coverage (V8, source-level, Chromium)');
 console.log('');
 console.log('File                                        Lines   Hit    Cover   Missing');
 console.log('---------------------------------------------------------------------------');
