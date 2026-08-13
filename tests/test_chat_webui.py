@@ -2641,6 +2641,42 @@ class TestLLMWorker:
         chat_webui._llm_worker("t1", "s1", 0, chat_webui.sessions["s1"])
         assert events and events[0][0][0] == "llm_ok"
 
+    def test_tool_free_agents_get_no_tools(self, chat_webui, temp_paths, monkeypatch):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        chat_webui._agent_users.add("moderator")
+        chat_webui._agent_users.add("kolpo")
+        chat_webui.sessions.clear()
+        chat_webui.sessions["s1"] = [{"role": "user", "content": "hi"}]
+        sent = {}
+
+        def fake_post(*a, **k):
+            sent.update(k)
+            return self._stream(
+                ['data: {"choices": [{"delta": {"content": "ok"}}]}', "data: [DONE]"]
+            )
+
+        monkeypatch.setattr(chat_webui.requests, "post", fake_post)
+        chat_webui.tasks["t1"] = {"session_id": "s1", "reasoning": "", "_user": "editor"}
+        chat_webui._llm_worker("t1", "s1", 0, chat_webui.sessions["s1"])
+        assert sent["json"]["tools"] == []
+        assert sent["json"]["tool_choice"] == "none"
+
+        chat_webui.tasks["t2"] = {"session_id": "s1", "reasoning": "", "_user": "moderator"}
+        chat_webui._llm_worker("t2", "s1", 0, chat_webui.sessions["s1"])
+        assert sent["json"]["tools"] == []
+        assert sent["json"]["tool_choice"] == "none"
+
+        chat_webui.tasks["t3"] = {"session_id": "s1", "reasoning": "", "_user": "kolpo"}
+        chat_webui._llm_worker("t3", "s1", 0, chat_webui.sessions["s1"])
+        assert sent["json"]["tools"] == chat_webui.TOOLS
+        assert sent["json"]["tool_choice"] == "auto"
+
+        chat_webui.tasks["t4"] = {"session_id": "s1", "reasoning": ""}
+        chat_webui._llm_worker("t4", "s1", 0, chat_webui.sessions["s1"])
+        assert sent["json"]["tools"] == chat_webui.TOOLS
+        assert sent["json"]["tool_choice"] == "auto"
+
 
 # ---------------------------------------------------------------------------
 # _event_loop

@@ -213,11 +213,14 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
         if tool_msgs:
             print(f"[llm_round] Round {round_num} includes {len(tool_msgs)} tool message(s) with search results")  # DEBUG
+        with M._data_lock:
+            task_user = M.tasks.get(task_id, {}).get("_user", "")
+        tool_free = task_user in M.TOOL_FREE_AGENTS
         payload = {
             "model": M.server_model_id(mode),
             "messages": messages,
-            "tools": M.TOOLS,
-            "tool_choice": "auto",
+            "tools": [] if tool_free else M.TOOLS,
+            "tool_choice": "none" if tool_free else "auto",
             "max_tokens": M.MAX_INPUT_TOKENS,
             #"reasoning_budget": REASONING_BUDGET,
             #"reasoning_effort": "medium",

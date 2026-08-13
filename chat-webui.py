@@ -51,6 +51,7 @@ from server.config import (  # noqa: F401
     SESSIONS_FILE,
     TASKS_DB,
     THEMES_DB,
+    TOOL_FREE_AGENTS,
     TOOLS,
     TOOLS_TOKEN_COST,
     UPLOADS_DIR,

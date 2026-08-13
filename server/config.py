@@ -29,6 +29,13 @@ SELF_CHAT_MODE = os.environ.get("SELF_CHAT_MODE", "cpu").strip().lower()
 if SELF_CHAT_MODE not in ("cpu", "gpu"):
     SELF_CHAT_MODE = "cpu"
 
+# Review-only self-chat roles that must NEVER call tools. The editor/moderator
+# are the same creative LLM as the story-writing agents, and with the tool list
+# enabled (tool_choice "auto") they spontaneously call generate_image/edit_image
+# while revising markdown, burning ComfyUI VRAM on unwanted images. Their chat
+# requests are sent with an empty tool list and tool_choice "none".
+TOOL_FREE_AGENTS = {"editor", "moderator"}
+
 # model.json holds the LLM model filenames (relative to ~/local-ai-files/my-models/)
 # per runtime mode: "gpu" for interactive chat UI users, "cpu" for automated
 # self-chat agents (editor/moderator/registered agents). Falls back to the legacy

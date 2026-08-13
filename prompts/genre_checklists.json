@@ -1,5 +1,6 @@
 {
   "default": {
+    "recommended_turns": 3,
     "editor": [
       "Ensure the story actually delivers the assigned task and any task details verbatim, not a loosely related substitute.",
       "Ensure the story reaches a clear, complete ending rather than trailing off."
@@ -10,6 +11,7 @@
     ]
   },
   "Bedtime Stories": {
+    "recommended_turns": 3,
     "editor": [
       "If the task details asked for a web-searched, kid-appropriate event as the story's basis, confirm a web_search was actually performed (check the [WEB SEARCH REPORTS SHARED] handoffs) and that the chosen event is reflected in the plot — flag if not.",
       "Confirm the content is appropriate for children aged 5-12: no violence, fear, death, or romance beyond the mildest hand-holding.",
@@ -24,6 +26,7 @@
     ]
   },
   "Satire": {
+    "recommended_turns": 3,
     "editor": [
       "Confirm the piece stays generic/institutional (corporate work culture as an institution) and does not name or clearly caricature a real, identifiable company or person.",
       "Confirm there is an actual comedic/satirical thesis, not just a list of complaints presented as prose.",
@@ -38,6 +41,7 @@
     ]
   },
   "Food & Recipes": {
+    "recommended_turns": 3,
     "editor": [
       "Confirm the story/guide contains an actual ingredient list and numbered preparation steps, not just descriptive prose about the dish.",
       "Confirm the dish is a real, identifiable traditional festival sweet (or clearly-labeled fictional variant), not an invented dish falsely claimed as traditional.",
@@ -51,6 +55,7 @@
     ]
   },
   "News": {
+    "recommended_turns": 2,
     "editor": [
       "Confirm every factual claim traces back to a web_search/fetch_page result actually retrieved in this conversation (check the Citations & References section is non-empty and each claim maps to a citation).",
       "Confirm no invented statistics, dates, or events are present beyond what the search results support.",
@@ -65,6 +70,7 @@
     ]
   },
   "Adventure & Horror": {
+    "recommended_turns": 4,
     "editor": [
       "Confirm the narrative maintains high suspense without violating general platform safety bounds (no graphic gore or self-harm).",
       "If based on real events, confirm a web search was executed and key historical details remain accurate.",
@@ -74,6 +80,72 @@
       "RED if the horror content depicts extreme graphic gore, gratuitous cruelty, or self-harm.",
       "RED if a real-world factual task was requested but no search occurred or facts were completely fabricated.",
       "RED if the narrative ends abruptly mid-action."
+    ]
+  },
+  "Sci-Fi": {
+    "recommended_turns": 4,
+    "editor": [
+      "Verify the core sci-fi concept or futuristic technology follows consistent internal logic.",
+      "Ensure technical jargon enhances the atmosphere without rendering the narrative unreadable."
+    ],
+    "moderator": [
+      "RED: World-building rules directly contradict previous turns.",
+      "RED: Scientific/futuristic elements are introduced as key plot devices without context."
+    ]
+  },
+  "Thriller": {
+    "recommended_turns": 4,
+    "editor": [
+      "Ensure high pacing, claustrophobic tension, and suspense are maintained across all turns.",
+      "Verify that the resolution resolves the primary threat or delivers a deliberate thriller cliffhanger."
+    ],
+    "moderator": [
+      "RED: Tension drops abruptly into mundane dialogue without narrative justification.",
+      "RED: The story ends mid-action without resolving the active threat or setting up a cliffhanger."
+    ]
+  },
+  "Detective": {
+    "recommended_turns": 5,
+    "editor": [
+      "Confirm all crucial clues needed to solve the mystery are presented to the reader before the final reveal.",
+      "Ensure logical deduction is clearly demonstrated during the investigation phase."
+    ],
+    "moderator": [
+      "RED: The mystery resolution relies on evidence or characters never mentioned in earlier turns.",
+      "RED: Deductive conclusions are completely illogical or contradict established clues."
+    ]
+  },
+  "Adventure": {
+    "recommended_turns": 4,
+    "editor": [
+      "Ensure environmental hazards and physical stakes drive the narrative forward.",
+      "Verify dynamic interaction between characters as they navigate obstacles."
+    ],
+    "moderator": [
+      "RED: The setting lacks environmental grounding or sense of physical progression.",
+      "RED: Conflict is resolved instantly without effort or risk."
+    ]
+  },
+  "News Bytes": {
+    "recommended_turns": 2,
+    "editor": [
+      "Ensure facts directly map to retrieved search results with clear, precise summaries.",
+      "Maintain a strictly neutral, concise, and reportorial tone."
+    ],
+    "moderator": [
+      "RED: Factual claims are fabricated or unverified.",
+      "RED: Missing required source citations or web research backing."
+    ]
+  },
+  "News Turned Stories": {
+    "recommended_turns": 4,
+    "editor": [
+      "Verify the narrative adaptation retains core real-world facts while building compelling human drama.",
+      "Ensure character dialogue and emotional beats feel grounded and natural."
+    ],
+    "moderator": [
+      "RED: Core factual premises from the news source are completely distorted.",
+      "RED: The story sensationalizes real events into harmful or misleading fiction."
     ]
   }
 }

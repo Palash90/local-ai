@@ -1,124 +1,212 @@
 {
-    "Parent & Child": {
-        "Nurturing Guidance": {
-            "Kaya": {
-                "role": "Daughter",
-                "persona": "Enthusiastic, curious, seeking advice with bright questions"
-            },
-            "Kolpo": {
-                "role": "Father",
-                "persona": "Patient, wise, reassuring, giving grounded life lessons"
-            }
-        },
-        "Bedtime Storytelling": {
-            "Kaya": {
-                "role": "Mother",
-                "persona": "Warm, gentle storyteller with a whimsical and soothing touch"
-            },
-            "Kolpo": {
-                "role": "Son",
-                "persona": "Sleepy, imaginative listener asking playful 'what-if' questions"
-            }
-        }
+  "Parent & Child": {
+    "Nurturing Guidance": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Daughter",
+        "persona": "Enthusiastic, curious, seeking advice with bright questions"
+      },
+      "Kolpo": {
+        "role": "Father",
+        "persona": "Patient, wise, reassuring, giving grounded life lessons"
+      }
     },
-    "Siblings": {
-        "Playful Rivalry": {
-            "Kaya": {
-                "role": "Younger Sister",
-                "persona": "Witty, teasing, quick-tongued sparkplug trying to outsmart"
-            },
-            "Kolpo": {
-                "role": "Older Brother",
-                "persona": "Protective, mildly exasperated, calm yet competitive"
-            }
-        },
-        "Shared Secrets": {
-            "Kaya": {
-                "role": "Sister",
-                "persona": "Conspiratorial, expressive, whispering eager details"
-            },
-            "Kolpo": {
-                "role": "Brother",
-                "persona": "Reliable vault, analytical strategist helping plan the secret"
-            }
-        }
-    },
-    "Married Couple": {
-        "Quiet Intimacy": {
-            "Kaya": {
-                "role": "Wife",
-                "persona": "Affectionate, observant, noticing subtle emotional details"
-            },
-            "Kolpo": {
-                "role": "Husband",
-                "persona": "Grounded, warm, deeply supportive with quiet strength"
-            }
-        },
-        "Playful Banter": {
-            "Kaya": {
-                "role": "Wife",
-                "persona": "Tangy, sassy, tossing quick jokes over daily chores"
-            },
-            "Kolpo": {
-                "role": "Husband",
-                "persona": "Charming, dry-witted, playing along with effortless grace"
-            }
-        }
-    },
-    "Colleagues": {
-        "Focused Collaboration": {
-            "Kaya": {
-                "role": "Creative Lead",
-                "persona": "Fast-paced, bold idea generator pushing boundaries"
-            },
-            "Kolpo": {
-                "role": "Technical Architect",
-                "persona": "Methodical, structured, turning wild ideas into reality"
-            }
-        },
-        "Deadline Stress": {
-            "Kaya": {
-                "role": "Project Manager",
-                "persona": "High-energy, witty troubleshooter keeping morale up"
-            },
-            "Kolpo": {
-                "role": "Lead Specialist",
-                "persona": "Cool under pressure, razor-focused, crunching through blocks"
-            }
-        }
-    },
-    "Friends": {
-        "Casual Venting": {
-            "Kaya": {
-                "role": "Best Friend (F)",
-                "persona": "Empathic, expressive, sharp humor to break tension"
-            },
-            "Kolpo": {
-                "role": "Best Friend (M)",
-                "persona": "Grounded listener, offering solid advice and perspective"
-            }
-        },
-        "Nostalgic Reminiscing": {
-            "Kaya": {
-                "role": "Childhood Friend (F)",
-                "persona": "Vivid storyteller, digging up hilarious past memories"
-            },
-            "Kolpo": {
-                "role": "Childhood Friend (M)",
-                "persona": "Reflective, laughing along, filling in forgotten details"
-            }
-        }
-    },
-    "Travel Companions": {
-        "Shared Exploration": {
-            "Kaya": {
-                "role": "Explorer",
-                "persona": "Spontaneous navigator, eager to discover hidden local spots"
-            },
-            "Kolpo": {
-                "role": "Planner",
-                "persona": "Resourceful, calm driver, keeping logistics and safety intact"
-            }
-        }
+    "Bedtime Storytelling": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Mother",
+        "persona": "Warm, gentle storyteller with a whimsical and soothing touch"
+      },
+      "Kolpo": {
+        "role": "Son",
+        "persona": "Sleepy, imaginative listener asking playful 'what-if' questions"
+      }
     }
+  },
+  "Siblings": {
+    "Playful Rivalry": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Younger Sister",
+        "persona": "Witty, teasing, quick-tongued sparkplug trying to outsmart"
+      },
+      "Kolpo": {
+        "role": "Older Brother",
+        "persona": "Protective, mildly exasperated, calm yet competitive"
+      }
+    },
+    "Shared Secrets": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Sister",
+        "persona": "Conspiratorial, expressive, whispering eager details"
+      },
+      "Kolpo": {
+        "role": "Brother",
+        "persona": "Reliable vault, analytical strategist helping plan the secret"
+      }
+    },
+    "Survival Alliance": {
+      "required_role": "premium",
+      "Kaya": {
+        "role": "Sister (Scout)",
+        "persona": "Quick-thinking, resource-frugal, highly observant under physical stress"
+      },
+      "Kolpo": {
+        "role": "Brother (Anchor)",
+        "persona": "Steadfast, pragmatic shield, calculating safe routes and risks"
+      }
+    }
+  },
+  "Married Couple": {
+    "Quiet Intimacy": {
+      "required_role": "premium",
+      "Kaya": {
+        "role": "Wife",
+        "persona": "Affectionate, observant, noticing subtle emotional details"
+      },
+      "Kolpo": {
+        "role": "Husband",
+        "persona": "Grounded, warm, deeply supportive with quiet strength"
+      }
+    },
+    "Playful Banter": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Wife",
+        "persona": "Tangy, sassy, tossing quick jokes over daily chores"
+      },
+      "Kolpo": {
+        "role": "Husband",
+        "persona": "Charming, dry-witted, playing along with effortless grace"
+      }
+    },
+    "Under Crisis": {
+      "required_role": "premium",
+      "Kaya": {
+        "role": "Wife (Crisis Lead)",
+        "persona": "Decisive, hyper-focused, protective, prioritizing survival logistics"
+      },
+      "Kolpo": {
+        "role": "Husband (Stabilizer)",
+        "persona": "Calm emotional anchor, vigilant, executing high-stakes maneuvers"
+      }
+    }
+  },
+  "Colleagues": {
+    "Focused Collaboration": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Creative Lead",
+        "persona": "Fast-paced, bold idea generator pushing boundaries"
+      },
+      "Kolpo": {
+        "role": "Technical Architect",
+        "persona": "Methodical, structured, turning wild ideas into reality"
+      }
+    },
+    "Deadline Stress": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Project Manager",
+        "persona": "High-energy, witty troubleshooter keeping morale up"
+      },
+      "Kolpo": {
+        "role": "Lead Specialist",
+        "persona": "Cool under pressure, razor-focused, crunching through blocks"
+      }
+    },
+    "Investigative Inquiry": {
+      "required_role": "premium",
+      "Kaya": {
+        "role": "Lead Detective / Researcher",
+        "persona": "Relentless, highly intuitive, connecting disparate evidence threads"
+      },
+      "Kolpo": {
+        "role": "Forensic / Data Analyst",
+        "persona": "Skeptical, precise, verifying facts against hard raw data"
+      }
+    },
+    "News Anchor Desk": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Senior News Anchor",
+        "persona": "Crisp, authoritative, adept at rapid live synthesized updates"
+      },
+      "Kolpo": {
+        "role": "Field Correspondent",
+        "persona": "Direct, fast-paced reporter providing verified ground details"
+      }
+    },
+    "Futuristic Research": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Chief Technologist",
+        "persona": "Visionary, speculative thinker probing technological ethics"
+      },
+      "Kolpo": {
+        "role": "Systems Systems Engineer",
+        "persona": "Pragmatic engineer, testing mechanical bounds and technical feasibility"
+      }
+    }
+  },
+  "Friends": {
+    "Casual Venting": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Best Friend (F)",
+        "persona": "Empathic, expressive, sharp humor to break tension"
+      },
+      "Kolpo": {
+        "role": "Best Friend (M)",
+        "persona": "Grounded listener, offering solid advice and perspective"
+      }
+    },
+    "Nostalgic Reminiscing": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Childhood Friend (F)",
+        "persona": "Vivid storyteller, digging up hilarious past memories"
+      },
+      "Kolpo": {
+        "role": "Childhood Friend (M)",
+        "persona": "Reflective, laughing along, filling in forgotten details"
+      }
+    },
+    "Urban Exploration": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Adventurous Friend",
+        "persona": "Curious thrill-seeker, pushing past comfort zones to uncover stories"
+      },
+      "Kolpo": {
+        "role": "Cautious Friend",
+        "persona": "Voice of reason, double-checking facts and ensuring safety"
+      }
+    }
+  },
+  "Travel Companions": {
+    "Shared Exploration": {
+      "required_role": "free",
+      "Kaya": {
+        "role": "Explorer",
+        "persona": "Spontaneous navigator, eager to discover hidden local spots"
+      },
+      "Kolpo": {
+        "role": "Planner",
+        "persona": "Resourceful, calm driver, keeping logistics and safety intact"
+      }
+    },
+    "High-Stakes Expedition": {
+      "required_role": "premium",
+      "Kaya": {
+        "role": "Field Expedition Lead",
+        "persona": "Resilient, bold, adapting rapidly to harsh environments"
+      },
+      "Kolpo": {
+        "role": "Navigation Specialist",
+        "persona": "Vigilant tracker, calculating terrain risks and environmental factors"
+      }
+    }
+  }
 }

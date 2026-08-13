@@ -1,8 +1,61 @@
 {
-  "Bedtime Stories": ["Parent & Child", "Siblings", "Married Couple"],
-  "Satire": ["Colleagues", "Friends"],
-  "Food & Recipes": ["Married Couple", "Parent & Child", "Friends", "Siblings"],
-  "News": ["Colleagues", "Friends"],
-  "Adventure & Horror": ["Travel Companions", "Friends", "Siblings", "Married Couple"],
-  "default": ["Colleagues", "Friends"]
+  "Bedtime Stories": [
+    "Parent & Child",
+    "Siblings",
+    "Married Couple"
+  ],
+  "Satire": [
+    "Colleagues",
+    "Friends"
+  ],
+  "Food & Recipes": [
+    "Married Couple",
+    "Parent & Child",
+    "Friends",
+    "Siblings"
+  ],
+  "News": [
+    "Colleagues",
+    "Friends"
+  ],
+  "Adventure & Horror": [
+    "Travel Companions",
+    "Friends",
+    "Siblings",
+    "Married Couple"
+  ],
+  "Sci-Fi": [
+    "Colleagues",
+    "Travel Companions",
+    "Friends",
+    "Married Couple"
+  ],
+  "Thriller": [
+    "Colleagues",
+    "Friends",
+    "Married Couple",
+    "Siblings"
+  ],
+  "Detective": [
+    "Colleagues",
+    "Friends"
+  ],
+  "Adventure": [
+    "Travel Companions",
+    "Friends",
+    "Siblings",
+    "Married Couple"
+  ],
+  "News Bytes": [
+    "Colleagues"
+  ],
+  "News Turned Stories": [
+    "Colleagues",
+    "Friends",
+    "Siblings"
+  ],
+  "default": [
+    "Colleagues",
+    "Friends"
+  ]
 }

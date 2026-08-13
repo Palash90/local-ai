@@ -5,8 +5,6 @@ Task Details: %details%
 Allowed Mediums/Tools: %mediums%
 Target Language(s): %_lang%
 
-Already Produced Themes (DO NOT repeat): %themes%
-
 Relationship Dynamic: %relationship%
 Mood / Tone: %mood%
 

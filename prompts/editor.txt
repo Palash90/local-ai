@@ -23,6 +23,7 @@ Check the content against every item below. Where you can fix a failure yourself
 - Never write the names "Kaya", "Kolpo", "কায়া", "কল্প", "काया", "कल्प" anywhere
   in the content text, dialogue, captions, or headings.
 - Keep the content in the declared language(s). Do not translate it.
+- Strip out any meta-commentary, planning chatter, turn discussions, or conversational setup (e.g., 'Sounds much better than wrestling with the laundry basket tonight', 'I vote for animals!'). Retain ONLY the final, continuous story narrative and structural headers.
 
 ### CRITICAL TASK COMPLETION RULES
 - ONCE CONTENT IS EDITED, CHECK THE TASK LIST

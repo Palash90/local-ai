@@ -1,0 +1,477 @@
+{
+    "kids_hero": {
+        "selector": "roundrobin",
+        "values": [
+            "a sleepy kitten",
+            "a brave little mouse",
+            "a curious owl chick",
+            "a playful puppy"
+        ]
+    },
+    "story_animals": {
+        "selector": "random",
+        "values": [
+            "horse",
+            "elephant",
+            "cow",
+            "cat",
+            "dog",
+            "goat",
+            "rabbit"
+        ]
+    },
+    "time_of_day": {
+        "selector": "roundrobin",
+        "values": [
+            "day",
+            "midday",
+            "evening",
+            "night"
+        ]
+    },
+    "setting_cozy": {
+        "selector": "random",
+        "values": [
+            "a cozy farmhouse",
+            "a lighthouse by the sea",
+            "an enchanted garden",
+            "a quiet village"
+        ]
+    },
+    "mood_cozy": {
+        "selector": "random",
+        "values": [
+            "gentle and soothing",
+            "playful and warm",
+            "quiet and dreamy"
+        ]
+    },
+    "setting_adventure": {
+        "selector": "roundrobin",
+        "values": [
+            "deep-sea exploration",
+            "extreme mountain survival",
+            "cave rescues",
+            "polar expeditions",
+            "a lost jungle trek"
+        ]
+    },
+    "setting_horror": {
+        "selector": "random",
+        "values": [
+            "an isolated cabin",
+            "a fogged-in small town",
+            "an empty apartment building",
+            "a house that is too quiet"
+        ]
+    },
+    "mood_horror": {
+        "selector": "random",
+        "values": [
+            "psychological dread",
+            "claustrophobic tension",
+            "relentless physical struggle",
+            "quiet hopelessness"
+        ]
+    },
+    "trope_horror": {
+        "selector": "roundrobin",
+        "values": [
+            "a mirror that isn't quite right",
+            "a recurring sound only one person hears",
+            "a room that doesn't belong",
+            "an old letter that rewrites itself",
+            "a guest who knows too much"
+        ]
+    },
+    "scifi_domain": {
+        "selector": "roundrobin",
+        "values": [
+            "neural brain-computer interfaces",
+            "advanced bionic prosthetics",
+            "synthetic organ replacement",
+            "quantum consciousness networks"
+        ]
+    },
+    "thriller_threat": {
+        "selector": "roundrobin",
+        "values": [
+            "compromised orbital satellite data",
+            "a rogue autonomous military AI",
+            "an encrypted offshore transfer log",
+            "a biological tracking breach"
+        ]
+    },
+    "detective_mystery": {
+        "selector": "roundrobin",
+        "values": [
+            "a vanished artifact from a sealed vault",
+            "an impossible high-society theft",
+            "a cold case involving a cryptically rewritten diary",
+            "a locked-room disappearance"
+        ]
+    },
+    "news_topics": {
+        "selector": "roundrobin",
+        "values": [
+            "global tech updates",
+            "space discovery headlines",
+            "environmental research breakthroughs",
+            "renewable energy innovations"
+        ]
+    },
+    "kids_age_group": {
+        "name": "children_age",
+        "selector": "random",
+        "values": [
+            "toddler (2-3 years old)",
+            "child (6-8 years old)",
+            "pre-teen (10-12 years old)"
+        ]
+    },
+    "working_class_age_group": {
+        "name": "age_group",
+        "selector": "random",
+        "values": [
+            "teenager (15-17 years old)",
+            "young adult (20-25 years old)",
+            "adult in prime (30-35 years old)",
+            "middle-aged (45-50 years old)"
+        ]
+    },
+    "retirement_age_group": {
+        "name": "retirement_age",
+        "values": [
+            "senior/elderly (65-70 years old)"
+        ]
+    },
+    "feature_indian_ethnicity": {
+        "name": "ethnicity_look",
+        "selector": "random",
+        "values": [
+            "Himachali",
+            "Bhojpuri",
+            "Magahi",
+            "Manipuri",
+            "Sikkimese",
+            "Anglo-Indian",
+            "Tuluva",
+            "Haryanvi",
+            "North East Indian",
+            "Dravidian",
+            "Assamese",
+            "Naga",
+            "Bengali",
+            "Adivasi",
+            "Afro-Indian",
+            "Parsi",
+            "Kashmiri Muslim",
+            "Gujrati",
+            "Rajasthani",
+            "Garhwali",
+            "Sindhi",
+            "Marathi",
+            "Punjabi",
+            "Malyali",
+            "Konkan"
+        ]
+    },
+    "feature_ethnicity_look": {
+        "name": "ethnicity_look",
+        "selector": "random",
+        "values": [
+            "South Asian / Indian features",
+            "East Asian features",
+            "Southeast Asian features",
+            "Afro-descendant / Black features",
+            "Mediterranean / Olive skin features",
+            "Nordic / Fair-skinned features",
+            "Latino / Hispanic features",
+            "Middle Eastern features",
+            "Indigenous / Native features",
+            "Central Asian features"
+        ]
+    },
+    "feature_skin_tone_texture": {
+        "name": "skin_tone_texture",
+        "selector": "random",
+        "values": [
+            "deep espresso skin with warm undertones",
+            "golden-tan skin with smooth finish",
+            "fair alabaster skin with delicate pink undertones",
+            "olive skin tone with subtle sun-kissed glow",
+            "bronze skin tone with slight dewiness",
+            "freckled pale skin",
+            "weathered mature skin with fine laugh lines"
+        ]
+    },
+    "feature_eye_shape": {
+        "name": "eye_shape",
+        "selector": "random",
+        "values": [
+            "almond-shaped eyes",
+            "round deep-set eyes",
+            "hooded expressive eyes",
+            "monolid sharp eyes",
+            "downturned gentle eyes",
+            "upturned cat-like eyes"
+        ]
+    },
+    "feature_eye_color": {
+        "name": "eye_color",
+        "selector": "random",
+        "values": [
+            "deep obsidian-black eyes",
+            "warm dark brown eyes",
+            "striking hazel eyes",
+            "piercing sapphire-blue eyes",
+            "vibrant emerald-green eyes",
+            "honey-amber eyes",
+            "steel-grey eyes",
+            "heterochromia (one blue eye, one brown eye)"
+        ]
+    },
+    "feature_face_shape": {
+        "name": "face_shape",
+        "selector": "random",
+        "values": [
+            "oval face with balanced features",
+            "sharp square face structure",
+            "heart-shaped face with high cheekbones",
+            "round face with soft cheeks",
+            "diamond-shaped face with chiseled cheekbones",
+            "long rectangular facial structure"
+        ]
+    },
+    "feature_nose_type": {
+        "name": "nose_type",
+        "selector": "random",
+        "values": [
+            "straight high-bridged nose",
+            "slightly upturned button nose",
+            "aquiline / Roman hooked nose",
+            "broad flat nose structure",
+            "petite pointed nose",
+            "gentle Greek straight nose"
+        ]
+    },
+    "feature_lip_shape": {
+        "name": "lip_shape",
+        "selector": "random",
+        "values": [
+            "full plump lips",
+            "thin defined lips",
+            "bow-shaped Cupid's lip",
+            "wide warm smiling lips",
+            "slightly downturned subtle lips"
+        ]
+    },
+    "feature_eyebrows": {
+        "name": "eyebrows",
+        "selector": "random",
+        "values": [
+            "thick bushy eyebrows",
+            "sharp arched eyebrows",
+            "thin neat eyebrows",
+            "straight flat eyebrows",
+            "slightly feathered natural eyebrows"
+        ]
+    },
+    "feature_expression": {
+        "name": "expression",
+        "selector": "random",
+        "values": [
+            "intense focused gaze",
+            "warm subtle smirk",
+            "calm serene look",
+            "playful curious smile",
+            "stern authoritative expression",
+            "pensive melancholic glance"
+        ]
+    },
+    "feature_distinguishing_marks": {
+        "name": "distinguishing_marks",
+        "selector": "random",
+        "values": [
+            "light dusting of freckles across nose and cheeks",
+            "faint eyebrow scar",
+            "distinct beauty mark near left cheekbone",
+            "deep cheek dimples when smiling",
+            "prominent sharp collarbones",
+            "subtle temple birthmark",
+            "none"
+        ]
+    },
+    "feature_eyewear": {
+        "name": "eyewear",
+        "selector": "random",
+        "values": [
+            "wire-rimmed round reading glasses",
+            "thick black square-frame glasses",
+            "sleek rimless rectangular glasses",
+            "retro tortoise-shell glasses",
+            "tinted aviator sunglasses perched on head",
+            "no glasses"
+        ]
+    },
+    "feature_art_medium": {
+        "name": "art_medium",
+        "selector": "random",
+        "values": [
+            "photorealistic cinematic photography, 8k resolution",
+            "cel-shaded anime style, vibrant palette, Makoto Shinkai aesthetic",
+            "warm digital storybook watercolor illustration",
+            "gritty vintage 1980s comic art, halftone shading",
+            "3D Pixar-style digital character render"
+        ]
+    },
+    "feature_female_body_build": {
+        "name": "female_build",
+        "selector": "random",
+        "values": [
+            "slender and petite frame",
+            "athletic and toned build",
+            "curvy hourglass silhouette",
+            "tall lean dancer build",
+            "soft full-figured body type"
+        ]
+    },
+    "feature_female_hair_style": {
+        "name": "female_hair_style",
+        "selector": "random",
+        "values": [
+            "long voluminous dark wavy hair down shoulders",
+            "sleek low bun with face-framing strands",
+            "shoulder-length chestnut lob cut",
+            "cute side twintails tied with ribbons",
+            "asymmetric pixie bob with side bangs",
+            "braided crown hairstyle",
+            "afro puffs with gold cuffs",
+            "high tight ponytail"
+        ]
+    },
+    "feature_female_hair_color": {
+        "name": "female_hair_color",
+        "selector": "random",
+        "values": [
+            "raven black",
+            "deep mahogany brown",
+            "honey blonde",
+            "copper red",
+            "pastel lavender-pink",
+            "platinum blonde",
+            "cyan-highlighted dark hair"
+        ]
+    },
+    "feature_female_makeup": {
+        "name": "female_makeup",
+        "selector": "random",
+        "values": [
+            "natural no-makeup look with dewy skin",
+            "bold crimson lipstick and sharp winged eyeliner",
+            "subtle nude lipstick with smoky eye shadow",
+            "glittery pastel eyeshadow with glossy pink lips",
+            "dark gothic lipstick with sharp winged eyeliner"
+        ]
+    },
+    "feature_female_jewelry_accessories": {
+        "name": "female_accessories",
+        "selector": "random",
+        "values": [
+            "gold hoop earrings and a thin gold pendant chain",
+            "pearl stud earrings and a silk neck scarf",
+            "silver ear cuff with a delicate velvet choker",
+            "minimalist diamond stud earrings",
+            "layered boho bead necklaces and bangles",
+            "none"
+        ]
+    },
+    "feature_female_clothing_style": {
+        "name": "female_clothing",
+        "selector": "random",
+        "values": [
+            "dark charcoal trench coat over a high-neck white ribbed sweater",
+            "cozy oversized knitted sweater paired with dark skinny denim",
+            "red denim overalls over a yellow cotton crewneck shirt",
+            "tailored fitted blazer over a silk cream blouse",
+            "floral print chiffon summer dress with a blue denim jacket",
+            "futuristic high-collared leather jacket with glowing neon seams",
+            "frilled magical-girl uniform with golden accents",
+            "casual cropped hoodie and high-waisted cargo pants"
+        ]
+    },
+    "feature_male_body_build": {
+        "name": "male_build",
+        "selector": "random",
+        "values": [
+            "broad-shouldered muscular athletic build",
+            "tall and slender lean frame",
+            "stocky solid powerlifter build",
+            "wiry agile athletic frame",
+            "average everyday relaxed build"
+        ]
+    },
+    "feature_male_facial_hair": {
+        "name": "male_facial_hair",
+        "selector": "random",
+        "values": [
+            "clean-shaven smooth skin",
+            "light 3-day stubble scruff",
+            "neatly trimmed short full beard",
+            "sharp goatee with a thin mustache",
+            "thick vintage handlebar mustache",
+            "rugged unkempt long beard"
+        ]
+    },
+    "feature_male_hair_style": {
+        "name": "male_hair_style",
+        "selector": "random",
+        "values": [
+            "short neat side-parted classic taper",
+            "messy textured crop cut with fade",
+            "spiky styled anime hair",
+            "slicked-back pompadour",
+            "buzz cut with clean surgical line design",
+            "shoulder-length hair tied loosely in a samurai bun",
+            "dreadlocks styled in a low ponytail"
+        ]
+    },
+    "feature_male_hair_color": {
+        "name": "male_hair_color",
+        "selector": "random",
+        "values": [
+            "pitch black",
+            "dark espresso brown",
+            "salt-and-pepper grey mixed hair",
+            "ash blonde",
+            "auburn dark red",
+            "silver-grey",
+            "slate blue"
+        ]
+    },
+    "feature_male_accessories": {
+        "name": "male_accessories",
+        "selector": "random",
+        "values": [
+            "classic analog leather-strap wrist watch",
+            "silver dog-tag pendant necklace",
+            "black braided leather wristband",
+            "signet ring on right index finger",
+            "none"
+        ]
+    },
+    "feature_male_clothing_style": {
+        "name": "male_clothing",
+        "selector": "random",
+        "values": [
+            "classic vintage tweed jacket over a collared button-down",
+            "casual dark denim jacket over a monochrome graphic tee",
+            "sleek tactical field jacket with utility harness straps",
+            "traditional embroidered silk kurta with rolled-up sleeves",
+            "tailored double-breasted navy blazer with open-collar shirt",
+            "black leather biker jacket over a heather grey t-shirt",
+            "dark martial arts tunic with silver shoulder armor pauldrons",
+            "casual comfortable oversized zip-up hoodie and track pants"
+        ]
+    }
+}

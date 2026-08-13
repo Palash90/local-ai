@@ -38,7 +38,7 @@ parser.add_argument(
     action="store_true",
     help="Run the self-chat agents (kolpo/kaya/editor/moderator) on the "
     "interactive GPU llama-server (8081) instead of the RAM-backed CPU "
-    "server (8079). Each /api/chat request carries mode=\"gpu\" so "
+    'server (8079). Each /api/chat request carries mode="gpu" so '
     "chat-webui routes the agent tasks to the GPU lane.",
 )
 args = parser.parse_args()
@@ -48,8 +48,8 @@ STORY_BASE_DIR = os.path.expanduser("~/local-ai-files/stories")
 # Resolved the same way markdown_hosting.py resolves its collections: from
 # the OS environment (STORIES_PREMIUM_DIR / STORIES_ADMIN_DIR), falling back
 # to the shared free stories dir when unset.
-PREMIUM_STORIES_DIR = os.getenv("STORIES_PREMIUM_DIR", "") or STORY_BASE_DIR
-ADMIN_STORIES_DIR = os.getenv("STORIES_ADMIN_DIR", "") or PREMIUM_STORIES_DIR
+PREMIUM_STORIES_DIR = os.getenv("STORIES_PREMIUM_DIR")
+ADMIN_STORIES_DIR = os.getenv("STORIES_ADMIN_DIR")
 
 BASE_URL = "http://localhost:3001"
 USERNAME_A = "kolpo"
@@ -83,10 +83,13 @@ SELF_CHAT_THEME_LIMIT = 30
 GENRE_CHECKLISTS_FILE = os.path.expanduser("~/local-ai-files/genre_checklists.json")
 
 
-GENRE_PERSONA_MAP_FILE = os.path.expanduser("~/local-ai-files/contexts/genre_persona_map.json")
+GENRE_PERSONA_MAP_FILE = os.path.expanduser(
+    "~/local-ai-files/contexts/genre_persona_map.json"
+)
 PERSONA_POOL_FILE = os.path.expanduser("~/local-ai-files/contexts/persona_pool.json")
 
 _persona_cycles = {}
+
 
 def load_json_file(filepath, fallback):
     try:
@@ -96,20 +99,20 @@ def load_json_file(filepath, fallback):
         print(f"[persona] Could not load {filepath}: {e} — using fallback")
         return fallback
 
+
 GENRE_PERSONA_MAP = load_json_file(GENRE_PERSONA_MAP_FILE, {})
 PERSONA_POOL = load_json_file(PERSONA_POOL_FILE, {})
+MASTER_DETAILS = load_json_file(os.path.expanduser("~/local-ai-files/contexts/master_details.json"), {})
 
-DETAIL_MASTER_FILE = os.path.expanduser("~/local-ai-files/detail_fields.json")
-DETAIL_MASTER = load_json_file(DETAIL_MASTER_FILE, {})
-
-
-def pick_persona_round_robin(pool, genre, genre_map):
+def pick_persona_round_robin(pool, genre, genre_map, task_roles = None):
     global _persona_cycles
     allowed = genre_map.get(genre) or genre_map.get("default")
-    
+
     # Hard safety rule: exclude Parent & Child from Adventure & Horror
     if genre == "Adventure & Horror" and allowed:
         allowed = [r for r in allowed if r != "Parent & Child"]
+
+    task_roles = task_roles or []
 
     # Flatten pool: (relationship, mood, details_dict)
     candidates = []
@@ -117,17 +120,34 @@ def pick_persona_round_robin(pool, genre, genre_map):
         if allowed and rel not in allowed:
             continue
         for mood, details in moods.items():
+            req_role = details.get("required_role")
+
+            # If profile requires premium/admin, skip if current task roles don't match
+            if req_role:
+                is_premium_or_admin = any(r in task_roles for r in ["premium", "admin"])
+                if req_role == "premium" and not is_premium_or_admin:
+                    continue
+                elif req_role == "admin" and "admin" not in task_roles:
+                    continue
             candidates.append((rel, mood, details))
 
     if not candidates:
         # Fallback default
         fallback_details = {
-            "Kaya": {"role": "Colleague", "persona": "Creative and energetic problem solver"},
-            "Kolpo": {"role": "Colleague", "persona": "Methodical and structured partner"}
+            "Kaya": {
+                "role": "Colleague",
+                "persona": "Creative and energetic problem solver",
+            },
+            "Kolpo": {
+                "role": "Colleague",
+                "persona": "Methodical and structured partner",
+            },
         }
         return "Colleagues", "Focused Collaboration", fallback_details
 
-    if genre not in _persona_cycles or _persona_cycles[genre]["idx"] >= len(_persona_cycles[genre]["pairs"]):
+    if genre not in _persona_cycles or _persona_cycles[genre]["idx"] >= len(
+        _persona_cycles[genre]["pairs"]
+    ):
         shuffled = list(candidates)
         random.shuffle(shuffled)
         _persona_cycles[genre] = {"pairs": shuffled, "idx": 0}
@@ -156,7 +176,9 @@ def load_genre_checklists(extra=None):
         with open(GENRE_CHECKLISTS_FILE, encoding="utf-8") as f:
             checklists = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"[checklist] Could not load {GENRE_CHECKLISTS_FILE}: {e} — using empty checklists")
+        print(
+            f"[checklist] Could not load {GENRE_CHECKLISTS_FILE}: {e} — using empty checklists"
+        )
     if extra:
         checklists.update(extra)
     return checklists
@@ -299,20 +321,19 @@ def _pick_detail_value(task, name, spec):
 
 
 def _resolve_field_value(spec, task, master):
-    """Resolve a single detail field spec into ``(name, value)``.
-
-    ``value`` is the raw scalar or list of values chosen by the selector.
-    ``spec`` may reference a shared definition in ``master`` (``ref``); local
-    keys override the master definition.
-    """
+    """Resolve a single detail field spec into ``(name, value)``."""
     if not isinstance(spec, dict):
         return "", str(spec)
+    
     ref = spec.get("ref")
     if ref and master and isinstance(master.get(ref), dict):
+        # Start with master definition, then override with spec
         merged = dict(master[ref])
         merged.update(spec)
         spec = merged
-    name = str(spec.get("name") or "").strip()
+
+    # If name wasn't explicitly provided in spec, fallback to master's name or ref key
+    name = str(spec.get("name") or ref or "").strip()
     value = _pick_detail_value(task, name, spec)
     return name, value
 
@@ -335,7 +356,7 @@ def resolve_details(details, task, master=None):
     ``"animals: horse, elephant"``. Resolution happens once per round.
     """
     if master is None:
-        master = DETAIL_MASTER
+        master = MASTER_DETAILS
 
     if isinstance(details, str):
         return details
@@ -379,7 +400,7 @@ def resolve_details_fields(details, task, master=None):
     the theme tracker. A plain string returns ``{}`` (nothing to track).
     """
     if master is None:
-        master = DETAIL_MASTER
+        master = MASTER_DETAILS
 
     if isinstance(details, str):
         return {}
@@ -417,9 +438,44 @@ def build_combo_dict(genre, mood, persona_details, details_fields):
         "genre": genre or "",
         "mood": mood or "",
         "role": " / ".join(x for x in [kaya.get("role"), kolpo.get("role")] if x),
-        "persona": " / ".join(x for x in [kaya.get("persona"), kolpo.get("persona")] if x),
+        "persona": " / ".join(
+            x for x in [kaya.get("persona"), kolpo.get("persona")] if x
+        ),
         "details": details_fields or {},
     }
+
+
+def build_theme_slug(task, mood, detail_fields, max_len=80):
+    """Build a short, readable theme slug purely from already-resolved data —
+    no LLM call needed. detail_fields already carries real variety via its
+    roundrobin/random selectors (hero, setting, festival, sweet, mystery,
+    trope, etc.); combining the most 'subject-like' ones with the mood gives
+    a distinct, human-readable premise for free. combo_hash (the actual
+    dedup mechanism used by check_combo_used) never reads this field — it
+    only makes the 'Already Produced Themes' prompt block readable for the
+    agents, so there is nothing here that needs an LLM to invent.
+    """
+    preferred_keys = [
+        "hero", "mystery", "trope", "sweet", "festival", "animals",
+        "domain", "topic", "target", "setting",
+    ]
+    parts = []
+    for key in preferred_keys:
+        val = detail_fields.get(key)
+        if not val:
+            continue
+        parts.append(val if isinstance(val, str) else ", ".join(val))
+        if len(parts) >= 2:
+            break
+    if not parts:
+        for v in detail_fields.values():
+            parts.append(v if isinstance(v, str) else ", ".join(v))
+            if len(parts) >= 2:
+                break
+    if mood:
+        parts.append(mood)
+    slug = " · ".join(p for p in parts if p) or task
+    return slug[:max_len]
 
 
 def theme_api(action, token, **payload):
@@ -427,10 +483,14 @@ def theme_api(action, token, **payload):
     headers = {"X-Auth-Token": token}
     try:
         if action == "list":
-            r = requests.get(f"{BASE_URL}/api/themes", params=payload, headers=headers, timeout=15)
+            r = requests.get(
+                f"{BASE_URL}/api/themes", params=payload, headers=headers, timeout=15
+            )
             r.raise_for_status()
         else:
-            r = requests.post(f"{BASE_URL}/api/themes", json=payload, headers=headers, timeout=15)
+            r = requests.post(
+                f"{BASE_URL}/api/themes", json=payload, headers=headers, timeout=15
+            )
             r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -473,9 +533,11 @@ def format_theme_block(records):
                 bits.append("details: " + ", ".join(f"{k}={v}" for k, v in det.items()))
         if r.get("theme"):
             bits.append(f"theme: {r['theme']}")
+        if not bits:
+            continue
         status = r.get("status") or ""
         lines.append(f"  - ({status}) " + " | ".join(bits))
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "None yet — everything is available."
 
 
 def load_config_file(tasks_file):
@@ -496,7 +558,7 @@ def load_config_file(tasks_file):
         persona_pool = data.get("persona_pool") or {}
         master = data.get("master_details") or {}
         if master:
-            DETAIL_MASTER.update(master)
+            MASTER_DETAILS.update(master)
         return tasks, checklists, persona_map, persona_pool
 
     return _parse_tasks(data), {}, {}, {}
@@ -504,21 +566,25 @@ def load_config_file(tasks_file):
 
 def load_tasks():
     checklists = {}
-   
+
     if args.config:
         persona_map = {}
         persona_pool = {}
-        
-        tasks, cfg_checklists, cfg_persona_map, cfg_persona_pool = load_config_file(args.config)
+
+        tasks, cfg_checklists, cfg_persona_map, cfg_persona_pool = load_config_file(
+            args.config
+        )
         source = args.config
         checklists.update(cfg_checklists)
-        
+
         # Merge config persona overrides
         deep_merge(persona_map, cfg_persona_map)
         deep_merge(persona_pool, cfg_persona_pool)
 
         if args.defaults:
-            defaults, def_checklists, def_pmap, def_ppool = load_config_file(DEFAULT_TASKS_FILE)
+            defaults, def_checklists, def_pmap, def_ppool = load_config_file(
+                DEFAULT_TASKS_FILE
+            )
             existing = {t["task"] for t in tasks}
             tasks.extend(t for t in defaults if t["task"] not in existing)
             checklists.update(def_checklists)
@@ -526,8 +592,10 @@ def load_tasks():
     else:
         persona_map = load_json_file(GENRE_PERSONA_MAP_FILE, {})
         persona_pool = load_json_file(PERSONA_POOL_FILE, {})
-        
-        tasks, def_checklists, def_pmap, def_ppool = load_config_file(DEFAULT_TASKS_FILE)
+
+        tasks, def_checklists, def_pmap, def_ppool = load_config_file(
+            DEFAULT_TASKS_FILE
+        )
         checklists.update(def_checklists)
         source = DEFAULT_TASKS_FILE
 
@@ -543,7 +611,9 @@ def checklist_for(genre, role, task_checklist=None):
         items = entry.get(role)
     if not items:
         items = GENRE_CHECKLISTS.get("default", {}).get(role) or []
-    items.append("Remove any out-of-character planning or meta-discussion between the collaborators (e.g. 'let's write about X', 'I'll cover Y, you do Z') that is not part of the narrative/content itself — the final piece must read as continuous, in-universe content only.")
+    items.append(
+        "Remove any out-of-character planning or meta-discussion between the collaborators (e.g. 'let's write about X', 'I'll cover Y, you do Z') that is not part of the narrative/content itself — the final piece must read as continuous, in-universe content only."
+    )
     return "\n".join(f"- {item}" for item in items)
 
 
@@ -572,6 +642,7 @@ def check_language_script(text, language):
 def run_dry_run():
     """Print the full plan for every task and validate the environment without
     making any LLM call. Exits before any session is created."""
+
     def indent(text):
         return "\n".join("    " + line for line in text.splitlines())
 
@@ -588,7 +659,7 @@ def run_dry_run():
         details = spec.get("details") or ""
         checklist = spec.get("checklist") or {}
         source = "task" if checklist else "genre/default"
-        inactive = spec.get('inactive') or False
+        inactive = spec.get("inactive") or False
 
         print(f"=== Task {idx}: {task}")
         print(f"  genre:       {genre}   (checklist source: {source})")
@@ -597,7 +668,9 @@ def run_dry_run():
         print(f"  languages:   {', '.join(languages)}")
         for lang in languages:
             if (lang or "").strip().lower() in _SCRIPT_RANGES:
-                print(f"               - '{lang}' -> script enforcement active (bengali/hindi)")
+                print(
+                    f"               - '{lang}' -> script enforcement active (bengali/hindi)"
+                )
             else:
                 print(f"               - '{lang}' -> no script check (unmapped)")
         for medium in mediums:
@@ -608,20 +681,32 @@ def run_dry_run():
         print(f"  roles:       {', '.join(roles)}")
         print(f"  turns:       {spec.get('turns') or MAX_MESSAGES_PER_AGENT} per agent")
         if isinstance(details, list):
-            names = [d.get("name", "?") if isinstance(d, dict) else "?" for d in details]
-            print(f"  details:     {len(details)} structured field(s) -> {', '.join(str(n) for n in names)}")
+            names = [
+                d.get("name", "?") if isinstance(d, dict) else "?" for d in details
+            ]
+            print(
+                f"  details:     {len(details)} structured field(s) -> {', '.join(str(n) for n in names)}"
+            )
         elif isinstance(details, dict):
-            print(f"  details:     {len(details)} structured field(s) -> {', '.join(details)}")
+            print(
+                f"  details:     {len(details)} structured field(s) -> {', '.join(details)}"
+            )
         else:
-            print(f"  details:     {'present (' + str(len(details)) + ' chars)' if details else 'EMPTY'}")
+            print(
+                f"  details:     {'present (' + str(len(details)) + ' chars)' if details else 'EMPTY'}"
+            )
         print("  editor checklist (resolved):")
         print(indent(checklist_for(genre, "editor", checklist)))
         print("  moderator checklist (resolved):")
         print(indent(checklist_for(genre, "moderator", checklist)))
-        print("ENVIRONMENT")    
+        print("ENVIRONMENT")
         print(f"  tasks source:        {TASKS_SOURCE}")
-        print(f"  persona map:         {len(GENRE_PERSONA_MAP)} genre mapping(s) active")
-        print(f"  persona pool:        {len(PERSONA_POOL)} relationship category(ies) active")
+        print(
+            f"  persona map:         {len(GENRE_PERSONA_MAP)} genre mapping(s) active"
+        )
+        print(
+            f"  persona pool:        {len(PERSONA_POOL)} relationship category(ies) active"
+        )
         print()
 
     print("=" * 68)
@@ -635,12 +720,32 @@ def run_dry_run():
 
     handled = {
         SELF_CHAT_PROMPT_FILE: {
-            "%task%", "%mediums%", "%_lang%", "%details%", "%themes%",
-            "%relationship%", "%mood%", "%kaya_role%", 
-            "%kaya_persona%", "%kolpo_role%", "%kolpo_persona%"
+            "%task%",
+            "%mediums%",
+            "%_lang%",
+            "%details%",
+            "%themes%",
+            "%relationship%",
+            "%mood%",
+            "%kaya_role%",
+            "%kaya_persona%",
+            "%kolpo_role%",
+            "%kolpo_persona%",
         },
-        EDITOR_PROMPT_FILE: {"%genre%", "%mediums%", "%language%", "%details%", "%checklist%"},
-        MODERATOR_PROMPT_FILE: {"%genre%", "%mediums%", "%language%", "%details%", "%checklist%"},
+        EDITOR_PROMPT_FILE: {
+            "%genre%",
+            "%mediums%",
+            "%language%",
+            "%details%",
+            "%checklist%",
+        },
+        MODERATOR_PROMPT_FILE: {
+            "%genre%",
+            "%mediums%",
+            "%language%",
+            "%details%",
+            "%checklist%",
+        },
     }
     for path, placeholders in handled.items():
         name = os.path.basename(path)
@@ -651,9 +756,13 @@ def run_dry_run():
             found = set(re.findall(r"%[a-z_]+%", f.read()))
         unhandled = found - placeholders
         if unhandled:
-            print(f"  prompt file {name}: ok, but UNHANDLED placeholders {sorted(unhandled)}")
+            print(
+                f"  prompt file {name}: ok, but UNHANDLED placeholders {sorted(unhandled)}"
+            )
         else:
-            print(f"  prompt file {name}: ok ({len(found)} placeholder(s) replaced by code)")
+            print(
+                f"  prompt file {name}: ok ({len(found)} placeholder(s) replaced by code)"
+            )
     print()
 
 
@@ -674,17 +783,24 @@ def verify_task_fulfillment(original_text, check_text, mediums, language):
         )
 
     if "image" in mediums and not re.search(r"!\[[^\]]*\]\([^)]+\)", check_text):
-        problems.append("Medium 'image' was declared but no image is embedded in the final story.")
+        problems.append(
+            "Medium 'image' was declared but no image is embedded in the final story."
+        )
 
     for field in ["Task prompt", "Genre", "Mediums", "Language(s)"]:
         if f"**{field}:**" in original_text and f"**{field}:**" not in check_text:
             problems.append(f"Editor dropped the '{field}' header field.")
 
-    if "## Citations & References" in original_text and "## Citations & References" not in check_text:
+    if (
+        "## Citations & References" in original_text
+        and "## Citations & References" not in check_text
+    ):
         problems.append("Editor dropped the Citations & References section.")
 
     if not check_language_script(check_text, language):
-        problems.append(f"Story does not appear to be predominantly written in the declared language '{language}'.")
+        problems.append(
+            f"Story does not appear to be predominantly written in the declared language '{language}'."
+        )
 
     stripped = re.sub(r"(?s)<small.*?</small>|!\[[^\]]*\]\([^)]*\)", "", check_text)
     for bad in _PROHIBITED_NAMES:
@@ -785,7 +901,9 @@ def active_real_users():
 
 def wait_for_user_to_leave():
     return
-'''
+
+
+"""
     while True:
         real = active_real_users()
         if not real:
@@ -796,7 +914,8 @@ def wait_for_user_to_leave():
             f"— pausing self-chat until they log out..."
         )
         #time.sleep(POLL_INTERVAL_SECONDS)
-'''
+"""
+
 
 def call_llm(token, session_id, message, image_b64=None):
     headers = {"X-Auth-Token": token}
@@ -840,7 +959,9 @@ def call_llm(token, session_id, message, image_b64=None):
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-def build_input(speaker, message_number, incoming, lang, task, context=None, turns=None):
+def build_input(
+    speaker, message_number, incoming, lang, task, context=None, turns=None
+):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
 
@@ -858,7 +979,8 @@ def build_input(speaker, message_number, incoming, lang, task, context=None, tur
 
     if message_number <= 2:
         lines.append(
-            f"[PHASE 1: ALIGNMENT] Agree on the plan/approach immediately with {partner_agent} for this task: {task}."
+            f"[PHASE 1: DECISION & PLANNING] Analyze options, debate trade-offs with {partner_agent}, and DECIDE on"
+            f" a concrete creative direction and role division for this task: {task}."
         )
     elif message_number >= turns - 2:
         lines.append(
@@ -876,23 +998,42 @@ def build_input(speaker, message_number, incoming, lang, task, context=None, tur
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None, path=None, context=None, persona=None, themes_context="", turns=None):
+def run_single_conversation(
+    token_a,
+    token_b,
+    round_number,
+    task,
+    mediums,
+    languages,
+    roles=None,
+    genre="General",
+    details="",
+    checklist=None,
+    path=None,
+    context=None,
+    persona=None,
+    themes_context="",
+    turns=None,
+    task_roles = None
+):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
     # Pick persona tuple. run_forever may pass a pre-picked one so the theme
     # tracker sees the exact same combination the conversation will use.
     if persona is None:
-        relationship, mood, persona_details = pick_persona_round_robin(PERSONA_POOL, genre, GENRE_PERSONA_MAP)
+        relationship, mood, persona_details = pick_persona_round_robin(
+            PERSONA_POOL, genre, GENRE_PERSONA_MAP, task_roles
+        )
     else:
         relationship, mood, persona_details = persona
-    
+
     persona_info = {
         "relationship": relationship,
         "mood": mood,
-        "details": persona_details
+        "details": persona_details,
     }
-    
+
     kaya_info = persona_details.get("Kaya", {})
     kolpo_info = persona_details.get("Kolpo", {})
 
@@ -936,7 +1077,9 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     incoming = ""
     shared_image_b64 = None
 
-    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre, path, persona_info)
+    stories_dir, fname = start_story(
+        round_number, task, task, medium, language, roles, genre, path, persona_info
+    )
     citations = {}
 
     while True:
@@ -1038,7 +1181,16 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     print(f"Story renamed to: {fname}\n")
 
     print("=== Editor phase ===")
-    edited_path = run_editor(stories_dir, fname, task, genre, mediums=medium, language=language, details=details, checklist=checklist)
+    edited_path = run_editor(
+        stories_dir,
+        fname,
+        task,
+        genre,
+        mediums=medium,
+        language=language,
+        details=details,
+        checklist=checklist,
+    )
 
     print("=== Deterministic verification ===")
     with open(fname, "r", encoding="utf-8") as f:
@@ -1049,13 +1201,18 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     problems = verify_task_fulfillment(original_text, check_text, medium, language)
 
     if problems:
-        print(f"[verify] {len(problems)} problem(s) found — auto-RED, skipping moderator LLM call:")
+        print(
+            f"[verify] {len(problems)} problem(s) found — auto-RED, skipping moderator LLM call:"
+        )
         for p in problems:
             print(f"[verify]   - {p}")
-        verdict_path = (edited_path if edited_path else fname).replace(".md", ".moderation.json")
+        verdict_path = (edited_path if edited_path else fname).replace(
+            ".md", ".moderation.json"
+        )
         data = {
             "verdict": "RED",
-            "reasons": "Automatic RED (deterministic check, no LLM call):\n" + "\n".join(f"- {p}" for p in problems),
+            "reasons": "Automatic RED (deterministic check, no LLM call):\n"
+            + "\n".join(f"- {p}" for p in problems),
             "task": task,
             "genre": genre,
             "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -1089,8 +1246,10 @@ def sanitize_title(text):
     """Extract a clean single-line title from an LLM reply, or None."""
     if not text:
         return None
-    first = text.strip().strip('"\'«»“”‘’`').splitlines()[0].strip()
-    first = re.sub(r"^(?:title|heading|name|header)\s*[:：]\s*", "", first, flags=re.IGNORECASE)
+    first = text.strip().strip("\"'«»“”‘’`").splitlines()[0].strip()
+    first = re.sub(
+        r"^(?:title|heading|name|header)\s*[:：]\s*", "", first, flags=re.IGNORECASE
+    )
     first = re.sub(r"^\d+[.)]\s*", "", first)
     first = re.sub(r"\s+", " ", first).strip().rstrip(".।!")
     return first[:80].strip() or None
@@ -1108,8 +1267,7 @@ def propose_title(token, session_id, task, language, genre, story_text):
         "title (max 60 characters) that captures its conclusion and theme. "
         "Output ONLY the title text — no quotes, no numbering, no explanation, "
         "no names of people or agents.\n\n"
-        "=== COMPLETED STORY ===\n\n"
-        + (story_text or "")[:6000]
+        "=== COMPLETED STORY ===\n\n" + (story_text or "")[:6000]
     )
     wait_for_user_to_leave()
     try:
@@ -1146,14 +1304,6 @@ def apply_title(title, stories_dir, fname):
 
 
 def resolve_story_path(spec, roles):
-    """Return the base directory where a task's story should be written.
-
-    A task may declare its own ``path`` in the spec; premium/admin roles then
-    nest one more level inside it. When the spec declares no path, the tiered
-    premium/admin roots are resolved the same way markdown_hosting.py does —
-    from the OS environment (``STORIES_PREMIUM_DIR`` / ``STORIES_ADMIN_DIR``),
-    falling back to the shared free stories dir.
-    """
     path = spec.get("path")
     if path:
         if "admin" in roles:
@@ -1161,14 +1311,31 @@ def resolve_story_path(spec, roles):
         if "premium" in roles:
             path = f"{path}/premium"
         return path
+        
     if "admin" in roles:
+        if not ADMIN_STORIES_DIR:
+            raise ValueError("STORIES_ADMIN_DIR environment variable is not set!")
         return ADMIN_STORIES_DIR
+        
     if "premium" in roles:
+        if not PREMIUM_STORIES_DIR:
+            raise ValueError("STORIES_PREMIUM_DIR environment variable is not set!")
         return PREMIUM_STORIES_DIR
+        
     return STORY_BASE_DIR
 
 
-def start_story(round_number, task, title, mediums, language, roles=None, genre="General", path=None, persona_info = None):
+def start_story(
+    round_number,
+    task,
+    title,
+    mediums,
+    language,
+    roles=None,
+    genre="General",
+    path=None,
+    persona_info=None,
+):
     base_dir = path or STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
     now = datetime.now()
@@ -1323,9 +1490,10 @@ def strip_model_citations(text):
         r"(?i)(?:^|\n)\s*#{1,6}\s+citations?\s*&?\s*references?.*$",
         "",
         text,
-        flags=re.DOTALL
+        flags=re.DOTALL,
     )
     return text.strip()
+
 
 def extract_tagged_content(text):
     """Return only the text inside [CONTENT]...[/CONTENT] blocks, discarding
@@ -1333,10 +1501,13 @@ def extract_tagged_content(text):
     [CONTENT] block is present at all — the caller treats that as a
     planning-only turn with nothing to publish. Multiple blocks are
     concatenated in order."""
-    blocks = re.findall(r"\[CONTENT\](.*?)\[/CONTENT\]", text, flags=re.DOTALL | re.IGNORECASE)
+    blocks = re.findall(
+        r"\[CONTENT\](.*?)\[/CONTENT\]", text, flags=re.DOTALL | re.IGNORECASE
+    )
     if not blocks:
         return None
     return "\n\n".join(b.strip() for b in blocks if b.strip())
+
 
 def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     speaker = entry.get("speaker", "Unknown")
@@ -1349,26 +1520,30 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
         # ran tools). Still capture any citations, but write nothing to the
         # story file.
         collect_citations(citations, entry.get("searches"))
-        print(f"[content] No [CONTENT] block in {speaker} turn {turn} — skipping (planning-only)")
+        print(
+            f"[content] No [CONTENT] block in {speaker} turn {turn} — skipping (planning-only)"
+        )
         return
 
     cleaned = clean_speaker_text(speaker, content)
     cleaned = scrub_agent_names(cleaned)
     cleaned = strip_model_citations(cleaned)
     lines = [
-        f"<small style=\"color:#888\">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n",
+        f'<small style="color:#888">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n',
         f"{cleaned}\n\n",
     ]
 
     collect_citations(citations, entry.get("searches"))
 
-    local_img = embed_story_image(entry.get("image"), stories_dir, round_number, speaker, idx)
+    local_img = embed_story_image(
+        entry.get("image"), stories_dir, round_number, speaker, idx
+    )
     if local_img:
         lines.append(f"![{speaker}]({local_img})\n\n")
 
     with open(fname, "a", encoding="utf-8") as f:
         f.writelines(lines)
-        
+
 
 def finalize_story(fname, citations):
     if citations:
@@ -1413,7 +1588,16 @@ def extract_markdown_fence(text):
     return text.strip()
 
 
-def run_editor(stories_dir, fname, task, genre, mediums=None, language="", details="", checklist=None):
+def run_editor(
+    stories_dir,
+    fname,
+    task,
+    genre,
+    mediums=None,
+    language="",
+    details="",
+    checklist=None,
+):
     """Editor phase: review images + markdown, write story_rN_ts.edited.md."""
     try:
         token = login(USERNAME_EDITOR, PASSWORD)
@@ -1483,7 +1667,18 @@ def run_editor(stories_dir, fname, task, genre, mediums=None, language="", detai
             delete_session(token, session_id)
 
 
-def run_moderator(stories_dir, fname, task, genre, editor_path=None, mediums=None, language="", details="", checklist=None):
+def run_moderator(
+    stories_dir,
+    fname,
+    task,
+    genre,
+    editor_path=None,
+    mediums=None,
+    language="",
+    details="",
+    checklist=None,
+    
+):
     """Moderator phase: GREEN/RED verdict, written to story_rN_ts.moderation.json."""
     try:
         token = login(USERNAME_MODERATOR, PASSWORD)
@@ -1533,9 +1728,7 @@ def run_moderator(stories_dir, fname, task, genre, editor_path=None, mediums=Non
             "VERDICT: GREEN\nREASONS: <short reasons>",
         )
         verdict = "UNKNOWN"
-        m = re.search(
-            r"VERDICT\s*:\s*(GREEN|RED)", result["text"], flags=re.IGNORECASE
-        )
+        m = re.search(r"VERDICT\s*:\s*(GREEN|RED)", result["text"], flags=re.IGNORECASE)
         if m:
             verdict = m.group(1).upper()
         elif re.search(r"\bGREEN\b", result["text"]):
@@ -1580,10 +1773,10 @@ def run_forever():
             roles = spec.get("roles") or ["free"]
             genre = spec.get("genre") or "General"
             details_spec = spec.get("details") or ""
-            details = resolve_details(details_spec, task)
+            details = resolve_details(details_spec, task, MASTER_DETAILS)
             checklist = spec.get("checklist") or {}
             path = resolve_story_path(spec, roles)
-            context = spec.get('context') or None
+            context = spec.get("context") or None
             print(roles)
             print("The stories will be generated in this directory", path)
             inactive = spec.get("inactive") or False
@@ -1607,9 +1800,9 @@ def run_forever():
             combo = {}
             for attempt in range(4):
                 relationship, mood, persona_details = pick_persona_round_robin(
-                    PERSONA_POOL, genre, GENRE_PERSONA_MAP
+                    PERSONA_POOL, genre, GENRE_PERSONA_MAP, task_roles=spec.get("roles")
                 )
-                detail_fields = resolve_details_fields(details_spec, task)
+                detail_fields = resolve_details_fields(details_spec, task, MASTER_DETAILS)
                 combo = build_combo_dict(genre, mood, persona_details, detail_fields)
                 if not check_combo_used(token_a, combo):
                     break
@@ -1618,7 +1811,9 @@ def run_forever():
                     f"re-rolling details/persona for variety"
                 )
             else:
-                print("[theme] Exhausted re-roll attempts; proceeding with the last combination")
+                print(
+                    "[theme] Exhausted re-roll attempts; proceeding with the last combination"
+                )
             persona = (relationship, mood, persona_details)
 
             # Share what has already been worked on with the agents BEFORE the
@@ -1628,23 +1823,47 @@ def run_forever():
             )
 
             # Reserve this combination in the tracker before the round runs, so
-            # no later round ever repeats it (even if this one fails).
+            # no later round ever repeats it (even if this one fails). The
+            # theme slug is built deterministically from the already-resolved
+            # detail fields + mood — no LLM call needed, and combo_hash (the
+            # actual dedup key) never reads this field anyway.
+            theme_slug = build_theme_slug(task, mood, combo.get("details") or {})
             logged = theme_api(
                 "log",
                 token_a,
                 operation="log",
                 scope=SELF_CHAT_THEME_SCOPE,
-                theme=task,
+                theme=theme_slug,
                 **combo,
             )
-            theme_id = (logged.get("theme") or {}).get("id") if logged.get("ok") else None
+            theme_id = (
+                (logged.get("theme") or {}).get("id") if logged.get("ok") else None
+            )
             if theme_id:
-                print(f"[theme] Reserved combination {theme_id} for round {round_number}")
+                print(
+                    f"[theme] Reserved combination {theme_id} for round {round_number}"
+                )
 
-            print(f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n")
+            print(
+                f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n"
+            )
             start_time = time.time()
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist, path, context, persona=persona, themes_context=themes_block, turns=spec.get("turns")
+                token_a,
+                token_b,
+                round_number,
+                task,
+                mediums,
+                languages,
+                roles,
+                genre,
+                details,
+                checklist,
+                path,
+                context,
+                persona=persona,
+                themes_context=themes_block,
+                turns=spec.get("turns"),
             )
             if theme_id:
                 done = theme_api(
@@ -1656,7 +1875,9 @@ def run_forever():
                 if done.get("ok"):
                     print(f"[theme] Marked {theme_id} completed")
                 else:
-                    print(f"[theme] Could not mark {theme_id} completed: {done.get('error')}")
+                    print(
+                        f"[theme] Could not mark {theme_id} completed: {done.get('error')}"
+                    )
             # save_transcript(transcript, round_number)
             if not keep_sessions:
                 delete_session(token_a, session_a)
@@ -1664,8 +1885,12 @@ def run_forever():
             round_number += 1
             task_index += 1
             elapsed = time.time() - start_time
-            print(f"Total time elapsed in round {round_number} - {elapsed:.2f} seconds\n")
-            print(f"Autonomous organization is in vacation for {SLEEP_BETWEEN_ROUNDS} seconds")
+            print(
+                f"Total time elapsed in round {round_number} - {elapsed:.2f} seconds\n"
+            )
+            print(
+                f"Autonomous organization is in vacation for {SLEEP_BETWEEN_ROUNDS} seconds"
+            )
             time.sleep(SLEEP_BETWEEN_ROUNDS)
             print("Vacation over")
     except KeyboardInterrupt:
