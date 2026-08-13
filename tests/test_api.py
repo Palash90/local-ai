@@ -341,6 +341,51 @@ class TestChat:
         finally:
             env["chat"]._agent_users.discard("alice")
 
+    def test_agent_task_queued_on_gpu_lane_with_mode_override(self, api_env):
+        env = api_env
+        env["chat"]._agent_users.add("alice")
+        try:
+            sid = _create_session(env, env["auth_a"])
+            r = env["handler"]("/api/chat", method="POST",
+                               data={"message": "hello", "session_id": sid,
+                                     "mode": "gpu"},
+                               headers=env["auth_a"])
+            assert r.status == 200
+            task_id = r.json["task_id"]
+            assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
+            assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
+            assert env["chat"].tasks[task_id]["mode"] == "gpu"
+        finally:
+            env["chat"]._agent_users.discard("alice")
+
+    def test_mode_override_ignored_for_human_user(self, api_env):
+        env = api_env
+        sid = _create_session(env, env["auth_a"])
+        r = env["handler"]("/api/chat", method="POST",
+                           data={"message": "hello", "session_id": sid,
+                                 "mode": "cpu"},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        task_id = r.json["task_id"]
+        assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
+        assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
+
+    def test_invalid_mode_override_falls_back_to_agent_flag(self, api_env):
+        env = api_env
+        env["chat"]._agent_users.add("alice")
+        try:
+            sid = _create_session(env, env["auth_a"])
+            r = env["handler"]("/api/chat", method="POST",
+                               data={"message": "hello", "session_id": sid,
+                                     "mode": "quantum"},
+                               headers=env["auth_a"])
+            assert r.status == 200
+            task_id = r.json["task_id"]
+            assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
+            assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
+        finally:
+            env["chat"]._agent_users.discard("alice")
+
     def test_queue_full_returns_503(self, api_env):
         env = api_env
         sid = _create_session(env, env["auth_a"])
@@ -433,6 +478,74 @@ class TestTasksApi:
         assert r.status == 200
         list_r = env["handler"]("/api/tasks", headers=env["auth_a"])
         assert list_r.json["tasks"] == []
+
+
+class TestThemesApi:
+    def test_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/themes")
+        assert r.status == 401
+
+    def test_log_and_list_scoped(self, api_env):
+        env = api_env
+        r = env["handler"]("/api/themes", method="POST",
+                           data={"operation": "log", "scope": "self-chat",
+                                 "genre": "Bedtime Stories", "mood": "Calm",
+                                 "role": "Storyteller", "persona": "Warm",
+                                 "details": {"animal": "horse"},
+                                 "theme": "sleepy horse"},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        body = r.json
+        assert body["ok"] is True
+        assert body["duplicate"] is False
+        assert body["theme"]["scope"] == "self-chat"
+
+        list_r = env["handler"]("/api/themes?scope=self-chat", headers=env["auth_a"])
+        assert list_r.status == 200
+        assert len(list_r.json["themes"]) == 1
+        assert list_r.json["themes"][0]["theme"] == "sleepy horse"
+
+    def test_log_duplicate_returns_same_id(self, api_env):
+        env = api_env
+        payload = {"operation": "log", "scope": "self-chat", "genre": "G",
+                   "details": {"animal": "horse"}}
+        a = env["handler"]("/api/themes", method="POST", data=payload,
+                           headers=env["auth_a"]).json
+        b = env["handler"]("/api/themes", method="POST", data=payload,
+                           headers=env["auth_b"]).json
+        assert b["duplicate"] is True
+        assert b["theme"]["id"] == a["theme"]["id"]
+
+    def test_global_list_includes_all_scopes(self, api_env):
+        env = api_env
+        env["handler"]("/api/themes", method="POST",
+                       data={"operation": "log", "scope": "self-chat", "genre": "G1"},
+                       headers=env["auth_a"])
+        env["handler"]("/api/themes", method="POST",
+                       data={"operation": "log", "scope": "alice", "genre": "G2"},
+                       headers=env["auth_a"])
+        r = env["handler"]("/api/themes?global=1", headers=env["auth_a"])
+        assert len(r.json["themes"]) == 2
+
+    def test_complete_via_api(self, api_env):
+        env = api_env
+        rec = env["handler"]("/api/themes", method="POST",
+                             data={"operation": "log", "scope": "alice", "genre": "G"},
+                             headers=env["auth_a"]).json["theme"]
+        r = env["handler"]("/api/themes", method="POST",
+                           data={"operation": "complete", "theme_id": rec["id"]},
+                           headers=env["auth_a"])
+        assert r.json["ok"] is True
+        assert r.json["theme"]["status"] == "completed"
+
+    def test_check_used(self, api_env):
+        env = api_env
+        payload = {"operation": "log", "scope": "alice", "genre": "G",
+                   "mood": "M", "role": "R", "persona": "P", "details": {"a": "1"}}
+        env["handler"]("/api/themes", method="POST", data=payload, headers=env["auth_a"])
+        r = env["handler"]("/api/themes", method="POST",
+                           data={**payload, "operation": "check"}, headers=env["auth_a"])
+        assert r.json["used"] is True
 
 
 class TestLocation:

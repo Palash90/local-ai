@@ -142,6 +142,7 @@ COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
 USERS_FILE = os.path.expanduser("~/local-ai-files/users.json")
 TASKS_DB = os.path.expanduser("~/local-ai-files/tasks.db")
+THEMES_DB = os.path.expanduser("~/local-ai-files/themes.db")
 IMAGE_TOKEN_COST = 1200
 AUDIO_TOKEN_COST = 800
 PER_MESSAGE_OVERHEAD = 4
@@ -334,6 +335,69 @@ TOOLS = [
                     "session_id": {
                         "type": "string",
                         "description": "Session ID to link this task to a conversation.",
+                    },
+                },
+                "required": ["operation"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "track_theme",
+            "description": "Dedicated theme/combination tracker that guarantees creative variety across all generated content. It records every already-used combination of task-detail fields + mood + genre + role + persona, both globally (across ALL users) and per-user scope. Call BEFORE agreeing on a creative idea to see what has already been produced (never repeat it), and call again AFTER locking in an idea to log it. Use this INSTEAD of manage_tasks for theme/idea tracking.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["list", "log", "complete", "check", "stats"],
+                        "description": "The operation to perform.",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Which user scope the theme belongs to (the user whose content is being generated). For the self-chat window always use 'self-chat' so all agents share one history. Optional for list/stats, required for log/check.",
+                    },
+                    "global": {
+                        "type": "boolean",
+                        "description": "list/stats only: include the history across ALL users instead of just scope. Use to keep track of all users at a glance.",
+                    },
+                    "theme": {
+                        "type": "string",
+                        "description": "log only: a short 3-6 word slug of the concrete creative theme/premise/idea chosen.",
+                    },
+                    "genre": {
+                        "type": "string",
+                        "description": "log/check only: the task genre.",
+                    },
+                    "mood": {
+                        "type": "string",
+                        "description": "log/check only: the mood/tone used.",
+                    },
+                    "role": {
+                        "type": "string",
+                        "description": "log/check only: the relationship dynamic or role pair used.",
+                    },
+                    "persona": {
+                        "type": "string",
+                        "description": "log/check only: the persona(s) used.",
+                    },
+                    "details": {
+                        "type": "object",
+                        "description": "log/check only: the resolved task-detail fields as {field: value} pairs.",
+                    },
+                    "theme_id": {
+                        "type": "string",
+                        "description": "complete only: the id of the theme record to mark completed.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "completed"],
+                        "description": "log only: initial status (default: active).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "list only: max number of records to return (default 50).",
                     },
                 },
                 "required": ["operation"],

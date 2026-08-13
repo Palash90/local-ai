@@ -50,13 +50,18 @@ def task_mode(task_id):
 
     Tasks posted by agent users (self-chat: editor, moderator, ...) run on the
     server selected by ``SELF_CHAT_MODE`` (``"cpu"`` or ``"gpu"``); tasks from
-    interactive users always use the GPU server.
+    interactive users always use the GPU server. A per-task ``mode`` override
+    (set at /api/chat admission, e.g. by ``self-chat.py --gpu``) wins over the
+    global flag for agent tasks.
     """
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
             return "gpu"
         user = t.get("_user", "")
+        mode = t.get("mode")
+    if user in M._agent_users and mode in ("gpu", "cpu"):
+        return mode
     return M.SELF_CHAT_MODE if user in M._agent_users else "gpu"
 
 

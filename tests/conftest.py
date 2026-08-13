@@ -83,6 +83,7 @@ def _reset_chat_state(chat_webui):
 def temp_paths(chat_webui, monkeypatch, tmp_path):
     """Point every file-backed module global at a scratch tmp_path."""
     monkeypatch.setattr(chat_webui, "TASKS_DB", str(tmp_path / "tasks.db"))
+    monkeypatch.setattr(chat_webui, "THEMES_DB", str(tmp_path / "themes.db"))
     monkeypatch.setattr(chat_webui, "USERS_FILE", str(tmp_path / "users.json"))
     monkeypatch.setattr(chat_webui, "SESSIONS_DIR", str(tmp_path))
     monkeypatch.setattr(chat_webui, "SESSIONS_FILE", str(tmp_path / "sessions.json"))
@@ -94,6 +95,7 @@ def temp_paths(chat_webui, monkeypatch, tmp_path):
     os.makedirs(chat_webui.UPLOADS_DIR, exist_ok=True)
     os.makedirs(chat_webui.IMG_PATH, exist_ok=True)
     chat_webui._init_tasks_db()
+    chat_webui._init_themes_db()
     return tmp_path
 
 

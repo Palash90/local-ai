@@ -19,6 +19,7 @@ TOOL_NAMES = {
     "read_file",
     "update_user_context",
     "manage_tasks",
+    "track_theme",
 }
 
 
@@ -110,6 +111,15 @@ class TestTools:
         op = mt["function"]["parameters"]["properties"]["operation"]
         assert set(op["enum"]) == {"create", "update", "complete", "delete", "list", "get"}
 
+    def test_track_theme_operations(self, cfg):
+        tt = next(
+            t for t in cfg.TOOLS if t["function"]["name"] == "track_theme"
+        )
+        op = tt["function"]["parameters"]["properties"]["operation"]
+        assert set(op["enum"]) == {"list", "log", "complete", "check", "stats"}
+        props = tt["function"]["parameters"]["properties"]
+        assert props["details"]["type"] == "object"
+
     def test_web_search_required_query(self, cfg):
         ws = next(t for t in cfg.TOOLS if t["function"]["name"] == "web_search")
         assert ws["function"]["parameters"]["required"] == ["query"]
@@ -180,6 +190,7 @@ class TestConstants:
         assert cfg.UPLOADS_DIR
         assert cfg.IMG_PATH
         assert cfg.TASKS_DB.endswith("tasks.db")
+        assert cfg.THEMES_DB.endswith("themes.db")
 
     def test_sessions_in_dedicated_dir(self, cfg):
         assert cfg.SESSIONS_DIR == os.path.join(cfg.FILES_DIR, "session")

@@ -1,129 +1,448 @@
-[
-  {
-    "task": "A bedtime story for kids",
-    "details": "Perform a web search to find a recent, lighthearted, funny news event appropriate for children aged 5 to 12. Choose one real-world event as the basis for the plot, write a gentle and soothing bedtime story around it, and include exactly one warm, child-friendly embedded image illustration that matches the climax scene.",
-    "genre": "Bedtime Stories",
-    "roles": [
-      "free"
-    ],
-    "languages": [
-      "bengali",
-      "English"
-    ],
-    "mediums": [
-      "image",
-      "text"
-    ]
+{
+  "master_details": {
+    "kids_hero": {
+      "selector": "roundrobin",
+      "values": [
+        "a sleepy kitten",
+        "a brave little mouse",
+        "a curious owl chick",
+        "a playful puppy"
+      ]
+    },
+    "story_animals": {
+      "selector": "random",
+      "values": [
+        "horse",
+        "elephant",
+        "cow",
+        "cat",
+        "dog",
+        "goat",
+        "rabbit"
+      ]
+    },
+    "time_of_day": {
+      "selector": "roundrobin",
+      "values": [
+        "day",
+        "midday",
+        "evening",
+        "night"
+      ]
+    },
+    "setting_cozy": {
+      "selector": "random",
+      "values": [
+        "a cozy farmhouse",
+        "a lighthouse by the sea",
+        "an enchanted garden",
+        "a quiet village"
+      ]
+    },
+    "mood_cozy": {
+      "selector": "random",
+      "values": [
+        "gentle and soothing",
+        "playful and warm",
+        "quiet and dreamy"
+      ]
+    },
+    "setting_adventure": {
+      "selector": "roundrobin",
+      "values": [
+        "deep-sea exploration",
+        "extreme mountain survival",
+        "cave rescues",
+        "polar expeditions",
+        "a lost jungle trek"
+      ]
+    },
+    "setting_horror": {
+      "selector": "random",
+      "values": [
+        "an isolated cabin",
+        "a fogged-in small town",
+        "an empty apartment building",
+        "a house that is too quiet"
+      ]
+    },
+    "mood_horror": {
+      "selector": "random",
+      "values": [
+        "psychological dread",
+        "claustrophobic tension",
+        "relentless physical struggle",
+        "quiet hopelessness"
+      ]
+    },
+    "trope_horror": {
+      "selector": "roundrobin",
+      "values": [
+        "a mirror that isn't quite right",
+        "a recurring sound only one person hears",
+        "a room that doesn't belong",
+        "an old letter that rewrites itself",
+        "a guest who knows too much"
+      ]
+    }
   },
-  {
-    "task": "Satire column on different office cultures",
-    "details": "Draft a witty, humorous satirical piece exploring generic corporate workplace tropes and absurd office dynamics (such as reply-all email threads, endless status meetings, and buzzword-heavy memos). Focus strictly on institutional work culture as a whole—do not name, reference, or caricature any real company, brand, or individual.",
-    "genre": "Satire",
-    "roles": [
-      "free"
-    ],
-    "languages": [
-      "English",
-      "bengali"
-    ],
-    "mediums": [
-      "text"
-    ]
-  },
-  {
-    "task": "A science article for kids",
-    "details": "Perform a web search for fascinating, real-world science updates or curious facts. Select one compelling discovery or phenomenon and write an engaging, easy-to-understand educational summary tailored for young readers. Ensure all factual claims map directly to retrieved search sources.",
-    "genre": "News",
-    "roles": [
-      "free"
-    ],
-    "languages": [
-      "English",
-      "bengali",
-      "Hindi"
-    ],
-    "mediums": [
-      "text"
-    ]
-  },
-  {
-    "task": "Traditional Festival Sweet Recipe & Cultural Story",
-    "details": "Draft a detailed recipe guide for a real, traditional festival sweet. The write-up must include an exact ingredient list with clear measurements, numbered step-by-step preparation instructions, and brief cultural context regarding its festive significance. Embed an image matching the finished dish.",
-    "genre": "Food & Recipes",
-    "roles": [
-      "free"
-    ],
-    "languages": [
-      "English",
-      "bengali",
-      "Hindi"
-    ],
-    "mediums": [
-      "image",
-      "text"
-    ]
-  },
-  {
-    "task": "Futuristic Invention Pitch & Conceptual Breakdown",
-    "details": "Perform a web search on emerging technology trends. Conceptualize an innovative, futuristic product or invention addressing a real-world problem (e.g., sustainable energy, smart urban living, or productivity). Provide a detailed breakdown covering its core mechanism, real-world application, and potential impact.",
-    "genre": "News",
-    "roles": [
-      "free"
-    ],
-    "languages": [
-      "English",
-      "bengali"
-    ],
-    "mediums": [
-      "text"
-    ]
-  },
-  {
-    "task": "Bone-Chilling Real-World Adventure",
-    "details": "Perform a web search to research a real historical survival, exploration, or wilderness incident (such as deep-sea exploration, extreme mountain survival, or cave rescues). Write a suspenseful, realistic narrative capturing the psychological dread and physical struggle. All core events must remain grounded in verified real-world facts.",
-    "genre": "Adventure & Horror",
-    "roles": [
-      "premium"
-    ],
-    "languages": [
-      "English",
-      "bengali",
-      "Hindi"
-    ],
-    "mediums": [
-      "text"
-    ]
-  },
-  {
-    "task": "Psychological Horror Short Story",
-    "details": "Craft an atmospheric horror tale centered on psychological tension, isolation, or supernatural uncanny elements. Focus on sensory horror, pacing, and creeping dread rather than shock value. Ensure the narrative resolves with a unsettling climax.",
-    "genre": "Adventure & Horror",
-    "roles": [
-      "premium"
-    ],
-    "languages": [
-      "English",
-      "bengali"
-    ],
-    "mediums": [
-      "image",
-      "text"
-    ]
-  },
-  {
-    "task": "Historical Mystery & Unsolved Legend",
-    "details": "Perform a web search for a famous unsolved historical mystery or local folklore. Draft an intriguing narrative exploration around the event that balances historical facts with atmospheric storytelling.",
-    "genre": "Adventure & Horror",
-    "roles": [
-      "premium"
-    ],
-    "languages": [
-      "English",
-      "bengali",
-      "Hindi"
-    ],
-    "mediums": [
-      "text"
-    ]
-  }
-]
+  "tasks": [
+    {
+      "task": "A bedtime story for kids",
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a web search to find a recent, lighthearted, funny news event appropriate for children aged 5 to 12, and base the plot on that one real event."
+        },
+        {
+          "name": "hero",
+          "ref": "kids_hero"
+        },
+        {
+          "name": "setting",
+          "ref": "setting_cozy"
+        },
+        {
+          "name": "mood",
+          "ref": "mood_cozy"
+        },
+        {
+          "name": "image",
+          "value": "Include exactly one warm, child-friendly embedded image illustration that matches the climax scene."
+        }
+      ],
+      "genre": "Bedtime Stories",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "bengali",
+        "English"
+      ],
+      "mediums": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "task": "A day at the farm",
+      "details": [
+        {
+          "name": "research",
+          "value": "No web search needed. Describe an ordinary, warm day on a small countryside farm through the eyes of a child visitor."
+        },
+        {
+          "name": "animals",
+          "selector": "random_multi",
+          "count": {
+            "selector": "random",
+            "values": [
+              2,
+              3
+            ]
+          },
+          "ref": "story_animals"
+        },
+        {
+          "name": "hero",
+          "ref": "kids_hero"
+        },
+        {
+          "name": "time",
+          "ref": "time_of_day"
+        },
+        {
+          "name": "mood",
+          "ref": "mood_cozy"
+        },
+        {
+          "name": "image",
+          "value": "Include exactly one warm, child-friendly embedded image illustration of the farm scene."
+        }
+      ],
+      "genre": "Bedtime Stories",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "English",
+        "bengali"
+      ],
+      "mediums": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "task": "Satire column on different office cultures",
+      "details": [
+        {
+          "name": "style",
+          "value": "Draft a witty, humorous satirical piece focusing strictly on institutional work culture as a whole — do not name, reference, or caricature any real company, brand, or individual."
+        },
+        {
+          "name": "target",
+          "selector": "roundrobin",
+          "values": [
+            "reply-all email threads",
+            "endless status meetings",
+            "buzzword-heavy memos",
+            "open-plan offices",
+            "performance reviews"
+          ]
+        },
+        {
+          "name": "angle",
+          "selector": "random",
+          "values": [
+            "a 'day in the life' narrative",
+            "a mock corporate memo",
+            "a series of absurd office observations",
+            "a parody of corporate advice columns"
+          ]
+        }
+      ],
+      "genre": "Satire",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "English",
+        "bengali"
+      ],
+      "mediums": [
+        "text"
+      ]
+    },
+    {
+      "task": "A science article for kids",
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a web search for fascinating, real-world science updates or curious facts, and ensure all factual claims map directly to the retrieved search sources."
+        },
+        {
+          "name": "topic",
+          "selector": "roundrobin",
+          "values": [
+            "animals and wildlife",
+            "space and astronomy",
+            "oceans and climate",
+            "the human body",
+            "technology and robots"
+          ]
+        },
+        {
+          "name": "angle",
+          "selector": "random",
+          "values": [
+            "a surprising 'did you know' fact",
+            "a mystery scientists are still solving",
+            "a recent breakthrough explained simply",
+            "a myth that turned out to be true"
+          ]
+        }
+      ],
+      "genre": "News",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "text"
+      ]
+    },
+    {
+      "task": "Traditional Festival Sweet Recipe & Cultural Story",
+      "details": [
+        {
+          "name": "structure",
+          "value": "Draft a detailed recipe guide for a real, traditional festival sweet: exact ingredient list with clear measurements, numbered step-by-step preparation instructions, and brief cultural context about its festive significance. Embed an image matching the finished dish."
+        },
+        {
+          "name": "festival",
+          "selector": "roundrobin",
+          "values": [
+            "Diwali",
+            "Eid",
+            "Durga Puja",
+            "Pongal",
+            "Christmas",
+            "Bengali New Year"
+          ]
+        },
+        {
+          "name": "sweet",
+          "selector": "random",
+          "values": [
+            "gulab jamun",
+            "sandesh",
+            "rasgulla",
+            "payesh",
+            "barfi",
+            "gujia",
+            "halwa"
+          ]
+        }
+      ],
+      "genre": "Food & Recipes",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "task": "Futuristic Invention Pitch & Conceptual Breakdown",
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a web search on emerging technology trends, then conceptualize an innovative, futuristic product or invention. Provide a detailed breakdown covering its core mechanism, real-world application, and potential impact."
+        },
+        {
+          "name": "domain",
+          "selector": "roundrobin",
+          "values": [
+            "sustainable energy",
+            "smart urban living",
+            "productivity tools",
+            "health and medicine",
+            "transportation"
+          ]
+        },
+        {
+          "name": "format",
+          "selector": "random",
+          "values": [
+            "an elevator pitch",
+            "a shark-tank style pitch script",
+            "a formal proposal",
+            "a journalist's feature story"
+          ]
+        }
+      ],
+      "genre": "News",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "English",
+        "bengali"
+      ],
+      "mediums": [
+        "text"
+      ]
+    },
+    {
+      "task": "Bone-Chilling Real-World Adventure",
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a web search to research a real historical survival, exploration, or wilderness incident. Write a suspenseful, realistic narrative capturing the psychological dread and physical struggle. All core events must remain grounded in verified real-world facts."
+        },
+        {
+          "name": "setting",
+          "ref": "setting_adventure"
+        },
+        {
+          "name": "tone",
+          "ref": "mood_horror"
+        }
+      ],
+      "genre": "Adventure & Horror",
+      "roles": [
+        "premium"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "text"
+      ]
+    },
+    {
+      "task": "Psychological Horror Short Story",
+      "details": [
+        {
+          "name": "style",
+          "value": "Craft an atmospheric horror tale centered on psychological tension, isolation, or supernatural uncanny elements. Focus on sensory horror, pacing, and creeping dread rather than shock value. Ensure the narrative resolves with an unsettling climax."
+        },
+        {
+          "name": "setting",
+          "ref": "setting_horror"
+        },
+        {
+          "name": "trope",
+          "ref": "trope_horror"
+        }
+      ],
+      "genre": "Adventure & Horror",
+      "roles": [
+        "premium"
+      ],
+      "languages": [
+        "English",
+        "bengali"
+      ],
+      "mediums": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "task": "Historical Mystery & Unsolved Legend",
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a web search for a famous unsolved historical mystery or local folklore. Draft an intriguing narrative exploration around the event that balances historical facts with atmospheric storytelling."
+        },
+        {
+          "name": "mystery",
+          "selector": "roundrobin",
+          "values": [
+            "a vanished civilization",
+            "an unsolved disappearance",
+            "a cursed artifact",
+            "a sea or lake legend",
+            "a lost treasure"
+          ]
+        },
+        {
+          "name": "frame",
+          "selector": "random",
+          "values": [
+            "a detective's cold-case notes",
+            "a traveler's journal",
+            "an oral retelling by a village elder",
+            "a researcher's investigation"
+          ]
+        }
+      ],
+      "genre": "Adventure & Horror",
+      "roles": [
+        "premium"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "text"
+      ]
+    }
+  ]
+}

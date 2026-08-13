@@ -719,6 +719,119 @@ class TestHandleTaskToolMore:
         assert chat_webui.task_update(t["id"], "u1") is None
 
 
+class TestThemeTool:
+    def test_log_then_duplicate_detected(self, chat_webui, temp_paths):
+        combo = {
+            "scope": "self-chat",
+            "genre": "Bedtime Stories",
+            "mood": "Calm",
+            "role": "Storyteller",
+            "persona": "Warm",
+            "details": {"animal": "horse", "time": "night"},
+            "theme": "sleepy horse",
+        }
+        first = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "log", **combo}))
+        assert first["ok"] is True
+        assert first["duplicate"] is False
+
+        second = json.loads(chat_webui.handle_theme_tool("kolpo", {"operation": "log", **combo}))
+        assert second["ok"] is True
+        assert second["duplicate"] is True
+        assert second["theme"]["id"] == first["theme"]["id"]
+
+    def test_same_combo_different_scope_is_distinct(self, chat_webui, temp_paths):
+        combo = {
+            "genre": "Bedtime Stories",
+            "mood": "Calm",
+            "role": "Storyteller",
+            "persona": "Warm",
+            "details": {"animal": "horse"},
+        }
+        a = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "log", "scope": "self-chat", **combo}))
+        b = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "log", "scope": "alice", **combo}))
+        assert a["theme"]["id"] != b["theme"]["id"]
+
+    def test_check_used_and_unused(self, chat_webui, temp_paths):
+        combo = {
+            "scope": "self-chat",
+            "genre": "Bedtime Stories",
+            "mood": "Calm",
+            "role": "Storyteller",
+            "persona": "Warm",
+            "details": {"animal": "horse"},
+        }
+        chat_webui.handle_theme_tool("kaya", {"operation": "log", **combo})
+        used = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "check", **combo}))
+        assert used["used"] is True
+        fresh = {**combo, "details": {"animal": "elephant"}}
+        unused = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "check", **fresh}))
+        assert unused["used"] is False
+
+    def test_complete(self, chat_webui, temp_paths):
+        rec = json.loads(chat_webui.handle_theme_tool(
+            "kaya",
+            {"operation": "log", "scope": "self-chat", "genre": "Bedtime Stories", "theme": "x"},
+        ))
+        tid = rec["theme"]["id"]
+        out = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "complete", "theme_id": tid}))
+        assert out["ok"] is True
+        assert out["theme"]["status"] == "completed"
+        missing = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "complete", "theme_id": "nope"}))
+        assert missing["ok"] is False
+
+    def test_list_and_stats_scoped_vs_global(self, chat_webui, temp_paths):
+        chat_webui.handle_theme_tool("kaya", {"operation": "log", "scope": "self-chat", "genre": "G1", "theme": "a"})
+        chat_webui.handle_theme_tool("kaya", {"operation": "log", "scope": "alice", "genre": "G2", "theme": "b"})
+
+        scoped = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "list", "scope": "self-chat"}))
+        assert len(scoped["themes"]) == 1
+        assert scoped["themes"][0]["genre"] == "G1"
+
+        global_list = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "list", "global": True}))
+        assert len(global_list["themes"]) == 2
+
+        stats = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "stats", "scope": "self-chat"}))
+        assert stats["total"] == 1
+
+    def test_missing_scope_rejected(self, chat_webui, temp_paths):
+        out = json.loads(chat_webui.handle_theme_tool("kaya", {"operation": "log", "theme": "x"}))
+        assert out["ok"] is False
+        assert "scope" in out["error"]
+
+    def test_dispatch_track_theme(self, chat_webui, temp_paths):
+        events = []
+        chat_webui._event_post = lambda *a, **k: events.append((a, k))
+        chat_webui.tasks["t1"] = {"session_id": "s1", "_user": "alice"}
+        tc = {
+            "id": "tc1",
+            "function": {
+                "name": "track_theme",
+                "arguments": json.dumps(
+                    {"operation": "log", "scope": "alice", "genre": "G", "theme": "slug"}
+                ),
+            },
+        }
+        chat_webui._dispatch_tool("t1", "s1", tc, None, 0, 0)
+        result = json.loads(events[0][1]["result"])
+        assert result["ok"] is True
+        assert result["theme"]["scope"] == "alice"
+
+    def test_dispatch_track_theme_no_user(self, chat_webui, temp_paths):
+        events = []
+        chat_webui._event_post = lambda *a, **k: events.append((a, k))
+        chat_webui.tasks["t1"] = {"session_id": "s1"}
+        tc = {
+            "id": "tc1",
+            "function": {
+                "name": "track_theme",
+                "arguments": json.dumps({"operation": "list"}),
+            },
+        }
+        chat_webui._dispatch_tool("t1", "s1", tc, None, 0, 0)
+        result = json.loads(events[0][1]["result"])
+        assert result["ok"] is False
+
+
 class TestLoadUsersErrors:
     def test_invalid_json(self, chat_webui, temp_paths):
         with open(chat_webui.USERS_FILE, "w") as f:
@@ -1070,6 +1183,26 @@ class TestActiveModelId:
         chat_webui._agent_users.add("editor")
         chat_webui.tasks["t1"] = {"_user": "editor"}
         monkeypatch.setattr(chat_webui, "SELF_CHAT_MODE", "cpu")
+        assert chat_webui.task_mode("t1") == "cpu"
+
+    def test_task_mode_per_task_override_wins(self, chat_webui):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        chat_webui.tasks["t1"] = {"_user": "editor", "mode": "gpu"}
+        chat_webui.tasks["t2"] = {"_user": "editor", "mode": "cpu"}
+        assert chat_webui.task_mode("t1") == "gpu"
+        assert chat_webui.task_mode("t2") == "cpu"
+
+    def test_task_mode_override_ignored_for_human(self, chat_webui):
+        chat_webui._agent_users.clear()
+        chat_webui.tasks["t1"] = {"_user": "alice", "mode": "cpu"}
+        assert chat_webui.task_mode("t1") == "gpu"
+
+    def test_task_mode_bad_override_ignored(self, chat_webui, monkeypatch):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        monkeypatch.setattr(chat_webui, "SELF_CHAT_MODE", "cpu")
+        chat_webui.tasks["t1"] = {"_user": "editor", "mode": "quantum"}
         assert chat_webui.task_mode("t1") == "cpu"
 
     def test_server_urls(self, chat_webui):
@@ -2482,6 +2615,20 @@ class TestEventLoop:
         assert chat_webui.sessions["s1"][-1]["content"] == "final answer"
         # assistant message with the tool call was stored too
         assert any(m.get("tool_calls") for m in chat_webui.sessions["s1"])
+
+    def test_start_preserves_mode_override(self, chat_webui, temp_paths, monkeypatch):
+        chat_webui.model_status = "chat_loaded"
+        chat_webui.sessions.clear()
+        chat_webui.sessions_meta.clear()
+        chat_webui.sessions["s1"] = []
+        chat_webui.sessions_meta["s1"] = {"name": "N", "user_id": "a", "created": 1, "updated": 1, "system_prompts": []}
+        chat_webui.tasks["t1"] = {"status": "queued", "session_id": "s1", "mode": "gpu"}
+        ev = [
+            ("start", "t1", {"sid": "s1", "message": "hello", "image": None, "audio": None, "user": "editor", "client_timestamp": None}),
+        ]
+        self._run(chat_webui, monkeypatch, ev)
+        assert chat_webui.tasks["t1"]["_user"] == "editor"
+        assert chat_webui.tasks["t1"]["mode"] == "gpu"
 
     def test_llm_err(self, chat_webui, temp_paths, monkeypatch):
         chat_webui.sessions.clear()

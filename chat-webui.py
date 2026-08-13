@@ -50,6 +50,7 @@ from server.config import (  # noqa: F401
     SESSIONS_DIR,
     SESSIONS_FILE,
     TASKS_DB,
+    THEMES_DB,
     TOOLS,
     TOOLS_TOKEN_COST,
     UPLOADS_DIR,
@@ -123,6 +124,11 @@ from server.features.tasks_db import (  # noqa: E402
     task_get,
     task_list,
     task_update,
+)
+
+from server.features.themes_db import (  # noqa: E402
+    _init_themes_db,
+    handle_theme_tool,
 )
 
 from server.features.users import (  # noqa: E402
@@ -228,6 +234,7 @@ from server.features.orchestration import (  # noqa: E402
 register_entrypoint(sys.modules[__name__])
 
 _init_tasks_db()
+_init_themes_db()
 
 SYS_CONTENT = build_sys_content()
 

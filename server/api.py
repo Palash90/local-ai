@@ -18,7 +18,7 @@ import time
 import traceback
 import uuid
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -49,6 +49,7 @@ context_token_report = None
 get_current_user = None
 get_user_context_path = None
 get_user_password = None
+handle_theme_tool = None
 model_status_snapshot = None
 read_user_context = None
 save_sessions = None
@@ -84,6 +85,7 @@ APP_STATE_NAMES = [
     "get_current_user",
     "get_user_context_path",
     "get_user_password",
+    "handle_theme_tool",
     "model_status_snapshot",
     "read_user_context",
     "save_sessions",
@@ -285,6 +287,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         return
                     user_tasks = task_list(user)
                     self.send_json({"tasks": user_tasks})
+                elif self.path.startswith("/api/themes"):
+                    user = get_current_user(self.headers)
+                    if not user:
+                        self.send_json({"error": "Unauthorized"}, status=401)
+                        return
+                    qs = parse_qs(urlparse(self.path).query)
+                    scope = qs.get("scope", [""])[0] or None
+                    result = handle_theme_tool(
+                        user,
+                        {
+                            "operation": "list",
+                            "scope": scope,
+                            "global": qs.get("global", ["0"])[0] in ("1", "true", "True", "yes"),
+                            "status": qs.get("status", [""])[0] or None,
+                            "limit": qs.get("limit", ["50"])[0] or 50,
+                        },
+                    )
+                    self.send_json(json.loads(result))
                 else:
                     self.send_error(404)
             else:
@@ -524,8 +544,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # Route to the GPU lane (interactive UI users) or the lane chosen
             # by SELF_CHAT_MODE — cpu (self-chat agents on the RAM-backed CPU
             # server) or gpu (agents sharing the interactive GPU server) — so
-            # the two never wait behind each other.
-            mode = SELF_CHAT_MODE if user in _agent_users else "gpu"
+            # the two never wait behind each other. Agent users may override
+            # the lane per request (self-chat.py --gpu sends mode="gpu"); the
+            # override is ignored for interactive users, who always use GPU.
+            mode = body.get("mode")
+            if mode not in ("gpu", "cpu") or user not in _agent_users:
+                mode = SELF_CHAT_MODE if user in _agent_users else "gpu"
+            entry["mode"] = mode
             with _queue_locks[mode]:
                 if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:
                     self.send_json({"error": "Server busy"}, status=503)
@@ -537,6 +562,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "status": "queued",
                     "message": "Waiting in line...",
                     "session_id": sid,
+                    "mode": mode,
                 }
             self.send_json({"task_id": task_id})
         elif self.path == "/api/extract-file":
@@ -707,6 +733,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             t = task_create(user, body.get("title", "Untitled"), body.get("description", ""), body.get("priority", "medium"), body.get("due_date"), body.get("session_id"), body.get("reminder_at"))
             self.send_json({"task": t})
+        elif self.path == "/api/themes":
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            result = handle_theme_tool(user, body)
+            self.send_json(json.loads(result))
         else:
             self.send_error(404)
 

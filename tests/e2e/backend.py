@@ -62,6 +62,7 @@ def main():
 
     chat.USERS_FILE = os.path.join(state_dir, "users.json")
     chat.TASKS_DB = os.path.join(state_dir, "tasks.db")
+    chat.THEMES_DB = os.path.join(state_dir, "themes.db")
     chat.SESSIONS_DIR = sessions_dir
     chat.SESSIONS_FILE = os.path.join(sessions_dir, "sessions.json")
     chat.PROMPT_PATH = os.path.join(state_dir, "sys_prompt.txt")
@@ -87,6 +88,7 @@ def main():
     chat._users_cache = None
     chat._users_cache_time = 0
     chat._init_tasks_db()
+    chat._init_themes_db()
     chat.load_sessions()
 
     # --- real background threads that own task processing ---

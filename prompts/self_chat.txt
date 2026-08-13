@@ -5,6 +5,8 @@ Task Details: %details%
 Allowed Mediums/Tools: %mediums%
 Target Language(s): %_lang%
 
+Already Produced Themes (DO NOT repeat): %themes%
+
 Relationship Dynamic: %relationship%
 Mood / Tone: %mood%
 
@@ -33,7 +35,7 @@ Execution Rules for Collaboration:
    - All dialogue, generation, and output MUST strictly use: %_lang%.
 
 2. Lifecycle & Phase Execution:
-   - Phase 1: Alignment (0% - 10% Progress): Agree on execution plan and split responsibilities in Turn 1. This is also when the CONTENT THEME TRACKING PROTOCOL (section 4d) below MUST be run, before any content is written.
+   - Phase 1: Alignment (0% - 10% Progress): Agree on execution plan and split responsibilities in Turn 1. This is also when the CONTENT THEME TRACKING PROTOCOL (section 4c) below MUST be run, before any content is written.
    - Phase 2: Direct Execution (10% - 90% Progress): EXECUTE TASK DELIVERABLES DIRECTLY. Minimize meta-talk or unneeded discussion. Alternate turns adding direct value to the assigned %task% (writing code, conducting research, generating images, drafting content, etc.).
    - Phase 3: Convergence (90% - 100% Progress): Consolidate results, resolve remaining items, and format final deliverable.
 
@@ -67,38 +69,47 @@ Execution Rules for Collaboration:
    3. REPETITION PREVENTION:
       - Check existing completed search tasks before writing. Build ON TOP of existing search facts — NEVER re-search or restate facts already logged in the todo list.
 
-4c. CONTENT THEME TRACKING PROTOCOL (HARD RULE):
-   - The same todo system that tracks searches (4b) also stores your creative
-     history across EVERY task you and your partner have ever executed for this
-     user — not just this run. Use it to guarantee variety: never repeat a
-     subject, joke, scene, dish/recipe, or image concept that you have already
-     used before, even in an unrelated task.
-   - FOR CHARACTERS, LOCATIONS, AMBIENCE IN YOUR CONTENT, DEFINE AS MANY FEATURES AS POSSIBLE.
+4c. THEME & COMBINATION TRACKING PROTOCOL (HARD RULE):
+   - Theme tracking has its OWN dedicated tool `track_theme`. NEVER use
+     `manage_tasks` for themes — the to-do system is ONLY for search topics (4b).
+   - The tracker keeps a GLOBAL history across ALL users, plus a per-user
+     combination history. Inside this self-chat window everyone shares the
+     scope "self-chat", so whatever you log is immediately visible to your
+     partner and vice versa — the theme is shared between the users of this
+     window through the tracker, not through copied context.
+   - A "combination" = every task-detail field + mood + genre + role + persona.
+     Reusing the same combination is forbidden — you must keep variety.
 
    1. BEFORE agreeing on an idea in Phase 1:
-      - Run `manage_tasks(operation="list")`.
-      - Read every task whose title starts with "THEME:" — each one is a
-        one-line record of a subject/premise/recipe/image concept used in a
-        past piece of content.
+      - The already-produced themes for this window are listed at the top of
+        this prompt under "Already Produced Themes" — READ them first.
+      - Also run `track_theme(operation="list", scope="self-chat")` for the
+        full recent history and `track_theme(operation="stats", scope="self-chat")`
+        for counts.
+      - Before settling on any candidate, run
+        `track_theme(operation="check", scope="self-chat", genre="<genre>",
+        mood="<mood>", role="<role>", persona="<persona>", details={...})` to
+        make sure that exact combination has not already been produced.
    2. CHOOSING THE IDEA:
-      - AVOID CHOOSING THEMES, CHARACTER DETAILS OR AMBIENCE THOSE HAVE ALREADY BEEN MARKED COMPLETE IN THE TASKS.
-      - Do not propose or settle on any subject, premise, joke, dish, or
-        central image concept that duplicates or closely resembles an
-        existing "THEME:" entry (same animal, same punchline, same recipe,
-        same visual gag, etc.), even if the genre or wording is different.
-      - If every obvious idea in this genre is already logged, deliberately
-        pick a less obvious angle (different subject, different setting,
-        different dish, different tone) rather than reusing the closest match.
+      - AVOID any subject, premise, scene, dish, recipe, or central image
+        concept that already appears in the tracker, even if the genre or
+        wording is different. Do NOT reuse a combination that is already logged.
+      - If every obvious idea is taken, deliberately pick a less obvious angle
+        (different subject, setting, dish, or tone) rather than the closest match.
    3. LOGGING THE IDEA (mandatory, before Phase 2 begins):
-      - As soon as the concrete theme is locked in during Phase 1, log it
+      - As soon as the concrete theme is locked in, log the full combination
         immediately, before writing any content:
-        `manage_tasks(operation="create", title="THEME: <3-6 word slug>", description="<1 sentence: subject/premise, image concept if any, dish/recipe if any, genre>", status="active")`
-      - This must happen even if the task later fails or is abandoned, so the
-        idea isn't accidentally reused next time.
-   4. Do NOT create a "THEME:" entry for anything other than the core creative
-      concept — do not log individual scenes, minor details, or every image;
-      one entry per piece of content is enough to prevent duplication.
-   5. [IMPORTANT]: ONCE THE THEME IS COMPLETE, UPDATE ITS STATUS TO `COMPLETE`
+        `track_theme(operation="log", scope="self-chat", theme="<3-6 word slug>",
+        genre="<genre>", mood="<mood>", role="<relationship dynamic / roles>",
+        persona="<persona summary>", details={each task-detail field: its value})`
+      - Include EVERY detail field from Task Details. This must happen even if
+        the task later fails or is abandoned, so the idea is never reused.
+      - If the reply says `"duplicate": true`, the exact combination is already
+        logged — change the idea so the combination differs.
+   4. Do NOT log individual scenes, minor details, or every image — one entry
+      per piece of content is enough to prevent duplication.
+   5. ONCE THE PIECE IS COMPLETE, mark it done:
+      `track_theme(operation="complete", theme_id="<the logged id>")`
 
 5. Termination Trigger:
    - In Phase 3, once %task% is fully executed and final deliverables are clear, append [END CONVERSATION] to terminate.

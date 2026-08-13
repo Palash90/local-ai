@@ -151,6 +151,7 @@ def _event_loop():
                     "_audio": audio_b64,
                     "_user": user,
                     "_client_timestamp": client_ts,
+                    "mode": t.get("mode"),
                 }
             # (The owning lane's _current_task_ids[mode] was already set by
             # _queue_worker before this "start" event was posted.)
