@@ -1058,6 +1058,20 @@ class TestActiveModelId:
         assert chat_webui.task_mode("t3") == "gpu"
         assert chat_webui.task_mode("ghost") == "gpu"
 
+    def test_task_mode_agent_flag_can_use_gpu(self, chat_webui, monkeypatch):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        chat_webui.tasks["t1"] = {"_user": "editor"}
+        monkeypatch.setattr(chat_webui, "SELF_CHAT_MODE", "gpu")
+        assert chat_webui.task_mode("t1") == "gpu"
+
+    def test_task_mode_agent_flag_can_use_cpu(self, chat_webui, monkeypatch):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        chat_webui.tasks["t1"] = {"_user": "editor"}
+        monkeypatch.setattr(chat_webui, "SELF_CHAT_MODE", "cpu")
+        assert chat_webui.task_mode("t1") == "cpu"
+
     def test_server_urls(self, chat_webui):
         assert chat_webui.server_url("gpu") == chat_webui.LLAMA_URL
         assert chat_webui.server_url("cpu") == chat_webui.LLAMA_URL_CPU

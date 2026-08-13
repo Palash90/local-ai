@@ -310,6 +310,37 @@ class TestChat:
         st = env["handler"]("/api/status/%s" % task_id)
         assert st.json["status"] == "queued"
 
+    def test_agent_task_queued_on_cpu_lane_by_default(self, api_env):
+        env = api_env
+        env["chat"]._agent_users.add("alice")
+        try:
+            sid = _create_session(env, env["auth_a"])
+            r = env["handler"]("/api/chat", method="POST",
+                               data={"message": "hello", "session_id": sid},
+                               headers=env["auth_a"])
+            assert r.status == 200
+            task_id = r.json["task_id"]
+            assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
+            assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
+        finally:
+            env["chat"]._agent_users.discard("alice")
+
+    def test_agent_task_queued_on_gpu_lane_when_flag_is_gpu(self, api_env, monkeypatch):
+        env = api_env
+        monkeypatch.setattr(env["api"], "SELF_CHAT_MODE", "gpu")
+        env["chat"]._agent_users.add("alice")
+        try:
+            sid = _create_session(env, env["auth_a"])
+            r = env["handler"]("/api/chat", method="POST",
+                               data={"message": "hello", "session_id": sid},
+                               headers=env["auth_a"])
+            assert r.status == 200
+            task_id = r.json["task_id"]
+            assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
+            assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
+        finally:
+            env["chat"]._agent_users.discard("alice")
+
     def test_queue_full_returns_503(self, api_env):
         env = api_env
         sid = _create_session(env, env["auth_a"])

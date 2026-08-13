@@ -34,6 +34,17 @@ cd ~/git/local-ai && python chat-webui.py
 
 Access at `http://chat.local` or `http://localhost:3001`.
 
+Self-chat agents (editor/moderator/registered agents) run on the CPU llama-server
+(`http://localhost:8079`) by default so they never compete with interactive UI
+users for VRAM. To run them on the interactive GPU server instead, set the
+`SELF_CHAT_MODE` environment variable to `gpu`:
+
+```bash
+SELF_CHAT_MODE=gpu python chat-webui.py
+```
+
+You can also edit `SELF_CHAT_MODE` in `server/config.py`.
+
 `chat-webui.py` auto-starts the two llama-servers on boot if they're down, and
 starts ComfyUI on demand, so no manual service startup is required. If you prefer
 to run the services manually:

@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from server.config import COMFYUI_OUTPUT, IMG_PATH, UPLOADS_DIR
+from server.config import COMFYUI_OUTPUT, IMG_PATH, SELF_CHAT_MODE, UPLOADS_DIR
 
 # ---------------------------------------------------------------------------
 # Shared application state — injected by chat-webui.py via set_app_state().
@@ -521,9 +521,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "user": user,
                 "client_timestamp": body.get("client_timestamp"),
             }
-            # Route to the GPU lane (interactive UI users) or the CPU lane
-            # (self-chat agents) so the two never wait behind each other.
-            mode = "gpu" if user in _agent_users else "gpu"
+            # Route to the GPU lane (interactive UI users) or the lane chosen
+            # by SELF_CHAT_MODE — cpu (self-chat agents on the RAM-backed CPU
+            # server) or gpu (agents sharing the interactive GPU server) — so
+            # the two never wait behind each other.
+            mode = SELF_CHAT_MODE if user in _agent_users else "gpu"
             with _queue_locks[mode]:
                 if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:
                     self.send_json({"error": "Server busy"}, status=503)

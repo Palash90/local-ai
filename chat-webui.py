@@ -46,6 +46,7 @@ from server.config import (  # noqa: F401
     PROMPT_PATH,
     REASONING_BUDGET,
     SEARXNG_URL,
+    SELF_CHAT_MODE,
     SESSIONS_DIR,
     SESSIONS_FILE,
     TASKS_DB,

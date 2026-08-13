@@ -199,10 +199,11 @@ def load_config_file(tasks_file):
 
 def load_tasks():
     checklists = {}
-    persona_map = load_json_file(GENRE_PERSONA_MAP_FILE, {})
-    persona_pool = load_json_file(PERSONA_POOL_FILE, {})
-
+   
     if args.config:
+        persona_map = {}
+        persona_pool = {}
+        
         tasks, cfg_checklists, cfg_persona_map, cfg_persona_pool = load_config_file(args.config)
         source = args.config
         checklists.update(cfg_checklists)
@@ -218,6 +219,9 @@ def load_tasks():
             checklists.update(def_checklists)
             source = f"{args.config} + defaults"
     else:
+        persona_map = load_json_file(GENRE_PERSONA_MAP_FILE, {})
+        persona_pool = load_json_file(PERSONA_POOL_FILE, {})
+        
         tasks, def_checklists, def_pmap, def_ppool = load_config_file(DEFAULT_TASKS_FILE)
         checklists.update(def_checklists)
         source = DEFAULT_TASKS_FILE

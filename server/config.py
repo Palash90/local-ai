@@ -21,6 +21,14 @@ PORT = 3001
 REASONING_BUDGET = 4096
 CPU_PARALLEL_SLOTS = 4  # Set to desired number of concurrent CPU agent slots
 
+# Which llama-server self-chat agents run on: "cpu" (the RAM-backed CPU server
+# on 8079, so agents never compete with interactive UI users for VRAM) or "gpu"
+# (the interactive GPU server on 8081, sharing the VRAM-backed model). Override
+# with the SELF_CHAT_MODE environment variable.
+SELF_CHAT_MODE = os.environ.get("SELF_CHAT_MODE", "cpu").strip().lower()
+if SELF_CHAT_MODE not in ("cpu", "gpu"):
+    SELF_CHAT_MODE = "cpu"
+
 # model.json holds the LLM model filenames (relative to ~/local-ai-files/my-models/)
 # per runtime mode: "gpu" for interactive chat UI users, "cpu" for automated
 # self-chat agents (editor/moderator/registered agents). Falls back to the legacy
