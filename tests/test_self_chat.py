@@ -64,6 +64,19 @@ class TestParseTasks:
         tasks = self_chat._parse_tasks([{"task": "T"}])
         assert tasks[0]["genre"] == "General"
 
+    def test_turns_default(self, self_chat):
+        tasks = self_chat._parse_tasks([{"task": "T"}])
+        assert tasks[0]["turns"] == self_chat.MAX_MESSAGES_PER_AGENT
+
+    def test_turns_from_spec(self, self_chat):
+        tasks = self_chat._parse_tasks([{"task": "T", "turns": 8}])
+        assert tasks[0]["turns"] == 8
+
+    def test_turns_invalid_falls_back(self, self_chat):
+        tasks = self_chat._parse_tasks([{"task": "T", "turns": "abc"}, {"task": "U", "turns": 1}])
+        assert tasks[0]["turns"] == self_chat.MAX_MESSAGES_PER_AGENT
+        assert tasks[1]["turns"] == self_chat.MAX_MESSAGES_PER_AGENT
+
     def test_path_parsed(self, self_chat):
         tasks = self_chat._parse_tasks([{"task": "T", "path": "/custom/dir"}])
         assert tasks[0]["path"] == "/custom/dir"
@@ -698,6 +711,16 @@ class TestBuildInput:
     def test_incoming_included(self, self_chat):
         out = self_chat.build_input("A", 3, "previous reply", "english", "Task X")
         assert "previous reply" in out
+
+    def test_turns_parameter_overrides_default(self, self_chat):
+        out = self_chat.build_input("A", 1, "", "english", "Task X", turns=6)
+        assert "[Turn 1/6]" in out
+
+    def test_turns_phase3_boundary(self, self_chat):
+        out = self_chat.build_input("A", 4, "", "english", "Task X", turns=6)
+        assert "PHASE 3: FINALIZATION" in out
+        out2 = self_chat.build_input("A", 3, "", "english", "Task X", turns=6)
+        assert "PHASE 2: DIRECT EXECUTION" in out2
 
 
 class TestResolveStoryPath:

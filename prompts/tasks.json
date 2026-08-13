@@ -89,6 +89,7 @@
   "tasks": [
     {
       "task": "A bedtime story for kids",
+      "turns": 5,
       "details": [
         {
           "name": "research",
@@ -126,6 +127,7 @@
     },
     {
       "task": "A day at the farm",
+      "turns": 4,
       "details": [
         {
           "name": "research",
@@ -175,6 +177,7 @@
     },
     {
       "task": "Satire column on different office cultures",
+      "turns": 4,
       "details": [
         {
           "name": "style",
@@ -216,6 +219,7 @@
     },
     {
       "task": "A science article for kids",
+      "turns": 6,
       "details": [
         {
           "name": "research",
@@ -258,6 +262,7 @@
     },
     {
       "task": "Traditional Festival Sweet Recipe & Cultural Story",
+      "turns": 5,
       "details": [
         {
           "name": "structure",
@@ -305,6 +310,7 @@
     },
     {
       "task": "Futuristic Invention Pitch & Conceptual Breakdown",
+      "turns": 5,
       "details": [
         {
           "name": "research",
@@ -346,6 +352,7 @@
     },
     {
       "task": "Bone-Chilling Real-World Adventure",
+      "turns": 7,
       "details": [
         {
           "name": "research",
@@ -375,6 +382,7 @@
     },
     {
       "task": "Psychological Horror Short Story",
+      "turns": 6,
       "details": [
         {
           "name": "style",
@@ -404,6 +412,7 @@
     },
     {
       "task": "Historical Mystery & Unsolved Legend",
+      "turns": 6,
       "details": [
         {
           "name": "research",

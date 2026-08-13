@@ -59,7 +59,7 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 2.0
 SLEEP_BETWEEN_TURNS = 1.0
-MAX_MESSAGES_PER_AGENT = 4
+MAX_MESSAGES_PER_AGENT = 10
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
 STARTING_CONVERSATION = open(SELF_CHAT_PROMPT_FILE).read()
@@ -185,6 +185,15 @@ def _parse_tasks(items):
         path = (item.get("path") or "").strip() or None
         inactive = item.get("inactive") or False
         context = item.get("context") or None
+        turns = MAX_MESSAGES_PER_AGENT
+        raw_turns = item.get("turns")
+        if raw_turns is not None:
+            try:
+                turns = int(raw_turns)
+            except (TypeError, ValueError):
+                turns = MAX_MESSAGES_PER_AGENT
+            if turns < 2:
+                turns = MAX_MESSAGES_PER_AGENT
         tasks.append(
             {
                 "task": task,
@@ -196,7 +205,8 @@ def _parse_tasks(items):
                 "checklist": checklist,
                 "path": path,
                 "inactive": inactive,
-                "context": context
+                "context": context,
+                "turns": turns,
             }
         )
     return tasks
@@ -596,6 +606,7 @@ def run_dry_run():
                 flag = "   WARNING: no audio tool exists — round will be skipped by the guard"
             print(f"  mediums:     {medium}{flag}")
         print(f"  roles:       {', '.join(roles)}")
+        print(f"  turns:       {spec.get('turns') or MAX_MESSAGES_PER_AGENT} per agent")
         if isinstance(details, list):
             names = [d.get("name", "?") if isinstance(d, dict) else "?" for d in details]
             print(f"  details:     {len(details)} structured field(s) -> {', '.join(str(n) for n in names)}")
@@ -829,13 +840,16 @@ def call_llm(token, session_id, message, image_b64=None):
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-def build_input(speaker, message_number, incoming, lang, task, context=None):
+def build_input(speaker, message_number, incoming, lang, task, context=None, turns=None):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
 
+    if turns is None:
+        turns = MAX_MESSAGES_PER_AGENT
+
     lines = [
         f"[SYSTEM DIRECTIVE: You are responding as {current_agent}. Your partner is {partner_agent}.]\n",
-        f"[Turn {message_number}/{MAX_MESSAGES_PER_AGENT}]\n",
+        f"[Turn {message_number}/{turns}]\n",
     ]
 
     if context is not None:
@@ -846,7 +860,7 @@ def build_input(speaker, message_number, incoming, lang, task, context=None):
         lines.append(
             f"[PHASE 1: ALIGNMENT] Agree on the plan/approach immediately with {partner_agent} for this task: {task}."
         )
-    elif message_number >= MAX_MESSAGES_PER_AGENT - 2:
+    elif message_number >= turns - 2:
         lines.append(
             f"[PHASE 3: FINALIZATION] Consolidate the work, write the final scene/panels, "
             f"and terminate the turn sequence by appending {STOP_PHRASE}."
@@ -862,7 +876,7 @@ def build_input(speaker, message_number, incoming, lang, task, context=None):
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None, path=None, context=None, persona=None, themes_context=""):
+def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None, path=None, context=None, persona=None, themes_context="", turns=None):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
 
@@ -914,6 +928,9 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     transcript = []
     counts = {"A": 0, "B": 0}
 
+    if turns is None:
+        turns = MAX_MESSAGES_PER_AGENT
+
     current_speaker = "A"
 
     incoming = ""
@@ -935,7 +952,8 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
             "" if not transcript else incoming,
             language,
             task,
-            context
+            context,
+            turns,
         )
 
         wait_for_user_to_leave()
@@ -971,10 +989,10 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
         if STOP_PHRASE in reply.upper():
             print(f"Round {round_number} ended by {AGENT_NAMES[current_speaker]}\n")
             break
-        if counts[current_speaker] >= MAX_MESSAGES_PER_AGENT:
+        if counts[current_speaker] >= turns:
             print(
                 f"Round {round_number} ended: {AGENT_NAMES[current_speaker]} "
-                f"reached the {MAX_MESSAGES_PER_AGENT}-message cap\n"
+                f"reached the {turns}-message cap\n"
             )
             break
 
@@ -1626,7 +1644,7 @@ def run_forever():
             print(f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n")
             start_time = time.time()
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist, path, context, persona=persona, themes_context=themes_block
+                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist, path, context, persona=persona, themes_context=themes_block, turns=spec.get("turns")
             )
             if theme_id:
                 done = theme_api(
