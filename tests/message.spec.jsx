@@ -1,5 +1,5 @@
 import React from 'react';
-import { test, expect } from '@playwright/experimental-ct-react';
+import { test, expect } from './fixtures.js';
 import Message from '../src/components/Message';
 import ChatArea from '../src/components/ChatArea';
 import ImageLightbox from '../src/components/ImageLightbox';
@@ -23,6 +23,14 @@ test('renders code blocks with copy button', async ({ mount }) => {
   await expect(component.locator('.code-block')).toHaveCount(1);
   await expect(component.locator('.copy-code-btn')).toHaveText('Copy');
   await expect(component.locator('.code-block code.language-python')).toHaveText('print(1)');
+});
+
+test('renders file chip for FILE link', async ({ mount }) => {
+  const component = await mount(<Message msg={{ role: 'user', content: '[FILE: /uploads/abc123.py](script.py)' }} onImageOpen={() => {}} />);
+  await expect(component.locator('.file-chip')).toHaveCount(1);
+  await expect(component.locator('.file-chip')).toHaveAttribute('href', '/uploads/abc123.py');
+  await expect(component.locator('.file-chip')).toHaveAttribute('download', 'script.py');
+  await expect(component.locator('.file-chip-name')).toHaveText('script.py');
 });
 
 test('system and tool messages render nothing', async ({ mount }) => {
@@ -297,6 +305,10 @@ test('ImageLightbox renders nothing without src', async ({ mount }) => {
 
 test('ImageLightbox zooms on wheel', async ({ page, mount }) => {
   const component = await mount(<ImageLightbox src="/output/gen.png" onClose={() => {}} />);
+  await expect(component.locator('#zoom-label')).toHaveText('100%');
+  // Let React flush passive effects (the wheel listener is attached in one)
+  // before dispatching the synthetic event, otherwise the event can be lost.
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 0)));
   await page.locator('#image-overlay').dispatchEvent('wheel', { deltaY: -100 });
   await expect(component.locator('#zoom-label')).toHaveText('110%');
   await page.locator('#image-overlay').dispatchEvent('wheel', { deltaY: 100 });

@@ -1,0 +1,8 @@
+{
+  "Bedtime Stories": ["Parent & Child", "Siblings", "Married Couple"],
+  "Satire": ["Colleagues", "Friends"],
+  "Food & Recipes": ["Married Couple", "Parent & Child", "Friends", "Siblings"],
+  "News": ["Colleagues", "Friends"],
+  "Adventure & Horror": ["Travel Companions", "Friends", "Siblings", "Married Couple"],
+  "default": ["Colleagues", "Friends"]
+}

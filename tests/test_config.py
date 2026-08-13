@@ -19,6 +19,7 @@ TOOL_NAMES = {
     "read_file",
     "update_user_context",
     "manage_tasks",
+    "track_theme",
 }
 
 
@@ -110,6 +111,15 @@ class TestTools:
         op = mt["function"]["parameters"]["properties"]["operation"]
         assert set(op["enum"]) == {"create", "update", "complete", "delete", "list", "get"}
 
+    def test_track_theme_operations(self, cfg):
+        tt = next(
+            t for t in cfg.TOOLS if t["function"]["name"] == "track_theme"
+        )
+        op = tt["function"]["parameters"]["properties"]["operation"]
+        assert set(op["enum"]) == {"list", "log", "complete", "check", "stats"}
+        props = tt["function"]["parameters"]["properties"]
+        assert props["details"]["type"] == "object"
+
     def test_web_search_required_query(self, cfg):
         ws = next(t for t in cfg.TOOLS if t["function"]["name"] == "web_search")
         assert ws["function"]["parameters"]["required"] == ["query"]
@@ -141,7 +151,7 @@ class TestConstants:
         assert "--host" in args
         assert "--port" in args
         assert str(cfg.PORT) in args or "8081" in args
-        assert "--n-gpu-layers" in args
+        assert "--n-gpu-layers" in args or "-ngl" in args
         assert "--no-mmproj-offload" in args
 
     def test_llama_server_args_cpu(self, cfg):
@@ -157,7 +167,12 @@ class TestConstants:
 
     def test_llama_server_cpu_differs_from_gpu(self, cfg):
         assert cfg.LLAMA_SERVER_ARGS_CPU != cfg.LLAMA_SERVER_ARGS
-        gpu_ngl = cfg.LLAMA_SERVER_ARGS[cfg.LLAMA_SERVER_ARGS.index("--n-gpu-layers") + 1]
+        gpu_ngl = None
+        if "--n-gpu-layers" in cfg.LLAMA_SERVER_ARGS:
+            gpu_ngl = cfg.LLAMA_SERVER_ARGS[cfg.LLAMA_SERVER_ARGS.index("--n-gpu-layers") + 1]
+        elif "-ngl" in cfg.LLAMA_SERVER_ARGS:
+            gpu_ngl = cfg.LLAMA_SERVER_ARGS[cfg.LLAMA_SERVER_ARGS.index("-ngl") + 1]
+        assert gpu_ngl is not None
         assert gpu_ngl != "0"
 
     def test_image_models_nonempty(self, cfg):
@@ -175,6 +190,7 @@ class TestConstants:
         assert cfg.UPLOADS_DIR
         assert cfg.IMG_PATH
         assert cfg.TASKS_DB.endswith("tasks.db")
+        assert cfg.THEMES_DB.endswith("themes.db")
 
     def test_sessions_in_dedicated_dir(self, cfg):
         assert cfg.SESSIONS_DIR == os.path.join(cfg.FILES_DIR, "session")

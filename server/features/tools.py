@@ -294,6 +294,25 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             round=round_num,
             tool_index=tool_index,
         )
+    elif tool_name == "track_theme":
+        user = ""
+        with M._data_lock:
+            t = M.tasks.get(task_id)
+            if t:
+                user = t.get("_user", "")
+        if not user:
+            result = json.dumps({"ok": False, "error": "User not found"})
+        else:
+            result = M.handle_theme_tool(user, args)
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
     else:
         result = json.dumps({"error": f"Unknown tool: {tool_name}"})
         M._event_post(

@@ -34,26 +34,38 @@ cd ~/git/local-ai && python chat-webui.py
 
 Access at `http://chat.local` or `http://localhost:3001`.
 
+Self-chat agents (editor/moderator/registered agents) run on the CPU llama-server
+(`http://localhost:8079`) by default so they never compete with interactive UI
+users for VRAM. To run them on the interactive GPU server instead, set the
+`SELF_CHAT_MODE` environment variable to `gpu`:
+
+```bash
+SELF_CHAT_MODE=gpu python chat-webui.py
+```
+
+You can also edit `SELF_CHAT_MODE` in `server/config.py`.
+
 `chat-webui.py` auto-starts the two llama-servers on boot if they're down, and
 starts ComfyUI on demand, so no manual service startup is required. If you prefer
 to run the services manually:
 
 ```bash
-# GPU llama-server — interactive chat UI users (VRAM-backed)
+# GPU llama-server — interactive chat UI users (VRAM-backed, 24K context)
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 0.0.0.0 --port 8081 \
     --models-dir ~/local-ai-files/my-models/ \
-    --n-gpu-layers 99 --ctx-size 32768 \
-    --reasoning-budget 4096 \
+    --jinja -ngl 99 -fa on --ctx-size 24576 \
+    -ctk q8_0 -ctv q8_0 \
     --no-mmproj-offload
 
 # CPU llama-server — automated self-chat agents (RAM-backed, concurrent)
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 0.0.0.0 --port 8079 \
     --models-dir ~/local-ai-files/my-models/ \
-    --n-gpu-layers 0 --ctx-size 32768 \
+    --jinja --n-gpu-layers 0 -fa off --ctx-size 32768 \
+    -ctk q8_0 -nkvo \
     --reasoning-budget 4096 \
-    --no-mmproj-offload
+    --no-mmproj-offload --device none
 
 cd ~/local-ai/ComfyUI && source venv/bin/activate && python main.py \
     --lowvram \
@@ -161,7 +173,7 @@ graph TD
         SO1["1. llama-server (GPU)\n--port 8081"] --> SO2["2. llama-server (CPU)\n--port 8079"]
         SO2 --> SO3["3. ComfyUI\nvenv → python main.py --lowvram"]
         SO3 --> SO4["4. chat-webui.py\npython chat-webui.py"]
-        SO5["chat-webui.py auto-checks\nboth /health on boot\n→ restart_servers if dead"]
+        SO5["chat-webui.py on boot:\nGPU /health OK? else restart_servers\n→ ensure CPU server → SearXNG\nreachable? else sys.exit(1)"]
     end
 ```
 
@@ -179,15 +191,17 @@ graph TD
 
     subgraph DataDir ["Data (~/local-ai-files/)"]
         DF1["model.json\nLLM model ids:\ngpu (chat UI)\n+ cpu (self-chat)"]
-        DF2["models.json\nComfyUI image model defs\nz_image, sd3_5_medium"]
+        DF2["models.json\nComfyUI image model defs\nz_image (turbo)"]
         DF3["users.json\nUser credentials + context paths"]
         DF4["sys_prompt.txt\nSystem prompt template\n%model_list% %current_time%\n%current_location%"]
-        DF5["sessions.json\nPersisted chat sessions"]
+        DF5["session/sessions_<user>.json\nPer-user persisted chat sessions"]
         DF6["my-models/\nLLM GGUF model files"]
         DF7["ComfyUI/input/\nTemp files for image editing"]
         DF8["ComfyUI/output/\nGenerated/edited images"]
         DF9["contexts/\nPer-user persistent context"]
         DF10["searxng/\nSearXNG config volume"]
+        DF11["uploads/\nUploaded files saved to disk\n(code/docs via /api/extract-file)"]
+        DF12["tasks.db\nSQLite to-do tasks + reminders"]
     end
 
     subgraph BuildFlags ["Build Flags"]
@@ -211,44 +225,44 @@ graph TD
     end
 
     subgraph RCLlama ["llama-server Args (two concurrent servers)"]
-        RCL1["GPU: --host 0.0.0.0 --port 8081\n--n-gpu-layers 99"]
-        RCL2["CPU: --host 0.0.0.0 --port 8079\n--n-gpu-layers 0"]
+        RCL1["GPU: --host 0.0.0.0 --port 8081\n--n-gpu-layers 99 -fa on --jinja"]
+        RCL2["CPU: --host 0.0.0.0 --port 8079\n--n-gpu-layers 0 -fa off\n--device none --jinja"]
         RCL3["--models-dir ~/local-ai-files/my-models/"]
-        RCL4["--ctx-size 32768"]
-        RCL5["--reasoning-budget 4096"]
-        RCL6["-ctk q8_0 -ctv q8_0 (KV cache quantization)"]
-        RCL7["-fa on (flash attention)"]
-        RCL8["--no-mmproj-offload on BOTH servers\n(multimodal projector stays in RAM —\notherwise its ~950 MiB on the 4 GiB card\nstarves the CPU server's worker buffers)"]
-        RCL9["Routing: agent task → 8079 CPU,\nUI task → 8081 GPU (task_mode)"]
+        RCL4["GPU: --ctx-size 24576 (24K)\nCPU: --ctx-size 32768 (32K)"]
+        RCL5["--reasoning-budget 4096\n(CPU server only)"]
+        RCL6["-ctk q8_0 (KV cache quant, both)\n-ctv q8_0 (GPU only)\n-nkvo (CPU only)"]
+        RCL7["--no-mmproj-offload on BOTH servers\n(multimodal projector stays in RAM —\notherwise its ~950 MiB on the 4 GiB card\nstarves the CPU server's worker buffers)"]
+        RCL8["Routing: agent task → 8079 CPU,\nUI task → 8081 GPU (task_mode)"]
     end
 
     subgraph RCThermal ["Thermal and RAM Thresholds"]
         RT1["TEMP_THRESHOLD_ON = 85 C"]
-        RT2["TEMP_THRESHOLD_OFF = 65 C"]
+        RT2["TEMP_THRESHOLD_OFF = 75 C"]
         RT3["RAM_EVAC_THRESHOLD = 95%"]
         RT4["RAM_RESUME_THRESHOLD = 70%"]
     end
 
     subgraph RCLimits ["Limits and Pools"]
-        RL1["MAX_QUEUE_SIZE = 5"]
-        RL2["MAX_INPUT_TOKENS = 32768"]
-        RL3["_llm_pool = 1 worker"]
-        RL4["_tool_pool = 2 workers"]
+        RL1["MAX_QUEUE_SIZE = 5 (per lane)"]
+        RL2["MAX_INPUT_TOKENS = 24576 (24K)"]
+        RL3["_llm_pools: gpu 1 / cpu 4 workers\n(CPU_PARALLEL_SLOTS = 4)"]
+        RL4["_tool_pools: gpu 2 / cpu 2 workers"]
         RL5["Max tool rounds = 10"]
         RL6["Idle unload = 300s"]
         RL7["LLM timeout = 600s"]
         RL8["ComfyUI poll = 120s"]
-        RL9["REASONING_BUDGET = 4096"]
+        RL9["REASONING_BUDGET = 4096 (CPU server)"]
     end
 
     subgraph RCThreads ["Thread Pools and Locks"]
-        LK1["_llm_pool: ThreadPoolExecutor 1\nSingle LLM call at a time"]
-        LK2["_tool_pool: ThreadPoolExecutor 2\n2 concurrent tool executions"]
+        LK1["_llm_pools: ThreadPoolExecutor\nper lane (gpu 1, cpu 4)\nLLM calls run per-lane"]
+        LK2["_tool_pools: ThreadPoolExecutor\nper lane (gpu 2, cpu 2)"]
         LK3["_event_queue: queue.Queue\nDecouples dequeue from dispatch"]
-        LK4["_data_lock: threading.Lock\nGuards sessions, tasks, model_status"]
-        LK5["_model_transition_lock\nSerializes load/unload of LLM"]
-        LK6["_tokens_lock\nGuards _active_tokens dict"]
-        LK7["_queue_lock + _queue_cond\nTask queue + Condition variable"]
+        LK4["_image_queue + _image_worker\nSerializes image jobs\n(image loading can starve GPU)"]
+        LK5["_data_lock: threading.Lock\nGuards sessions, tasks, model_status"]
+        LK6["_model_transition_lock\nSerializes load/unload of LLM"]
+        LK7["_tokens_lock\nGuards _active_tokens dict"]
+        LK8["_queue_locks + _queue_conds\nPer-lane task queues\n(gpu lane + cpu lane)\nCondition variables"]
     end
 ```
 
@@ -257,25 +271,27 @@ graph TD
 ```mermaid
 graph TD
     A["python chat-webui.py"] --> A1["Load configs at module import:\nmodel.json, models.json,\nsys_prompt.txt, users.json"]
-    A --> B["load_sessions()\nLoad sessions.json"]
+    A --> B["load_sessions()\nLoad per-user session files"]
     A1 & B --> C{"GPU llama-server /health\nHTTP GET localhost:8081?"}
     C -- "200 OK" --> C2{"CPU llama-server /health\nHTTP GET localhost:8079?"}
-    C -- "Dead" --> Restart["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn GPU llama-server (8081)\n4. Spawn CPU llama-server (8079)\n5. Spawn ComfyUI Popen\n6. Poll each /health 2s up to 120s\n7. Kill on timeout"]
+    C -- "Dead" --> Restart["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn ComfyUI Popen (no poll here)\n4. Spawn GPU llama-server (8081)\n5. Spawn CPU llama-server (8079)\n6. Poll each /health 2s up to 120s\n7. Kill on timeout"]
     C2 -- "Dead" --> EnsureCPU["ensure_llama_server cpu:\nrestart CPU llama-server only\n(GPU stays running)"]
     C2 -- "200 OK" --> D{"SearXNG reachable\non localhost:8080?"}
     EnsureCPU --> D
-    D -- "Yes" --> E["Start 5 Daemon Threads"]
+    D -- "Yes" --> E["Start 7 Daemon Threads"]
     D -- "No" --> Exit["print ERROR & sys.exit(1)"]
     Restart --> D
 
     subgraph Daemons ["Background Daemon Threads"]
         E1["_event_loop\nSingle-threaded event dispatcher"]
-        E2["_queue_worker\nSequential task dequeuer"]
-        E3["_idle_unload_loop\nPolls every 10s"]
-        E4["_thermal_monitor\nPolls every 10s"]
-        E5["_reminder_loop\nPolls every 30s"]
+        E2["_queue_worker gpu\nSequential dequeuer\n(GPU lane — UI users)"]
+        E3["_queue_worker cpu\nSequential dequeuer\n(CPU lane — self-chat agents)"]
+        E4["_image_worker\nSerialized image jobs\n(one at a time)"]
+        E5["_idle_unload_loop\nPolls every 10s"]
+        E6["_thermal_monitor\nPolls every 10s"]
+        E7["_reminder_loop\nPolls every 30s"]
     end
-    E --> E1 & E2 & E3 & E4 & E5
+    E --> E1 & E2 & E3 & E4 & E5 & E6 & E7
     E --> F["HTTPServer.serve_forever\n0.0.0.0:3001"]
 ```
 
@@ -333,7 +349,7 @@ graph TD
         Client -->|"GET /api/sessions"| ListSessions["List user sessions\nSorted by updated desc"]
         Client -->|"GET /api/sessions/:id/messages"| GetMessages["Return messages\n+ token_estimate"]
         Client -->|"PUT /api/sessions/:id"| RenameSession["Rename session"]
-        Client -->|"DELETE /api/sessions/:id"| DeleteSession["Delete session + cleanup\nassociated output images"]
+        Client -->|"DELETE /api/sessions/:id"| DeleteSession["Delete session + cleanup\nassociated output images\nand uploaded files"]
     end
 
     subgraph TaskEndpoints ["Task Management"]
@@ -343,9 +359,15 @@ graph TD
         Client -->|"DELETE /api/tasks/:id"| DeleteTask["Delete task"]
     end
 
+    subgraph AgentEndpoints ["Agent / Presence"]
+        Client -->|"POST /api/register-agent"| RegisterAgent["Create agent token\nfor self-chat bots\n(kolpo, kaya, editor, moderator)"]
+        Client -->|"POST /api/leaving"| Leaving["Set user's active window\nnow → end (presence)"]
+        Client -->|"GET /api/active-users"| ActiveUsers["List currently active users\n(presence tracking)"]
+    end
+
     subgraph UtilityEndpoints ["Utility"]
-        Client -->|"GET /api/model-status"| ModelStatus["model_status, _last_tps\n_overheated, _gpu_temp, reminder_count"]
-        Client -->|"POST /api/extract-file"| ExtractFile["PDF/DOCX/DOC/XLSX to text\nvia fitz/catdoc/antiword/openpyxl"]
+        Client -->|"GET /api/model-status"| ModelStatus["model_status, _last_tps\n_overheated, _gpu_temp,\nreminder_count, max_context"]
+        Client -->|"POST /api/extract-file"| ExtractFile["Save uploaded file to disk\n(~/local-ai-files/uploads/)\nReturn {url, name}\nText extraction happens later\nvia the read_file tool"]
         Client -->|"POST /api/location"| SetLocation["Reverse geocode via Nominatim\nstore _client_location"]
         Client -->|"GET /api/user-context"| GetUserCtx["Read user context file"]
         Client -->|"POST /api/user-context\n{action: write|overwrite|read}"| SetUserCtx["Write / overwrite / read\nuser context file"]
@@ -375,32 +397,37 @@ graph TD
     AuthCheck -- No --> AuthErr[401 Unauthorized]
     AuthCheck -- Yes --> SessionCheck{"Session exists\nand owned by user?"}
     SessionCheck -- No --> SessionErr[404 Session not found]
-    SessionCheck -- Yes --> TempCheck{"_overheated?"}
-    TempCheck -- Yes --> ThermalErr["503 Server overloaded\nmessage queued on cooldown"]
-    TempCheck -- No --> QueueCheck{"len task_queue\n< MAX_QUEUE_SIZE 5?"}
+    SessionCheck -- Yes --> RouteAtAdmission{"user in\n_agent_users?"}
+    RouteAtAdmission -- "agent (cpu)" --> LaneCPU["lane = cpu\nQueue: _task_queues['cpu']"]
+    RouteAtAdmission -- "user (gpu)" --> LaneGPU["lane = gpu\nQueue: _task_queues['gpu']"]
+    LaneCPU --> QueueCheck{"len lane queue\n< MAX_QUEUE_SIZE 5?"}
+    LaneGPU --> QueueCheck
     QueueCheck -- No --> QueueBusy[503 Server Busy]
-
-    QueueCheck -- Yes --> EnqueueTask["task_queue.append\nqueue_cond.notify"]
+    QueueCheck -- Yes --> EnqueueTask["lane queue.append\n_queue_conds[lane].notify"]
     EnqueueTask --> TaskInit["tasks task_id =\nstatus queued"]
     TaskInit --> ReturnTaskID["Return task_id to Client"]
-
-    TaskInit -. "routing (in _prepare_session)" .-> Route{"task_mode(task_id)\nuser in _agent_users?"}
-    Route -- "agent (cpu)" --> RouteCPU["ensure CPU llama-server 8079\n+ load_llama_model('cpu')"]
-    Route -- "user (gpu)" --> RouteGPU["ensure GPU llama-server 8081\n+ load_llama_model('gpu')"]
+    ReturnTaskID -. "mode resolved later\nin task_mode(task_id)" .-> TaskMode["agent → 8079 CPU\nuser → 8081 GPU"]
+    TaskMode --> EnsureServer["ensure + load that\nmode's llama-server"]
 ```
 
-### 8. Queue Worker
+### 8. Queue Workers (one per lane)
+
+A separate worker drains each lane (`_queue_worker("gpu")`, `_queue_worker("cpu")`),
+each with its own lock/condition/queue. The two lanes never wait behind each other;
+they only share hardware when both need the GPU (chat load / image gen), which is
+arbitrated separately. (The CPU-lane "yield to human presence" pause is disabled in
+the current code — self-chat agents run on the CPU server continuously.)
 
 ```mermaid
 graph TD
-    E2["_queue_worker"] --> QueueLoop["queue_cond.wait\nblock on empty queue"]
-    QueueLoop --> SafetyCheck{"overheated\nor ram_evacuating?"}
-    SafetyCheck -- Yes --> MarkWaiting["Set all queued tasks to\nstatus waiting\npause label"]
+    E2["_queue_worker(mode)\ngpu or cpu"] --> QueueLoop["queue_cond[mode].wait\nblock on empty queue"]
+    QueueLoop --> PauseCheck{"overheated and mode=gpu\nor ram_evacuating?"}
+    PauseCheck -- Yes --> MarkWaiting["Set all queued tasks in\nthis lane to status waiting\npause label"]
     MarkWaiting --> PauseWait["queue_cond.wait 5s"] --> QueueLoop
-    SafetyCheck -- No --> PopTask["item = task_queue.pop 0\ncurrent_task_id = item.task_id"]
+    PauseCheck -- No --> PopTask["item = lane queue.pop 0\n_current_task_ids[mode] = task_id"]
     PopTask --> PostStart["event_post start\nsession_id message image\naudio user client_timestamp"]
     PostStart --> TaskDoneWait{"Poll tasks id.status\nevery 0.5s"}
-    TaskDoneWait -- "done or error" --> ClearTask["current_task_id = None\nqueue_cond.notify_all"]
+    TaskDoneWait -- "done or error" --> ClearTask["_current_task_ids[mode] = None\nqueue_cond.notify_all"]
     ClearTask --> QueueLoop
 ```
 
@@ -417,7 +444,7 @@ graph TD
 
     EvDispatch -- "llm_ok" --> LLMOK{"state == llm_waiting\nand has tool_calls?"}
     LLMOK -- "No tools" --> Finalize["_finalize_task:\n1. Build msg_entry with reasoning\n   tools_used, image_url etc\n2. Append to session\n3. save_sessions\n4. tasks id = status done\n5. Reset + update that\n   mode's idle timestamp"]
-    LLMOK -- "Has tools" --> SubmitTools["1. Append assistant msg\n2. state = tools_running\n3. pending_tools = count\n4. save_sessions\n5. Submit to tool_pool"]
+    LLMOK -- "Has tools" --> SubmitTools["1. Append assistant msg\n2. state = tools_running\n3. pending_tools = count\n4. save_sessions\n5. Submit to that\n   task's lane tool pool"]
 
     EvDispatch -- "llm_err" --> LLMERR{"state == llm_waiting?"}
     LLMERR -- Yes --> LLMErrAction["_set_task_error:\ntasks id = status error"]
@@ -437,8 +464,8 @@ graph TD
 
 ```mermaid
 graph TD
-    StartRound0["start_llm_round\n(mode from task_mode)"] --> LLMWorker["_llm_worker\nin _llm_pool 1 worker"]
-    LLMWorker --> PayloadBuild["Build payload:\nmodel (mode's model id)\nmessages tools\ntool_choice auto\nmax_tokens 32768\nstream true\n(server: --reasoning-budget 4096)"]
+    StartRound0["start_llm_round\n(mode from task_mode)"] --> LLMWorker["_llm_worker\nin _llm_pools[mode]\n(gpu 1 / cpu 4 workers)"]
+    LLMWorker --> PayloadBuild["Build payload:\nmodel (mode's model id)\nmessages tools\ntool_choice auto\nmax_tokens 24576\nstream true\n(CPU server: --reasoning-budget 4096)"]
     PayloadBuild --> StreamReq["POST llama-server\n(mode's base: 8081 gpu / 8079 cpu)\nv1/chat/completions\nstream=True timeout=600s"]
     StreamReq --> StreamParse["Parse SSE stream:\n- reasoning_content delta\n  accumulate in reasoning_buf\n- content delta\n  accumulate in content_buf\n- tool_calls delta\n  reassemble by index[...]" ]
     StreamParse --> BuildAssistantMsg["Build assistant msg:\nrole assistant content\nreasoning_content tool_calls"]
@@ -452,7 +479,7 @@ graph TD
 
 ```mermaid
 graph TD
-    SubmitTools["Submit to _tool_pool"] --> ToolWorker["_tool_worker\nin _tool_pool 2 workers"]
+    SubmitTools["Submit to _tool_pools[mode]\ngpu 2 / cpu 2 workers"] --> ToolWorker["_tool_worker\nin the task's lane pool"]
     ToolWorker --> ParseArgs["Parse tc.function.arguments\nfrom JSON string"]
     ParseArgs --> ChooseTool{"tc.function.name?"}
 
@@ -464,10 +491,12 @@ graph TD
 
     ChooseTool -- "generate_image" --> GenGuard{"already generated\nimage this task?"}
     GenGuard -- Yes --> GenReject["Return error:\nImage generation limit reached"]
-    GenGuard -- No --> GenImage["1. unload_llama_model('gpu')\n2. Build ComfyUI workflow:\n   z_image 8 steps res_multistep\n   or sd3_5_medium 20 steps euler (default)\n3. ensure_comfyui_running\n4. POST /prompt\n5. Poll history 120s\n6. free_comfyui_vram\n7. load_llama_model('gpu')\n(CPU agents keep running)"]
+    GenGuard -- No --> EnqueueImage["_enqueue_image_job\nImage worker (single, serialized)"]
+    EnqueueImage --> GenImage["1. unload_llama_model('gpu')\n2. Build ComfyUI workflow:\n   z_image 8 steps res_multistep\n   (default; sd3_5_medium 20\n   steps euler if in models.json)\n3. ensure_comfyui_running\n4. POST /prompt\n5. Poll history 120s\n6. free_comfyui_vram\n7. load_llama_model('gpu')\n8. 5s GPU cooldown\n(CPU agents keep running)"]
     GenImage --> ToolPost
 
-    ChooseTool -- "edit_image" --> EditImage["1. Find source image:\n   Check _image_url in session\n   Check base64 in user messages\n2. unload_llama_model('gpu')\n3. Write input to ComfyUI/input\n4. Build img2img workflow (denoise)\n5. ensure_comfyui_running\n6. POST /prompt\n7. Poll history 120s\n8. free_comfyui_vram\n9. load_llama_model('gpu')\n(CPU agents keep running)"]
+    ChooseTool -- "edit_image" --> EditEnqueue["_enqueue_image_job\nImage worker (single, serialized)"]
+    EditEnqueue --> EditImage["1. Find source image:\n   Check _image_url in session\n   Check base64 in user messages\n2. unload_llama_model('gpu')\n3. Write input to ComfyUI/input\n4. Build img2img workflow (denoise)\n5. ensure_comfyui_running\n6. POST /prompt\n7. Poll history 120s\n8. free_comfyui_vram\n9. load_llama_model('gpu')\n10. 5s GPU cooldown\n(CPU agents keep running)"]
     EditImage --> ToolPost
 
     ChooseTool -- "get_user_location" --> GetLoc["If _client_location cached: return it\nElse: set_status location_needed\nWait for browser geolocation\n(60s timeout)\nReturn location or 'denied'"]
@@ -494,9 +523,9 @@ graph TD
     ThermalLoop --> CheckGPU["nvidia-smi GPU temp"]
     CheckGPU --> GPUTempCheck{"Temp >= 85 C?"}
     GPUTempCheck -- Yes --> SetOverheat["_overheated = True"]
-    GPUTempCheck -- No --> CheckCool{"_overheated\nand Temp <= 65 C?"}
+    GPUTempCheck -- No --> CheckCool{"_overheated\nand Temp <= 75 C?"}
     CheckCool -- Yes --> UnsetOverheat["_overheated = False"]
-    SetOverheat --> ThermalAction{"Is task running?"}
+    SetOverheat --> ThermalAction{"Is GPU lane\ntask running?"}
     ThermalAction -- No --> ThermalUnload["GPU model_status?"]
     ThermalUnload -- "chat_loaded" --> UnloadModel["unload_llama_model('gpu')\n(CPU server untouched)"]
     ThermalUnload -- "image_active" --> FreeVRAM["free_comfyui_vram"]
@@ -504,7 +533,7 @@ graph TD
     UnsetOverheat --> RAMCheck1
 
     ThermalLoop --> RAMCheck1{"not evacuating\nand RAM >= 95%?"}
-    RAMCheck1 -- Yes --> EvacuateRAM["_evacuate_ram:\n1. ram_evacuating = True\n2. Requeue current task to front\n3. Set task status error\n4. kill_llama_server (both 8081 + 8079)\n5. kill_comfyui\n6. Wait until RA[...]" ]
+    RAMCheck1 -- Yes --> EvacuateRAM["_evacuate_ram:\n1. ram_evacuating = True\n2. Requeue in-flight task\n   to front of EACH lane\n   (gpu + cpu) status error\n3. kill_llama_server (both 8081 + 8079)\n4. kill_comfyui\n5. Wait until RAM <= 70%\n6. restart_servers()"]
     RAMCheck1 -- No --> ThermalLoop
 
     E3["_idle_unload_loop"] --> IdleLoop["Loop every 10s"]

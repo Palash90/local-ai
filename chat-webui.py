@@ -46,9 +46,11 @@ from server.config import (  # noqa: F401
     PROMPT_PATH,
     REASONING_BUDGET,
     SEARXNG_URL,
+    SELF_CHAT_MODE,
     SESSIONS_DIR,
     SESSIONS_FILE,
     TASKS_DB,
+    THEMES_DB,
     TOOLS,
     TOOLS_TOKEN_COST,
     UPLOADS_DIR,
@@ -124,6 +126,11 @@ from server.features.tasks_db import (  # noqa: E402
     task_update,
 )
 
+from server.features.themes_db import (  # noqa: E402
+    _init_themes_db,
+    handle_theme_tool,
+)
+
 from server.features.users import (  # noqa: E402
     _safe_username,
     get_current_user,
@@ -196,6 +203,7 @@ from server.features.monitoring import (  # noqa: E402
     _idle_unload_loop,
     _reminder_loop,
     _thermal_monitor,
+    _connection_manager,
     ensure_comfyui_running,
     ensure_llama_server,
     get_gpu_temp,
@@ -226,6 +234,7 @@ from server.features.orchestration import (  # noqa: E402
 register_entrypoint(sys.modules[__name__])
 
 _init_tasks_db()
+_init_themes_db()
 
 SYS_CONTENT = build_sys_content()
 
@@ -265,6 +274,7 @@ if __name__ == "__main__":
     threading.Thread(target=_idle_unload_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()
     threading.Thread(target=_reminder_loop, daemon=True).start()
+    threading.Thread(target=_connection_manager, daemon=True).start()
     print(f"Chat UI running on http://localhost:{PORT}")
     s = http.server.HTTPServer((HOST, PORT), Handler)
     try:

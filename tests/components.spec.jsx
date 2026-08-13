@@ -1,5 +1,5 @@
 import React from 'react';
-import { test, expect } from '@playwright/experimental-ct-react';
+import { test, expect } from './fixtures.js';
 import OverloadWarning from '../src/components/OverloadWarning';
 import LocationPrompt from '../src/components/LocationPrompt';
 import Sidebar from '../src/components/Sidebar';
@@ -144,7 +144,7 @@ const baseProps = {
   tokenEstimate: 0,
   contextCompressed: false,
   rawTokenEstimate: 0,
-  maxContext: 32768,
+  maxContext: 24576,
   onToggleSidebar: () => {},
   username: 'palash',
   onLogout: () => {},
@@ -178,7 +178,7 @@ test('ModelBar shows tps without warning when fast', async ({ mount }) => {
 test('ModelBar formats token estimate in k', async ({ mount }) => {
   const component = await mount(<ModelBar {...baseProps} tokenEstimate={1500} />);
   await expect(component.locator('.token-text')).toContainText('1.5k');
-  await expect(component.locator('.token-text')).toContainText('33k');
+  await expect(component.locator('.token-text')).toContainText('25k');
 });
 
 test('ModelBar shows compressed context marker', async ({ mount }) => {

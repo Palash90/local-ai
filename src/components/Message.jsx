@@ -8,6 +8,35 @@ import StatusBox from './StatusBox'
 
 marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
 
+const fileLinkExt = {
+  name: 'fileLink',
+  level: 'inline',
+  start(src) {
+    const i = src.indexOf('[FILE:')
+    return i === -1 ? undefined : i
+  },
+  tokenizer(src) {
+    const match = /^\[FILE:\s*(\S+)\]\(([^)]+)\)/.exec(src)
+    if (!match) return undefined
+    return { type: 'fileLink', raw: match[0], url: match[1], name: match[2] }
+  },
+  renderer(token) {
+    const url = token.url.replace(/"/g, '&quot;')
+    const name = token.name.replace(/"/g, '&quot;')
+    return (
+      '<a class="file-chip" href="' + url + '" download="' + name + '" title="' + name + '">' +
+      '<svg class="file-chip-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">' +
+      '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>' +
+      '<polyline points="14 2 14 8 20 8"></polyline>' +
+      '</svg>' +
+      '<span class="file-chip-name">' + name + '</span>' +
+      '</a>'
+    )
+  },
+}
+
+marked.use({ extensions: [fileLinkExt] })
+
 function escHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }

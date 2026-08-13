@@ -9,3 +9,5 @@ dist
 # Code coverage reports
 /coverage/
 /.nyc_output/
+/coverage-js/
+*.log

@@ -33,6 +33,14 @@ parser.add_argument(
     "for each task (genre/checklist resolution, script enforcement, medium "
     "feasibility) without making any LLM call, then exit.",
 )
+parser.add_argument(
+    "--gpu",
+    action="store_true",
+    help="Run the self-chat agents (kolpo/kaya/editor/moderator) on the "
+    "interactive GPU llama-server (8081) instead of the RAM-backed CPU "
+    "server (8079). Each /api/chat request carries mode=\"gpu\" so "
+    "chat-webui routes the agent tasks to the GPU lane.",
+)
 args = parser.parse_args()
 STORY_BASE_DIR = os.path.expanduser("~/local-ai-files/stories")
 
@@ -42,24 +50,95 @@ USERNAME_B = "kaya"
 PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
-POLL_INTERVAL_SECONDS = 10.0
-SLEEP_BETWEEN_TURNS = 5.0
-MAX_MESSAGES_PER_AGENT = 15
+POLL_INTERVAL_SECONDS = 2.0
+SLEEP_BETWEEN_TURNS = 1.0
+MAX_MESSAGES_PER_AGENT = 4
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
 STARTING_CONVERSATION = open(SELF_CHAT_PROMPT_FILE).read()
 
-SLEEP_BETWEEN_ROUNDS = 900
+SLEEP_BETWEEN_ROUNDS = 10
 
 USERNAME_EDITOR = "editor"
 USERNAME_MODERATOR = "moderator"
-EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/editor_prompt.txt"
-MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/moderator_prompt.txt"
+EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/editor.txt"
+MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/moderator.txt"
 
 DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 
+# All participants of the self-chat window (kolpo, kaya, editor, moderator)
+# share one theme scope, so the theme is coordinated between the users of the
+# window while regular per-user chats stay isolated in their own scopes.
+SELF_CHAT_THEME_SCOPE = "self-chat"
+SELF_CHAT_THEME_LIMIT = 30
+
 
 GENRE_CHECKLISTS_FILE = os.path.expanduser("~/local-ai-files/genre_checklists.json")
+
+
+GENRE_PERSONA_MAP_FILE = os.path.expanduser("~/local-ai-files/contexts/genre_persona_map.json")
+PERSONA_POOL_FILE = os.path.expanduser("~/local-ai-files/contexts/persona_pool.json")
+
+_persona_cycles = {}
+
+def load_json_file(filepath, fallback):
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"[persona] Could not load {filepath}: {e} — using fallback")
+        return fallback
+
+GENRE_PERSONA_MAP = load_json_file(GENRE_PERSONA_MAP_FILE, {})
+PERSONA_POOL = load_json_file(PERSONA_POOL_FILE, {})
+
+DETAIL_MASTER_FILE = os.path.expanduser("~/local-ai-files/detail_fields.json")
+DETAIL_MASTER = load_json_file(DETAIL_MASTER_FILE, {})
+
+
+def pick_persona_round_robin(pool, genre, genre_map):
+    global _persona_cycles
+    allowed = genre_map.get(genre) or genre_map.get("default")
+    
+    # Hard safety rule: exclude Parent & Child from Adventure & Horror
+    if genre == "Adventure & Horror" and allowed:
+        allowed = [r for r in allowed if r != "Parent & Child"]
+
+    # Flatten pool: (relationship, mood, details_dict)
+    candidates = []
+    for rel, moods in pool.items():
+        if allowed and rel not in allowed:
+            continue
+        for mood, details in moods.items():
+            candidates.append((rel, mood, details))
+
+    if not candidates:
+        # Fallback default
+        fallback_details = {
+            "Kaya": {"role": "Colleague", "persona": "Creative and energetic problem solver"},
+            "Kolpo": {"role": "Colleague", "persona": "Methodical and structured partner"}
+        }
+        return "Colleagues", "Focused Collaboration", fallback_details
+
+    if genre not in _persona_cycles or _persona_cycles[genre]["idx"] >= len(_persona_cycles[genre]["pairs"]):
+        shuffled = list(candidates)
+        random.shuffle(shuffled)
+        _persona_cycles[genre] = {"pairs": shuffled, "idx": 0}
+
+    state = _persona_cycles[genre]
+    choice = state["pairs"][state["idx"]]
+    state["idx"] += 1
+    return choice  # Returns (relationship, mood, details_dict)
+
+
+def deep_merge(target, source):
+    """Recursively merge dictionary source into target."""
+    for key, value in source.items():
+        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
+            deep_merge(target[key], value)
+        else:
+            target[key] = value
+    return target
 
 
 def load_genre_checklists(extra=None):
@@ -92,10 +171,13 @@ def _parse_tasks(items):
         if isinstance(roles, str):
             roles = [r.strip() for r in roles.split(",")]
         genre = (item.get("genre") or "").strip() or "General"
-        details = (item.get("details") or "").strip()
+        details = item.get("details") or ""
+        if isinstance(details, str):
+            details = details.strip()
         checklist = item.get("checklist") or {}
         path = (item.get("path") or "").strip() or None
         inactive = item.get("inactive") or False
+        context = item.get("context") or None
         tasks.append(
             {
                 "task": task,
@@ -106,53 +188,333 @@ def _parse_tasks(items):
                 "details": details,
                 "checklist": checklist,
                 "path": path,
-                "inactive": inactive
+                "inactive": inactive,
+                "context": context
             }
         )
     return tasks
 
 
+_detail_cycles = {}
+
+
+def _fmt_detail_value(value):
+    """Render a resolved detail value as prompt text."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)) or value is None:
+        return str(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return str(value)
+
+
+def _join_values(values, separator=None):
+    """Join multi-selected values naturally: 'a', 'a and b', 'a, b and c'."""
+    if separator:
+        return separator.join(values)
+    if len(values) <= 1:
+        return values[0] if values else ""
+    return ", ".join(values[:-1]) + " and " + values[-1]
+
+
+def _resolve_count(task, name, spec):
+    """Resolve how many values a multi selector should pick.
+
+    ``count`` may be a plain integer/string or its own selector spec
+    (e.g. ``{"selector": "random", "values": [2, 3]}``), resolved through
+    the same selector machinery so it can vary per round.
+    """
+    count = spec.get("count")
+    if count is None:
+        return 1
+    count_spec = count if isinstance(count, dict) else {"value": count}
+    resolved = _pick_detail_value(task, f"{name}::count", count_spec)
+    if isinstance(resolved, (list, tuple)):
+        return len(resolved)
+    try:
+        return max(0, int(resolved))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _pick_detail_value(task, name, spec):
+    """Pick value(s) for one detail field according to its selector.
+
+    Supported selectors:
+      - random:           pick one value at random (fresh each round)
+      - roundrobin:       cycle through values one at a time across rounds
+      - random_multi:     pick ``count`` distinct values at random
+      - roundrobin_multi: slide a window of ``count`` values across rounds
+      - absent / static / first: use ``value`` if given, else ``values[0]``
+    """
+    if "value" in spec:
+        return spec["value"]
+
+    values = spec.get("values") or []
+    selector = str(spec.get("selector") or "").strip().lower()
+
+    if not values:
+        return None
+
+    if selector == "random":
+        return random.choice(values)
+
+    if selector == "roundrobin":
+        key = (task, name)
+        idx = _detail_cycles.get(key, 0) % len(values)
+        _detail_cycles[key] = idx + 1
+        return values[idx]
+
+    if selector == "random_multi":
+        count = _resolve_count(task, name, spec)
+        return random.sample(values, min(count, len(values)))
+
+    if selector == "roundrobin_multi":
+        count = _resolve_count(task, name, spec)
+        key = (task, name)
+        n = len(values)
+        start = _detail_cycles.get(key, 0) % n
+        _detail_cycles[key] = start + count
+        return [values[(start + i) % n] for i in range(min(count, n))]
+
+    return values[0]
+
+
+def _resolve_field_value(spec, task, master):
+    """Resolve a single detail field spec into ``(name, value)``.
+
+    ``value`` is the raw scalar or list of values chosen by the selector.
+    ``spec`` may reference a shared definition in ``master`` (``ref``); local
+    keys override the master definition.
+    """
+    if not isinstance(spec, dict):
+        return "", str(spec)
+    ref = spec.get("ref")
+    if ref and master and isinstance(master.get(ref), dict):
+        merged = dict(master[ref])
+        merged.update(spec)
+        spec = merged
+    name = str(spec.get("name") or "").strip()
+    value = _pick_detail_value(task, name, spec)
+    return name, value
+
+
+def resolve_details(details, task, master=None):
+    """Resolve a task's ``details`` spec into a prompt-ready string.
+
+    Accepts:
+      - a plain string (legacy format): returned unchanged
+      - a list of ``{name, selector, values}`` field specs
+      - a dict keyed by field name (``{name: {selector, values}}``)
+
+    A field may reference a shared definition from ``master`` (the
+    ``master_details`` block in a task config, or the ``detail_fields.json``
+    file) via ``{"name": ..., "ref": "pool_name"}``; local keys override the
+    master definition.
+
+    Fields resolve to an inline comma list, e.g.
+    ``"animal: horse, time: evening"``. Multi-select fields render as
+    ``"animals: horse, elephant"``. Resolution happens once per round.
+    """
+    if master is None:
+        master = DETAIL_MASTER
+
+    if isinstance(details, str):
+        return details
+
+    if isinstance(details, list):
+        specs = details
+    elif isinstance(details, dict):
+        specs = [
+            {"name": name, **(spec if isinstance(spec, dict) else {"value": spec})}
+            for name, spec in details.items()
+        ]
+    else:
+        return str(details)
+
+    parts = []
+    for spec in specs:
+        if not isinstance(spec, dict):
+            parts.append(str(spec))
+            continue
+        name, value = _resolve_field_value(spec, task, master)
+        if not name or value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            formatted = [_fmt_detail_value(v) for v in value]
+            if not formatted:
+                continue
+            rendered = _join_values(formatted, spec.get("separator"))
+        else:
+            rendered = _fmt_detail_value(value)
+        if not rendered:
+            continue
+        parts.append(f"{name}: {rendered}")
+    return ", ".join(parts)
+
+
+def resolve_details_fields(details, task, master=None):
+    """Resolve a task's ``details`` spec into ``{field: value}`` pairs.
+
+    Like :func:`resolve_details` but returns the raw resolved values (lists
+    stay lists) keyed by field name, so the exact combination can be hashed by
+    the theme tracker. A plain string returns ``{}`` (nothing to track).
+    """
+    if master is None:
+        master = DETAIL_MASTER
+
+    if isinstance(details, str):
+        return {}
+
+    if isinstance(details, list):
+        specs = details
+    elif isinstance(details, dict):
+        specs = [
+            {"name": name, **(spec if isinstance(spec, dict) else {"value": spec})}
+            for name, spec in details.items()
+        ]
+    else:
+        return {}
+
+    fields = {}
+    for spec in specs:
+        name, value = _resolve_field_value(spec, task, master)
+        if not name or value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            formatted = [_fmt_detail_value(v) for v in value]
+            value = formatted if formatted else None
+        else:
+            value = _fmt_detail_value(value)
+        if value:
+            fields[name] = value
+    return fields
+
+
+def build_combo_dict(genre, mood, persona_details, details_fields):
+    """Assemble the tracked combination: detail fields + mood + genre + role + persona."""
+    kaya = (persona_details or {}).get("Kaya", {}) or {}
+    kolpo = (persona_details or {}).get("Kolpo", {}) or {}
+    return {
+        "genre": genre or "",
+        "mood": mood or "",
+        "role": " / ".join(x for x in [kaya.get("role"), kolpo.get("role")] if x),
+        "persona": " / ".join(x for x in [kaya.get("persona"), kolpo.get("persona")] if x),
+        "details": details_fields or {},
+    }
+
+
+def theme_api(action, token, **payload):
+    """Talk to the server's theme tracker (/api/themes). Returns parsed JSON."""
+    headers = {"X-Auth-Token": token}
+    try:
+        if action == "list":
+            r = requests.get(f"{BASE_URL}/api/themes", params=payload, headers=headers, timeout=15)
+            r.raise_for_status()
+        else:
+            r = requests.post(f"{BASE_URL}/api/themes", json=payload, headers=headers, timeout=15)
+            r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[theme] {action} failed: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+def fetch_used_themes(token, scope=SELF_CHAT_THEME_SCOPE):
+    """Return the list of already-logged theme records for the window scope."""
+    data = theme_api("list", token, scope=scope, limit=SELF_CHAT_THEME_LIMIT)
+    return data.get("themes", []) if data.get("ok") else []
+
+
+def check_combo_used(token, combo, scope=SELF_CHAT_THEME_SCOPE):
+    data = theme_api("check", token, operation="check", scope=scope, **combo)
+    return bool(data.get("used")) if data.get("ok") else False
+
+
+def format_theme_block(records):
+    """Render the shared 'Already Produced Themes' block for the prompt."""
+    if not records:
+        return "None yet — everything is available."
+    lines = []
+    for r in records:
+        bits = []
+        if r.get("genre"):
+            bits.append(f"genre: {r['genre']}")
+        if r.get("mood"):
+            bits.append(f"mood: {r['mood']}")
+        if r.get("role"):
+            bits.append(f"role: {r['role']}")
+        if r.get("persona"):
+            bits.append(f"persona: {r['persona']}")
+        if r.get("details") and r.get("details") != "{}":
+            try:
+                det = json.loads(r["details"])
+            except (TypeError, ValueError):
+                det = {}
+            if det:
+                bits.append("details: " + ", ".join(f"{k}={v}" for k, v in det.items()))
+        if r.get("theme"):
+            bits.append(f"theme: {r['theme']}")
+        status = r.get("status") or ""
+        lines.append(f"  - ({status}) " + " | ".join(bits))
+    return "\n".join(lines)
+
+
 def load_config_file(tasks_file):
-    """Load a task config file. Accepts either a plain task list or an object
-    with 'tasks' plus optional 'genre_checklists' (genre -> {editor, moderator}).
-    Returns (tasks, genre_checklists)."""
     if not os.path.isfile(tasks_file):
         print(f"Tasks file not found: {tasks_file}")
-        return [], {}
+        return [], {}, {}, {}
     with open(tasks_file, "r", encoding="utf-8") as f:
         try:
             data = json.load(f)
         except json.JSONDecodeError as e:
-            print(
-                f"[config] Invalid JSON in {tasks_file}: {e.msg} at line "
-                f"{e.lineno}, column {e.colno} (char {e.pos}). Check for "
-                "trailing commas after the last property/array item."
-            )
+            print(f"[config] Invalid JSON in {tasks_file}: {e.msg}")
             raise SystemExit(1) from e
+
     if isinstance(data, dict):
-        return _parse_tasks(data.get("tasks") or []), data.get("genre_checklists") or {}
-    return _parse_tasks(data), {}
+        tasks = _parse_tasks(data.get("tasks") or [])
+        checklists = data.get("genre_checklists") or {}
+        persona_map = data.get("genre_persona_map") or {}
+        persona_pool = data.get("persona_pool") or {}
+        master = data.get("master_details") or {}
+        if master:
+            DETAIL_MASTER.update(master)
+        return tasks, checklists, persona_map, persona_pool
+
+    return _parse_tasks(data), {}, {}, {}
 
 
 def load_tasks():
-    """Combine tasks from --config and/or the default file. No role tag => free.
-    Genre checklists from the config file override the default file's."""
     checklists = {}
+   
     if args.config:
-        tasks, cfg_checklists = load_config_file(args.config)
+        persona_map = {}
+        persona_pool = {}
+        
+        tasks, cfg_checklists, cfg_persona_map, cfg_persona_pool = load_config_file(args.config)
         source = args.config
         checklists.update(cfg_checklists)
+        
+        # Merge config persona overrides
+        deep_merge(persona_map, cfg_persona_map)
+        deep_merge(persona_pool, cfg_persona_pool)
+
         if args.defaults:
-            defaults, def_checklists = load_config_file(DEFAULT_TASKS_FILE)
+            defaults, def_checklists, def_pmap, def_ppool = load_config_file(DEFAULT_TASKS_FILE)
             existing = {t["task"] for t in tasks}
             tasks.extend(t for t in defaults if t["task"] not in existing)
             checklists.update(def_checklists)
             source = f"{args.config} + defaults"
     else:
-        tasks, def_checklists = load_config_file(DEFAULT_TASKS_FILE)
+        persona_map = load_json_file(GENRE_PERSONA_MAP_FILE, {})
+        persona_pool = load_json_file(PERSONA_POOL_FILE, {})
+        
+        tasks, def_checklists, def_pmap, def_ppool = load_config_file(DEFAULT_TASKS_FILE)
         checklists.update(def_checklists)
         source = DEFAULT_TASKS_FILE
-    return tasks, source, checklists
+
+    return tasks, source, checklists, persona_map, persona_pool
 
 
 def checklist_for(genre, role, task_checklist=None):
@@ -228,11 +590,21 @@ def run_dry_run():
                 flag = "   WARNING: no audio tool exists — round will be skipped by the guard"
             print(f"  mediums:     {medium}{flag}")
         print(f"  roles:       {', '.join(roles)}")
-        print(f"  details:     {'present (' + str(len(details)) + ' chars)' if details else 'EMPTY'}")
+        if isinstance(details, list):
+            names = [d.get("name", "?") if isinstance(d, dict) else "?" for d in details]
+            print(f"  details:     {len(details)} structured field(s) -> {', '.join(str(n) for n in names)}")
+        elif isinstance(details, dict):
+            print(f"  details:     {len(details)} structured field(s) -> {', '.join(details)}")
+        else:
+            print(f"  details:     {'present (' + str(len(details)) + ' chars)' if details else 'EMPTY'}")
         print("  editor checklist (resolved):")
         print(indent(checklist_for(genre, "editor", checklist)))
         print("  moderator checklist (resolved):")
         print(indent(checklist_for(genre, "moderator", checklist)))
+        print("ENVIRONMENT")    
+        print(f"  tasks source:        {TASKS_SOURCE}")
+        print(f"  persona map:         {len(GENRE_PERSONA_MAP)} genre mapping(s) active")
+        print(f"  persona pool:        {len(PERSONA_POOL)} relationship category(ies) active")
         print()
 
     print("=" * 68)
@@ -245,7 +617,11 @@ def run_dry_run():
         print(f"                         loaded ({len(GENRE_CHECKLISTS)} genre(s))")
 
     handled = {
-        SELF_CHAT_PROMPT_FILE: {"%task%", "%mediums%", "%_lang%", "%details%"},
+        SELF_CHAT_PROMPT_FILE: {
+            "%task%", "%mediums%", "%_lang%", "%details%", "%themes%",
+            "%relationship%", "%mood%", "%kaya_role%", 
+            "%kaya_persona%", "%kolpo_role%", "%kolpo_persona%"
+        },
         EDITOR_PROMPT_FILE: {"%genre%", "%mediums%", "%language%", "%details%", "%checklist%"},
         MODERATOR_PROMPT_FILE: {"%genre%", "%mediums%", "%language%", "%details%", "%checklist%"},
     }
@@ -413,6 +789,8 @@ def call_llm(token, session_id, message, image_b64=None):
         "message": message,
         "client_timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+    if args.gpu:
+        payload["mode"] = "gpu"
     if image_b64:
         payload["image"] = image_b64
 
@@ -442,11 +820,10 @@ def call_llm(token, session_id, message, image_b64=None):
             }
         if status == "error":
             raise RuntimeError(f"Task failed: {data}")
-
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-def build_input(speaker, message_number, incoming, lang, task):
+def build_input(speaker, message_number, incoming, lang, task, context=None):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
 
@@ -454,6 +831,10 @@ def build_input(speaker, message_number, incoming, lang, task):
         f"[SYSTEM DIRECTIVE: You are responding as {current_agent}. Your partner is {partner_agent}.]\n",
         f"[Turn {message_number}/{MAX_MESSAGES_PER_AGENT}]\n",
     ]
+
+    if context is not None:
+        print("Extra context", context)
+        lines.append(context)
 
     if message_number <= 2:
         lines.append(
@@ -475,14 +856,41 @@ def build_input(speaker, message_number, incoming, lang, task):
     return "\n".join(lines)
 
 
-def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None, path=None):
+def run_single_conversation(token_a, token_b, round_number, task, mediums, languages, roles=None, genre="General", details="", checklist=None, path=None, context=None, persona=None, themes_context=""):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
+
+    # Pick persona tuple. run_forever may pass a pre-picked one so the theme
+    # tracker sees the exact same combination the conversation will use.
+    if persona is None:
+        relationship, mood, persona_details = pick_persona_round_robin(PERSONA_POOL, genre, GENRE_PERSONA_MAP)
+    else:
+        relationship, mood, persona_details = persona
+    
+    persona_info = {
+        "relationship": relationship,
+        "mood": mood,
+        "details": persona_details
+    }
+    
+    kaya_info = persona_details.get("Kaya", {})
+    kolpo_info = persona_details.get("Kolpo", {})
+
+    print(f"[persona] Genre: {genre} | Dynamic: {relationship} ({mood})")
+    print(f"[persona] Kaya: {kaya_info.get('role')} — {kaya_info.get('persona')}")
+    print(f"[persona] Kolpo: {kolpo_info.get('role')} — {kolpo_info.get('persona')}")
 
     s = STARTING_CONVERSATION.replace("%task%", task)
     s = s.replace("%mediums%", " , ".join(medium))
     s = s.replace("%_lang%", language)
     s = s.replace("%details%", details or "None")
+    s = s.replace("%themes%", themes_context or "None yet — everything is available.")
+    s = s.replace("%relationship%", relationship)
+    s = s.replace("%mood%", mood)
+    s = s.replace("%kaya_role%", kaya_info.get("role", "Partner"))
+    s = s.replace("%kaya_persona%", kaya_info.get("persona", "Creative"))
+    s = s.replace("%kolpo_role%", kolpo_info.get("role", "Partner"))
+    s = s.replace("%kolpo_persona%", kolpo_info.get("persona", "Methodical"))
 
     print(s)
     prompt_block = {"name": "Self-Chat Directive", "content": s}
@@ -505,7 +913,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
     incoming = ""
     shared_image_b64 = None
 
-    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre, path)
+    stories_dir, fname = start_story(round_number, task, task, medium, language, roles, genre, path, persona_info)
     citations = {}
 
     while True:
@@ -521,6 +929,7 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
             "" if not transcript else incoming,
             language,
             task,
+            context
         )
 
         wait_for_user_to_leave()
@@ -587,7 +996,9 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
             if block:
                 incoming += "\n\n[WEB SEARCH REPORTS SHARED:]\n" + "\n".join(block)
         current_speaker = "B" if current_speaker == "A" else "A"
+        print(f"LLM Rest for {SLEEP_BETWEEN_TURNS} seconds")
         time.sleep(SLEEP_BETWEEN_TURNS)
+        print("LLM Rest Over")
 
     finalize_story(fname, citations)
 
@@ -629,7 +1040,8 @@ def run_single_conversation(token_a, token_b, round_number, task, mediums, langu
             json.dump(data, f, indent=2)
     else:
         print("=== Moderator phase ===")
-        run_moderator(stories_dir, fname, task, genre, editor_path=edited_path, mediums=medium, language=language, details=details, checklist=checklist)
+        print("Moderator Phase Skipped, not much value add")
+        # run_moderator(stories_dir, fname, task, genre, editor_path=edited_path, mediums=medium, language=language, details=details, checklist=checklist)
 
     return transcript, session_a, session_b, fname
 
@@ -709,7 +1121,7 @@ def apply_title(title, stories_dir, fname):
     return stories_dir, fname
 
 
-def start_story(round_number, task, title, mediums, language, roles=None, genre="General", path=None):
+def start_story(round_number, task, title, mediums, language, roles=None, genre="General", path=None, persona_info = None):
     base_dir = path or STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
     now = datetime.now()
@@ -721,11 +1133,14 @@ def start_story(round_number, task, title, mediums, language, roles=None, genre=
     os.makedirs(stories_dir, exist_ok=True)
     fname = os.path.join(stories_dir, f"story_r{round_number}_{timestamp}.md")
     roles = roles or ["free"]
+    rel = persona_info.get("relationship", "N/A") if persona_info else "N/A"
+    mood = persona_info.get("mood", "N/A") if persona_info else "N/A"
+
     header = [
         f"# {title}\n",
         f"*Round {round_number} · Generated on {now.strftime('%Y-%m-%d %H:%M:%S')}*\n\n",
         f"**Task prompt:** {task}\n\n",
-        f"**Genre:** {genre}\n\n",
+        f"**Genre:** {genre}  ·  **Dynamic:** {rel} ({mood})\n\n",
         f"**For roles:** {' , '.join(roles)}\n\n",
         f"**Mediums:** {' , '.join(mediums)}  ·  **Language(s):** {language}\n\n",
         "---\n\n",
@@ -970,7 +1385,9 @@ def run_editor(stories_dir, fname, task, genre, mediums=None, language="", detai
                 token,
                 session_id,
                 f"This is the image referenced in the story as {img_fname}. "
-                "Look at it carefully; it is part of the story you must edit.",
+                "Look at it carefully; it is part of the story. Decide the quality of image."
+                "If it does not match the task expectation, flag it."
+                "But never add new image or edit existing one",
                 image_b64=file_to_b64(full),
             )
         wait_for_user_to_leave()
@@ -1096,9 +1513,18 @@ def run_forever():
             languages = spec["languages"]
             roles = spec.get("roles") or ["free"]
             genre = spec.get("genre") or "General"
-            details = spec.get("details") or ""
+            details_spec = spec.get("details") or ""
+            details = resolve_details(details_spec, task)
             checklist = spec.get("checklist") or {}
             path = spec.get("path")
+            context = spec.get('context') or None
+            print(roles)
+            if "admin" in roles:
+                path = f"{path}/admin"
+            if "premium" in roles:
+                path = f"{path}/premium"
+
+            print("The stories will be generated in this directory", path)
             inactive = spec.get("inactive") or False
             if inactive:
                 print(f"Task {task} is inactive, skipping the task")
@@ -1113,11 +1539,63 @@ def run_forever():
                 round_number += 1
                 task_index += 1
                 continue
+
+            # Deterministic variety: resolve the combination (detail fields +
+            # mood + genre + role + persona) and re-roll until it has not
+            # already been produced in this self-chat window.
+            combo = {}
+            for attempt in range(4):
+                relationship, mood, persona_details = pick_persona_round_robin(
+                    PERSONA_POOL, genre, GENRE_PERSONA_MAP
+                )
+                detail_fields = resolve_details_fields(details_spec, task)
+                combo = build_combo_dict(genre, mood, persona_details, detail_fields)
+                if not check_combo_used(token_a, combo):
+                    break
+                print(
+                    f"[theme] Combination already used (attempt {attempt + 1}); "
+                    f"re-rolling details/persona for variety"
+                )
+            else:
+                print("[theme] Exhausted re-roll attempts; proceeding with the last combination")
+            persona = (relationship, mood, persona_details)
+
+            # Share what has already been worked on with the agents BEFORE the
+            # task starts, so they coordinate through the tracker.
+            themes_block = format_theme_block(
+                fetch_used_themes(token_a, scope=SELF_CHAT_THEME_SCOPE)
+            )
+
+            # Reserve this combination in the tracker before the round runs, so
+            # no later round ever repeats it (even if this one fails).
+            logged = theme_api(
+                "log",
+                token_a,
+                operation="log",
+                scope=SELF_CHAT_THEME_SCOPE,
+                theme=task,
+                **combo,
+            )
+            theme_id = (logged.get("theme") or {}).get("id") if logged.get("ok") else None
+            if theme_id:
+                print(f"[theme] Reserved combination {theme_id} for round {round_number}")
+
             print(f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n")
             start_time = time.time()
             transcript, session_a, session_b, fname = run_single_conversation(
-                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist, path
+                token_a, token_b, round_number, task, mediums, languages, roles, genre, details, checklist, path, context, persona=persona, themes_context=themes_block
             )
+            if theme_id:
+                done = theme_api(
+                    "complete",
+                    token_a,
+                    operation="complete",
+                    theme_id=theme_id,
+                )
+                if done.get("ok"):
+                    print(f"[theme] Marked {theme_id} completed")
+                else:
+                    print(f"[theme] Could not mark {theme_id} completed: {done.get('error')}")
             # save_transcript(transcript, round_number)
             if not keep_sessions:
                 delete_session(token_a, session_a)
@@ -1125,15 +1603,15 @@ def run_forever():
             round_number += 1
             task_index += 1
             elapsed = time.time() - start_time
-            print(f"Total time elapsed in this round {elapsed:.2f} seconds\n")
-            print("Autonomous organization is in vacation...")
+            print(f"Total time elapsed in round {round_number} - {elapsed:.2f} seconds\n")
+            print(f"Autonomous organization is in vacation for {SLEEP_BETWEEN_ROUNDS} seconds")
             time.sleep(SLEEP_BETWEEN_ROUNDS)
             print("Vacation over")
     except KeyboardInterrupt:
         print("\nManual Interruption")
 
 
-TASKS, TASKS_SOURCE, TASK_CHECKLISTS = load_tasks()
+TASKS, TASKS_SOURCE, TASK_CHECKLISTS, GENRE_PERSONA_MAP, PERSONA_POOL = load_tasks()
 if not TASKS:
     print("No tasks to run. Add tasks to a config file and restart.")
     raise SystemExit(1)

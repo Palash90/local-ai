@@ -1,3 +1,4 @@
+import argparse
 import base64
 import importlib.util
 import json
@@ -75,10 +76,243 @@ class TestParseTasks:
         tasks = self_chat._parse_tasks([{"task": "T", "path": "   "}])
         assert tasks[0]["path"] is None
 
+    def test_structured_details_preserved(self, self_chat):
+        items = [{
+            "task": "T",
+            "details": [
+                {"name": "animal", "selector": "random", "values": ["horse", "cow"]},
+                {"name": "time", "selector": "roundrobin", "values": ["day", "night"]},
+            ],
+        }]
+        tasks = self_chat._parse_tasks(items)
+        assert tasks[0]["details"] == [
+            {"name": "animal", "selector": "random", "values": ["horse", "cow"]},
+            {"name": "time", "selector": "roundrobin", "values": ["day", "night"]},
+        ]
+
+    def test_blank_details_default_to_empty(self, self_chat):
+        tasks = self_chat._parse_tasks([{"task": "T", "details": ""}, {"task": "U"}])
+        assert tasks[0]["details"] == ""
+        assert tasks[1]["details"] == ""
+
+
+class TestResolveDetails:
+    def test_string_passthrough(self, self_chat):
+        assert self_chat.resolve_details("long text", "Task") == "long text"
+
+    def test_inline_comma_list(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        monkeypatch.setattr(self_chat, "_detail_cycles", {})
+        details = [
+            {"name": "animal", "selector": "random", "values": ["horse", "cow"]},
+            {"name": "time", "selector": "roundrobin", "values": ["day", "night"]},
+        ]
+        assert self_chat.resolve_details(details, "Task X") == "animal: horse, time: day"
+
+    def test_roundrobin_cycles_across_calls(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "_detail_cycles", {})
+        details = [{"name": "time", "selector": "roundrobin", "values": ["day", "midday", "evening", "night"]}]
+        assert self_chat.resolve_details(details, "Task X") == "time: day"
+        assert self_chat.resolve_details(details, "Task X") == "time: midday"
+        assert self_chat.resolve_details(details, "Task X") == "time: evening"
+        assert self_chat.resolve_details(details, "Task X") == "time: night"
+        assert self_chat.resolve_details(details, "Task X") == "time: day"
+
+    def test_roundrobin_state_is_per_task(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "_detail_cycles", {})
+        details = [{"name": "time", "selector": "roundrobin", "values": ["day", "night"]}]
+        assert self_chat.resolve_details(details, "Task X") == "time: day"
+        assert self_chat.resolve_details(details, "Task Y") == "time: day"
+        assert self_chat.resolve_details(details, "Task X") == "time: night"
+
+    def test_random_picks_value(self, self_chat, monkeypatch):
+        calls = []
+
+        def fake_choice(seq):
+            calls.append(list(seq))
+            return "elephant"
+
+        monkeypatch.setattr(self_chat.random, "choice", fake_choice)
+        details = [{"name": "animal", "selector": "random", "values": ["horse", "elephant", "cow"]}]
+        assert self_chat.resolve_details(details, "Task X") == "animal: elephant"
+        assert calls == [["horse", "elephant", "cow"]]
+
+    def test_static_value_field(self, self_chat):
+        details = [{"name": "constraint", "value": "must be factual"}]
+        assert self_chat.resolve_details(details, "Task X") == "constraint: must be factual"
+
+    def test_no_selector_uses_first_value(self, self_chat):
+        details = [{"name": "animal", "values": ["horse", "cow"]}]
+        assert self_chat.resolve_details(details, "Task X") == "animal: horse"
+
+    def test_empty_values_skips_field(self, self_chat):
+        details = [{"name": "animal", "selector": "random", "values": []}, {"name": "ok", "value": "y"}]
+        assert self_chat.resolve_details(details, "Task X") == "ok: y"
+
+    def test_missing_name_skips_field(self, self_chat):
+        details = [{"name": "", "selector": "random", "values": ["x"]}, {"name": "ok", "value": "y"}]
+        assert self_chat.resolve_details(details, "Task X") == "ok: y"
+
+    def test_dict_form_supported(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        details = {"animal": {"selector": "random", "values": ["horse", "cow"]}, "time": "day"}
+        assert self_chat.resolve_details(details, "Task X") == "animal: horse, time: day"
+
+    def test_non_text_value_rendered(self, self_chat):
+        details = [{"name": "count", "value": 3}]
+        assert self_chat.resolve_details(details, "Task X") == "count: 3"
+
+    def test_random_multi_static_count(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.random, "sample", lambda seq, k: list(seq)[:k])
+        details = [{"name": "animals", "selector": "random_multi", "count": 2,
+                    "values": ["horse", "elephant", "cow", "cat", "dog"]}]
+        assert self_chat.resolve_details(details, "Task X") == "animals: horse and elephant"
+
+    def test_random_multi_variable_count(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.random, "sample", lambda seq, k: list(seq)[:k])
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[-1])
+        details = [{"name": "animals", "selector": "random_multi",
+                    "count": {"selector": "random", "values": [2, 3]},
+                    "values": ["cow", "cat", "dog"]}]
+        assert self_chat.resolve_details(details, "Task X") == "animals: cow, cat and dog"
+
+    def test_random_multi_no_repeat(self, self_chat, monkeypatch):
+        picked = []
+
+        def fake_sample(seq, k):
+            picked.append((list(seq), k))
+            return ["horse", "elephant"]
+
+        monkeypatch.setattr(self_chat.random, "sample", fake_sample)
+        details = [{"name": "animals", "selector": "random_multi", "count": 2,
+                    "values": ["horse", "elephant", "cow"]}]
+        assert self_chat.resolve_details(details, "Task X") == "animals: horse and elephant"
+        seq, k = picked[0]
+        assert k == 2
+        assert len(set(seq)) == 3
+
+    def test_random_multi_count_over_values_returns_all(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.random, "sample", lambda seq, k: list(seq)[:k])
+        details = [{"name": "animals", "selector": "random_multi", "count": 10,
+                    "values": ["cow", "cat", "dog"]}]
+        assert self_chat.resolve_details(details, "Task X") == "animals: cow, cat and dog"
+
+    def test_roundrobin_multi_window(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "_detail_cycles", {})
+        details = [{"name": "animals", "selector": "roundrobin_multi", "count": 2,
+                    "values": ["a", "b", "c", "d"]}]
+        assert self_chat.resolve_details(details, "Task X") == "animals: a and b"
+        assert self_chat.resolve_details(details, "Task X") == "animals: c and d"
+        assert self_chat.resolve_details(details, "Task X") == "animals: a and b"
+
+    def test_multi_separator_override(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.random, "sample", lambda seq, k: list(seq)[:k])
+        details = [{"name": "tags", "selector": "random_multi", "count": 2,
+                    "separator": "; ", "values": ["a", "b", "c"]}]
+        assert self_chat.resolve_details(details, "Task X") == "tags: a; b"
+
+    def test_master_ref_resolved(self, self_chat, monkeypatch):
+        master = {"kids_hero": {"selector": "roundrobin", "values": ["a kitten", "a puppy"]}}
+        monkeypatch.setattr(self_chat, "_detail_cycles", {})
+        details = [{"name": "hero", "ref": "kids_hero"}]
+        assert self_chat.resolve_details(details, "Task X", master=master) == "hero: a kitten"
+        assert self_chat.resolve_details(details, "Task X", master=master) == "hero: a puppy"
+
+    def test_master_ref_local_override(self, self_chat, monkeypatch):
+        master = {"animals": {"selector": "random", "values": ["horse", "cow"]}}
+        monkeypatch.setattr(self_chat.random, "sample", lambda seq, k: list(seq)[:k])
+        details = [{"name": "animals", "selector": "random_multi", "count": 2,
+                    "ref": "animals", "values": ["horse", "cow", "dog"]}]
+        assert self_chat.resolve_details(details, "Task X", master=master) == "animals: horse and cow"
+
+    def test_master_ref_from_module(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "DETAIL_MASTER", {
+            "time_of_day": {"selector": "roundrobin", "values": ["day", "night"]},
+        })
+        monkeypatch.setattr(self_chat, "_detail_cycles", {})
+        details = [{"name": "time", "ref": "time_of_day"}]
+        assert self_chat.resolve_details(details, "Task X") == "time: day"
+        assert self_chat.resolve_details(details, "Task X") == "time: night"
+
+    def test_unknown_ref_falls_back_to_local(self, self_chat):
+        details = [{"name": "animal", "ref": "no_such_pool", "value": "cow"}]
+        assert self_chat.resolve_details(details, "Task X", master={}) == "animal: cow"
+
+
+class TestResolveDetailsFields:
+    def test_string_returns_empty(self, self_chat):
+        assert self_chat.resolve_details_fields("long text", "Task X") == {}
+
+    def test_dict_of_resolved_values(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        details = [
+            {"name": "animal", "selector": "random", "values": ["horse", "cow"]},
+            {"name": "time", "value": "night"},
+        ]
+        assert self_chat.resolve_details_fields(details, "Task X") == {
+            "animal": "horse",
+            "time": "night",
+        }
+
+    def test_multi_select_kept_as_list(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.random, "sample", lambda seq, k: list(seq)[:k])
+        details = [{"name": "animals", "selector": "random_multi", "count": 2,
+                    "values": ["horse", "elephant", "cow"]}]
+        assert self_chat.resolve_details_fields(details, "Task X") == {
+            "animals": ["horse", "elephant"]
+        }
+
+    def test_empty_values_skipped(self, self_chat):
+        details = [{"name": "animal", "values": []}, {"name": "ok", "value": "y"}]
+        assert self_chat.resolve_details_fields(details, "Task X") == {"ok": "y"}
+
+
+class TestThemeHelpers:
+    def test_build_combo_dict(self, self_chat):
+        persona = {
+            "Kaya": {"role": "Storyteller", "persona": "Warm"},
+            "Kolpo": {"role": "Illustrator", "persona": "Playful"},
+        }
+        combo = self_chat.build_combo_dict(
+            "Bedtime Stories", "Calm", persona, {"animal": "horse"}
+        )
+        assert combo == {
+            "genre": "Bedtime Stories",
+            "mood": "Calm",
+            "role": "Storyteller / Illustrator",
+            "persona": "Warm / Playful",
+            "details": {"animal": "horse"},
+        }
+
+    def test_build_combo_dict_no_persona(self, self_chat):
+        combo = self_chat.build_combo_dict("G", "M", {}, {})
+        assert combo["role"] == ""
+        assert combo["persona"] == ""
+
+    def test_format_theme_block_empty(self, self_chat):
+        assert "everything is available" in self_chat.format_theme_block([])
+
+    def test_format_theme_block_records(self, self_chat):
+        records = [
+            {
+                "genre": "Bedtime Stories",
+                "mood": "Calm",
+                "role": "Storyteller / Illustrator",
+                "persona": "Warm / Playful",
+                "details": '{"animal": "horse"}',
+                "theme": "sleepy horse",
+                "status": "completed",
+            }
+        ]
+        block = self_chat.format_theme_block(records)
+        assert "completed" in block
+        assert "sleepy horse" in block
+        assert "animal=horse" in block
+
 
 class TestLoadConfigFile:
     def test_missing_file(self, self_chat):
-        assert self_chat.load_config_file("/nonexistent/tasks.json") == ([], {})
+        assert self_chat.load_config_file("/nonexistent/tasks.json") == ([], {}, {}, {})
 
     def test_invalid_json_exits(self, self_chat, tmp_path):
         p = tmp_path / "bad.json"
@@ -92,18 +326,35 @@ class TestLoadConfigFile:
         p.write_text(json.dumps({
             "tasks": [{"task": "One", "path": "/custom"}],
             "genre_checklists": {"Drama": {"editor": ["Check A"]}},
+            "genre_persona_map": {"Drama": ["Artisans"]},
+            "persona_pool": {"Artisans": {"Calm": {"Kaya": {}, "Kolpo": {}}}},
         }))
-        tasks, checklists = self_chat.load_config_file(str(p))
+        tasks, checklists, persona_map, persona_pool = self_chat.load_config_file(str(p))
         assert [t["task"] for t in tasks] == ["One"]
         assert tasks[0]["path"] == "/custom"
         assert checklists == {"Drama": {"editor": ["Check A"]}}
+        assert persona_map == {"Drama": ["Artisans"]}
+        assert persona_pool == {"Artisans": {"Calm": {"Kaya": {}, "Kolpo": {}}}}
 
     def test_plain_list(self, self_chat, tmp_path):
         p = tmp_path / "cfg.json"
         p.write_text(json.dumps([{"task": "One"}, {"task": "Two"}]))
-        tasks, checklists = self_chat.load_config_file(str(p))
+        tasks, checklists, persona_map, persona_pool = self_chat.load_config_file(str(p))
         assert [t["task"] for t in tasks] == ["One", "Two"]
         assert checklists == {}
+        assert persona_map == {}
+        assert persona_pool == {}
+
+    def test_dict_config_merges_master_details(self, self_chat, tmp_path, monkeypatch):
+        p = tmp_path / "cfg.json"
+        p.write_text(json.dumps({
+            "master_details": {"farm_animals": {"selector": "random", "values": ["cow"]}},
+            "tasks": [{"task": "One"}],
+        }))
+        monkeypatch.setattr(self_chat, "DETAIL_MASTER", {})
+        tasks, *_ = self_chat.load_config_file(str(p))
+        assert self_chat.DETAIL_MASTER == {"farm_animals": {"selector": "random", "values": ["cow"]}}
+        assert [t["task"] for t in tasks] == ["One"]
 
 
 class TestLoadTasks:
@@ -113,10 +364,12 @@ class TestLoadTasks:
         monkeypatch.setattr(self_chat, "DEFAULT_TASKS_FILE", str(p))
         monkeypatch.setattr(self_chat.args, "config", "")
         monkeypatch.setattr(self_chat.args, "defaults", False)
-        tasks, source, checklists = self_chat.load_tasks()
+        tasks, source, checklists, persona_map, persona_pool = self_chat.load_tasks()
         assert [t["task"] for t in tasks] == ["Alpha", "Beta"]
         assert source == str(p)
         assert checklists == {}
+        assert isinstance(persona_map, dict)
+        assert isinstance(persona_pool, dict)
 
     def test_config_plus_defaults_dedup(self, self_chat, monkeypatch, tmp_path):
         cfg = tmp_path / "cfg.json"
@@ -126,10 +379,12 @@ class TestLoadTasks:
         monkeypatch.setattr(self_chat, "DEFAULT_TASKS_FILE", str(defaults))
         monkeypatch.setattr(self_chat.args, "config", str(cfg))
         monkeypatch.setattr(self_chat.args, "defaults", True)
-        tasks, source, _ = self_chat.load_tasks()
+        tasks, source, _checklists, persona_map, persona_pool = self_chat.load_tasks()
         names = [t["task"] for t in tasks]
         assert names == ["Shared", "OnlyConfig", "OnlyDefault"]
         assert "defaults" in source
+        assert persona_map == {}
+        assert persona_pool == {}
 
 
 class TestChecklistFor:
@@ -416,23 +671,27 @@ class TestBuildInput:
         assert "You are responding as Kolpo" in out
         assert "Your partner is Kaya" in out
 
-    def test_phase2(self, self_chat):
+    def test_phase2(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "MAX_MESSAGES_PER_AGENT", 15)
         out = self_chat.build_input("B", 3, "", "english", "Task X")
         assert "PHASE 2: DIRECT EXECUTION" in out
         assert "Speak in english" in out
 
-    def test_phase3(self, self_chat):
-        out = self_chat.build_input("A", self_chat.MAX_MESSAGES_PER_AGENT - 2, "", "english", "Task X")
+    def test_phase3(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "MAX_MESSAGES_PER_AGENT", 15)
+        out = self_chat.build_input("A", 15 - 2, "", "english", "Task X")
         assert "PHASE 3: FINALIZATION" in out
         assert "[END CONVERSATION]" in out
 
-    def test_phase2_mid_conversation(self, self_chat):
-        mid = max(3, self_chat.MAX_MESSAGES_PER_AGENT // 2)
+    def test_phase2_mid_conversation(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "MAX_MESSAGES_PER_AGENT", 15)
+        mid = max(3, 15 // 2)
         out = self_chat.build_input("A", mid, "", "english", "Task X")
         assert "PHASE 2: DIRECT EXECUTION" in out
 
-    def test_phase3_boundary(self, self_chat):
-        boundary = self_chat.MAX_MESSAGES_PER_AGENT - 3
+    def test_phase3_boundary(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "MAX_MESSAGES_PER_AGENT", 15)
+        boundary = 15 - 3
         out = self_chat.build_input("A", boundary, "", "english", "Task X")
         assert "PHASE 2: DIRECT EXECUTION" in out
 
@@ -746,7 +1005,7 @@ class TestCallLlm:
                                 [{"status": "working"}, {"status": "done", "response": "x"}])
         out = self_chat.call_llm("tok", "S", "msg")
         assert out["text"] == "x"
-        assert sleeps == [10.0]
+        assert sleeps == [self_chat.POLL_INTERVAL_SECONDS]
 
     def test_error_status_raises(self, self_chat, monkeypatch):
         self._post_get(self_chat, monkeypatch, {"task_id": "T1"}, [{"status": "error", "why": "bad"}])
@@ -764,6 +1023,28 @@ class TestCallLlm:
         monkeypatch.setattr(self_chat.requests, "get", lambda *a, **k: FakeResp(status=500))
         with pytest.raises(RuntimeError):
             self_chat.call_llm("tok", "S", "msg")
+
+    def test_gpu_flag_sends_mode(self, self_chat, monkeypatch):
+        sent = {}
+        monkeypatch.setattr(self_chat, "args", argparse.Namespace(gpu=True))
+        monkeypatch.setattr(self_chat.time, "sleep", lambda s: None)
+        monkeypatch.setattr(self_chat.requests, "post",
+                            lambda *a, **k: sent.update(k) or FakeResp({"task_id": "T1"}))
+        monkeypatch.setattr(self_chat.requests, "get",
+                            lambda *a, **k: FakeResp({"status": "done", "response": "x"}))
+        self_chat.call_llm("tok", "S", "msg")
+        assert sent["json"]["mode"] == "gpu"
+
+    def test_no_gpu_flag_omits_mode(self, self_chat, monkeypatch):
+        sent = {}
+        monkeypatch.setattr(self_chat, "args", argparse.Namespace(gpu=False))
+        monkeypatch.setattr(self_chat.time, "sleep", lambda s: None)
+        monkeypatch.setattr(self_chat.requests, "post",
+                            lambda *a, **k: sent.update(k) or FakeResp({"task_id": "T1"}))
+        monkeypatch.setattr(self_chat.requests, "get",
+                            lambda *a, **k: FakeResp({"status": "done", "response": "x"}))
+        self_chat.call_llm("tok", "S", "msg")
+        assert "mode" not in sent["json"]
 
 
 class TestProposeTitle:
@@ -896,7 +1177,7 @@ class TestRunSingleConversation:
         monkeypatch.setattr(self_chat, "run_editor", fake_editor)
         transcript, sa, sb, fname = self._run(self_chat)
         assert len(transcript) == 3
-        assert moderated == [1]
+        assert moderated == []
         assert calls[2]["image"] == "b64data"
         assert "WEB SEARCH REPORTS SHARED" in calls[2]["message"]
         assert "Kitten Wiki" in calls[2]["message"]
@@ -937,12 +1218,16 @@ class TestRunSingleConversation:
         assert transcript == []
 
     def test_duplicate_retry_and_message_cap(self, self_chat, monkeypatch, tmp_path):
-        replies = ["One", "Two", "Two", "Two revised", "Three", "Four", "Five",
-                   "Six", "Seven", "Eight", "Nine", "Ten"]
+        words = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet "
+                 "kilo lima mike november oscar papa quebec romeo sierra tango "
+                 "uniform victor whiskey xray yankee zulu").split()
+        replies = ["One", "Two", "Two", "Two revised"] + words
         script = [{"text": r, "image": None, "searches": None} for r in replies]
         calls, _ = self._setup(self_chat, monkeypatch, tmp_path, script)
         transcript, *_ = self._run(self_chat)
-        assert len(transcript) == 11
+        cap = self_chat.MAX_MESSAGES_PER_AGENT
+        assert len(script) >= 2 * cap
+        assert len(transcript) == 2 * cap - 1
         assert "identical to your partner" in calls[3]["message"]
 
     def test_custom_path_used(self, self_chat, monkeypatch, tmp_path):

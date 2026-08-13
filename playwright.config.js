@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   testDir: 'tests',
+  testIgnore: '**/e2e/**',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: 0,

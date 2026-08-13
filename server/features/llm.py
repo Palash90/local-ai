@@ -49,14 +49,20 @@ def task_mode(task_id):
     """Return the llama-server mode a task must run on.
 
     Tasks posted by agent users (self-chat: editor, moderator, ...) run on the
-    CPU server; tasks from interactive users use the GPU server.
+    server selected by ``SELF_CHAT_MODE`` (``"cpu"`` or ``"gpu"``); tasks from
+    interactive users always use the GPU server. A per-task ``mode`` override
+    (set at /api/chat admission, e.g. by ``self-chat.py --gpu``) wins over the
+    global flag for agent tasks.
     """
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
             return "gpu"
         user = t.get("_user", "")
-    return "cpu" if user in M._agent_users else "gpu"
+        mode = t.get("mode")
+    if user in M._agent_users and mode in ("gpu", "cpu"):
+        return mode
+    return M.SELF_CHAT_MODE if user in M._agent_users else "gpu"
 
 
 def server_base(mode):

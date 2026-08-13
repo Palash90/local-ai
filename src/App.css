@@ -467,6 +467,36 @@ html, body {
   background: rgba(255, 255, 255, 0.12);
 }
 
+/* ---- File chip (uploaded files shown in messages) ---- */
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: #e0e0e0;
+  text-decoration: none;
+  font-size: 13px;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.file-chip:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+.file-chip-icon {
+  flex-shrink: 0;
+  color: #60a5fa;
+}
+.file-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---- Image Download ---- */
 .image-wrap > img {
   display: block;

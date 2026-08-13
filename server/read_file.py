@@ -67,4 +67,16 @@ def read_file_text(file_path):
                 rows.append("\t".join(str(c) if c is not None else "" for c in row))
         wb.close()
         return "\n".join(rows)
+    else:
+        # Plain text / code files (.py, .js, .json, .md, .txt, .csv, etc.)
+        try:
+            print("Reading code file(s)", raw)
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                print("Trying Latin")
+                return raw.decode("latin-1")
+            except Exception:
+                print("Exception")
+                return ""
     return ""

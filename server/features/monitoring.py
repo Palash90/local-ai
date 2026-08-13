@@ -241,7 +241,7 @@ def _reminder_loop():
                 M._db_run("UPDATE tasks SET reminded=1 WHERE id=?", (task["id"],))
         except Exception as e:
             print(f"[reminder] Error: {e}")
-        time.sleep(30)
+        time.sleep(43200)
 
 
 def _evacuate_ram():
@@ -319,3 +319,9 @@ def _thermal_monitor():
             if ram is not None and ram >= M.RAM_EVAC_THRESHOLD:
                 print(f"[ram] RAM usage {ram:.0f}% >= {M.RAM_EVAC_THRESHOLD}%")
                 M._evacuate_ram()
+
+
+def _connection_manager():
+    while True:
+        time.sleep(20)
+        

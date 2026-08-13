@@ -19,9 +19,13 @@ def _write(path, data=b"x"):
 
 
 class TestUnknownExt:
-    def test_returns_empty_for_unknown(self, rf, tmp_path):
-        p = _write(str(tmp_path / "a.xyz"))
-        assert rf(p) == ""
+    def test_unknown_ext_reads_as_text(self, rf, tmp_path):
+        p = _write(str(tmp_path / "a.xyz"), data=b"hello text")
+        assert rf(p) == "hello text"
+
+    def test_unknown_ext_falls_back_to_latin1(self, rf, tmp_path):
+        p = _write(str(tmp_path / "a.xyz"), data=b"\xff\xfe bytes")
+        assert rf(p) == "\xff\xfe bytes"
 
     def test_missing_file_raises(self, rf, tmp_path):
         with pytest.raises(FileNotFoundError):

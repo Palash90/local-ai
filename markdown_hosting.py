@@ -1,5 +1,6 @@
 import os
 import json
+import html
 import time
 import uuid
 import shutil
@@ -8,6 +9,8 @@ import markdown
 from fastapi import FastAPI, HTTPException, Header, Request, Response, status
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
+import json
+from urllib.parse import quote
 
 app = FastAPI()
 
@@ -206,11 +209,22 @@ def story_moderation(folder_path):
 
 
 def moderation_badge(mod):
-    """HTML snippet showing the GREEN/RED verdict, or empty string."""
+    """HTML snippet showing the GREEN/RED verdict, or empty string.
+
+    For RED verdicts, includes the moderator's reason as a tap/hover tooltip
+    (see .mod-badge CSS/JS shared by both pages).
+    """
     if not mod:
         return ""
     v = mod.get("verdict", "")
     color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
+    if v == "RED":
+        reason = html.escape(mod.get("reason", "No reason provided."))
+        return (
+            f' <span class="mod-badge" tabindex="0" data-reason="{reason}" '
+            f'style="color:{color}; font-size:11px; font-family:sans-serif; '
+            f'cursor:pointer; border-bottom:1px dotted {color};">({v})</span>'
+        )
     return (
         f' <span style="color:{color}; font-size:11px; font-family:sans-serif;">'
         f"({v})</span>"
@@ -269,8 +283,13 @@ async def index(request: Request):
             lis = []
             for sid in sids:
                 badge = moderation_badge(story_moderation(os.path.join(root, sid)))
+                
+                # Safely quote path segments for URLs and escape HTML text display
+                encoded_sid = "/".join(quote(part) for part in sid.split("/"))
+                display_name = html.escape(sid.split("/")[-1])
+                
                 lis.append(
-                    f'<li><a href="/story/{name}/{sid}">{sid.split("/")[-1]}</a>{badge}</li>'
+                    f'<li><a href="/story/{name}/{encoded_sid}">{display_name}</a>{badge}</li>'
                 )
             sections.append(heading + "<ul>" + "".join(lis) + "</ul>")
         cards.append(
@@ -284,7 +303,8 @@ async def index(request: Request):
         """
     else:
         auth_html = f"""
-        <span class="login">
+        <span class="login-toggle"><a href="#" id="login-link">Login</a></span>
+        <span class="login hidden" id="login-form">
             <input id="login-user" placeholder="Username">
             <input id="login-pass" type="password" placeholder="Password">
             <button id="login-btn" class="primary">Log in</button>
@@ -309,10 +329,22 @@ async def index(request: Request):
             .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; font-family: sans-serif; font-size: 14px; }}
             .topbar .logged {{ margin: 0; color: #555; }}
             .topbar .login {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
-            .topbar input {{ padding: 6px 8px; border: 1px solid #aaa; border-radius: 6px; font-size: 14px; }}
+            .topbar .login.hidden {{ display: none; }}
+            .topbar .login-toggle a {{ color: #06c; font-weight: bold; }}
+            .topbar input {{ padding: 6px 8px; border: 1px solid #aaa; border-radius: 6px; font-size: 14px; background: #fff; color: #111; }}
             .topbar button {{ background: none; border: 1px solid #888; color: #888; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-family: sans-serif; font-size: 13px; }}
+            .topbar button:hover {{ background: #eee; }}
             .topbar button.primary {{ background: #06c; color: #fff; border-color: #06c; }}
+            .topbar button.primary:hover {{ background: #0577e6; }}
             .topbar #login-msg {{ color: #c44; font-size: 12px; width: 100%; }}
+            .mod-badge {{ position: relative; }}
+            .mod-badge:hover::after, .mod-badge.show-tip::after {{
+                content: attr(data-reason);
+                position: absolute; left: 0; top: 100%; margin-top: 4px;
+                background: #222; color: #fff; padding: 6px 10px; border-radius: 6px;
+                font-size: 12px; line-height: 1.4; white-space: normal;
+                width: max-content; max-width: 240px; z-index: 10;
+            }}
             @media (max-width: 600px) {{
                 body {{ padding: 12px; font-size: 19px; }}
                 .topbar {{ flex-direction: column; align-items: stretch; }}
@@ -324,6 +356,14 @@ async def index(request: Request):
                 h1, h2, h3 {{ color: #f0f0f0; }}
                 a {{ color: #7ab8ff; }}
                 .topbar .logged {{ color: #aaa; }}
+                .topbar .login-toggle a {{ color: #7ab8ff; }}
+                .topbar input {{ background: #1f232b; border-color: #3a3f4a; color: #e6e6e6; }}
+                .topbar input::placeholder {{ color: #888; }}
+                .topbar button {{ background: #1f232b; border-color: #555; color: #cfcfcf; }}
+                .topbar button:hover {{ background: #262b34; }}
+                .topbar button.primary {{ background: #3a7ee0; border-color: #3a7ee0; color: #fff; }}
+                .topbar button.primary:hover {{ background: #4a8cec; }}
+                .topbar #login-msg {{ color: #ff8080; }}
             }}
         </style>
     </head>
@@ -359,6 +399,17 @@ async def index(request: Request):
                     if (e.key === 'Enter') doLogin();
                 }});
             }}
+            const loginLink = document.getElementById('login-link');
+            const loginForm = document.getElementById('login-form');
+            if (loginLink && loginForm) {{
+                loginLink.addEventListener('click', e => {{
+                    e.preventDefault();
+                    loginForm.classList.toggle('hidden');
+                    if (!loginForm.classList.contains('hidden')) {{
+                        document.getElementById('login-user').focus();
+                    }}
+                }});
+            }}
             const logoutBtn = document.getElementById('logout-btn');
             if (logoutBtn) {{
                 logoutBtn.addEventListener('click', async () => {{
@@ -366,12 +417,23 @@ async def index(request: Request):
                     window.location.reload();
                 }});
             }}
+            // Tap-to-toggle tooltip for moderation badges (title= doesn't work on mobile touch).
+            document.querySelectorAll('.mod-badge').forEach(el => {{
+                el.addEventListener('click', e => {{
+                    e.stopPropagation();
+                    document.querySelectorAll('.mod-badge.show-tip').forEach(o => {{
+                        if (o !== el) o.classList.remove('show-tip');
+                    }});
+                    el.classList.toggle('show-tip');
+                }});
+            }});
+            document.addEventListener('click', () => {{
+                document.querySelectorAll('.mod-badge.show-tip').forEach(o => o.classList.remove('show-tip'));
+            }});
         </script>
     </body>
     </html>
     """
-
-
 @app.get("/media/{collection}/{story_id:path}/{filename}")
 async def serve_story_image(
     collection: str, 
@@ -392,8 +454,18 @@ async def serve_story_image(
 
 
 def render_story_html(collection: str, story_id: str, content: str) -> str:
-    """Render story markdown and rewrite image srcs to the authenticated media route."""
-    html_content = markdown.markdown(content, extensions=['extra', 'tables', 'fenced_code'])
+    """Render story markdown and rewrite image srcs to the authenticated media route.
+
+    pymdownx.arithmatex (generic mode) leaves $...$ / $$...$$ math untouched
+    but wraps it in <span class="arithmatex"> / <div class="arithmatex">
+    so the KaTeX auto-render script loaded on the story page can find and
+    typeset it client-side.
+    """
+    html_content = markdown.markdown(
+        content,
+        extensions=['extra', 'tables', 'fenced_code', 'pymdownx.arithmatex'],
+        extension_configs={'pymdownx.arithmatex': {'generic': True}},
+    )
     html_content = html_content.replace(
         '<table>', '<div class="table-wrap"><table>'
     ).replace('</table>', '</table></div>')
@@ -430,9 +502,15 @@ async def delete_story(
     story_id: str, 
     request: Request
 ):
-    """Deletes the story folder (markdown + images) with RBAC enforcement."""
+    """Deletes the story folder (markdown + images). Admin role required."""
     username = get_current_user(request)
     enforce_rbac(collection, username)
+
+    if get_user_role(username) != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required to delete stories.",
+        )
 
     folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
     if not os.path.exists(folder_path):
@@ -466,15 +544,33 @@ async def read_story(
         content = f.read()
 
     html_content = render_story_html(collection, story_id, content)
+    is_admin = get_user_role(username) == "admin" if username else False
+
     verdict_html = ""
     mod = story_moderation(folder_path)
     if mod:
         v = mod.get("verdict", "")
         color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
-        verdict_html = (
-            f'<div style="font-family:sans-serif; color:{color}; font-size:13px; '
-            f'margin-bottom:12px;">Moderation: {v}</div>'
-        )
+        if v == "RED":
+            reason = html.escape(mod.get("reason", "No reason provided."))
+            verdict_html = (
+                f'<div class="mod-badge" tabindex="0" data-reason="{reason}" '
+                f'style="font-family:sans-serif; color:{color}; font-size:13px; '
+                f'margin-bottom:12px; display:inline-block; cursor:pointer; '
+                f'border-bottom:1px dotted {color};">Moderation: {v} (tap for reason)</div>'
+            )
+        else:
+            verdict_html = (
+                f'<div style="font-family:sans-serif; color:{color}; font-size:13px; '
+                f'margin-bottom:12px;">Moderation: {v}</div>'
+            )
+
+    delete_button_html = '<button id="delete-btn">Delete story</button>' if is_admin else ""
+
+    # Escaped parameters for safe JavaScript injection and HTTP URL generation
+    story_id_js = json.dumps(story_id)
+    encoded_collection = quote(collection)
+    encoded_story_path = "/".join(quote(part) for part in story_id.split("/"))
 
     return f"""
     <!DOCTYPE html>
@@ -482,7 +578,10 @@ async def read_story(
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>{story_id.replace('-', ' ').title()}</title>
+        <title>{html.escape(story_id.split('/')[-1].replace('-', ' ').title())}</title>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
         <style>
             * {{ box-sizing: border-box; }}
             html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
@@ -493,6 +592,7 @@ async def read_story(
             .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
             a.back {{ color: #666; text-decoration: none; }}
             .topbar button {{ background: none; border: 1px solid #c44; color: #c44; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-family: sans-serif; font-size: 14px; }}
+            .topbar button:hover {{ background: #fceaea; }}
             blockquote {{ border-left: 4px solid #ddd; margin: 0 0 1em; padding: 0 0 0 16px; color: #555; }}
             code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.85em; }}
             pre {{ background: #f0f0f0; padding: 12px; border-radius: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
@@ -500,6 +600,14 @@ async def read_story(
             .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 1em 0; }}
             table {{ border-collapse: collapse; font-size: 0.9em; }}
             th, td {{ border: 1px solid #ccc; padding: 6px 10px; }}
+            .mod-badge {{ position: relative; }}
+            .mod-badge:hover::after, .mod-badge.show-tip::after {{
+                content: attr(data-reason);
+                position: absolute; left: 0; top: 100%; margin-top: 4px;
+                background: #222; color: #fff; padding: 6px 10px; border-radius: 6px;
+                font-size: 12px; line-height: 1.4; white-space: normal;
+                width: max-content; max-width: 280px; z-index: 10;
+            }}
             @media (max-width: 600px) {{
                 body {{ padding: 12px; font-size: 19px; }}
                 .topbar {{ flex-direction: column; align-items: stretch; }}
@@ -508,6 +616,8 @@ async def read_story(
             @media (prefers-color-scheme: dark) {{
                 body {{ background: #16181d; color: #e6e6e6; }}
                 a.back {{ color: #999; }}
+                .topbar button {{ border-color: #e05a5a; color: #ff7a7a; }}
+                .topbar button:hover {{ background: #2a1c1c; }}
                 blockquote {{ border-left-color: #444; color: #aaa; }}
                 code {{ background: #2a2e37; }}
                 pre {{ background: #2a2e37; }}
@@ -518,16 +628,35 @@ async def read_story(
     <body>
         <nav class="topbar">
             <a href="/" class="back">← Back to Collections</a>
-            <button id="delete-btn">Delete story</button>
+            {delete_button_html}
         </nav>
         {verdict_html}
         <article id="story-article">{html_content}</article>
         <script>
+            const storyId = {story_id_js};
             const article = document.getElementById('story-article');
             let lastHtml = article.innerHTML;
+
+            function typesetMath() {{
+                if (typeof renderMathInElement !== 'function') {{
+                    setTimeout(typesetMath, 100);
+                    return;
+                }}
+                renderMathInElement(article, {{
+                    delimiters: [
+                        {{left: '\\\\[', right: '\\\\]', display: true}},
+                        {{left: '\\\\(', right: '\\\\)', display: false}},
+                        {{left: '$$', right: '$$', display: true}},
+                        {{left: '$', right: '$', display: false}}
+                    ],
+                    throwOnError: false
+                }});
+            }}
+            typesetMath();
+
             async function poll() {{
                 try {{
-                    const r = await fetch('/story/{collection}/{story_id}/content');
+                    const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/content');
                     if (!r.ok) return;
                     const data = await r.json();
                     const newHtml = data.html;
@@ -540,25 +669,40 @@ async def read_story(
                             article.innerHTML = newHtml;
                         }}
                         lastHtml = newHtml;
+                        typesetMath();
                     }}
                 }} catch (e) {{}}
                 setTimeout(poll, 3000);
             }}
             poll();
 
-            document.getElementById('delete-btn').addEventListener('click', async () => {{
-                if (!confirm('Delete this story and all its images?')) return;
-                try {{
-                    const r = await fetch('/story/{collection}/{story_id}', {{ method: 'DELETE' }});
-                    if (r.ok) {{
-                        window.location.href = '/';
-                    }} else {{
-                        const d = await r.json();
-                        alert('Delete failed: ' + (d.detail || r.status));
+            const deleteBtn = document.getElementById('delete-btn');
+            if (deleteBtn) {{
+                deleteBtn.addEventListener('click', async () => {{
+                    if (!confirm(`Delete story "${{storyId}}" and all its images?`)) return;
+                    try {{
+                        const r = await fetch('/story/{encoded_collection}/{encoded_story_path}', {{ method: 'DELETE' }});
+                        if (r.ok) {{
+                            window.location.href = '/';
+                        }} else {{
+                            const d = await r.json();
+                            alert('Delete failed: ' + (d.detail || r.status));
+                        }}
+                    }} catch (e) {{
+                        alert('Delete failed: ' + e.message);
                     }}
-                }} catch (e) {{
-                    alert('Delete failed: ' + e.message);
-                }}
+                }});
+            }}
+
+            // Tap-to-toggle tooltip for the moderation reason (title= doesn't work on mobile touch).
+            document.querySelectorAll('.mod-badge').forEach(el => {{
+                el.addEventListener('click', e => {{
+                    e.stopPropagation();
+                    el.classList.toggle('show-tip');
+                }});
+            }});
+            document.addEventListener('click', () => {{
+                document.querySelectorAll('.mod-badge.show-tip').forEach(o => o.classList.remove('show-tip'));
             }});
         </script>
     </body>
