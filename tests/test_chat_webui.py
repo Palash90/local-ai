@@ -433,9 +433,14 @@ class TestWebSearch:
                 ]}
 
         calls = {}
-        def fake_get(url, params=None, timeout=None):
-            calls["params"] = params
+        monkeypatch.setattr(chat_webui, "fetch_page",
+                            lambda url, max_chars=8000: json.dumps({"url": url, "error": "stub"}))
+
+        def fake_get(url, params=None, timeout=None, **k):
+            if params is not None:
+                calls["params"] = params
             return FakeResp()
+
         monkeypatch.setattr(chat_webui.requests, "get", fake_get)
         out = json.loads(chat_webui.web_search("  cats  "))
         assert out["results"][0]["title"] == "T"
@@ -443,6 +448,86 @@ class TestWebSearch:
         assert calls["params"]["q"] == "cats"
         assert out["query"] == "  cats  "
         assert "search_date" in out
+
+    def test_result_limit(self, chat_webui, monkeypatch):
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"results": [
+                    {"title": "T%d" % i, "url": "http://x/%d" % i, "content": "s"}
+                    for i in range(15)
+                ]}
+
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: FakeResp())
+        monkeypatch.setattr(chat_webui, "fetch_page",
+                            lambda url, max_chars=8000: json.dumps({"url": url, "error": "stub"}))
+        from server.features import tools as tools_mod
+        out = json.loads(chat_webui.web_search("cats"))
+        assert len(out["results"]) == tools_mod.WEB_SEARCH_RESULT_LIMIT
+
+    def test_enriches_top_results(self, chat_webui, monkeypatch):
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"results": [
+                    {"title": "T%d" % i, "url": "http://x/%d" % i, "content": "snippet%d" % i}
+                    for i in range(5)
+                ]}
+
+        seen = []
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: FakeResp())
+
+        def fake_fetch(url, max_chars=8000):
+            seen.append(url)
+            return json.dumps({"url": url, "title": "Full %s" % url, "content": "FULL BODY TEXT %s" % url})
+
+        monkeypatch.setattr(chat_webui, "fetch_page", fake_fetch)
+        out = json.loads(chat_webui.web_search("cats"))
+        assert seen == ["http://x/0", "http://x/1"]
+        assert out["results"][0]["full_content"] == "FULL BODY TEXT http://x/0"
+        assert out["results"][0]["page_title"] == "Full http://x/0"
+        assert "full_content" not in out["results"][2]
+
+    def test_enrich_failure_is_graceful(self, chat_webui, monkeypatch):
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"results": [
+                    {"title": "T", "url": "http://x/", "content": "snippet"},
+                ]}
+
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: FakeResp())
+        monkeypatch.setattr(chat_webui, "fetch_page",
+                            lambda url, max_chars=8000: (_ for _ in ()).throw(RuntimeError("down")))
+        out = json.loads(chat_webui.web_search("cats"))
+        assert out["results"][0]["snippet"] == "snippet"
+        assert out["results"][0]["fetch_error"] == "down"
+
+    def test_non_http_results_not_enriched(self, chat_webui, monkeypatch):
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"results": [
+                    {"title": "T", "url": "ftp://x/", "content": "snippet"},
+                ]}
+
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: FakeResp())
+
+        def fake_fetch(url, max_chars=8000):
+            raise AssertionError("should not fetch non-http url")
+
+        monkeypatch.setattr(chat_webui, "fetch_page", fake_fetch)
+        out = json.loads(chat_webui.web_search("cats"))
+        assert out["results"][0]["url"] == "ftp://x/"
+        assert "full_content" not in out["results"][0]
 
     def test_error_returns_error_payload(self, chat_webui, monkeypatch):
         def boom(*a, **k):

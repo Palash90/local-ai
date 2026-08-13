@@ -45,6 +45,22 @@ Execution Rules for Collaboration:
      - Kaya MUST end with: [NEXT TURN: Kolpo]
      - Kolpo MUST end with: [NEXT TURN: Kaya]
 
+3a. Content Tagging (HARD RULE):
+   - Wrap ONLY the actual narrative/deliverable content — the text that
+     belongs in the final published piece — inside [CONTENT] and [/CONTENT]
+     tags.
+   - Anything OUTSIDE these tags (planning talk, acknowledgments, phase
+     discussion, "sounds good, let's do X") is discarded automatically and
+     will NEVER appear in the final piece. Do not rely on it being read by
+     anyone but your partner.
+   - Phase 1 (Alignment) turns are typically pure planning — it is fine and
+     expected for a Phase 1 turn to contain NO [CONTENT] block.
+   - Every Phase 2/3 turn that adds real deliverable content MUST wrap that
+     content in [CONTENT]...[/CONTENT]. Multiple blocks in one turn are
+     allowed and will be concatenated in order.
+   - The [NEXT TURN: ...] hand-off tag and [END CONVERSATION] must always
+     stay OUTSIDE the [CONTENT] block.
+
 4. Mandatory Tool Execution Directives:
    - To generate/search/edit, you MUST issue a true native function/tool call.
    - CRITICAL: NEVER output raw text representations, brackets, or pseudo-code such as "[ACTION: generate_image]", "[z_image: ...]", or "[web_search: ...]".

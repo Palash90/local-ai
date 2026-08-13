@@ -1,5 +1,6 @@
 """LLM tool implementations: web search, page fetching, image tools dispatch."""
 
+import concurrent.futures
 import json
 import os
 import threading
@@ -9,6 +10,14 @@ from urllib.parse import urlencode, urlparse
 import requests
 
 from server.features.state import M
+
+# How many search results to hand back to the LLM, and how many of the top
+# ones to enrich with the full page text (via fetch_page) so the LLM sees real
+# content instead of only engine snippets.
+WEB_SEARCH_RESULT_LIMIT = 10
+WEB_SEARCH_ENRICH_TOP = 2
+WEB_SEARCH_ENRICH_CHARS = 6000
+WEB_SEARCH_ENRICH_TIMEOUT = 25
 
 
 def web_search(query, current_time=None, current_location=None):
@@ -31,7 +40,7 @@ def web_search(query, current_time=None, current_location=None):
             "search_url": search_url,
             "error": str(e),
         })
-    results = data.get("results", [])[:5]
+    results = data.get("results", [])[:WEB_SEARCH_RESULT_LIMIT]
     formatted = []
     for x in results:
         formatted.append(
@@ -41,9 +50,10 @@ def web_search(query, current_time=None, current_location=None):
                 "snippet": x.get("content", "") or x.get("snippet", ""),
             }
         )
+    enriched = _enrich_top_results(formatted)
     return json.dumps(
         {
-            "results": formatted,
+            "results": enriched,
             "search_date": ts.strftime("%Y-%m-%d %A"),
             "query": query,
             "search_url": search_url,
@@ -51,7 +61,42 @@ def web_search(query, current_time=None, current_location=None):
     )
 
 
-def fetch_page(url, max_chars=8000):
+def _enrich_top_results(results):
+    """Attach the full page text to the top results.
+
+    The top ``WEB_SEARCH_ENRICH_TOP`` results are fetched concurrently (their
+    body is stored as ``full_content``) so the LLM does not have to make a
+    separate ``fetch_page`` call for every promising link. Fetch failures are
+    recorded as ``fetch_error`` and never break the search response.
+    """
+    targets = results[:WEB_SEARCH_ENRICH_TOP]
+    if not targets:
+        return results
+
+    def _one(entry):
+        url = entry.get("url", "")
+        if not url.lower().startswith(("http://", "https://")):
+            return
+        try:
+            page = json.loads(
+                M.fetch_page(url, max_chars=WEB_SEARCH_ENRICH_CHARS)
+            )
+            if page.get("content"):
+                entry["full_content"] = page["content"]
+                entry["page_title"] = page.get("title", "")
+            elif page.get("error"):
+                entry["fetch_error"] = page["error"]
+        except Exception as e:
+            entry["fetch_error"] = str(e)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(targets))
+    futs = [executor.submit(_one, entry) for entry in targets]
+    concurrent.futures.wait(futs, timeout=WEB_SEARCH_ENRICH_TIMEOUT)
+    executor.shutdown(wait=False)
+    return results
+
+
+def fetch_page(url, max_chars=24000):
     import ipaddress
     import socket
 

@@ -44,6 +44,13 @@ parser.add_argument(
 args = parser.parse_args()
 STORY_BASE_DIR = os.path.expanduser("~/local-ai-files/stories")
 
+# Tiered story roots for premium/admin tasks whose spec declares no path.
+# Resolved the same way markdown_hosting.py resolves its collections: from
+# the OS environment (STORIES_PREMIUM_DIR / STORIES_ADMIN_DIR), falling back
+# to the shared free stories dir when unset.
+PREMIUM_STORIES_DIR = os.getenv("STORIES_PREMIUM_DIR", "") or STORY_BASE_DIR
+ADMIN_STORIES_DIR = os.getenv("STORIES_ADMIN_DIR", "") or PREMIUM_STORIES_DIR
+
 BASE_URL = "http://localhost:3001"
 USERNAME_A = "kolpo"
 USERNAME_B = "kaya"
@@ -526,8 +533,7 @@ def checklist_for(genre, role, task_checklist=None):
         items = entry.get(role)
     if not items:
         items = GENRE_CHECKLISTS.get("default", {}).get(role) or []
-    if not items:
-        return "- No genre-specific checks defined for this genre."
+    items.append("Remove any out-of-character planning or meta-discussion between the collaborators (e.g. 'let's write about X', 'I'll cover Y, you do Z') that is not part of the narrative/content itself — the final piece must read as continuous, in-universe content only.")
     return "\n".join(f"- {item}" for item in items)
 
 
@@ -576,7 +582,7 @@ def run_dry_run():
 
         print(f"=== Task {idx}: {task}")
         print(f"  genre:       {genre}   (checklist source: {source})")
-        print(f"  path:        {spec.get('path') or STORY_BASE_DIR}")
+        print(f"  path:        {resolve_story_path(spec, roles)}")
         print(f"  inactive:        {inactive}")
         print(f"  languages:   {', '.join(languages)}")
         for lang in languages:
@@ -1121,6 +1127,29 @@ def apply_title(title, stories_dir, fname):
     return stories_dir, fname
 
 
+def resolve_story_path(spec, roles):
+    """Return the base directory where a task's story should be written.
+
+    A task may declare its own ``path`` in the spec; premium/admin roles then
+    nest one more level inside it. When the spec declares no path, the tiered
+    premium/admin roots are resolved the same way markdown_hosting.py does —
+    from the OS environment (``STORIES_PREMIUM_DIR`` / ``STORIES_ADMIN_DIR``),
+    falling back to the shared free stories dir.
+    """
+    path = spec.get("path")
+    if path:
+        if "admin" in roles:
+            path = f"{path}/admin"
+        if "premium" in roles:
+            path = f"{path}/premium"
+        return path
+    if "admin" in roles:
+        return ADMIN_STORIES_DIR
+    if "premium" in roles:
+        return PREMIUM_STORIES_DIR
+    return STORY_BASE_DIR
+
+
 def start_story(round_number, task, title, mediums, language, roles=None, genre="General", path=None, persona_info = None):
     base_dir = path or STORY_BASE_DIR
     os.makedirs(base_dir, exist_ok=True)
@@ -1280,13 +1309,34 @@ def strip_model_citations(text):
     )
     return text.strip()
 
+def extract_tagged_content(text):
+    """Return only the text inside [CONTENT]...[/CONTENT] blocks, discarding
+    everything else (planning talk, meta-commentary). Returns None if no
+    [CONTENT] block is present at all — the caller treats that as a
+    planning-only turn with nothing to publish. Multiple blocks are
+    concatenated in order."""
+    blocks = re.findall(r"\[CONTENT\](.*?)\[/CONTENT\]", text, flags=re.DOTALL | re.IGNORECASE)
+    if not blocks:
+        return None
+    return "\n\n".join(b.strip() for b in blocks if b.strip())
 
 def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     speaker = entry.get("speaker", "Unknown")
-    cleaned = clean_speaker_text(speaker, entry.get("text", ""))
+    raw_text = entry.get("text", "")
+    turn = entry.get("message", idx)
+
+    content = extract_tagged_content(raw_text)
+    if content is None:
+        # No [CONTENT] block — Phase 1 planning turn (or a turn that only
+        # ran tools). Still capture any citations, but write nothing to the
+        # story file.
+        collect_citations(citations, entry.get("searches"))
+        print(f"[content] No [CONTENT] block in {speaker} turn {turn} — skipping (planning-only)")
+        return
+
+    cleaned = clean_speaker_text(speaker, content)
     cleaned = scrub_agent_names(cleaned)
     cleaned = strip_model_citations(cleaned)
-    turn = entry.get("message", idx)
     lines = [
         f"<small style=\"color:#888\">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n",
         f"{cleaned}\n\n",
@@ -1294,15 +1344,13 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
 
     collect_citations(citations, entry.get("searches"))
 
-    local_img = embed_story_image(
-        entry.get("image"), stories_dir, round_number, speaker, idx
-    )
+    local_img = embed_story_image(entry.get("image"), stories_dir, round_number, speaker, idx)
     if local_img:
         lines.append(f"![{speaker}]({local_img})\n\n")
 
     with open(fname, "a", encoding="utf-8") as f:
         f.writelines(lines)
-
+        
 
 def finalize_story(fname, citations):
     if citations:
@@ -1516,14 +1564,9 @@ def run_forever():
             details_spec = spec.get("details") or ""
             details = resolve_details(details_spec, task)
             checklist = spec.get("checklist") or {}
-            path = spec.get("path")
+            path = resolve_story_path(spec, roles)
             context = spec.get('context') or None
             print(roles)
-            if "admin" in roles:
-                path = f"{path}/admin"
-            if "premium" in roles:
-                path = f"{path}/premium"
-
             print("The stories will be generated in this directory", path)
             inactive = spec.get("inactive") or False
             if inactive:

@@ -700,6 +700,35 @@ class TestBuildInput:
         assert "previous reply" in out
 
 
+class TestResolveStoryPath:
+    def test_spec_path_free(self, self_chat):
+        out = self_chat.resolve_story_path({"path": "/s"}, ["free"])
+        assert out == "/s"
+
+    def test_spec_path_premium(self, self_chat):
+        out = self_chat.resolve_story_path({"path": "/s"}, ["premium"])
+        assert out == "/s/premium"
+
+    def test_spec_path_admin(self, self_chat):
+        out = self_chat.resolve_story_path({"path": "/s"}, ["admin"])
+        assert out == "/s/admin"
+
+    def test_no_spec_path_free_uses_base(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "STORY_BASE_DIR", "/base")
+        out = self_chat.resolve_story_path({}, ["free"])
+        assert out == "/base"
+
+    def test_no_spec_path_premium_uses_env_dir(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "PREMIUM_STORIES_DIR", "/premium")
+        out = self_chat.resolve_story_path({}, ["premium"])
+        assert out == "/premium"
+
+    def test_no_spec_path_admin_uses_env_dir(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "ADMIN_STORIES_DIR", "/admin")
+        out = self_chat.resolve_story_path({}, ["admin"])
+        assert out == "/admin"
+
+
 class TestStartStory:
     def test_creates_folder_and_header(self, self_chat, monkeypatch, tmp_path):
         base = tmp_path / "stories"
