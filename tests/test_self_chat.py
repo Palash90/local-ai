@@ -78,7 +78,7 @@ class TestParseTasks:
 
 class TestLoadConfigFile:
     def test_missing_file(self, self_chat):
-        assert self_chat.load_config_file("/nonexistent/tasks.json") == ([], {})
+        assert self_chat.load_config_file("/nonexistent/tasks.json") == ([], {}, {}, {})
 
     def test_invalid_json_exits(self, self_chat, tmp_path):
         p = tmp_path / "bad.json"
@@ -92,18 +92,24 @@ class TestLoadConfigFile:
         p.write_text(json.dumps({
             "tasks": [{"task": "One", "path": "/custom"}],
             "genre_checklists": {"Drama": {"editor": ["Check A"]}},
+            "genre_persona_map": {"Drama": ["Artisans"]},
+            "persona_pool": {"Artisans": {"Calm": {"Kaya": {}, "Kolpo": {}}}},
         }))
-        tasks, checklists = self_chat.load_config_file(str(p))
+        tasks, checklists, persona_map, persona_pool = self_chat.load_config_file(str(p))
         assert [t["task"] for t in tasks] == ["One"]
         assert tasks[0]["path"] == "/custom"
         assert checklists == {"Drama": {"editor": ["Check A"]}}
+        assert persona_map == {"Drama": ["Artisans"]}
+        assert persona_pool == {"Artisans": {"Calm": {"Kaya": {}, "Kolpo": {}}}}
 
     def test_plain_list(self, self_chat, tmp_path):
         p = tmp_path / "cfg.json"
         p.write_text(json.dumps([{"task": "One"}, {"task": "Two"}]))
-        tasks, checklists = self_chat.load_config_file(str(p))
+        tasks, checklists, persona_map, persona_pool = self_chat.load_config_file(str(p))
         assert [t["task"] for t in tasks] == ["One", "Two"]
         assert checklists == {}
+        assert persona_map == {}
+        assert persona_pool == {}
 
 
 class TestLoadTasks:
@@ -113,10 +119,12 @@ class TestLoadTasks:
         monkeypatch.setattr(self_chat, "DEFAULT_TASKS_FILE", str(p))
         monkeypatch.setattr(self_chat.args, "config", "")
         monkeypatch.setattr(self_chat.args, "defaults", False)
-        tasks, source, checklists = self_chat.load_tasks()
+        tasks, source, checklists, persona_map, persona_pool = self_chat.load_tasks()
         assert [t["task"] for t in tasks] == ["Alpha", "Beta"]
         assert source == str(p)
         assert checklists == {}
+        assert isinstance(persona_map, dict)
+        assert isinstance(persona_pool, dict)
 
     def test_config_plus_defaults_dedup(self, self_chat, monkeypatch, tmp_path):
         cfg = tmp_path / "cfg.json"
@@ -126,10 +134,12 @@ class TestLoadTasks:
         monkeypatch.setattr(self_chat, "DEFAULT_TASKS_FILE", str(defaults))
         monkeypatch.setattr(self_chat.args, "config", str(cfg))
         monkeypatch.setattr(self_chat.args, "defaults", True)
-        tasks, source, _ = self_chat.load_tasks()
+        tasks, source, _checklists, persona_map, persona_pool = self_chat.load_tasks()
         names = [t["task"] for t in tasks]
         assert names == ["Shared", "OnlyConfig", "OnlyDefault"]
         assert "defaults" in source
+        assert persona_map == {}
+        assert persona_pool == {}
 
 
 class TestChecklistFor:
@@ -416,23 +426,27 @@ class TestBuildInput:
         assert "You are responding as Kolpo" in out
         assert "Your partner is Kaya" in out
 
-    def test_phase2(self, self_chat):
+    def test_phase2(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "MAX_MESSAGES_PER_AGENT", 15)
         out = self_chat.build_input("B", 3, "", "english", "Task X")
         assert "PHASE 2: DIRECT EXECUTION" in out
         assert "Speak in english" in out
 
-    def test_phase3(self, self_chat):
-        out = self_chat.build_input("A", self_chat.MAX_MESSAGES_PER_AGENT - 2, "", "english", "Task X")
+    def test_phase3(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "MAX_MESSAGES_PER_AGENT", 15)
+        out = self_chat.build_input("A", 15 - 2, "", "english", "Task X")
         assert "PHASE 3: FINALIZATION" in out
         assert "[END CONVERSATION]" in out
 
-    def test_phase2_mid_conversation(self, self_chat):
-        mid = max(3, self_chat.MAX_MESSAGES_PER_AGENT // 2)
+    def test_phase2_mid_conversation(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "MAX_MESSAGES_PER_AGENT", 15)
+        mid = max(3, 15 // 2)
         out = self_chat.build_input("A", mid, "", "english", "Task X")
         assert "PHASE 2: DIRECT EXECUTION" in out
 
-    def test_phase3_boundary(self, self_chat):
-        boundary = self_chat.MAX_MESSAGES_PER_AGENT - 3
+    def test_phase3_boundary(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "MAX_MESSAGES_PER_AGENT", 15)
+        boundary = 15 - 3
         out = self_chat.build_input("A", boundary, "", "english", "Task X")
         assert "PHASE 2: DIRECT EXECUTION" in out
 
@@ -746,7 +760,7 @@ class TestCallLlm:
                                 [{"status": "working"}, {"status": "done", "response": "x"}])
         out = self_chat.call_llm("tok", "S", "msg")
         assert out["text"] == "x"
-        assert sleeps == [10.0]
+        assert sleeps == [self_chat.POLL_INTERVAL_SECONDS]
 
     def test_error_status_raises(self, self_chat, monkeypatch):
         self._post_get(self_chat, monkeypatch, {"task_id": "T1"}, [{"status": "error", "why": "bad"}])
@@ -896,7 +910,7 @@ class TestRunSingleConversation:
         monkeypatch.setattr(self_chat, "run_editor", fake_editor)
         transcript, sa, sb, fname = self._run(self_chat)
         assert len(transcript) == 3
-        assert moderated == [1]
+        assert moderated == []
         assert calls[2]["image"] == "b64data"
         assert "WEB SEARCH REPORTS SHARED" in calls[2]["message"]
         assert "Kitten Wiki" in calls[2]["message"]
@@ -944,7 +958,9 @@ class TestRunSingleConversation:
         script = [{"text": r, "image": None, "searches": None} for r in replies]
         calls, _ = self._setup(self_chat, monkeypatch, tmp_path, script)
         transcript, *_ = self._run(self_chat)
-        assert len(transcript) == 29
+        cap = self_chat.MAX_MESSAGES_PER_AGENT
+        assert len(script) >= 2 * cap
+        assert len(transcript) == 2 * cap - 1
         assert "identical to your partner" in calls[3]["message"]
 
     def test_custom_path_used(self, self_chat, monkeypatch, tmp_path):

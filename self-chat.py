@@ -527,7 +527,7 @@ def call_llm(token, session_id, message, image_b64=None):
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-def build_input(speaker, message_number, incoming, lang, task, context):
+def build_input(speaker, message_number, incoming, lang, task, context=None):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
 
