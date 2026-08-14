@@ -159,25 +159,42 @@
         "selector": "random",
         "values": [
             "toddler (2-3 years old)",
-            "child (6-8 years old)",
-            "pre-teen (10-12 years old)"
+            "early childhood (4-5 years old)",
+            "young child (6-8 years old)",
+            "older child (9-11 years old)",
+            "pre-teen (12-14 years old)"
         ]
     },
-    "working_class_age_group": {
+    "prime_adult_class_age_group": {
         "name": "age_group",
         "selector": "random",
         "values": [
-            "teenager (15-17 years old)",
-            "young adult (20-25 years old)",
-            "adult in prime (30-35 years old)",
-            "midlife (35-45 years old)",
-            "middle-aged (45-50 years old)"
+            "older teen (15-17 years old)",
+            "young adult (18-21 years old)",
+            "early 20s (22-25 years old)",
+            "late 20s (26-29 years old)",
+            "early 30s (30-34 years old)",
+            "late 30s (35-39 years old)",
+            "early 40s (40-44 years old)"
+        ]
+    },
+    "late_adult_class_age_group": {
+        "name": "age_group",
+        "selector": "random",
+        "values": [
+            "late 40s (45-49 years old)",
+            "early 50s (50-54 years old)",
+            "late 50s (55-59 years old)"
         ]
     },
     "retirement_age_group": {
         "name": "retirement_age",
         "values": [
-            "senior/elderly (65-70 years old)"
+            "early retirement (60-64 years old)",
+            "mid retirement (65-69 years old)",
+            "senior (70-74 years old)",
+            "elderly (75-79 years old)",
+            "late elderly (80+ years old)"
         ]
     },
     "feature_indian_ethnicity": {

@@ -43,7 +43,7 @@ if SELF_CHAT_MODE not in ("cpu", "gpu"):
 # endure CPU speed. A real web-UI human request never goes to the CPU lane
 # regardless of this flag: that invariant is enforced unconditionally at
 # admission and in task_mode().
-FORCE_GPU_LANE = True
+FORCE_GPU_LANE = False
 
 # Review-only self-chat roles that must NEVER call tools. The editor/moderator
 # are the same creative LLM as the story-writing agents, and with the tool list
