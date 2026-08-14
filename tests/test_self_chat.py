@@ -827,7 +827,7 @@ class TestAppendStoryEntry:
         entry = {
             "speaker": "Kolpo",
             "message": 1,
-            "text": "Kolpo: Hello world\n[END CONVERSATION]",
+            "text": "Kolpo: [CONTENT]Hello world[/CONTENT]\n[END CONVERSATION]",
             "image": None,
             "searches": [{"query": "q", "results": [{"url": "http://a", "title": "A"}]}],
         }
@@ -838,6 +838,46 @@ class TestAppendStoryEntry:
         assert "Hello world" in content
         assert "[END CONVERSATION]" not in content
         assert citations["http://a"] == ("A", "q")
+
+    def test_embeds_image_when_no_content_block(self, self_chat, monkeypatch, tmp_path):
+        comfy = tmp_path / "comfy"
+        pic = comfy / "user" / "pic.png"
+        pic.parent.mkdir(parents=True)
+        pic.write_bytes(b"imgdata")
+        monkeypatch.setattr(self_chat.os.path, "expanduser", lambda p: str(comfy))
+        fname = str(tmp_path / "story.md")
+        with open(fname, "w") as f:
+            f.write("# Title\n")
+        entry = {
+            "speaker": "Kaya",
+            "message": 2,
+            "text": "Planning only, no [CONTENT] block.",
+            "image": "/output/user/pic.png",
+            "searches": [],
+        }
+        self_chat.append_story_entry(entry, fname, {}, str(tmp_path), 1, 1)
+        with open(fname) as f:
+            content = f.read()
+        assert "_Round 1 · Kaya Turn 2_" in content
+        assert "Planning only" not in content
+        assert "![Kaya](img_r1_Kaya_1.png)" in content
+        assert (tmp_path / "img_r1_Kaya_1.png").read_bytes() == b"imgdata"
+
+    def test_skips_when_no_content_and_no_image(self, self_chat, tmp_path):
+        fname = str(tmp_path / "story.md")
+        with open(fname, "w") as f:
+            f.write("# Title\n")
+        entry = {
+            "speaker": "Kolpo",
+            "message": 1,
+            "text": "Planning only.",
+            "image": None,
+            "searches": [],
+        }
+        self_chat.append_story_entry(entry, fname, {}, str(tmp_path), 1, 0)
+        with open(fname) as f:
+            content = f.read()
+        assert content.strip() == "# Title"
 
 
 class TestFinalizeStory:

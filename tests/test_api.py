@@ -174,6 +174,7 @@ class TestModelStatus:
         assert body["model"] == "chat_loaded"
         assert body["predicted_per_second"] == 12.3
         assert body["overheated"] is False
+        assert body["ram_evacuating"] is False
         assert body["max_context"] == env["chat"].MAX_INPUT_TOKENS
         assert body["reminder_count"] == 0
 
@@ -385,6 +386,37 @@ class TestChat:
             assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
         finally:
             env["chat"]._agent_users.discard("alice")
+
+    def test_force_gpu_lane_keeps_agent_off_cpu(self, api_env, monkeypatch):
+        env = api_env
+        monkeypatch.setattr(env["api"], "FORCE_GPU_LANE", True)
+        env["chat"]._agent_users.add("alice")
+        try:
+            sid = _create_session(env, env["auth_a"])
+            r = env["handler"]("/api/chat", method="POST",
+                               data={"message": "hello", "session_id": sid,
+                                     "mode": "cpu"},
+                               headers=env["auth_a"])
+            assert r.status == 200
+            task_id = r.json["task_id"]
+            assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
+            assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
+        finally:
+            env["chat"]._agent_users.discard("alice")
+
+    def test_human_request_never_on_cpu_lane(self, api_env, monkeypatch):
+        env = api_env
+        monkeypatch.setattr(env["api"], "FORCE_GPU_LANE", True)
+        sid = _create_session(env, env["auth_a"])
+        r = env["handler"]("/api/chat", method="POST",
+                           data={"message": "hello", "session_id": sid,
+                                 "mode": "cpu"},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        task_id = r.json["task_id"]
+        assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
+        assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
+        assert env["chat"].tasks[task_id]["mode"] == "gpu"
 
     def test_queue_full_returns_503(self, api_env):
         env = api_env
@@ -790,11 +822,12 @@ class TestDeleteSessionDeep:
                 {"role": "user", "content": "See [FILE: /uploads/doc.pdf] and [FILE: /uploads/other.txt]"},
                 {"role": "user", "content": "See [FILE: /uploads/code.py](script.py) and more"},
                 {"role": "user", "content": [{"type": "text", "text": "plain [FILE: /uploads/multi.txt]"}]},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "/uploads/photo.jpg"}}]},
             ]
             env["chat"].tasks["t9"] = {"session_id": sid, "status": "working"}
         img_dir = os.path.join(env["api"].IMG_PATH, "user")
         os.makedirs(img_dir, exist_ok=True)
-        for name in ["doc.pdf", "other.txt", "multi.txt", "code.py"]:
+        for name in ["doc.pdf", "other.txt", "multi.txt", "code.py", "photo.jpg"]:
             with open(os.path.join(env["api"].UPLOADS_DIR, name), "w") as f:
                 f.write("x")
         with open(os.path.join(img_dir, "gen.png"), "w") as f:
@@ -807,6 +840,7 @@ class TestDeleteSessionDeep:
         assert not os.path.exists(os.path.join(env["api"].UPLOADS_DIR, "doc.pdf"))
         assert not os.path.exists(os.path.join(env["api"].UPLOADS_DIR, "multi.txt"))
         assert not os.path.exists(os.path.join(env["api"].UPLOADS_DIR, "code.py"))
+        assert not os.path.exists(os.path.join(env["api"].UPLOADS_DIR, "photo.jpg"))
         assert not os.path.exists(os.path.join(img_dir, "gen.png"))
         with env["chat"]._effective_contexts_lock:
             assert sid not in env["chat"]._effective_contexts

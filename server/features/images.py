@@ -288,6 +288,14 @@ def edit_image(
                                 "[edit_image] Extracted base64 image from user message content"
                             )
                             break
+                        fpath = M.resolve_image_path(img_url)
+                        if fpath and os.path.exists(fpath):
+                            with open(fpath, "rb") as f:
+                                image_b64 = base64.b64encode(f.read()).decode()
+                            print(
+                                f"[edit_image] Loaded image from {img_url} ({len(image_b64)} bytes base64)"
+                            )
+                            break
                 if image_b64:
                     break
 

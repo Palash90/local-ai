@@ -204,6 +204,16 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         M._event_post("tool_ok", task_id, tc_id=tc["id"], result=result, sid=sid, round=round_num, tool_index=tool_index)
         return
 
+    if tool_name == "read_image":
+        url = args.get("url", "")
+        fpath = M.resolve_image_path(url)
+        if fpath is None:
+            result = json.dumps({"ok": False, "error": f"Image not found: {url}"})
+        else:
+            result = json.dumps({"ok": True, "image_url": url})
+        M._event_post("tool_ok", task_id, tc_id=tc["id"], result=result, sid=sid, round=round_num, tool_index=tool_index)
+        return
+
     if tool_name == "web_search":
         M.set_status(task_id, f"Searching web for: {args.get('query')}...")
         with M._data_lock:

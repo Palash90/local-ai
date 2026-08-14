@@ -26,6 +26,7 @@ from server.config import (  # noqa: F401
     COMFYUI_OUTPUT,
     COMFYUI_URL,
     FILES_DIR,
+    FORCE_GPU_LANE,
     HOST,
     IMG_PATH,
     IMAGE_MODELS,
@@ -164,6 +165,9 @@ from server.features.shares import (  # noqa: E402
 )
 
 from server.features.context import (  # noqa: E402
+    _image_to_data_url,
+    _latest_read_image_url,
+    _reference_historical_images,
     _summarize_with_llm,
     _text_tokens,
     compact_messages_copy,
@@ -171,12 +175,14 @@ from server.features.context import (  # noqa: E402
     effective_token_estimate,
     estimate_tokens,
     prepare_context_for_llm,
+    resolve_image_path,
     strip_html,
     trim_messages_for_context,
 )
 
 from server.features.llm import (  # noqa: E402
     _consult_worker,
+    _inject_read_image,
     _llm_worker,
     _start_llm_round,
     active_model_id,
@@ -211,6 +217,7 @@ from server.features.images import (  # noqa: E402
 )
 
 from server.features.monitoring import (  # noqa: E402
+    _cpu_lane_needed,
     _ensure_llama_server_for_task,
     _evacuate_ram,
     _idle_unload_loop,
@@ -268,7 +275,6 @@ if __name__ == "__main__":
     except Exception:
         print("[startup] GPU llama-server not reachable — starting...")
         restart_servers()
-    ensure_llama_server("cpu")
     try:
         r = requests.get(SEARXNG_URL, timeout=3)
         if r.status_code in (200, 301, 302):

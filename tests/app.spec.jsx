@@ -35,7 +35,7 @@ async function stubAuthFlow(page, { taskStatus, chatResult }) {
       }
       if (urlStr === '/api/model-status') {
         return { status: 200, json: async () => ({
-          model: 'loaded', overheated: false, gpu_temp: 40,
+          model: 'loaded', overheated: false, gpu_temp: 40, ram_evacuating: false,
           predicted_per_second: 20, max_context: 24576, reminder_count: 0,
         }) };
       }

@@ -22,7 +22,13 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from server.config import COMFYUI_OUTPUT, IMG_PATH, SELF_CHAT_MODE, UPLOADS_DIR
+from server.config import (
+    COMFYUI_OUTPUT,
+    FORCE_GPU_LANE,
+    IMG_PATH,
+    SELF_CHAT_MODE,
+    UPLOADS_DIR,
+)
 
 # ---------------------------------------------------------------------------
 # Shared application state — injected by chat-webui.py via set_app_state().
@@ -178,11 +184,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({"users": active})
         elif self.path == "/api/model-status":
             snap = model_status_snapshot()
-            ms, tps, oh, gtemp = (
+            ms, tps, oh, gtemp, ram_evac = (
                 snap["model"],
                 snap["predicted_per_second"],
                 snap["overheated"],
                 snap["gpu_temp"],
+                snap["ram_evacuating"],
             )
             try:
                 user = get_current_user(self.headers)
@@ -195,6 +202,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "predicted_per_second": tps,
                     "overheated": oh,
                     "gpu_temp": gtemp,
+                    "ram_evacuating": ram_evac,
                     "max_context": MAX_INPUT_TOKENS,
                     "reminder_count": reminder_count,
                 }
@@ -412,6 +420,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             if os.path.exists(fpath):
                                 print(f"[delete] Removed uploaded file: {fpath}")
                                 os.remove(fpath)
+            # Remove image uploads stored as image_url content parts (the
+            # /uploads/ URLs written by _save_upload_image).
+            for msg in msgs:
+                raw = msg.get("content", "")
+                if not isinstance(raw, list):
+                    continue
+                for part in raw:
+                    if not isinstance(part, dict) or part.get("type") != "image_url":
+                        continue
+                    url = part.get("image_url", {}).get("url", "")
+                    if not url.startswith("/uploads/"):
+                        continue
+                    fname = os.path.basename(url.split("?", 1)[0])
+                    fpath = os.path.join(UPLOADS_DIR, fname)
+                    if os.path.exists(fpath):
+                        print(f"[delete] Removed uploaded image: {fpath}")
+                        os.remove(fpath)
 
             with _data_lock:
                 exists = sid in sessions
@@ -610,6 +635,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             mode = body.get("mode")
             if mode not in ("gpu", "cpu") or user not in _agent_users:
                 mode = SELF_CHAT_MODE if user in _agent_users else "gpu"
+            if FORCE_GPU_LANE:
+                # Test-time override: never admit anything to the CPU lane.
+                mode = "gpu"
             entry["mode"] = mode
             with _queue_locks[mode]:
                 if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:

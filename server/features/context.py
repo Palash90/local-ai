@@ -1,6 +1,8 @@
 """Token estimation, context trimming and context compaction."""
 
+import base64
 import json
+import os
 import re
 
 import requests
@@ -165,11 +167,122 @@ def sanitize_content_for_llm(messages):
     return sanitized
 
 
+def resolve_image_path(url):
+    """Resolve a ``/uploads/`` or ``/output/`` URL to a local file path, or
+    ``None`` if the URL is unknown or the file is missing."""
+    if not url:
+        return None
+    fpath = None
+    if url.startswith("/uploads/"):
+        fname = os.path.basename(url.split("?", 1)[0])
+        fpath = os.path.join(M.UPLOADS_DIR, fname)
+    elif url.startswith("/output/"):
+        rel = url[len("/output/"):].split("?", 1)[0]
+        fpath = os.path.join(M.IMG_PATH, rel)
+    if not fpath or not os.path.isfile(fpath):
+        return None
+    return fpath
+
+
+def _image_to_data_url(url):
+    """Resolve an image URL the server can serve to a ``data:`` URL.
+
+    Understands ``/uploads/`` (user uploads) and ``/output/`` (generated
+    images) so those bytes can be embedded in the LLM request. ``data:`` URLs
+    pass through unchanged; anything unknown returns ``None``.
+    """
+    if not url:
+        return None
+    if url.startswith("data:"):
+        return url
+    fpath = resolve_image_path(url)
+    if not fpath:
+        return None
+    ext = os.path.splitext(fpath)[1].lower()
+    mime = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }.get(ext, "image/jpeg")
+    try:
+        with open(fpath, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+
+
+def _reference_historical_images(messages):
+    """Return a COPY of ``messages`` where ``image_url`` parts are kept lean.
+
+    The image attached to the most recent user message stays visible (its bytes
+    are embedded via ``_image_to_data_url``), preserving the current turn's
+    vision. Every older image becomes a compact text marker carrying the file
+    URL — the model can call ``read_image`` to actually view one, so history
+    never drags megabytes of base64 through the context window.
+    """
+    last_user_idx = -1
+    for i, m in enumerate(messages):
+        if m.get("role") == "user":
+            last_user_idx = i
+
+    out = []
+    for i, m in enumerate(messages):
+        content = m.get("content")
+        if not isinstance(content, list):
+            out.append(m)
+            continue
+        parts = []
+        for p in content:
+            if isinstance(p, dict) and p.get("type") == "image_url":
+                url = p.get("image_url", {}).get("url", "")
+                if i == last_user_idx:
+                    data_url = _image_to_data_url(url)
+                    if data_url:
+                        parts.append({"type": "image_url", "image_url": {"url": data_url}})
+                        continue
+                    parts.append({"type": "text", "text": f"[IMAGE: {url}]"})
+                else:
+                    parts.append(
+                        {
+                            "type": "text",
+                            "text": f"[IMAGE: {url} — use the read_image tool to view this image]",
+                        }
+                    )
+            else:
+                parts.append(p)
+        out.append({**m, "content": parts})
+    return out
+
+
+def _latest_read_image_url(messages):
+    """Return the image URL of the most recent successful ``read_image`` tool
+    result in ``messages`` (or ``None``)."""
+    for m in reversed(messages):
+        if m.get("role") != "tool":
+            continue
+        content = m.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            data = json.loads(content)
+        except (TypeError, ValueError):
+            continue
+        if data.get("ok") is True and data.get("image_url"):
+            return data["image_url"]
+    return None
+
+
 def prepare_context_for_llm(sid, messages, mode="gpu"):
     """Build the message list to send to the LLM. When the conversation nears the
     context limit, old messages are summarized into a compressed context block —
-    but the stored session is left untouched, so no messages are deleted."""
+    but the stored session is left untouched, so no messages are deleted.
+    Historical images are referenced by path (see ``read_image``) instead of
+    being re-sent as base64 on every round."""
     messages = sanitize_content_for_llm(messages)
+    messages = _reference_historical_images(messages)
     total = estimate_tokens(messages)
     if total <= M.AUTO_COMPACT_THRESHOLD:
         context = trim_messages_for_context(messages)

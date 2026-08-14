@@ -30,6 +30,7 @@ def model_status_snapshot():
             "predicted_per_second": M._last_tps,
             "overheated": M._overheated,
             "gpu_temp": M._gpu_temp,
+            "ram_evacuating": M._ram_evacuating,
         }
 
 
@@ -143,6 +144,23 @@ def _ensure_llama_server_for_task(task_id):
     M.ensure_llama_server(mode)
 
 
+def _cpu_lane_needed():
+    """True if the CPU self-chat lane has (or is about to have) work.
+
+    The CPU llama-server is only started when a self-chat agent is registered
+    or an agent task is queued/running on the cpu lane. This keeps the machine
+    from booting a second llama-server that nothing ever uses. Under the
+    test-time ``FORCE_GPU_LANE`` flag the CPU lane is never needed at all.
+    """
+    if M.FORCE_GPU_LANE:
+        return False
+    with M._data_lock:
+        if M._agent_users:
+            return True
+    with M._queue_locks["cpu"]:
+        return len(M._task_queues["cpu"]) > 0 or M._current_task_ids["cpu"] is not None
+
+
 def restart_servers():
     print("Restarting servers")
     M.kill_llama_server()
@@ -169,7 +187,11 @@ def restart_servers():
         M.model_status = "unloaded"
         M._cpu_model_status = "unloaded"
     _start_llama_process(M.LLAMA_SERVER_ARGS, "gpu")
-    _start_llama_process(M.LLAMA_SERVER_ARGS_CPU, "cpu")
+    # The CPU self-chat server only comes up on demand (first agent task).
+    if _cpu_lane_needed():
+        _start_llama_process(M.LLAMA_SERVER_ARGS_CPU, "cpu")
+    else:
+        print("[llama] Skipping CPU llama-server start (no agent lane activity)")
 
 
 def ensure_comfyui_running():

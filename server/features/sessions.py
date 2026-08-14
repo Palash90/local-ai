@@ -1,9 +1,12 @@
 """Conversation session persistence and per-request session preparation."""
 
+import base64
+import binascii
 import glob
 import json
 import os
 import time
+import uuid
 from datetime import datetime
 
 from server.features.state import M
@@ -11,6 +14,56 @@ from server.features.state import M
 
 def _session_file(user):
     return os.path.join(M.SESSIONS_DIR, f"sessions_{M._safe_username(user)}.json")
+
+
+def _save_upload_image(image_b64, user=""):
+    """Persist a base64-encoded upload to the uploads dir and return its URL.
+
+    Keeps image bytes on disk instead of inside the conversation history, so
+    sessions stay small and the LLM only receives the bytes for images it
+    actually needs (see ``read_image`` / ``prepare_context_for_llm``).
+    """
+    if not image_b64:
+        return None
+    raw = base64.b64decode(image_b64)
+    fname = f"{uuid.uuid4().hex}.jpg"
+    os.makedirs(M.UPLOADS_DIR, exist_ok=True)
+    fpath = os.path.join(M.UPLOADS_DIR, fname)
+    with open(fpath, "wb") as f:
+        f.write(raw)
+    return f"/uploads/{fname}"
+
+
+def _migrate_data_urls(messages):
+    """Rewrite legacy ``data:image`` content parts to ``/uploads/`` file URLs.
+
+    Older sessions stored uploaded images inline as base64 (a single session
+    could reach ~19 MB). This writes those bytes to the uploads dir once and
+    replaces the part URL, so the stored history stays small.
+    """
+    changed = False
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        parts = []
+        for p in content:
+            if isinstance(p, dict) and p.get("type") == "image_url":
+                url = p.get("image_url", {}).get("url", "")
+                if isinstance(url, str) and url.startswith("data:image"):
+                    try:
+                        b64 = url.split(",", 1)[-1]
+                        new_url = _save_upload_image(b64, msg.get("_user", ""))
+                    except (ValueError, binascii.Error):
+                        new_url = None
+                    if new_url:
+                        parts.append({"type": "image_url", "image_url": {"url": new_url}})
+                        changed = True
+                        continue
+            parts.append(p)
+        if changed or len(parts) != len(content):
+            msg["content"] = parts
+    return changed
 
 
 def _session_meta_from(sdata):
@@ -56,6 +109,7 @@ def load_sessions():
     with M._data_lock:
         M.sessions.clear()
         M.sessions_meta.clear()
+    migrated = False
     for path in glob.glob(os.path.join(M.SESSIONS_DIR, "sessions_*.json")):
         try:
             with open(path) as f:
@@ -64,7 +118,10 @@ def load_sessions():
             continue
         with M._data_lock:
             for sid, sdata in data.get("sessions", {}).items():
-                M.sessions[sid] = sdata.get("messages", [])
+                msgs = sdata.get("messages", [])
+                if _migrate_data_urls(msgs):
+                    migrated = True
+                M.sessions[sid] = msgs
                 M.sessions_meta[sid] = _session_meta_from(sdata)
     stale = os.path.join(M.SESSIONS_DIR, "sessions.json")
     if os.path.exists(stale):
@@ -74,7 +131,10 @@ def load_sessions():
             with M._data_lock:
                 for sid, sdata in data.get("sessions", {}).items():
                     if sid not in M.sessions:
-                        M.sessions[sid] = sdata.get("messages", [])
+                        msgs = sdata.get("messages", [])
+                        if _migrate_data_urls(msgs):
+                            migrated = True
+                        M.sessions[sid] = msgs
                         M.sessions_meta[sid] = _session_meta_from(sdata)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
@@ -82,6 +142,8 @@ def load_sessions():
             os.remove(stale)
         except OSError:
             pass
+    if migrated:
+        save_sessions()
 
 
 def save_sessions():
@@ -145,6 +207,7 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         full_sys_content = full_sys_content.replace("%current_location%", "not available")
     for token, value in context_tokens.items():
         full_sys_content = full_sys_content.replace(token, value)
+    image_url = _save_upload_image(image_b64, user) if image_b64 else None
     if user_context:
         print(
             f"[context] Injected {len(user_context)} chars of context for user '{user}'"
@@ -163,11 +226,11 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
                 "updated": time.time(),
             }
         content = []
-        if image_b64:
+        if image_url:
             content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                    "image_url": {"url": image_url},
                 }
             )
         if audio_b64:

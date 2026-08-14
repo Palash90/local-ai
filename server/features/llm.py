@@ -52,7 +52,9 @@ def task_mode(task_id):
     server selected by ``SELF_CHAT_MODE`` (``"cpu"`` or ``"gpu"``); tasks from
     interactive users always use the GPU server. A per-task ``mode`` override
     (set at /api/chat admission, e.g. by ``self-chat.py --gpu``) wins over the
-    global flag for agent tasks.
+    global flag for agent tasks. When ``FORCE_GPU_LANE`` is set (test-time),
+    every task — agent or not — runs on the GPU lane; a real web-UI human
+    request never runs on the CPU lane regardless of the flag.
     """
     with M._data_lock:
         t = M.tasks.get(task_id)
@@ -60,6 +62,8 @@ def task_mode(task_id):
             return "gpu"
         user = t.get("_user", "")
         mode = t.get("mode")
+    if M.FORCE_GPU_LANE:
+        return "gpu"
     if user in M._agent_users and mode in ("gpu", "cpu"):
         return mode
     return M.SELF_CHAT_MODE if user in M._agent_users else "gpu"
@@ -205,11 +209,49 @@ def load_llama_model(mode="gpu"):
     return False
 
 
+def _inject_read_image(messages):
+    """Attach the bytes of the most recent ``read_image`` result to its tool
+    message so the model can actually see the image this round.
+
+    The stored tool result stays a tiny JSON blob (url only); the image bytes
+    are embedded only in this round's payload. A copy is returned so the
+    stored session is never mutated.
+    """
+    out = list(messages)
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
+        if m.get("role") != "tool":
+            continue
+        content = m.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            data = json.loads(content)
+        except (TypeError, ValueError):
+            continue
+        url = data.get("image_url") if data.get("ok") is True else None
+        if not url:
+            continue
+        data_url = M._image_to_data_url(url)
+        if not data_url:
+            continue
+        out[i] = {
+            **m,
+            "content": [
+                {"type": "text", "text": f"[Image loaded from {url}]"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }
+        break
+    return out
+
+
 def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
     try:
         if M.estimate_tokens(msgs) > M.AUTO_COMPACT_THRESHOLD:
             M.set_status(task_id, "Context is full — compressing older messages...")
         messages = M.prepare_context_for_llm(sid, msgs, mode)
+        messages = _inject_read_image(messages)
         tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
         if tool_msgs:
             print(f"[llm_round] Round {round_num} includes {len(tool_msgs)} tool message(s) with search results")  # DEBUG

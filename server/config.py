@@ -37,6 +37,14 @@ SELF_CHAT_MODE = os.environ.get("SELF_CHAT_MODE", "cpu").strip().lower()
 if SELF_CHAT_MODE not in ("cpu", "gpu"):
     SELF_CHAT_MODE = "cpu"
 
+# Test-time flag: flip to True (manually) to keep EVERY request on the fast GPU
+# lane and never admit anything — including self-chat agents — to the slow CPU
+# lane. During testing it is easier to wait a few seconds for the GPU than to
+# endure CPU speed. A real web-UI human request never goes to the CPU lane
+# regardless of this flag: that invariant is enforced unconditionally at
+# admission and in task_mode().
+FORCE_GPU_LANE = True
+
 # Review-only self-chat roles that must NEVER call tools. The editor/moderator
 # are the same creative LLM as the story-writing agents, and with the tool list
 # enabled (tool_choice "auto") they spontaneously call generate_image/edit_image
@@ -285,6 +293,23 @@ TOOLS = [
                     }
                 },
                 "required": ["file_url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_image",
+            "description": "View/read an image that was attached or generated earlier in the conversation. The image URL appears in the conversation as [IMAGE: url]. Call this when you actually need to see the image content to answer or describe it accurately. Pass that url as the url parameter.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The image URL from the conversation, e.g. /uploads/<file>.jpg or /output/<file>.png"
+                    }
+                },
+                "required": ["url"],
             },
         },
     },

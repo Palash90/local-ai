@@ -1290,6 +1290,16 @@ class TestActiveModelId:
         chat_webui.tasks["t1"] = {"_user": "editor", "mode": "quantum"}
         assert chat_webui.task_mode("t1") == "cpu"
 
+    def test_task_mode_forced_gpu_when_flag_set(self, chat_webui, monkeypatch):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        monkeypatch.setattr(chat_webui, "FORCE_GPU_LANE", True)
+        chat_webui.tasks["t1"] = {"_user": "editor", "mode": "cpu"}
+        chat_webui.tasks["t2"] = {"_user": "alice", "mode": "cpu"}
+        assert chat_webui.task_mode("t1") == "gpu"
+        assert chat_webui.task_mode("t2") == "gpu"
+        assert chat_webui.task_mode("ghost") == "gpu"
+
     def test_server_urls(self, chat_webui):
         assert chat_webui.server_url("gpu") == chat_webui.LLAMA_URL
         assert chat_webui.server_url("cpu") == chat_webui.LLAMA_URL_CPU
@@ -1380,6 +1390,31 @@ class TestSystemHelpers:
         assert len(calls) == 1
 
 
+class TestCpuLaneNeeded:
+    def test_false_when_no_agents_or_work(self, chat_webui):
+        chat_webui._agent_users.clear()
+        chat_webui._task_queues["cpu"][:] = []
+        chat_webui._current_task_ids["cpu"] = None
+        assert chat_webui._cpu_lane_needed() is False
+
+    def test_true_with_registered_agent(self, chat_webui):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        assert chat_webui._cpu_lane_needed() is True
+
+    def test_true_with_queued_cpu_work(self, chat_webui):
+        chat_webui._agent_users.clear()
+        chat_webui._task_queues["cpu"][:] = []
+        chat_webui._task_queues["cpu"].append({"task_id": "t1", "session_id": "s1"})
+        assert chat_webui._cpu_lane_needed() is True
+
+    def test_force_gpu_lane_disables_cpu_lane(self, chat_webui, monkeypatch):
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        monkeypatch.setattr(chat_webui, "FORCE_GPU_LANE", True)
+        assert chat_webui._cpu_lane_needed() is False
+
+
 class TestRestartServers:
     def test_restart_healthy(self, chat_webui, monkeypatch, tmp_path):
         killed = []
@@ -1401,12 +1436,53 @@ class TestRestartServers:
         monkeypatch.setattr(chat_webui.subprocess, "Popen", lambda *a, **k: popens.append(a))
         monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
         monkeypatch.setattr(chat_webui.os.path, "expanduser", lambda p: str(tmp_path))
-        chat_webui.restart_servers()
-        # ComfyUI + GPU llama-server + CPU llama-server
-        assert len(popens) == 3
-        assert len(opened) == 3
+        saved_agents = set(chat_webui._agent_users)
+        chat_webui._agent_users.clear()
+        try:
+            chat_webui.restart_servers()
+        finally:
+            chat_webui._agent_users.clear()
+            chat_webui._agent_users.update(saved_agents)
+        # ComfyUI + GPU llama-server only — no agents registered, so the CPU
+        # self-chat server is started lazily (or not at all).
+        assert len(popens) == 2
+        assert len(opened) == 2
         assert killed[0] is None
         assert killed[1] == "comfy"
+        # GPU args on 8081
+        assert popens[1][0][1:] == chat_webui.LLAMA_SERVER_ARGS
+
+    def test_restart_healthy_boots_cpu_with_agents(self, chat_webui, monkeypatch, tmp_path):
+        killed = []
+        monkeypatch.setattr(chat_webui, "kill_llama_server", lambda mode=None: killed.append(mode))
+        monkeypatch.setattr(chat_webui, "kill_comfyui", lambda: killed.append("comfy"))
+        class Resp:
+            status_code = 200
+
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: Resp())
+        opened = []
+        real_open = open
+
+        def fake_open(path, mode):
+            opened.append(path)
+            return real_open(path, mode)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+        popens = []
+        monkeypatch.setattr(chat_webui.subprocess, "Popen", lambda *a, **k: popens.append(a))
+        monkeypatch.setattr(chat_webui.time, "sleep", lambda *a, **k: None)
+        monkeypatch.setattr(chat_webui.os.path, "expanduser", lambda p: str(tmp_path))
+        saved_agents = set(chat_webui._agent_users)
+        chat_webui._agent_users.clear()
+        chat_webui._agent_users.add("editor")
+        try:
+            chat_webui.restart_servers()
+        finally:
+            chat_webui._agent_users.clear()
+            chat_webui._agent_users.update(saved_agents)
+        # ComfyUI + GPU llama-server + CPU llama-server (agents are registered)
+        assert len(popens) == 3
+        assert len(opened) == 3
         # GPU args on 8081, CPU args on 8079
         assert popens[1][0][1:] == chat_webui.LLAMA_SERVER_ARGS
         assert popens[2][0][1:] == chat_webui.LLAMA_SERVER_ARGS_CPU
@@ -1432,11 +1508,18 @@ class TestRestartServers:
 
         monkeypatch.setattr(chat_webui.time, "time", fake_time)
         monkeypatch.setattr(chat_webui.os.path, "expanduser", lambda p: str(tmp_path))
-        chat_webui.restart_servers()
-        # one full kill + one timeout kill per llama-server
+        saved_agents = set(chat_webui._agent_users)
+        chat_webui._agent_users.clear()
+        try:
+            chat_webui.restart_servers()
+        finally:
+            chat_webui._agent_users.clear()
+            chat_webui._agent_users.update(saved_agents)
+        # one full kill + one timeout kill for the GPU server; the CPU server
+        # is skipped (no agent lane activity), so no CPU kills happen
         assert killed.count(None) == 1
         assert killed.count("gpu") == 1
-        assert killed.count("cpu") == 1
+        assert killed.count("cpu") == 0
 
 
 class TestRestartLlamaServer:

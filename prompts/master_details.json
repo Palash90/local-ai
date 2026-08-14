@@ -258,11 +258,8 @@
             "deep obsidian-black eyes",
             "warm dark brown eyes",
             "striking hazel eyes",
-            "natural human blue eyes",
-            "natural human green eyes",
             "honey-amber eyes",
-            "steel-grey eyes",
-            "heterochromia (one blue eye, one brown eye)"
+            "steel-grey eyes"
         ]
     },
     "feature_face_shape": {
@@ -275,6 +272,45 @@
             "round face with soft cheeks",
             "diamond-shaped face with chiseled cheekbones",
             "long rectangular facial structure"
+        ]
+    },
+    "feature_cheekbones": {
+        "name": "cheekbone_structure",
+        "selector": "random",
+        "values": [
+            "high prominent cheekbones with defined cheek hollows",
+            "soft rounded cheekbones with subtle youthful fullness",
+            "broad well-defined cheekbones with gentle contours",
+            "subtle low cheekbones with a smooth natural transition"
+        ]
+    },
+    "feature_forehead_and_hairline": {
+        "name": "forehead_and_hairline",
+        "selector": "random",
+        "values": [
+            "smooth rounded forehead with a neat symmetrical hairline",
+            "slightly high prominent forehead with natural temple contours",
+            "soft compact forehead with a subtle widow's peak hairline",
+            "broad gently curved forehead with a low clean hairline"
+        ]
+    },
+    "feature_under_eye_area": {
+        "name": "under_eye_structure",
+        "selector": "random",
+        "values": [
+            "smooth under-eye skin with subtle natural tear troughs",
+            "slight natural under-eye hollows with expressive depth",
+            "soft delicate under-eye contours with no dark circles",
+            "gentle subtle laughter lines around the outer eye corners"
+        ]
+    },
+    "feature_ears_and_lobes": {
+        "name": "ear_structure",
+        "selector": "random",
+        "values": [
+            "neat small ears with attached earlobes",
+            "well-proportioned elegant ears with free unattached earlobes",
+            "slightly defined delicate ears hugging close to the head"
         ]
     },
     "feature_nose_type": {
@@ -293,22 +329,33 @@
         "name": "lip_shape",
         "selector": "random",
         "values": [
-            "full plump lips",
-            "thin defined lips",
-            "bow-shaped Cupid's lip",
-            "wide warm smiling lips",
-            "slightly downturned subtle lips"
+            "full symmetrical lips with natural rose pigment",
+            "thin finely defined lips with a subtle cupid's bow",
+            "well-defined Cupid's bow upper lip with medium full lower lip",
+            "medium soft lips with a soft, natural lip border",
+            "slightly defined narrow lips with soft natural tone"
         ]
     },
     "feature_eyebrows": {
         "name": "eyebrows",
         "selector": "random",
         "values": [
-            "thick bushy eyebrows",
-            "sharp arched eyebrows",
-            "thin neat eyebrows",
-            "straight flat eyebrows",
-            "slightly feathered natural eyebrows"
+            "thick natural dark eyebrows with a soft rounded arch",
+            "sharp well-defined arched dark eyebrows",
+            "neat medium-density dark eyebrows with subtle grey strands",
+            "straight natural dark eyebrows with tapered ends",
+            "slightly feathered soft dark eyebrows with a subtle arch"
+        ]
+    },
+    "feature_jawline": {
+        "name": "jawline_and_chin",
+        "selector": "random",
+        "values": [
+            "defined sharp jawline with a soft rounded chin",
+            "soft gently curved jawline with a subtle chin dip",
+            "strong structured jawline with a neat square chin",
+            "tapered oval jawline with a delicate pointed chin",
+            "smooth natural jawline with a soft subtle chin"
         ]
     },
     "feature_expression": {
@@ -332,8 +379,7 @@
             "distinct beauty mark near left cheekbone",
             "deep cheek dimples when smiling",
             "prominent sharp collarbones",
-            "subtle temple birthmark",
-            "none"
+            "subtle temple birthmark"
         ]
     },
     "feature_eyewear": {
@@ -367,7 +413,8 @@
             "athletic and toned build",
             "curvy hourglass silhouette",
             "tall lean dancer build",
-            "soft full-figured body type"
+            "soft full-figured body type",
+            "chubby"
         ]
     },
     "feature_female_hair_style": {

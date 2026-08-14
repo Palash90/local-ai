@@ -58,7 +58,7 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 5.0
-SLEEP_BETWEEN_TURNS = 30.0
+SLEEP_BETWEEN_TURNS = 1.0
 MAX_MESSAGES_PER_AGENT = 10
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
@@ -1538,12 +1538,27 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     content = extract_tagged_content(raw_text)
     if content is None:
         # No [CONTENT] block — Phase 1 planning turn (or a turn that only
-        # ran tools). Still capture any citations, but write nothing to the
-        # story file.
+        # ran tools). Still capture any citations. If the turn generated an
+        # image, embed it anyway so a generated image is never lost from the
+        # story just because the model skipped the [CONTENT] wrapper.
         collect_citations(citations, entry.get("searches"))
-        print(
-            f"[content] No [CONTENT] block in {speaker} turn {turn} — skipping (planning-only)"
+        local_img = embed_story_image(
+            entry.get("image"), stories_dir, round_number, speaker, idx
         )
+        if not local_img:
+            print(
+                f"[content] No [CONTENT] block in {speaker} turn {turn} — skipping (planning-only)"
+            )
+            return
+        print(
+            f"[content] No [CONTENT] block in {speaker} turn {turn} — embedding generated image only"
+        )
+        lines = [
+            f'<small style="color:#888">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n',
+            f"![{speaker}]({local_img})\n\n",
+        ]
+        with open(fname, "a", encoding="utf-8") as f:
+            f.writelines(lines)
         return
 
     cleaned = clean_speaker_text(speaker, content)

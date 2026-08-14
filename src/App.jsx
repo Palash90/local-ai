@@ -32,6 +32,7 @@ export default function App() {
   const [modelTps, setModelTps] = useState(null)
   const [overheated, setOverheated] = useState(false)
   const [gpuTemp, setGpuTemp] = useState(null)
+  const [ramEvacuating, setRamEvacuating] = useState(false)
   const [reminderCount, setReminderCount] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [lightboxSrc, setLightboxSrc] = useState(null)
@@ -323,6 +324,7 @@ export default function App() {
         setModelStatus(data.model)
         setOverheated(data.overheated)
         setGpuTemp(data.gpu_temp)
+        if (data.ram_evacuating != null) setRamEvacuating(data.ram_evacuating)
         if (data.predicted_per_second != null) setModelTps(data.predicted_per_second)
         if (data.max_context != null) setMaxContext(data.max_context)
         if (data.reminder_count != null) setReminderCount(data.reminder_count)
@@ -438,7 +440,7 @@ export default function App() {
             onClose={closeSidebar}
             open={sidebarOpen}
           />
-          <OverloadWarning overheated={overheated} gpuTemp={gpuTemp} />
+          <OverloadWarning overheated={overheated} gpuTemp={gpuTemp} ramEvacuating={ramEvacuating} />
           <ChatArea
             messages={messages}
             pendingMessages={pendingMessages}

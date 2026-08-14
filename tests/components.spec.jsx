@@ -25,6 +25,18 @@ test('OverloadWarning hides GPU temperature when unknown', async ({ mount }) => 
   await expect(component).not.toContainText('GPU:');
 });
 
+test('OverloadWarning shows during RAM evacuation', async ({ mount }) => {
+  const component = await mount(<OverloadWarning overheated={false} gpuTemp={null} ramEvacuating />);
+  await expect(component).toHaveAttribute('id', 'overload-warn');
+  await expect(component).toContainText('Server overloaded');
+  await expect(component).toContainText('RAM is freed');
+});
+
+test('OverloadWarning hides when neither overload condition is active', async ({ mount }) => {
+  const component = await mount(<OverloadWarning overheated={false} gpuTemp={42} ramEvacuating={false} />);
+  await expect(component.locator('#overload-warn')).toHaveCount(0);
+});
+
 // ---------- LocationPrompt ----------
 
 test('LocationPrompt renders default description and buttons', async ({ mount }) => {

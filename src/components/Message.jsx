@@ -507,6 +507,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
           else if (part.type === 'image_url') {
             const url = part.image_url.url
             if (url.startsWith('data:')) userImg = url.split(',')[1]
+            else if (url.startsWith('/uploads/') || url.startsWith('/output/') || /^https?:/.test(url)) userImg = url
           }
         })
       }
@@ -562,6 +563,8 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
   const genPrompt = msg._gen_prompt
   const imageUrl = msg._image_url
   const imageModel = msg._image_model
+  const isUserImgUrl = typeof userImg === 'string' && (userImg.startsWith('/') || /^https?:/.test(userImg))
+  const userImgSrc = userImg ? (isUserImgUrl ? userImg : 'data:image/jpeg;base64,' + userImg) : null
 
   if (
     msg.role === 'assistant' &&
@@ -585,6 +588,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
         else if (part.type === 'image_url') {
           const url = part.image_url.url
           if (url.startsWith('data:')) userImg = url.split(',')[1]
+          else if (url.startsWith('/uploads/') || url.startsWith('/output/') || /^https?:/.test(url)) userImg = url
         }
       })
     }
@@ -679,11 +683,11 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
           </div>
         </div>
       )}
-      {userImg && (
+      {userImgSrc && (
         <img
-          src={'data:image/jpeg;base64,' + userImg}
+          src={userImgSrc}
           style={{ maxWidth: '100%', borderRadius: 10, cursor: 'pointer' }}
-          onClick={() => onImageOpen('data:image/jpeg;base64,' + userImg)}
+          onClick={() => onImageOpen(userImgSrc)}
           alt="Uploaded"
         />
       )}
