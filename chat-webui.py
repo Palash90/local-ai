@@ -49,6 +49,8 @@ from server.config import (  # noqa: F401
     SELF_CHAT_MODE,
     SESSIONS_DIR,
     SESSIONS_FILE,
+    SHARE_BASE_URL,
+    SHARES_FILE,
     TASKS_DB,
     THEMES_DB,
     TOOL_FREE_AGENTS,
@@ -110,6 +112,7 @@ from server.features.state import (  # noqa: E402
     register_entrypoint,
     sessions,
     sessions_meta,
+    shares,
     tasks,
 )
 
@@ -149,6 +152,15 @@ from server.features.sessions import (  # noqa: E402
     _session_meta_from,
     load_sessions,
     save_sessions,
+)
+
+from server.features.shares import (  # noqa: E402
+    create_share,
+    get_share,
+    list_shares,
+    load_shares,
+    revoke_share,
+    save_shares,
 )
 
 from server.features.context import (  # noqa: E402
@@ -247,6 +259,7 @@ set_app_state({name: globals()[name] for name in APP_STATE_NAMES})
 if __name__ == "__main__":
     os.makedirs(UPLOADS_DIR, exist_ok=True)
     load_sessions()
+    load_shares()
     try:
         r = requests.get(f"{LLAMA_BASE}/health", timeout=3)
         if r.status_code != 200:

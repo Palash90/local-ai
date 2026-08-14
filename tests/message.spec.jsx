@@ -199,6 +199,53 @@ test('speak button calls the TTS endpoint', async ({ page, mount }) => {
   await expect(component.locator('.speak-btn')).toHaveClass(/speaking/);
 });
 
+// ---------- Message: share button ----------
+
+test('share button is hidden without session context', async ({ mount }) => {
+  const component = await mount(<Message msg={{ role: 'assistant', content: 'hello' }} onImageOpen={() => {}} />);
+  await expect(component.locator('.share-btn')).toHaveCount(0);
+});
+
+test('share button is hidden on user messages', async ({ mount }) => {
+  const component = await mount(<Message msg={{ role: 'user', content: 'hi' }} sessionId="s1" msgIndex={0} onImageOpen={() => {}} />);
+  await expect(component.locator('.share-btn')).toHaveCount(0);
+});
+
+test('share button shares an assistant message and shows the link', async ({ page, mount }) => {
+  await page.evaluate(() => {
+    window.fetch = async (url, opts) => {
+      if (String(url) === '/api/shares' && (opts?.method || 'GET') === 'POST') {
+        return { status: 200, json: async () => ({ token: 'abc123', url: '/s/abc123' }) };
+      }
+      return { status: 404, json: async () => ({}) };
+    };
+  });
+  const component = await mount(
+    <Message msg={{ role: 'assistant', content: 'shared text' }} sessionId="s1" msgIndex={1} onImageOpen={() => {}} />
+  );
+  await component.locator('.share-btn').click();
+  await expect(component.locator('.share-modal')).toContainText('Message shared');
+  await expect(component.locator('.share-modal-url')).toHaveValue(/\/s\/abc123/);
+  await component.locator('.share-modal-close').click();
+  await expect(component.locator('.share-modal')).toHaveCount(0);
+});
+
+test('share button surfaces a server error', async ({ page, mount }) => {
+  await page.evaluate(() => {
+    window.fetch = async (url, opts) => {
+      if (String(url) === '/api/shares' && (opts?.method || 'GET') === 'POST') {
+        return { status: 400, json: async () => ({ error: 'Only assistant messages can be shared' }) };
+      }
+      return { status: 404, json: async () => ({}) };
+    };
+  });
+  const component = await mount(
+    <Message msg={{ role: 'assistant', content: 'x' }} sessionId="s1" msgIndex={1} onImageOpen={() => {}} />
+  );
+  await component.locator('.share-btn').click();
+  await expect(component.locator('.share-error')).toContainText('Only assistant messages can be shared');
+});
+
 // ---------- Message: pending ----------
 
 test('pending message shows status and resolves', async ({ page, mount }) => {

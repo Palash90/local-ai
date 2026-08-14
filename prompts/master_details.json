@@ -170,6 +170,7 @@
             "teenager (15-17 years old)",
             "young adult (20-25 years old)",
             "adult in prime (30-35 years old)",
+            "midlife (35-45 years old)",
             "middle-aged (45-50 years old)"
         ]
     },
@@ -191,7 +192,6 @@
             "Anglo-Indian",
             "Tuluva",
             "Haryanvi",
-            "North East Indian",
             "Dravidian",
             "Assamese",
             "Naga",
@@ -258,8 +258,8 @@
             "deep obsidian-black eyes",
             "warm dark brown eyes",
             "striking hazel eyes",
-            "piercing sapphire-blue eyes",
-            "vibrant emerald-green eyes",
+            "natural human blue eyes",
+            "natural human green eyes",
             "honey-amber eyes",
             "steel-grey eyes",
             "heterochromia (one blue eye, one brown eye)"

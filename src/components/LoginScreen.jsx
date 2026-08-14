@@ -1,9 +1,18 @@
 import { useState } from 'react'
 
-export default function LoginScreen({ onLogin }) {
+function extractToken(value) {
+  const trimmed = value.trim()
+  const m = /\/s\/([A-Za-z0-9]+)\/?/.exec(trimmed)
+  if (m) return m[1]
+  if (/^[A-Za-z0-9]{8,}$/.test(trimmed)) return trimmed
+  return ''
+}
+
+export default function LoginScreen({ onLogin, onOpenShare }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState(false)
+  const [shareToken, setShareToken] = useState('')
 
   async function handleSubmit(e) {
     if (e) {
@@ -32,6 +41,17 @@ export default function LoginScreen({ onLogin }) {
     if (e.key === 'Enter') handleSubmit(e)
   }
 
+  function handleOpenShare(e) {
+    e.preventDefault()
+    const token = extractToken(shareToken)
+    if (!token) return
+    if (onOpenShare) {
+      onOpenShare(token)
+    } else {
+      window.location.href = '/s/' + token
+    }
+  }
+
   return (
     <div id="login-overlay">
       <div className="login-box">
@@ -54,6 +74,17 @@ export default function LoginScreen({ onLogin }) {
         />
         <button onClick={handleSubmit}>Sign In</button>
         <div className={`login-error${error ? ' show' : ''}`}>Invalid username or password</div>
+        <div className="login-share-divider" />
+        <input
+          type="text"
+          className="login-share-input"
+          placeholder="Or paste a shared message link"
+          aria-label="Shared message link"
+          value={shareToken}
+          onChange={e => setShareToken(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleOpenShare(e) }}
+        />
+        <button className="login-share-btn" onClick={handleOpenShare}>View shared message</button>
       </div>
     </div>
   )

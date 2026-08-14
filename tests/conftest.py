@@ -37,8 +37,8 @@ def chat_webui():
 
 
 _CHAT_STATE = [
-    "sessions", "sessions_meta", "tasks", "_active_tokens", "_agent_tokens",
-    "_agent_users", "_effective_contexts", "_client_location",
+    "sessions", "sessions_meta", "tasks", "shares", "_active_tokens",
+    "_agent_tokens", "_agent_users", "_effective_contexts", "_client_location",
     "_users_cache", "_users_cache_time", "model_status", "_cpu_model_status",
     "_last_tps", "_current_task_ids", "_overheated", "_gpu_temp",
     "_event_post", "_ram_evacuating",
@@ -71,12 +71,14 @@ def _reset_chat_state(chat_webui):
     try:
         _clear_task_queues(chat_webui)
         _drain_image_queue(chat_webui._image_queue)
+        chat_webui.shares.clear()
         yield
     finally:
         for name, value in snapshots.items():
             setattr(chat_webui, name, value)
         _clear_task_queues(chat_webui)
         _drain_image_queue(chat_webui._image_queue)
+        chat_webui.shares.clear()
 
 
 @pytest.fixture
@@ -87,6 +89,7 @@ def temp_paths(chat_webui, monkeypatch, tmp_path):
     monkeypatch.setattr(chat_webui, "USERS_FILE", str(tmp_path / "users.json"))
     monkeypatch.setattr(chat_webui, "SESSIONS_DIR", str(tmp_path))
     monkeypatch.setattr(chat_webui, "SESSIONS_FILE", str(tmp_path / "sessions.json"))
+    monkeypatch.setattr(chat_webui, "SHARES_FILE", str(tmp_path / "shares.json"))
     monkeypatch.setattr(chat_webui, "UPLOADS_DIR", str(tmp_path / "uploads"))
     monkeypatch.setattr(chat_webui, "IMG_PATH", str(tmp_path / "output"))
     monkeypatch.setattr(chat_webui, "COMFYUI_OUTPUT", str(tmp_path / "comfy_output"))

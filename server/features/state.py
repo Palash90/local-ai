@@ -54,6 +54,7 @@ M = _Proxy()
 sessions = {}
 sessions_meta = {}
 tasks = {}
+shares = {}
 
 _active_tokens = {}
 _tokens_lock = threading.Lock()

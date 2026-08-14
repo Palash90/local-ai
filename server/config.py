@@ -18,6 +18,14 @@ SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080/search")
 COMFYUI_URL = "http://localhost:8188"
 HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
 PORT = 3001
+
+# External origin used to build public share links. Set this to a portless URL
+# (e.g. http://192.168.1.10 or https://chat.example.com) when the server is also
+# reachable on port 80/443, because WhatsApp and several other messengers stop
+# auto-linking a URL at the ":" of a port: a share link like
+# "http://192.168.1.10:3001/s/<token>" becomes a dead short URL that ends at the
+# colon. Leave empty to keep building links from the browser's own origin.
+SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL", "").strip().rstrip("/")
 REASONING_BUDGET = 4096
 CPU_PARALLEL_SLOTS = 4  # Set to desired number of concurrent CPU agent slots
 
@@ -144,6 +152,7 @@ LLAMA_SERVER_ARGS_CPU = [
 FILES_DIR = os.path.expanduser("~/local-ai-files")
 SESSIONS_DIR = os.path.join(FILES_DIR, "session")
 SESSIONS_FILE = os.path.join(SESSIONS_DIR, "sessions.json")
+SHARES_FILE = os.path.join(FILES_DIR, "shares.json")
 IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")

@@ -65,6 +65,8 @@ export default function ChatArea({ messages, pendingMessages, currentSessionId, 
         <Message
           key={i}
           msg={msg}
+          sessionId={currentSessionId}
+          msgIndex={i}
           onImageOpen={onImageOpen}
           selectingRef={selectingRef}
           onResolved={onPendingResolved}

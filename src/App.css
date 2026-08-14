@@ -439,6 +439,147 @@ html, body {
   color: #f472b6;
 }
 
+.share-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(52, 211, 153, 0.12);
+  border: 1px solid rgba(52, 211, 153, 0.3);
+  cursor: pointer;
+  color: #34d399;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background .2s, color .2s, border-color .2s;
+  font-family: inherit;
+}
+
+.share-btn:hover {
+  background: rgba(52, 211, 153, 0.22);
+  color: #6ee7b7;
+}
+
+.share-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.share-error {
+  color: #f87171;
+  font-size: 11px;
+  margin-left: 6px;
+}
+
+/* ---- Share Modal ---- */
+.share-modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(2px);
+}
+
+.share-modal {
+  background: #1a1a2e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 460px;
+  padding: 16px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+
+.share-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 600;
+  color: #e2e8f0;
+  margin-bottom: 8px;
+}
+
+.share-modal-close {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  line-height: 1;
+  font-family: inherit;
+}
+
+.share-modal-close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.share-modal-hint {
+  color: #94a3b8;
+  font-size: 12px;
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.share-modal-url {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e0e0e0;
+  font-size: 13px;
+  font-family: monospace;
+  outline: none;
+  margin-bottom: 12px;
+}
+
+.share-modal-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.share-modal-actions button,
+.share-open-link {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: none;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  font-family: inherit;
+}
+
+.share-copy-btn {
+  background: linear-gradient(135deg, #34d399, #0ea5e9);
+  color: #06281f;
+}
+
+.share-copy-btn:hover {
+  filter: brightness(1.1);
+}
+
+.share-open-link {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.share-open-link:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
 /* ---- Code Block Copy ---- */
 .code-block {
   position: relative;
@@ -1195,6 +1336,90 @@ input[type=file] {
 
 .login-box .login-error.show {
   display: block;
+}
+
+.login-share-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 18px 0 14px;
+}
+
+.login-share-input {
+  margin-bottom: 8px;
+}
+
+.login-share-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #a5b4c8;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.login-share-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #e2e8f0;
+  transform: none;
+  box-shadow: none;
+}
+
+/* ---- Public Share View ---- */
+#public-share-view {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+.public-share-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-wrap: wrap;
+}
+
+.public-share-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.public-share-exit {
+  background: rgba(74, 108, 247, 0.12);
+  border: 1px solid rgba(74, 108, 247, 0.3);
+  color: #a5b4ff;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.public-share-exit:hover {
+  background: rgba(74, 108, 247, 0.22);
+}
+
+.public-share-meta {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 12px;
+}
+
+.public-share-status {
+  color: #94a3b8;
+  font-size: 14px;
+  padding: 24px 0;
+}
+
+.public-share-status.error {
+  color: #f87171;
 }
 
 /* ---- Token Indicator ---- */

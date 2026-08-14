@@ -957,6 +957,149 @@ class TestPostFallback:
         assert r.status == 401
 
 
+class TestShareEndpoints:
+    def _session_with_assistant(self, env, owner_auth, owner):
+        sid = _create_session(env, owner_auth)
+        with env["chat"]._data_lock:
+            env["chat"].sessions[sid] = [
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": "It is **four**.", "_image_url": "/output/a.png"},
+            ]
+            env["chat"].sessions_meta[sid]["user_id"] = owner
+        return sid
+
+    def test_create_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/shares", method="POST",
+                               data={"session_id": "s1", "msg_index": 1})
+        assert r.status == 401
+
+    def test_create_shares_assistant_message(self, api_env):
+        env = api_env
+        sid = self._session_with_assistant(env, env["auth_a"], "alice")
+        r = env["handler"]("/api/shares", method="POST",
+                           data={"session_id": sid, "msg_index": 1},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        body = r.json
+        assert body["token"]
+        assert body["url"] == "/s/%s" % body["token"]
+
+    def test_create_uses_portless_share_base_url(self, api_env):
+        env = api_env
+        sid = self._session_with_assistant(env, env["auth_a"], "alice")
+        env["chat"].SHARE_BASE_URL = "http://192.168.1.10"
+        try:
+            r = env["handler"]("/api/shares", method="POST",
+                               data={"session_id": sid, "msg_index": 1},
+                               headers=env["auth_a"])
+        finally:
+            env["chat"].SHARE_BASE_URL = ""
+        assert r.status == 200
+        body = r.json
+        assert body["url"] == "http://192.168.1.10/s/%s" % body["token"]
+
+    def test_create_not_owner_rejected(self, api_env):
+        env = api_env
+        sid = self._session_with_assistant(env, env["auth_a"], "alice")
+        r = env["handler"]("/api/shares", method="POST",
+                           data={"session_id": sid, "msg_index": 1},
+                           headers=env["auth_b"])
+        assert r.status == 400
+        assert "Not your session" in r.json["error"]
+
+    def test_create_missing_session_rejected(self, api_env):
+        env = api_env
+        r = env["handler"]("/api/shares", method="POST",
+                           data={"session_id": "nope", "msg_index": 1},
+                           headers=env["auth_a"])
+        assert r.status == 400
+        assert "Session not found" in r.json["error"]
+
+    def test_create_bad_index_rejected(self, api_env):
+        env = api_env
+        sid = self._session_with_assistant(env, env["auth_a"], "alice")
+        r = env["handler"]("/api/shares", method="POST",
+                           data={"session_id": sid, "msg_index": 99},
+                           headers=env["auth_a"])
+        assert r.status == 400
+        assert "Message not found" in r.json["error"]
+
+    def test_create_only_assistant_messages(self, api_env):
+        env = api_env
+        sid = self._session_with_assistant(env, env["auth_a"], "alice")
+        r = env["handler"]("/api/shares", method="POST",
+                           data={"session_id": sid, "msg_index": 0},
+                           headers=env["auth_a"])
+        assert r.status == 400
+        assert "assistant" in r.json["error"]
+
+    def test_public_get_no_auth(self, api_env):
+        env = api_env
+        sid = self._session_with_assistant(env, env["auth_a"], "alice")
+        token = env["handler"]("/api/shares", method="POST",
+                               data={"session_id": sid, "msg_index": 1},
+                               headers=env["auth_a"]).json["token"]
+        r = env["handler"]("/api/public/share/%s" % token)
+        assert r.status == 200
+        body = r.json
+        assert body["message"]["role"] == "assistant"
+        assert body["message"]["content"] == "It is **four**."
+        assert body["shared_by"] == "alice"
+
+    def test_public_get_unknown_token_404(self, api_env):
+        r = api_env["handler"]("/api/public/share/deadbeef")
+        assert r.status == 404
+
+    def test_revoke_by_owner(self, api_env):
+        env = api_env
+        sid = self._session_with_assistant(env, env["auth_a"], "alice")
+        token = env["handler"]("/api/shares", method="POST",
+                               data={"session_id": sid, "msg_index": 1},
+                               headers=env["auth_a"]).json["token"]
+        r = env["handler"]("/api/shares/%s" % token, method="DELETE",
+                           headers=env["auth_a"])
+        assert r.status == 200
+        assert r.json["status"] == "revoked"
+        r2 = env["handler"]("/api/public/share/%s" % token)
+        assert r2.status == 404
+
+    def test_revoke_by_other_user_rejected(self, api_env):
+        env = api_env
+        sid = self._session_with_assistant(env, env["auth_a"], "alice")
+        token = env["handler"]("/api/shares", method="POST",
+                               data={"session_id": sid, "msg_index": 1},
+                               headers=env["auth_a"]).json["token"]
+        r = env["handler"]("/api/shares/%s" % token, method="DELETE",
+                           headers=env["auth_b"])
+        assert r.status == 404
+        assert env["handler"]("/api/public/share/%s" % token).status == 200
+
+    def test_list_shares_only_own(self, api_env):
+        env = api_env
+        sid = self._session_with_assistant(env, env["auth_a"], "alice")
+        env["handler"]("/api/shares", method="POST",
+                       data={"session_id": sid, "msg_index": 1},
+                       headers=env["auth_a"])
+        env["handler"]("/api/shares", method="POST",
+                       data={"session_id": sid, "msg_index": 1},
+                       headers=env["auth_a"])
+        r = env["handler"]("/api/shares", headers=env["auth_b"])
+        assert r.status == 200
+        assert r.json["shares"] == []
+        r2 = env["handler"]("/api/shares", headers=env["auth_a"])
+        assert len(r2.json["shares"]) == 2
+        assert r2.json["shares"][0]["preview"] == "It is **four**."
+        assert r2.json["shares"][0]["url"].startswith("/s/")
+
+    def test_list_shares_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/shares")
+        assert r.status == 401
+
+    def test_revoke_requires_auth(self, api_env):
+        r = api_env["handler"]("/api/shares/abc", method="DELETE")
+        assert r.status == 401
+
+
 class TestLogMessage:
     def test_log_message_noop(self, api_env):
         import server.api

@@ -9,9 +9,16 @@ import ImageLightbox from './components/ImageLightbox'
 import OverloadWarning from './components/OverloadWarning'
 import TaskPanel from './components/TaskPanel'
 import LocationPrompt from './components/LocationPrompt'
+import PublicShareView from './components/PublicShareView'
+
+function shareTokenFromPath() {
+  const m = /^\/s\/([A-Za-z0-9]+)\/?$/.exec(window.location.pathname)
+  return m ? m[1] : null
+}
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(false)
+  const [publicShareToken, setPublicShareToken] = useState(() => shareTokenFromPath())
   const [username, setUsername] = useState('')
   const [sessions, setSessions] = useState([])
   const [currentSessionId, setCurrentSessionId] = useState(null)
@@ -386,6 +393,18 @@ export default function App() {
     setLocationTaskId(null)
     setLocationError(null)
     api.denyLocation(tid)
+  }
+
+  if (publicShareToken) {
+    return (
+      <PublicShareView
+        token={publicShareToken}
+        onExit={() => {
+          window.history.replaceState({}, '', '/')
+          setPublicShareToken(null)
+        }}
+      />
+    )
   }
 
   return (

@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, useCallback, useEffect, memo } from 'react'
 import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import DOMPurify from 'dompurify'
-import { speak as apiSpeak, getTaskStatus as apiGetTaskStatus } from '../api'
+import { speak as apiSpeak, getTaskStatus as apiGetTaskStatus, shareMessage as apiShareMessage } from '../api'
 import { downloadFile } from '../utils'
 import StatusBox from './StatusBox'
 
@@ -79,6 +79,83 @@ async function writeClipboard(text) {
     return true
   }
   return execCopy(text)
+}
+
+function ShareButton({ sessionId, msgIndex, forceShow }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [share, setShare] = useState(null)
+
+  async function handleShare(e) {
+    e.preventDefault()
+    e.stopPropagation()
+    if (busy || !sessionId || msgIndex == null) return
+    setBusy(true)
+    setError('')
+    try {
+      const data = await apiShareMessage(sessionId, msgIndex)
+      if (data && data.token) {
+        setShare({ url: data.url })
+      } else {
+        setError((data && data.error) || 'Sharing failed')
+      }
+    } catch (err) {
+      setError(err.message || 'Sharing failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function copyLink() {
+    if (!share) return
+    const url = share.url.startsWith('http') ? share.url : window.location.origin + share.url
+    await writeClipboard(url)
+  }
+
+  return (
+    <>
+      <button
+        className={'share-btn' + (forceShow ? ' force-show' : '')}
+        onClick={handleShare}
+        title="Share this message"
+        aria-label="Share this message"
+        disabled={busy}
+      >
+        {busy ? 'Sharing…' : (
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="18" cy="5" r="3" />
+            <circle cx="6" cy="12" r="3" />
+            <circle cx="18" cy="19" r="3" />
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+          </svg>
+        )}
+      </button>
+      {share && (
+        <div className="share-modal-overlay" onClick={() => setShare(null)}>
+          <div className="share-modal" onClick={e => e.stopPropagation()}>
+            <div className="share-modal-header">
+              <span>Message shared</span>
+              <button type="button" className="share-modal-close" onClick={() => setShare(null)}>&#10005;</button>
+            </div>
+            <p className="share-modal-hint">Anyone on this network with the link can view this message without logging in.</p>
+            <input
+              readOnly
+              className="share-modal-url"
+              value={share.url.startsWith('http') ? share.url : window.location.origin + share.url}
+              onFocus={e => e.target.select()}
+              onKeyDown={e => e.key === 'Enter' && e.target.select()}
+            />
+            <div className="share-modal-actions">
+              <button type="button" className="share-copy-btn" onClick={copyLink}>Copy link</button>
+              <a className="share-open-link" href={share.url} target="_blank" rel="noreferrer">Open</a>
+            </div>
+          </div>
+        </div>
+      )}
+      {error && <span className="share-error" role="alert">{error}</span>}
+    </>
+  )
 }
 
 function SearchPopup({ details }) {
@@ -396,7 +473,7 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
   )
 }
 
-function Message({ msg, pending, onImageOpen, selectingRef, onResolved, onLocationNeeded }) {
+function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, selectingRef, onResolved, onLocationNeeded }) {
   const elRef = useRef(null)
   const chatEl = useRef(null)
   const [popupVisible, setPopupVisible] = useState(null)
@@ -581,8 +658,11 @@ function Message({ msg, pending, onImageOpen, selectingRef, onResolved, onLocati
             )
           })
         })()}
-        {role === 'bot' && text && <SpeakButton text={ttsText} />}
+        {role === 'bot' && text && !hideSpeak && <SpeakButton text={ttsText} />}
         <CopyButton text={text} genPrompt={genPrompt} imageUrl={imageUrl} />
+        {role === 'bot' && sessionId && msgIndex != null && (
+          <ShareButton sessionId={sessionId} msgIndex={msgIndex} />
+        )}
       </div>
       {imageUrl && (
         <div className="image-wrap">

@@ -261,3 +261,27 @@ test('LoginScreen keeps error hidden after successful login', async ({ mount }) 
   await component.getByRole('button', { name: 'Sign In' }).click();
   await expect(component.locator('.login-error')).not.toHaveClass(/show/);
 });
+
+test('LoginScreen opens a shared message from a pasted link', async ({ mount }) => {
+  let opened = null;
+  const component = await mount(<LoginScreen onLogin={async () => {}} onOpenShare={(t) => { opened = t; }} />);
+  await component.getByPlaceholder('Shared message link').fill('http://192.168.1.10:3001/s/abc123');
+  await component.getByRole('button', { name: 'View shared message' }).click();
+  expect(opened).toBe('abc123');
+});
+
+test('LoginScreen opens a shared message from a bare token', async ({ mount }) => {
+  let opened = null;
+  const component = await mount(<LoginScreen onLogin={async () => {}} onOpenShare={(t) => { opened = t; }} />);
+  await component.getByPlaceholder('Shared message link').fill('deadbeef1234');
+  await component.getByRole('button', { name: 'View shared message' }).click();
+  expect(opened).toBe('deadbeef1234');
+});
+
+test('LoginScreen ignores invalid share input', async ({ mount }) => {
+  let opened = false;
+  const component = await mount(<LoginScreen onLogin={async () => {}} onOpenShare={() => { opened = true; }} />);
+  await component.getByPlaceholder('Shared message link').fill('  ');
+  await component.getByRole('button', { name: 'View shared message' }).click();
+  expect(opened).toBe(false);
+});

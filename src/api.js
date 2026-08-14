@@ -173,3 +173,27 @@ export async function updateTask(taskId, data) {
 export async function deleteTask(taskId) {
   await authFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
 }
+
+export async function shareMessage(sessionId, msgIndex) {
+  const r = await authFetch('/api/shares', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, msg_index: msgIndex }),
+  });
+  return r.json();
+}
+
+export async function listShares() {
+  const r = await authFetch('/api/shares');
+  return r.json();
+}
+
+export async function revokeShare(token) {
+  const r = await authFetch(`/api/shares/${token}`, { method: 'DELETE' });
+  return r.json();
+}
+
+export async function fetchPublicShare(token) {
+  const r = await fetch(`/api/public/share/${encodeURIComponent(token)}`);
+  return r.json();
+}

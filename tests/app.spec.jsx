@@ -109,3 +109,53 @@ test('pending task resolves into the assistant message', async ({ page, mount })
   await expect(page.locator('.msg.bot').filter({ hasText: 'Great!' })).toBeVisible();
   await expect(page.locator('.status-box')).toHaveCount(0);
 });
+
+test('renders a public shared message without login', async ({ page, mount }) => {
+  await page.evaluate(() => {
+    window.history.pushState({}, '', '/s/abc123');
+    window.fetch = async (url) => {
+      const urlStr = String(url);
+      if (urlStr === '/api/public/share/abc123') {
+        return { status: 200, json: async () => ({
+          message: { role: 'assistant', content: 'A **shared** answer.' },
+          created: 1234567890,
+          shared_by: 'alice',
+        }) };
+      }
+      return { status: 404, json: async () => ({}) };
+    };
+  });
+  const component = await mount(<App />);
+  await expect(component.locator('.public-share-meta')).toContainText('alice');
+  await expect(component.locator('#login-overlay')).toHaveCount(0);
+  await expect(component.locator('.msg-content strong')).toHaveText('shared');
+});
+
+test('public share view shows unavailable state for revoked shares', async ({ page, mount }) => {
+  await page.evaluate(() => {
+    window.history.pushState({}, '', '/s/deadbeef');
+    window.fetch = async () => ({ status: 404, json: async () => ({}) });
+  });
+  const component = await mount(<App />);
+  await expect(component).toContainText('no longer available');
+});
+
+test('public share view can return to the login screen', async ({ page, mount }) => {
+  await page.evaluate(() => {
+    window.history.pushState({}, '', '/s/abc123');
+    window.fetch = async (url) => {
+      const urlStr = String(url);
+      if (urlStr === '/api/public/share/abc123') {
+        return { status: 200, json: async () => ({
+          message: { role: 'assistant', content: 'hello' },
+          shared_by: 'alice',
+        }) };
+      }
+      return { status: 404, json: async () => ({}) };
+    };
+  });
+  const component = await mount(<App />);
+  await expect(component.locator('.public-share-meta')).toContainText('alice');
+  await component.getByRole('button', { name: 'Log in to chat' }).click();
+  await expect(component.locator('#login-overlay')).toBeVisible();
+});

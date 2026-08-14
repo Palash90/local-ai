@@ -31,6 +31,7 @@ from server.config import COMFYUI_OUTPUT, IMG_PATH, SELF_CHAT_MODE, UPLOADS_DIR
 ACTIVE_WINDOW_SECONDS = None
 MAX_INPUT_TOKENS = None
 MAX_QUEUE_SIZE = None
+SHARES_FILE = None
 _active_tokens = None
 _agent_tokens = None
 _agent_users = None
@@ -46,16 +47,23 @@ _queue_locks = None
 _task_queues = None
 _tokens_lock = None
 context_token_report = None
+create_share = None
 get_current_user = None
+get_share = None
 get_user_context_path = None
 get_user_password = None
 handle_theme_tool = None
+list_shares = None
+load_shares = None
 model_status_snapshot = None
 read_user_context = None
+revoke_share = None
 save_sessions = None
+save_shares = None
 sessions = None
 sessions_meta = None
 set_client_location = None
+shares = None
 task_create = None
 task_delete = None
 task_list = None
@@ -67,6 +75,7 @@ APP_STATE_NAMES = [
     "ACTIVE_WINDOW_SECONDS",
     "MAX_INPUT_TOKENS",
     "MAX_QUEUE_SIZE",
+    "SHARES_FILE",
     "_active_tokens",
     "_agent_tokens",
     "_agent_users",
@@ -82,16 +91,23 @@ APP_STATE_NAMES = [
     "_task_queues",
     "_tokens_lock",
     "context_token_report",
+    "create_share",
     "get_current_user",
+    "get_share",
     "get_user_context_path",
     "get_user_password",
     "handle_theme_tool",
+    "list_shares",
+    "load_shares",
     "model_status_snapshot",
     "read_user_context",
+    "revoke_share",
     "save_sessions",
+    "save_shares",
     "sessions",
     "sessions_meta",
     "set_client_location",
+    "shares",
     "task_create",
     "task_delete",
     "task_list",
@@ -181,6 +197,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "gpu_temp": gtemp,
                     "max_context": MAX_INPUT_TOKENS,
                     "reminder_count": reminder_count,
+                }
+            )
+        elif self.path == "/api/shares":
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            self.send_json({"shares": list_shares(user)})
+        elif self.path.startswith("/api/public/share/"):
+            token = os.path.basename(self.path)
+            rec = get_share(token)
+            if not rec:
+                self.send_error(404)
+                return
+            self.send_json(
+                {
+                    "message": rec.get("message", {}),
+                    "created": rec.get("created"),
+                    "shared_by": rec.get("owner", ""),
                 }
             )
         elif self.path.startswith("/output/"):
@@ -315,7 +350,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._safe_write(read_index_html().encode())
 
     def do_DELETE(self):
-        if self.path.startswith("/api/sessions/"):
+        if self.path.startswith("/api/shares/"):
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            token = self.path.split("/")[3]
+            if revoke_share(token, user):
+                self.send_json({"status": "revoked"})
+            else:
+                self.send_json({"error": "Share not found or not yours"}, status=404)
+        elif self.path.startswith("/api/sessions/"):
             user = get_current_user(self.headers)
             if not user:
                 self.send_json({"error": "Unauthorized"}, status=401)
@@ -430,7 +475,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        if self.path == "/api/register-agent":
+        if self.path == "/api/shares":
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            try:
+                token, url = create_share(
+                    user, body.get("session_id", ""), body.get("msg_index")
+                )
+            except ValueError as e:
+                self.send_json({"error": str(e)}, status=400)
+                return
+            self.send_json({"token": token, "url": url})
+        elif self.path == "/api/register-agent":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             tokens = body.get("tokens", []) or []
