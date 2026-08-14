@@ -223,6 +223,21 @@ class TestModeration:
         b = mh.moderation_badge({"verdict": "MEH"})
         assert "MEH" in b
 
+    def test_badge_red_reason_from_plural_key(self, mh):
+        b = mh.moderation_badge(
+            {"verdict": "RED", "reasons": "The ending is unresolved.\n- Missing resolution"}
+        )
+        assert "RED" in b
+        assert "The ending is unresolved." in b
+
+    def test_badge_red_reason_falls_back_to_singular(self, mh):
+        b = mh.moderation_badge({"verdict": "RED", "reason": "Too short"})
+        assert "Too short" in b
+
+    def test_badge_red_no_reason_placeholder(self, mh):
+        b = mh.moderation_badge({"verdict": "RED"})
+        assert "No reason provided." in b
+
 
 class TestListCollectionStories:
     def test_flat_story(self, mh):
@@ -321,6 +336,34 @@ class TestReadStory:
         r = mh_client.get("/story/premium_stories/s1")
         assert r.status_code == 401
 
+    def test_guest_blocked_from_premium_gets_html_page(self, mh_client, mh, mh_make_user):
+        mh_make_user({})
+        _write_story(mh, "premium_stories")
+        r = mh_client.get("/story/premium_stories/s1")
+        assert r.status_code == 401
+        assert "text/html" in r.headers["content-type"]
+        assert "Authentication Required" in r.text
+        assert "login-form" in r.text
+        assert '"detail"' not in r.text
+
+    def test_free_user_blocked_from_premium_gets_html_page(self, mh_client, mh, mh_make_user):
+        mh_make_user({"free": {"password": "s"}})
+        _write_story(mh, "premium_stories")
+        _login(mh_client, "free", "s")
+        r = mh_client.get("/story/premium_stories/s1")
+        assert r.status_code == 403
+        assert "text/html" in r.headers["content-type"]
+        assert "Access Denied" in r.text
+        assert 'id="login-form"' not in r.text
+
+    def test_guest_blocked_content_stays_json(self, mh_client, mh, mh_make_user):
+        mh_make_user({})
+        _write_story(mh, "premium_stories")
+        r = mh_client.get("/story/premium_stories/s1/content")
+        assert r.status_code == 401
+        assert "application/json" in r.headers["content-type"]
+        assert r.json()["detail"] == "Authentication token missing or invalid."
+
     def test_free_user_blocked_from_premium(self, mh_client, mh, mh_make_user):
         mh_make_user({"free": {"password": "s"}})
         _write_story(mh, "premium_stories")
@@ -355,6 +398,18 @@ class TestReadStory:
             f.write('{"verdict": "GREEN"}')
         r = mh_client.get("/story/free_stories/s1")
         assert "Moderation: GREEN" in r.text
+
+    def test_shows_moderation_reason_for_red(self, mh_client, mh, mh_make_user):
+        mh_make_user({})
+        root = mh.COLLECTION_RULES["free_stories"]["path"]
+        os.makedirs(os.path.join(root, "s1"))
+        with open(os.path.join(root, "s1", "story.md"), "w") as f:
+            f.write("# hi")
+        with open(os.path.join(root, "s1", "story.moderation.json"), "w") as f:
+            f.write('{"verdict": "RED", "reasons": "Dialogue is repeated verbatim."}')
+        r = mh_client.get("/story/free_stories/s1")
+        assert "Moderation: RED" in r.text
+        assert "Dialogue is repeated verbatim." in r.text
 
 
 class TestStoryContent:

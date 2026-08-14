@@ -21,12 +21,46 @@
         ]
     },
     "time_of_day": {
-        "selector": "roundrobin",
+        "selector": "random",
         "values": [
-            "day",
+            "dawn",
+            "early morning",
             "midday",
-            "evening",
-            "night"
+            "golden hour",
+            "dusk",
+            "twilight",
+            "blue hour",
+            "late evening",
+            "midnight",
+            "witching hour (3 AM)",
+            "pre-dawn mist"
+        ]
+    },
+    "lighting_ambience": {
+        "selector": "random",
+        "values": [
+            "cinematic volumetric sunbeams piercing through light haze",
+            "dramatic high-contrast chiaroscuro with deep harsh shadows",
+            "soft diffused overcast natural light",
+            "dappled sunlight filtering through lush tree canopy leaves",
+            "vibrant moody neon glows reflecting on wet pavement",
+            "warm cozy candlelight with soft flickers",
+            "harsh mid-day overhead sun with crisp defined shadows",
+            "ethereal glowing rim lighting highlighting the silhouette",
+            "cool muted studio softbox illumination"
+        ]
+    },
+    "color_palette_mood": {
+        "selector": "random",
+        "values": [
+            "warm golden-orange and teal high-fashion color grading",
+            "desaturated moody monochrome with high micro-contrast",
+            "dreamy pastel-toned soft-focus aesthetic",
+            "rich vivid jewel tones with deep saturated hues",
+            "cool icy blue undertones with stark white highlights",
+            "vintage Kodachrome film look with earthy muted tones",
+            "cyberpunk-inspired neon magenta and cyan contrast",
+            "cinematic filmic grain with rich crushed blacks"
         ]
     },
     "setting_cozy": {

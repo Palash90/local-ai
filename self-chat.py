@@ -102,9 +102,12 @@ def load_json_file(filepath, fallback):
 
 GENRE_PERSONA_MAP = load_json_file(GENRE_PERSONA_MAP_FILE, {})
 PERSONA_POOL = load_json_file(PERSONA_POOL_FILE, {})
-MASTER_DETAILS = load_json_file(os.path.expanduser("~/local-ai-files/contexts/master_details.json"), {})
+MASTER_DETAILS = load_json_file(
+    os.path.expanduser("~/local-ai-files/contexts/master_details.json"), {}
+)
 
-def pick_persona_round_robin(pool, genre, genre_map, task_roles = None):
+
+def pick_persona_round_robin(pool, genre, genre_map, task_roles=None):
     global _persona_cycles
     allowed = genre_map.get(genre) or genre_map.get("default")
 
@@ -324,7 +327,7 @@ def _resolve_field_value(spec, task, master):
     """Resolve a single detail field spec into ``(name, value)``."""
     if not isinstance(spec, dict):
         return "", str(spec)
-    
+
     ref = spec.get("ref")
     if ref and master and isinstance(master.get(ref), dict):
         # Start with master definition, then override with spec
@@ -338,28 +341,13 @@ def _resolve_field_value(spec, task, master):
     return name, value
 
 
-def resolve_details(details, task, master=None):
-    """Resolve a task's ``details`` spec into a prompt-ready string.
-
-    Accepts:
-      - a plain string (legacy format): returned unchanged
-      - a list of ``{name, selector, values}`` field specs
-      - a dict keyed by field name (``{name: {selector, values}}``)
-
-    A field may reference a shared definition from ``master`` (the
-    ``master_details`` block in a task config, or the ``detail_fields.json``
-    file) via ``{"name": ..., "ref": "pool_name"}``; local keys override the
-    master definition.
-
-    Fields resolve to an inline comma list, e.g.
-    ``"animal: horse, time: evening"``. Multi-select fields render as
-    ``"animals: horse, elephant"``. Resolution happens once per round.
-    """
+def resolve_details(details, task, master=None, freq_filter="Per Round"):
+    """Resolve field specs matching a specific change frequency."""
     if master is None:
         master = MASTER_DETAILS
 
     if isinstance(details, str):
-        return details
+        return details if freq_filter == "Per Round" else ""
 
     if isinstance(details, list):
         specs = details
@@ -369,13 +357,20 @@ def resolve_details(details, task, master=None):
             for name, spec in details.items()
         ]
     else:
-        return str(details)
+        return str(details) if freq_filter == "Per Round" else ""
 
     parts = []
     for spec in specs:
         if not isinstance(spec, dict):
-            parts.append(str(spec))
+            if freq_filter == "Per Round":
+                parts.append(str(spec))
             continue
+
+        # Check frequency (default to "Per Round" if missing)
+        spec_freq = spec.get("change_freq", "Per Round")
+        if spec_freq != freq_filter:
+            continue
+
         name, value = _resolve_field_value(spec, task, master)
         if not name or value is None:
             continue
@@ -389,6 +384,7 @@ def resolve_details(details, task, master=None):
         if not rendered:
             continue
         parts.append(f"{name}: {rendered}")
+
     return ", ".join(parts)
 
 
@@ -456,8 +452,16 @@ def build_theme_slug(task, mood, detail_fields, max_len=80):
     agents, so there is nothing here that needs an LLM to invent.
     """
     preferred_keys = [
-        "hero", "mystery", "trope", "sweet", "festival", "animals",
-        "domain", "topic", "target", "setting",
+        "hero",
+        "mystery",
+        "trope",
+        "sweet",
+        "festival",
+        "animals",
+        "domain",
+        "topic",
+        "target",
+        "setting",
     ]
     parts = []
     for key in preferred_keys:
@@ -960,7 +964,14 @@ def call_llm(token, session_id, message, image_b64=None):
 
 
 def build_input(
-    speaker, message_number, incoming, lang, task, context=None, turns=None
+    speaker,
+    message_number,
+    incoming,
+    lang,
+    task,
+    context=None,
+    turns=None,
+    per_turn_details="",
 ):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
@@ -971,16 +982,16 @@ def build_input(
     lines = [
         f"[SYSTEM DIRECTIVE: You are responding as {current_agent}. Your partner is {partner_agent}.]\n",
         f"[Turn {message_number}/{turns}]\n",
+        "[SYSTEM DIRECTIVE: Place ALL meta-analysis, praise, and planning OUTSIDE the [CONTENT] tags. ",
+        "The [CONTENT] block must ONLY contain clean narrative/visual deliverable text.]",
     ]
 
     if context is not None:
-        print("Extra context", context)
         lines.append(context)
 
     if message_number <= 2:
         lines.append(
-            f"[PHASE 1: DECISION & PLANNING] Analyze options, debate trade-offs with {partner_agent}, and DECIDE on"
-            f" a concrete creative direction and role division for this task: {task}."
+            f"Immediately establish your role and provide the first creative deliverable inside [CONTENT] tags."
         )
     elif message_number >= turns - 2:
         lines.append(
@@ -992,6 +1003,9 @@ def build_input(
             f"[PHASE 2: DIRECT EXECUTION] Continue building content turn-by-turn. "
             f"Do not send meta-talk or prematurely end the story. Speak in {lang}."
         )
+
+    if per_turn_details:
+        lines.append(f"[DYNAMIC TURN ATTRIBUTES: {per_turn_details}]")
 
     if incoming:
         lines.extend(["", "----------", incoming])
@@ -1008,13 +1022,14 @@ def run_single_conversation(
     roles=None,
     genre="General",
     details="",
+    details_spec=None,
     checklist=None,
     path=None,
     context=None,
     persona=None,
     themes_context="",
     turns=None,
-    task_roles = None
+    task_roles=None,
 ):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
@@ -1089,6 +1104,9 @@ def run_single_conversation(
         token = token_a if current_speaker == "A" else token_b
         session = session_a if current_speaker == "A" else session_b
 
+        per_turn_str = resolve_details(
+            details_spec, task, MASTER_DETAILS, freq_filter="Per Turn"
+        )
         prompt = build_input(
             current_speaker,
             message_number,
@@ -1097,9 +1115,12 @@ def run_single_conversation(
             task,
             context,
             turns,
+            per_turn_details=per_turn_str,
         )
 
         wait_for_user_to_leave()
+
+        print(prompt)
 
         result = call_llm(token, session, prompt, image_b64=shared_image_b64)
         reply = result["text"]
@@ -1311,17 +1332,17 @@ def resolve_story_path(spec, roles):
         if "premium" in roles:
             path = f"{path}/premium"
         return path
-        
+
     if "admin" in roles:
         if not ADMIN_STORIES_DIR:
             raise ValueError("STORIES_ADMIN_DIR environment variable is not set!")
         return ADMIN_STORIES_DIR
-        
+
     if "premium" in roles:
         if not PREMIUM_STORIES_DIR:
             raise ValueError("STORIES_PREMIUM_DIR environment variable is not set!")
         return PREMIUM_STORIES_DIR
-        
+
     return STORY_BASE_DIR
 
 
@@ -1677,7 +1698,6 @@ def run_moderator(
     language="",
     details="",
     checklist=None,
-    
 ):
     """Moderator phase: GREEN/RED verdict, written to story_rN_ts.moderation.json."""
     try:
@@ -1802,7 +1822,9 @@ def run_forever():
                 relationship, mood, persona_details = pick_persona_round_robin(
                     PERSONA_POOL, genre, GENRE_PERSONA_MAP, task_roles=spec.get("roles")
                 )
-                detail_fields = resolve_details_fields(details_spec, task, MASTER_DETAILS)
+                detail_fields = resolve_details_fields(
+                    details_spec, task, MASTER_DETAILS
+                )
                 combo = build_combo_dict(genre, mood, persona_details, detail_fields)
                 if not check_combo_used(token_a, combo):
                     break
@@ -1858,6 +1880,7 @@ def run_forever():
                 roles,
                 genre,
                 details,
+                details_spec,
                 checklist,
                 path,
                 context,

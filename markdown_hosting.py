@@ -7,6 +7,7 @@ import shutil
 import threading
 import markdown
 from fastapi import FastAPI, HTTPException, Header, Request, Response, status
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 import json
@@ -144,6 +145,144 @@ def enforce_rbac(collection_folder: str, username: str | None):
         )
 
 
+def error_page(status_code: int, detail: str, show_login: bool = False) -> str:
+    """Render a styled HTML error page for browser navigation.
+
+    API and live-polling endpoints keep their JSON error responses (see
+    ``_http_exception_html_handler``); anything a user would navigate to in the
+    browser gets a proper page instead of raw JSON. For 401 (guest hitting a
+    gated collection) the page embeds the same login form as the index.
+    """
+    titles = {
+        401: "Authentication Required",
+        403: "Access Denied",
+        404: "Not Found",
+    }
+    title = titles.get(status_code, f"Error {status_code}")
+    if status_code == 401:
+        message = "Please log in to view this story collection."
+    else:
+        message = html.escape(str(detail))
+    login_block = ""
+    if show_login:
+        login_block = f"""
+        <span class="login-toggle"><a href="#" id="login-link">Login</a></span>
+        <span class="login hidden" id="login-form">
+            <input id="login-user" placeholder="Username">
+            <input id="login-pass" type="password" placeholder="Password">
+            <button id="login-btn" class="primary">Log in</button>
+            <span id="login-msg"></span>
+        </span>
+        """
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{title}</title>
+        <style>
+            * {{ box-sizing: border-box; }}
+            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
+            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
+            h1 {{ color: #c44; }}
+            a.back {{ color: #666; text-decoration: none; }}
+            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
+            .topbar .login {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
+            .topbar .login.hidden {{ display: none; }}
+            .topbar .login-toggle a {{ color: #06c; font-weight: bold; }}
+            .topbar input {{ padding: 6px 8px; border: 1px solid #aaa; border-radius: 6px; font-size: 14px; background: #fff; color: #111; }}
+            .topbar button {{ background: none; border: 1px solid #888; color: #888; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-family: sans-serif; font-size: 13px; }}
+            .topbar button:hover {{ background: #eee; }}
+            .topbar button.primary {{ background: #06c; color: #fff; border-color: #06c; }}
+            .topbar button.primary:hover {{ background: #0577e6; }}
+            .topbar #login-msg {{ color: #c44; font-size: 12px; width: 100%; }}
+            @media (max-width: 600px) {{
+                body {{ padding: 12px; font-size: 19px; }}
+                .topbar {{ flex-direction: column; align-items: stretch; }}
+                .topbar .login {{ flex-direction: column; align-items: stretch; }}
+                .topbar input {{ width: 100%; }}
+            }}
+            @media (prefers-color-scheme: dark) {{
+                body {{ background: #16181d; color: #e6e6e6; }}
+                h1 {{ color: #ff8080; }}
+                a.back {{ color: #999; }}
+                .topbar .login-toggle a {{ color: #7ab8ff; }}
+                .topbar input {{ background: #1f232b; border-color: #3a3f4a; color: #e6e6e6; }}
+                .topbar input::placeholder {{ color: #888; }}
+                .topbar button {{ background: #1f232b; border-color: #555; color: #cfcfcf; }}
+                .topbar button:hover {{ background: #262b34; }}
+                .topbar button.primary {{ background: #3a7ee0; border-color: #3a7ee0; color: #fff; }}
+                .topbar button.primary:hover {{ background: #4a8cec; }}
+                .topbar #login-msg {{ color: #ff8080; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <nav class="topbar">
+            <a href="/" class="back">← Back to Collections</a>
+            {login_block}
+        </nav>
+        <h1>{title}</h1>
+        <p>{message}</p>
+        <script>
+            async function doLogin() {{
+                const user = document.getElementById('login-user').value.trim();
+                const pass = document.getElementById('login-pass').value;
+                const msg = document.getElementById('login-msg');
+                try {{
+                    const r = await fetch('/api/login', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ username: user, password: pass }}),
+                    }});
+                    if (r.ok) {{
+                        window.location.reload();
+                    }} else {{
+                        const d = await r.json();
+                        msg.textContent = d.detail || 'Invalid credentials';
+                    }}
+                }} catch (e) {{
+                    msg.textContent = e.message;
+                }}
+            }}
+            const loginBtn = document.getElementById('login-btn');
+            if (loginBtn) {{
+                loginBtn.addEventListener('click', doLogin);
+                document.getElementById('login-pass').addEventListener('keydown', e => {{
+                    if (e.key === 'Enter') doLogin();
+                }});
+            }}
+            const loginLink = document.getElementById('login-link');
+            const loginForm = document.getElementById('login-form');
+            if (loginLink && loginForm) {{
+                loginLink.addEventListener('click', e => {{
+                    e.preventDefault();
+                    loginForm.classList.toggle('hidden');
+                    if (!loginForm.classList.contains('hidden')) {{
+                        document.getElementById('login-user').focus();
+                    }}
+                }});
+            }}
+        </script>
+    </body>
+    </html>
+    """
+
+
+@app.exception_handler(HTTPException)
+async def _http_exception_html_handler(request: Request, exc: HTTPException):
+    """JSON errors for API/live-poll endpoints, HTML pages for browser routes."""
+    path = request.url.path
+    if path.startswith("/api/") or path.endswith("/content"):
+        return await http_exception_handler(request, exc)
+    show_login = exc.status_code == status.HTTP_401_UNAUTHORIZED
+    return HTMLResponse(
+        status_code=exc.status_code,
+        content=error_page(exc.status_code, exc.detail, show_login=show_login),
+    )
+
+
 # --- Authentication Endpoints ---
 
 @app.post("/api/login")
@@ -219,7 +358,7 @@ def moderation_badge(mod):
     v = mod.get("verdict", "")
     color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
     if v == "RED":
-        reason = html.escape(mod.get("reason", "No reason provided."))
+        reason = html.escape(mod.get("reasons") or mod.get("reason") or "No reason provided.")
         return (
             f' <span class="mod-badge" tabindex="0" data-reason="{reason}" '
             f'style="color:{color}; font-size:11px; font-family:sans-serif; '
@@ -552,7 +691,7 @@ async def read_story(
         v = mod.get("verdict", "")
         color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
         if v == "RED":
-            reason = html.escape(mod.get("reason", "No reason provided."))
+            reason = html.escape(mod.get("reasons") or mod.get("reason") or "No reason provided.")
             verdict_html = (
                 f'<div class="mod-badge" tabindex="0" data-reason="{reason}" '
                 f'style="font-family:sans-serif; color:{color}; font-size:13px; '
