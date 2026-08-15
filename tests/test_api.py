@@ -239,6 +239,21 @@ class TestSessions:
         assert meta["context_tokens"] == {"%genre%": "adult"}
         assert meta["system_prompts"] == [{"name": "D", "content": "g is %genre%"}]
 
+    def test_create_with_system_prompt(self, api_env):
+        env = api_env
+        r = env["handler"]("/api/sessions", method="POST",
+                           data={"system_prompt": "You are a story agent."},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        sid = r.json["session_id"]
+        meta = env["chat"].sessions_meta[sid]
+        assert meta["system_prompt"] == "You are a story agent."
+
+    def test_create_without_system_prompt_defaults_to_empty(self, api_env):
+        env = api_env
+        sid = _create_session(env, env["auth_a"])
+        assert env["chat"].sessions_meta[sid]["system_prompt"] == ""
+
     def test_sessions_scoped_to_user(self, api_env):
         env = api_env
         _create_session(env, env["auth_a"])

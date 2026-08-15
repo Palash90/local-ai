@@ -58,7 +58,7 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 5.0
-SLEEP_BETWEEN_TURNS = 30.0
+SLEEP_BETWEEN_TURNS = 2.0
 MAX_MESSAGES_PER_AGENT = 10
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
@@ -839,12 +839,14 @@ def login(username, password):
     return resp.json()["token"]
 
 
-def create_session(token, name, system_prompts=None, context_tokens=None):
+def create_session(token, name, system_prompts=None, context_tokens=None, system_prompt=None):
     body = {"name": name}
     if system_prompts:
         body["system_prompts"] = system_prompts
     if context_tokens:
         body["context_tokens"] = context_tokens
+    if system_prompt:
+        body["system_prompt"] = system_prompt
     resp = requests.post(
         f"{BASE_URL}/api/sessions",
         json=body,
@@ -1069,16 +1071,15 @@ def run_single_conversation(
     s = s.replace("%kolpo_persona%", kolpo_info.get("persona", "Methodical"))
 
     print(s)
-    prompt_block = {"name": "Self-Chat Directive", "content": s}
     session_a = create_session(
         token_a,
         f"{AGENT_NAMES['A']} round {round_number}",
-        system_prompts=[prompt_block],
+        system_prompt=s,
     )
     session_b = create_session(
         token_b,
         f"{AGENT_NAMES['B']} round {round_number}",
-        system_prompts=[prompt_block],
+        system_prompt=s,
     )
 
     transcript = []
@@ -1658,7 +1659,7 @@ def run_editor(
     session_id = create_session(
         token,
         "Editor review",
-        system_prompts=[{"name": "Editor Directive", "content": prompt}],
+        system_prompt=prompt,
         context_tokens=context_tokens,
     )
     edited_path = fname.replace(".md", ".edited.md")
@@ -1738,7 +1739,7 @@ def run_moderator(
     session_id = create_session(
         token,
         "Moderator review",
-        system_prompts=[{"name": "Moderator Directive", "content": prompt}],
+        system_prompt=prompt,
         context_tokens=context_tokens,
     )
     try:

@@ -43,7 +43,7 @@ if SELF_CHAT_MODE not in ("cpu", "gpu"):
 # endure CPU speed. A real web-UI human request never goes to the CPU lane
 # regardless of this flag: that invariant is enforced unconditionally at
 # admission and in task_mode().
-FORCE_GPU_LANE = False
+FORCE_GPU_LANE = True
 
 # Review-only self-chat roles that must NEVER call tools. The editor/moderator
 # are the same creative LLM as the story-writing agents, and with the tool list
@@ -106,7 +106,7 @@ LLAMA_SERVER_ARGS = [
     "-fa", "on",
     "--ctx-size", "24576",       # 24K context for interactive UI chat
     "-ctk", "q8_0",
-    "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q4_0
+    "-ctv", "q4_0", # If you really need a very big context on VRAM, can make it q4_0
     "--no-mmproj-offload",
 
     # Threads & Batching

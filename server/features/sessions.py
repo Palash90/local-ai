@@ -74,6 +74,7 @@ def _session_meta_from(sdata):
         "user_id": sdata.get("user_id", ""),
         "system_prompts": sdata.get("system_prompts", []),
         "context_tokens": sdata.get("context_tokens", {}),
+        "system_prompt": sdata.get("system_prompt", ""),
     }
 
 
@@ -162,6 +163,7 @@ def save_sessions():
                 "user_id": meta.get("user_id", ""),
                 "system_prompts": meta.get("system_prompts", []),
                 "context_tokens": meta.get("context_tokens", {}),
+                "system_prompt": meta.get("system_prompt", ""),
                 "messages": M.sessions[sid],
             }
     for user, data in by_user.items():
@@ -183,6 +185,7 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
     user = ""
     extra_prompts = []
     context_tokens = {}
+    system_prompt = ""
     with M._data_lock:
         t = M.tasks.get(task_id)
         if t:
@@ -190,9 +193,13 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         meta = M.sessions_meta.get(sid, {})
         extra_prompts = meta.get("system_prompts", [])
         context_tokens = meta.get("context_tokens", {})
+        system_prompt = meta.get("system_prompt", "")
     user_context = M.read_user_context(user) if user else ""
     context_block = f"\n\n## User Context\n{user_context}" if user_context else ""
-    full_sys_content = f"{M.SYS_CONTENT}\n\n{date_loc_context}{context_block}"
+    # A session created with its own system prompt (e.g. a self-chat agent
+    # directive) uses it as the base instead of the global sys_prompt.txt.
+    base_sys = system_prompt if system_prompt else M.SYS_CONTENT
+    full_sys_content = f"{base_sys}\n\n{date_loc_context}{context_block}"
     for blk in extra_prompts:
         full_sys_content += f"\n\n## {blk.get('name', 'System Prompt')}\n{blk.get('content', '')}"
     full_sys_content = full_sys_content.replace(

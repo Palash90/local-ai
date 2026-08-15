@@ -953,7 +953,7 @@ class TestLoginAndSessions:
             return FakeResp({"session_id": "S"})
 
         monkeypatch.setattr(self_chat.requests, "post", fake_post)
-        sid = self_chat.create_session("tok", "Chat", system_prompts=[{"name": "N", "content": "c"}], context_tokens={"%genre%": "adult"})
+        sid = self_chat.create_session("tok", "Chat", system_prompts=[{"name": "N", "content": "c"}], context_tokens={"%genre%": "adult"}, system_prompt="directive")
         assert sid == "S"
         args, kwargs = calls["post"]
         assert args[0] == "http://localhost:3001/api/sessions"
@@ -961,6 +961,7 @@ class TestLoginAndSessions:
         assert kwargs["json"]["name"] == "Chat"
         assert kwargs["json"]["system_prompts"] == [{"name": "N", "content": "c"}]
         assert kwargs["json"]["context_tokens"] == {"%genre%": "adult"}
+        assert kwargs["json"]["system_prompt"] == "directive"
 
     def test_create_session_no_context_tokens(self, self_chat, monkeypatch):
         calls = {}

@@ -2465,6 +2465,24 @@ class TestPrepareSessionFull:
         assert "%genre%" not in sys_content
         assert "%checklist%" not in sys_content
 
+    def test_session_system_prompt_replaces_default(self, chat_webui, temp_paths, make_user, tmp_path, monkeypatch):
+        chat_webui.tasks["t1"] = {"_user": ""}
+        chat_webui.sessions.clear()
+        chat_webui.sessions_meta.clear()
+        chat_webui.sessions_meta["s1"] = {
+            "name": "Agent",
+            "system_prompts": [],
+            "system_prompt": "You are Kolpo, a story agent.",
+            "created": 1,
+            "updated": 1,
+        }
+        chat_webui.model_status = "chat_loaded"
+        chat_webui.set_client_location(None)
+        chat_webui._prepare_session("t1", "s1", "start", None)
+        sys_content = chat_webui.sessions["s1"][0]["content"]
+        assert "You are Kolpo, a story agent." in sys_content
+        assert chat_webui.SYS_CONTENT not in sys_content
+
     def test_existing_session_system_update(self, chat_webui, temp_paths, monkeypatch):
         chat_webui.tasks["t1"] = {"_user": ""}
         chat_webui.sessions.clear()
