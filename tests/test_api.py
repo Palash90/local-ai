@@ -1189,3 +1189,17 @@ def test_debug_env(api_env):
     print("api.get_user_password:", repr(env["api"].get_user_password("alice")))
     with open(env["chat"].USERS_FILE) as f:
         print("users.json:", f.read())
+
+
+class TestComboHashLevel:
+    def test_round_and_turn_levels_never_collide(self):
+        from server.features.themes_db import combo_hash
+
+        args = ("G", "M", "Storyteller", "Warm", {"animal": "horse"})
+        assert combo_hash(*args, level="round") != combo_hash(*args, level="turn")
+
+    def test_same_level_same_combination_matches(self):
+        from server.features.themes_db import combo_hash
+
+        args = ("G", "M", "Storyteller", "Warm", {"animal": "horse"}, "turn")
+        assert combo_hash(*args) == combo_hash(*args)

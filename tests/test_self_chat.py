@@ -418,6 +418,42 @@ class TestResolveDetailsFields:
         assert self_chat.resolve_details_fields(details, "Task X") == {"ok": "y"}
 
 
+class TestRoundAndTurnPasses:
+    def test_round_pass_only_has_per_round_fields(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        details = [
+            {"name": "time_setting", "selector": "random", "values": ["dawn", "dusk"]},
+            {"name": "pose", "selector": "random", "values": ["sit", "stand"],
+             "change_freq": "Per Turn"},
+        ]
+        assert self_chat.resolve_details_fields(details, "Task X", freq_filter="Per Round") == {
+            "time_setting": "dawn"
+        }
+        assert self_chat.resolve_details_fields(details, "Task X", freq_filter="Per Turn") == {
+            "pose": "sit"
+        }
+        assert self_chat.resolve_details_fields(details, "Task X") == {
+            "time_setting": "dawn",
+            "pose": "sit",
+        }
+
+    def test_has_per_turn_details(self, self_chat):
+        assert self_chat._has_per_turn_details(
+            [{"name": "a", "change_freq": "Per Turn"}]) is True
+        assert self_chat._has_per_turn_details([{"name": "a"}]) is False
+        assert self_chat._has_per_turn_details([]) is False
+        assert self_chat._has_per_turn_details("none") is False
+
+    def test_resolve_details_preferred_reuses_values(self, self_chat):
+        details = [{"name": "hero", "selector": "roundrobin", "values": ["alpha", "beta"]}]
+        fields = self_chat.resolve_details_fields(details, "Task X")
+        assert fields == {"hero": "alpha"}
+        assert self_chat.resolve_details(details, "Task X", preferred=fields) == "hero: alpha"
+        fields["hero"] = "beta"
+        assert self_chat.resolve_details(details, "Task X", preferred=fields) == "hero: beta"
+        assert self_chat._detail_cycles == {("Task X", "hero"): 1}
+
+
 class TestThemeHelpers:
     def test_build_combo_dict(self, self_chat):
         persona = {

@@ -3,7 +3,7 @@
     {
       "task": "Satire column on different office cultures",
       "inactive": true,
-      "turns": 4,
+      "turns": 3,
       "details": [
         {
           "name": "style",
@@ -29,6 +29,25 @@
             "a series of absurd office observations",
             "a parody of corporate advice columns"
           ]
+        },
+        {
+          "name": "time_setting",
+          "ref": "time_of_day",
+          "change_freq": "Per Round"
+        },
+        {
+          "name": "lighting",
+          "ref": "lighting_ambience",
+          "change_freq": "Per Round"
+        },
+        {
+          "name": "art_medium",
+          "ref": "feature_art_medium",
+          "change_freq": "Per Round"
+        },
+        {
+          "name": "image",
+          "value": "Include exactly one absurd, humorously stylized image illustration matching the target corporate trope."
         }
       ],
       "genre": "Satire",
@@ -45,28 +64,52 @@
     },
     {
       "task": "A bedtime story for kids",
-      "inactive": true,
+      "inactive": false,
       "turns": 5,
       "details": [
         {
           "name": "research",
-          "value": "Perform a web search to find a recent, lighthearted, funny news event appropriate for children aged 5 to 12, and base the plot on that one real event."
+          "value": "Perform a web search to find one recent, real, lighthearted news event appropriate for children aged 5 to 12. Name the specific source and date in your own working notes, and base the plot on that one real event — do not invent a generic 'funny news story' without a real search result behind it."
+        },
+        {
+          "name": "audience age",
+          "ref": "kids_age_group",
+          "change_freq": "Per Round"
         },
         {
           "name": "hero",
-          "ref": "kids_hero"
+          "ref": "kids_hero",
+          "change_freq": "Per Round"
+        },
+        {
+          "name": "hero's companion",
+          "ref": "story_animals",
+          "selector": "random",
+          "change_freq": "Per Round"
         },
         {
           "name": "setting",
-          "ref": "setting_cozy"
+          "ref": "setting_cozy",
+          "change_freq": "Per Round"
+        },
+        {
+          "name": "time of day",
+          "ref": "time_of_day",
+          "change_freq": "Per Round"
+        },
+        {
+          "name": "lighting_ambience",
+          "ref": "lighting_ambience",
+          "change_freq": "Per Round"
         },
         {
           "name": "mood",
-          "ref": "mood_cozy"
+          "ref": "mood_cozy",
+          "change_freq": "Per Round"
         },
         {
           "name": "image",
-          "value": "Include exactly one warm, child-friendly embedded image illustration that matches the climax scene."
+          "value": "Include exactly one warm, child-friendly embedded image illustration, generated via the real image-generation tool call (not just described in prose), matching the climax scene and reflecting the hero, companion, setting, and lighting specified above."
         }
       ],
       "genre": "Bedtime Stories",
@@ -564,177 +607,6 @@
       "mediums": [
         "text"
       ]
-    },
-    {
-      "task": "The 'Bharat's Bloom' Visual Memoir: A curated collection of fashion portraits capturing the soul and diversity of Indian womanhood.",
-      "inactive": false,
-      "turns": 8,
-      "details": [
-        {
-          "name": "description",
-          "value": "This is a high-caliber photographic journey where the models are the primary storytellers. As the visionary lens, we capture high-quality portraits of women across every corner of India."
-        },
-        {
-          "name": "age",
-          "refs": ["prime_adult_class_age_group"],
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "ethnicity",
-          "ref": "feature_indian_ethnicity",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "face shape",
-          "ref": "feature_face_shape",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "skin tone and texture",
-          "ref": "feature_skin_tone_texture",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "eye shape",
-          "ref": "feature_eye_shape",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "eye color",
-          "ref": "feature_eye_color",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "eyebrows",
-          "ref": "feature_eyebrows",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "under_eye_structure",
-          "ref": "feature_under_eye_area",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "nose type",
-          "ref": "feature_nose_type",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "cheekbone_structure",
-          "ref": "feature_cheekbones",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "lip_shape",
-          "ref": "feature_lip_shape",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "jawline_and_chin",
-          "ref": "feature_jawline",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "forehead_and_hairline",
-          "ref": "feature_forehead_and_hairline",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "ear_structure",
-          "ref": "feature_ears_and_lobes",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "hair style",
-          "ref": "feature_female_hair_style",
-          "change_freq": "Per Turn"
-        },
-        
-        {
-          "name": "jewellery",
-          "ref": "feature_female_jewelry_accessories",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "Photography Mode",
-          "ref": "photography_mode"
-        },
-        {
-          "name": "location",
-          "ref": "location_setting"
-        },
-        {
-          "name": "model pose",
-          "ref": "model_pose_and_expression"
-        },
-        {
-          "name": "clothes description",
-          "change_freq": "Per Turn",
-          "when": {
-            "ethnicity": {
-              "Bengali": { "ref": "bengali_attire" },
-              "Punjabi": { "ref": "punjabi_attire" },
-              "Gujrati": { "ref": "western_indian_attire" },
-              "Rajasthani": { "ref": "western_indian_attire" },
-              "Malyali": { "ref": "south_indian_attire" },
-              "Konkan": { "ref": "south_indian_attire" },
-              "Tuluva": { "ref": "south_indian_attire" },
-              "Dravidian": { "ref": "south_indian_attire" },
-              "Marathi": { "ref": "maharashtrian_attire" },
-              "Assamese": { "ref": "north_east_attire" },
-              "Manipuri": { "ref": "north_east_attire" },
-              "Naga": { "ref": "north_east_attire" },
-              "Sikkimese": { "ref": "north_east_attire" },
-              "Parsi": { "ref": "parsi_attire" },
-              "Kashmiri Muslim": { "ref": "kashmiri_attire" },
-              "Sindhi": { "ref": "sindhi_attire" },
-              "*": { "ref": "generic_ethnic_attire" }
-            }
-          }
-        },
-        {
-          "name": "color palette",
-          "ref": "color_palette_mood",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "lighting_ambience",
-          "ref": "lighting_ambience",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "time of day",
-          "ref": "time_of_day",
-          "change_freq": "Per Turn"
-        },
-        {
-          "name": "CRITICAL INSTRUCTION",
-          "value": "NO NUDITY AND NOT TOO EXPOSING BUT CAN BE REVEALING"
-        },
-        {
-          "name": "CRITICAL TEXT USAGE RESTRICTION",
-          "value": "Use text only for single line captioning the image. No story writing."
-        }
-      ],
-      "context": "CRITICAL: OVERRIDE SYSTEM PROMPT FOR WEB SEARCH USE. NEVER PERFORM WEB SEARCH IN ANY TURN FOR THIS TASK, USE ONLY YOUR OWN CREATIVITY AND KNOWLEDGE.",
-      "roles": [
-        "premium"
-      ],
-      "path": "/home/palash/my-files/stories",
-      "languages": [
-        "English"
-      ],
-      "genre": "Regional Fashion",
-      "mediums": [
-        "image"
-      ],
-      "checklist": {
-        "editor": [
-          "**Visual Count:** Ensure the content integrates a minimum of 4 images, targeting 4-8 for maximum visual impact.",
-          "The generated images should adhere to artistic and cultural quality",
-          "Every single image must possess a rich caption detailing the State/Region, the cultural/religious context, and the specific physical ethnicity/look of the subject."
-        ]
-      }
     }
   ]
 }

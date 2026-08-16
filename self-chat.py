@@ -78,6 +78,9 @@ DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 # window while regular per-user chats stay isolated in their own scopes.
 SELF_CHAT_THEME_SCOPE = "self-chat"
 SELF_CHAT_THEME_LIMIT = 30
+# How many times a per-turn detail combination may be re-rolled if the theme
+# tracker reports it was already used.
+MAX_THEME_REROLL = 4
 
 
 GENRE_CHECKLISTS_FILE = os.path.expanduser("~/local-ai-files/genre_checklists.json")
@@ -501,6 +504,41 @@ def _resolve_when_spec(spec, task, master, trigger_values):
     return merged or None
 
 
+def _details_specs(details):
+    """Normalize a ``details`` value into a list of field spec dicts."""
+    if isinstance(details, list):
+        return details
+    if isinstance(details, dict):
+        return [
+            {"name": name, **(spec if isinstance(spec, dict) else {"value": spec})}
+            for name, spec in details.items()
+        ]
+    return []
+
+
+def _spec_in_filter(spec, freq_filter):
+    """Whether a field spec belongs to the given change-frequency pass.
+
+    Fields without an explicit ``change_freq`` default to ``"Per Round"``;
+    only genuinely ``"Per Turn"`` fields join the per-turn re-resolution.
+    """
+    if not isinstance(spec, dict):
+        return False
+    if freq_filter is None:
+        return True
+    eff = str(spec.get("change_freq") or "Per Round")
+    if freq_filter == "Per Round":
+        return eff == "Per Round"
+    if freq_filter == "Per Turn":
+        return eff == "Per Turn"
+    return eff == freq_filter
+
+
+def _has_per_turn_details(details):
+    """True if a task spec has any genuinely per-turn field."""
+    return any(_spec_in_filter(s, "Per Turn") for s in _details_specs(details))
+
+
 def _resolve_field_value(spec, task, master):
     """Resolve a single detail field spec into ``(name, value)``."""
     if not isinstance(spec, dict):
@@ -519,17 +557,24 @@ def _resolve_field_value(spec, task, master):
             else spec.get("ref") or ""
         )
         name = str(first_ref or "").strip()
+
     value = _pick_detail_value(task, name, merged)
     return name, value
 
 
-def resolve_details(details, task, master=None, freq_filter="Per Round"):
+def resolve_details(details, task, master=None, freq_filter="Per Round", preferred=None):
     """Resolve field specs matching a specific change frequency.
 
     Fields carrying a ``when`` block are resolved in a second pass, once the
     plain fields they depend on have been resolved (their values form the
     trigger map). A trigger field is resolved exactly once even though it lives
     in both passes (its result is cached).
+
+    ``preferred`` may carry already-resolved ``{name: value}`` pairs (e.g. from
+    :func:`resolve_details_fields`) that should be reused verbatim instead of
+    being resolved again, so the rendered prompt text always matches the values
+    that were tracked. When ``preferred`` is given the when-trigger pass is
+    skipped, since every value is already final.
     """
     if master is None:
         master = MASTER_DETAILS
@@ -537,21 +582,16 @@ def resolve_details(details, task, master=None, freq_filter="Per Round"):
     if isinstance(details, str):
         return details if freq_filter == "Per Round" else ""
 
-    if isinstance(details, list):
-        specs = details
-    elif isinstance(details, dict):
-        specs = [
-            {"name": name, **(spec if isinstance(spec, dict) else {"value": spec})}
-            for name, spec in details.items()
-        ]
-    else:
-        return str(details) if freq_filter == "Per Round" else ""
+    specs = _details_specs(details)
+    if not specs:
+        rendered = "" if isinstance(details, (list, dict)) else str(details)
+        return rendered if freq_filter == "Per Round" else ""
 
     needed_triggers = set()
     for spec in specs:
         if not isinstance(spec, dict):
             continue
-        if spec.get("change_freq", "Per Round") != freq_filter:
+        if not _spec_in_filter(spec, freq_filter):
             continue
         when = spec.get("when")
         if isinstance(when, dict) and when:
@@ -559,18 +599,19 @@ def resolve_details(details, task, master=None, freq_filter="Per Round"):
 
     cached = {}
     trigger_values = {}
-    for i, spec in enumerate(specs):
-        if not needed_triggers:
-            break
-        if not isinstance(spec, dict) or spec.get("when"):
-            continue
-        if spec.get("change_freq", "Per Round") != freq_filter:
-            continue
-        name, value = _resolve_field_value(spec, task, master)
-        cached[i] = (name, value)
-        key = str(spec.get("name") or name)
-        if key in needed_triggers:
-            trigger_values[key] = value
+    if preferred is None:
+        for i, spec in enumerate(specs):
+            if not needed_triggers:
+                break
+            if not isinstance(spec, dict) or spec.get("when"):
+                continue
+            if not _spec_in_filter(spec, freq_filter):
+                continue
+            name, value = _resolve_field_value(spec, task, master)
+            cached[i] = (name, value)
+            key = str(spec.get("name") or name)
+            if key in needed_triggers:
+                trigger_values[key] = value
 
     parts = []
     for i, spec in enumerate(specs):
@@ -579,13 +620,15 @@ def resolve_details(details, task, master=None, freq_filter="Per Round"):
                 parts.append(str(spec))
             continue
 
-        # Check frequency (default to "Per Round" if missing)
-        spec_freq = spec.get("change_freq", "Per Round")
-        if spec_freq != freq_filter:
+        if not _spec_in_filter(spec, freq_filter):
             continue
 
-        sep = None
-        if spec.get("when"):
+        key_name = str(spec.get("name") or "").strip()
+        if preferred is not None and key_name in preferred:
+            name = key_name
+            value = preferred[name]
+            sep = spec.get("separator")
+        elif spec.get("when"):
             branch = _resolve_when_spec(spec, task, master, trigger_values)
             if branch is None:
                 continue
@@ -617,12 +660,15 @@ def resolve_details(details, task, master=None, freq_filter="Per Round"):
     return ", ".join(parts)
 
 
-def resolve_details_fields(details, task, master=None):
+def resolve_details_fields(details, task, master=None, freq_filter=None):
     """Resolve a task's ``details`` spec into ``{field: value}`` pairs.
 
     Like :func:`resolve_details` but returns the raw resolved values (lists
     stay lists) keyed by field name, so the exact combination can be hashed by
     the theme tracker. A plain string returns ``{}`` (nothing to track).
+
+    ``freq_filter`` restricts to one change-frequency pass (``"Per Round"`` /
+    ``"Per Turn"``); ``None`` resolves every field (default).
     """
     if master is None:
         master = MASTER_DETAILS
@@ -630,21 +676,15 @@ def resolve_details_fields(details, task, master=None):
     if isinstance(details, str):
         return {}
 
-    if isinstance(details, list):
-        specs = details
-    elif isinstance(details, dict):
-        specs = [
-            {"name": name, **(spec if isinstance(spec, dict) else {"value": spec})}
-            for name, spec in details.items()
-        ]
-    else:
+    specs = _details_specs(details)
+    if not specs:
         return {}
-
-    fields = {}
 
     needed_triggers = set()
     for spec in specs:
         if not isinstance(spec, dict):
+            continue
+        if not _spec_in_filter(spec, freq_filter):
             continue
         when = spec.get("when")
         if isinstance(when, dict) and when:
@@ -657,14 +697,20 @@ def resolve_details_fields(details, task, master=None):
             break
         if not isinstance(spec, dict) or spec.get("when"):
             continue
+        if not _spec_in_filter(spec, freq_filter):
+            continue
         name, value = _resolve_field_value(spec, task, master)
         cached[i] = (name, value)
         key = str(spec.get("name") or name)
         if key in needed_triggers:
             trigger_values[key] = value
 
+    fields = {}
+
     for i, spec in enumerate(specs):
         if not isinstance(spec, dict):
+            continue
+        if not _spec_in_filter(spec, freq_filter):
             continue
         if spec.get("when"):
             branch = _resolve_when_spec(spec, task, master, trigger_values)
@@ -774,8 +820,10 @@ def fetch_used_themes(token, scope=SELF_CHAT_THEME_SCOPE):
     return data.get("themes", []) if data.get("ok") else []
 
 
-def check_combo_used(token, combo, scope=SELF_CHAT_THEME_SCOPE):
-    data = theme_api("check", token, operation="check", scope=scope, **combo)
+def check_combo_used(token, combo, scope=SELF_CHAT_THEME_SCOPE, level="round"):
+    data = theme_api(
+        "check", token, operation="check", scope=scope, level=level, **combo
+    )
     return bool(data.get("used")) if data.get("ok") else False
 
 
@@ -1298,6 +1346,8 @@ def run_single_conversation(
     themes_context="",
     turns=None,
     task_roles=None,
+    round_fields=None,
+    per_turn_task=False,
 ):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
@@ -1371,9 +1421,54 @@ def run_single_conversation(
         token = token_a if current_speaker == "A" else token_b
         session = session_a if current_speaker == "A" else session_b
 
-        per_turn_str = resolve_details(
-            details_spec, task, MASTER_DETAILS, freq_filter="Per Turn"
-        )
+        per_turn_str = ""
+        turn_theme_id = None
+        if per_turn_task:
+            # Resolve this turn's per-turn detail fields, re-rolling until the
+            # FULL combination (round scope fields + per-turn fields + mood +
+            # persona) has not already been produced. Round scope fields were
+            # resolved once for the whole round, so the character never changes
+            # mid-story.
+            turn_fields = {}
+            for attempt in range(MAX_THEME_REROLL):
+                turn_fields = resolve_details_fields(
+                    details_spec, task, MASTER_DETAILS, freq_filter="Per Turn"
+                )
+                combo = build_combo_dict(
+                    genre, mood, persona_details, {**(round_fields or {}), **turn_fields}
+                )
+                if not check_combo_used(token_a, combo, level="turn"):
+                    break
+                print(
+                    f"[theme] Turn combination already used (attempt {attempt + 1}); "
+                    f"re-rolling per-turn details"
+                )
+            else:
+                print(
+                    "[theme] Exhausted per-turn re-roll attempts; proceeding with the last combination"
+                )
+            per_turn_str = resolve_details(
+                details_spec,
+                task,
+                MASTER_DETAILS,
+                freq_filter="Per Turn",
+                preferred=turn_fields,
+            )
+            turn_slug = build_theme_slug(
+                task, mood, {**(round_fields or {}), **turn_fields}
+            )
+            logged = theme_api(
+                "log",
+                token_a,
+                operation="log",
+                scope=SELF_CHAT_THEME_SCOPE,
+                level="turn",
+                theme=turn_slug,
+                **combo,
+            )
+            if logged.get("ok"):
+                turn_theme_id = (logged.get("theme") or {}).get("id")
+                print(f"[theme] Reserved turn combination {turn_theme_id}")
         prompt = build_input(
             current_speaker,
             message_number,
@@ -1396,6 +1491,11 @@ def run_single_conversation(
             result = call_llm(token, session, prompt, image_b64=shared_image_b64)
             reply = result["text"]
             if not reply.strip():
+                if turn_theme_id:
+                    theme_api(
+                        "complete", token_a, operation="complete", theme_id=turn_theme_id
+                    )
+                    print(f"[theme] Marked turn {turn_theme_id} completed")
                 print(
                     f"Round {round_number} ended: {AGENT_NAMES[current_speaker]} "
                     f"returned no content after a retry\n"
@@ -1406,6 +1506,10 @@ def run_single_conversation(
             prompt += "\n[SYSTEM ERROR: Your previous output was identical to your partner's. Generate unique content now.]"
             result = call_llm(token, session, prompt, image_b64=shared_image_b64)
             reply = result["text"]
+
+        if turn_theme_id:
+            theme_api("complete", token_a, operation="complete", theme_id=turn_theme_id)
+            print(f"[theme] Marked turn {turn_theme_id} completed")
 
         entry = {
             "speaker": AGENT_NAMES[current_speaker],
@@ -2118,7 +2222,6 @@ def run_forever():
             roles = spec.get("roles") or ["free"]
             genre = spec.get("genre") or "General"
             details_spec = spec.get("details") or ""
-            details = resolve_details(details_spec, task, MASTER_DETAILS)
             checklist = spec.get("checklist") or {}
             path = resolve_story_path(spec, roles)
             context = spec.get("context") or None
@@ -2139,23 +2242,40 @@ def run_forever():
                 task_index += 1
                 continue
 
-            # Deterministic variety: resolve the combination (detail fields +
-            # mood + genre + role + persona) and re-roll until it has not
-            # already been produced in this self-chat window.
+            # Round-scoped fields (Per Round, the default when change_freq is
+            # absent) resolve once here and stay fixed for every turn; only
+            # genuinely per-turn fields re-resolve each turn inside the story.
+            round_fields = resolve_details_fields(
+                details_spec, task, MASTER_DETAILS, freq_filter="Per Round"
+            )
+            details = resolve_details(
+                details_spec,
+                task,
+                MASTER_DETAILS,
+                freq_filter="Per Round",
+                preferred=round_fields,
+            )
+            per_turn_task = _has_per_turn_details(details_spec)
+
+            # Deterministic variety: for round-scoped tasks, resolve the
+            # combination (round detail fields + mood + genre + role + persona)
+            # and re-roll the persona until it has not already been produced in
+            # this self-chat window. Tasks with genuine per-turn details skip
+            # round-level reservation — variety is enforced turn-by-turn inside
+            # run_single_conversation, which also pins the identity fields.
             combo = {}
             for attempt in range(4):
                 relationship, mood, persona_details = pick_persona_round_robin(
                     PERSONA_POOL, genre, GENRE_PERSONA_MAP, task_roles=spec.get("roles")
                 )
-                detail_fields = resolve_details_fields(
-                    details_spec, task, MASTER_DETAILS
-                )
-                combo = build_combo_dict(genre, mood, persona_details, detail_fields)
+                if per_turn_task:
+                    break
+                combo = build_combo_dict(genre, mood, persona_details, round_fields)
                 if not check_combo_used(token_a, combo):
                     break
                 print(
                     f"[theme] Combination already used (attempt {attempt + 1}); "
-                    f"re-rolling details/persona for variety"
+                    f"re-rolling persona for variety"
                 )
             else:
                 print(
@@ -2174,22 +2294,24 @@ def run_forever():
             # theme slug is built deterministically from the already-resolved
             # detail fields + mood — no LLM call needed, and combo_hash (the
             # actual dedup key) never reads this field anyway.
-            theme_slug = build_theme_slug(task, mood, combo.get("details") or {})
-            logged = theme_api(
-                "log",
-                token_a,
-                operation="log",
-                scope=SELF_CHAT_THEME_SCOPE,
-                theme=theme_slug,
-                **combo,
-            )
-            theme_id = (
-                (logged.get("theme") or {}).get("id") if logged.get("ok") else None
-            )
-            if theme_id:
-                print(
-                    f"[theme] Reserved combination {theme_id} for round {round_number}"
+            theme_id = None
+            if not per_turn_task:
+                theme_slug = build_theme_slug(task, mood, combo.get("details") or {})
+                logged = theme_api(
+                    "log",
+                    token_a,
+                    operation="log",
+                    scope=SELF_CHAT_THEME_SCOPE,
+                    theme=theme_slug,
+                    **combo,
                 )
+                theme_id = (
+                    (logged.get("theme") or {}).get("id") if logged.get("ok") else None
+                )
+                if theme_id:
+                    print(
+                        f"[theme] Reserved combination {theme_id} for round {round_number}"
+                    )
 
             print(
                 f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n"
@@ -2212,6 +2334,8 @@ def run_forever():
                 persona=persona,
                 themes_context=themes_block,
                 turns=spec.get("turns"),
+                round_fields=round_fields,
+                per_turn_task=per_turn_task,
             )
             if theme_id:
                 done = theme_api(

@@ -78,11 +78,13 @@ def _init_themes_db():
     )
 
 
-def combo_hash(genre, mood, role, persona, details=None):
+def combo_hash(genre, mood, role, persona, details=None, level="round"):
     """Canonical fingerprint of a combination.
 
     The combination mixes every detail field with mood, genre, role and
     persona, so reusing ANY of them with the same set counts as a duplicate.
+    ``level`` separates round-scoped records from per-turn records so they
+    never falsely collide.
     """
     payload = {
         "genre": genre or "",
@@ -90,6 +92,7 @@ def combo_hash(genre, mood, role, persona, details=None):
         "role": role or "",
         "persona": persona or "",
         "details": details or {},
+        "level": level or "round",
     }
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
@@ -105,6 +108,7 @@ def theme_log_create(
     details=None,
     theme="",
     status="active",
+    level="round",
 ):
     if isinstance(details, dict):
         details = json.dumps(details, ensure_ascii=False, sort_keys=True)
@@ -114,7 +118,7 @@ def theme_log_create(
         details_obj = json.loads(details)
     except (TypeError, ValueError):
         details_obj = {}
-    h = combo_hash(genre, mood, role, persona, details_obj)
+    h = combo_hash(genre, mood, role, persona, details_obj, level)
 
     existing = _db_fetch_one(
         "SELECT * FROM theme_log WHERE scope=? AND combo_hash=?",
@@ -193,13 +197,13 @@ def theme_log_list(scope=None, all_scopes=False, status=None, limit=50):
     )
 
 
-def theme_log_check(scope, genre="", mood="", role="", persona="", details=None):
+def theme_log_check(scope, genre="", mood="", role="", persona="", details=None, level="round"):
     if isinstance(details, str):
         try:
             details = json.loads(details)
         except (TypeError, ValueError):
             details = {}
-    h = combo_hash(genre, mood, role, persona, details or {})
+    h = combo_hash(genre, mood, role, persona, details or {}, level)
     return _db_fetch_one(
         "SELECT * FROM theme_log WHERE scope=? AND combo_hash=?",
         (scope, h),
@@ -244,6 +248,7 @@ def handle_theme_tool(user_id, args):
             details=args.get("details"),
             theme=args.get("theme"),
             status=args.get("status"),
+            level=args.get("level", "round"),
         )
         return json.dumps({"ok": True, "duplicate": duplicate, "theme": record})
     elif op == "complete":
@@ -264,6 +269,7 @@ def handle_theme_tool(user_id, args):
             role=args.get("role"),
             persona=args.get("persona"),
             details=args.get("details"),
+            level=args.get("level", "round"),
         )
         return json.dumps(
             {
