@@ -64,7 +64,7 @@
     },
     {
       "task": "A bedtime story for kids",
-      "inactive": false,
+      "inactive": true,
       "turns": 5,
       "details": [
         {

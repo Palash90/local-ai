@@ -84,7 +84,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
             },
             "68": {
                 "class_type": "EmptySD3LatentImage",
-                "inputs": {"width": 1024, "height": 1024, "batch_size": 1},
+                "inputs": {"width": 768, "height": 768, "batch_size": 1},
             },
             "69": {
                 "class_type": "ModelSamplingAuraFlow",
