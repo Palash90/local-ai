@@ -571,5 +571,235 @@
             "dark martial arts tunic with silver shoulder armor pauldrons",
             "casual comfortable oversized zip-up hoodie and track pants"
         ]
+    },
+    "bengali_attire": {
+        "name": "bengali_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "elegant red-and-white Tant cotton saree with a broad maroon and gold border, draped to the ankle with a high-neck capped-sleeve blouse",
+            "Dhakai Jamdani muslin saree woven with fine floral motifs, pleated neatly over a modest jewel-neck blouse",
+            "Baluchari silk saree depicting weaved scenes in its border, worn with a full-sleeve boat-neck blouse and a tucked pallu over one shoulder",
+            "Kantha-stitched pastel cotton saree with hand-embroidered folk motifs, paired with a three-quarter-sleeved high-neck blouse",
+            "Garad silk saree in off-white with a signature deep red zari border, styled with a traditional keyhole-neck blouse",
+            "Tussar silk saree in honey-gold with hand-painted alpana art along the border, draped with an elbow-length sleeved blouse",
+            "Murshidabad printed silk saree with traditional paisley motifs, paired with a fitted high-collar ethnic blouse"
+        ]
+    },
+    "punjabi_attire": {
+        "name": "punjabi_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "salwar kameez in rich maroon with intricate gota edging paired with an embroidered phulkari dupatta draped neatly over both shoulders",
+            "Patiala salwar suit with a long flowing kurta, bright chunni, and subtle tilla work on the neckline",
+            "Anarkali-style suit in deep green with a fully covered high neckline and a matching ombre dupatta",
+            "Sharara suit featuring a short heavily embroidered kurti with wide-flared bottoms and a net dupatta pinned over the shoulder",
+            "Lacha-style traditional ensemble with a full-coverage jacket-style blouse, flared skirt, and a heavy thread-work dupatta"
+        ]
+    },
+    "western_indian_attire": {
+        "name": "western_indian_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "bandhani tie-dye saree with silver gota-patti border paired with a short-sleeved round-neck blouse",
+            "mirror-work lehenga-choli with a long, fully covered blouse and a broad odhni dupatta draped over the head and shoulders",
+            "Rajasthani kanchli-style full-sleeve choli with an embroidered ghagra and a heavily bordered odhni",
+            "Patan Patola double-ikat silk saree with vibrant geometric motifs, draped modestly with a high-neck elbow-sleeve blouse",
+            "Leheriya silk saree with diagonal wave patterns, paired with a fitted boat-neck blouse and a long pallu drape"
+        ]
+    },
+    "south_indian_attire": {
+        "name": "south_indian_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "Kanjivaram silk saree with a contrasting temple-border, crisp pleats, and a modest quarter-sleeve blouse",
+            "cream-and-gold Kerala Kasavu saree with a plain handloom border, worn with a short-sleeve high-neck blouse",
+            "Mysore silk saree in emerald green with ancient weaves, pallu pinned over the shoulder with a covered blouse",
+            "Pochampally Ikat silk saree with sharp geometric weaves, paired with an elbow-sleeve solid high-neck blouse",
+            "Chettinad heavy cotton saree with bold checks and a traditional contrasting blouse",
+            "Dharmavaram silk saree featuring rich brocade borders and a fully pinned pallu drape"
+        ]
+    },
+    "maharashtrian_attire": {
+        "name": "maharashtrian_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "Paithani silk saree in peacock green with gold lattice motifs, draped in the traditional fixed-pleat style with a modest blouse",
+            "nauvari nine-yard saree draped in the classic tucked style with a full-length covering blouse and traditional jewellery",
+            "lugade saree in deep magenta with chinon fabric, worn with a neat short-sleeve blouse and silk nath",
+            "Karvati Kati silk saree with temple-woven borders, paired with a matching crew-neck blouse"
+        ]
+    },
+    "north_east_attire": {
+        "name": "north_east_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "Assamese Mekhela Chador in muted silk with delicate floral temple motifs, wrapped high at the waist with a covered blouse",
+            "Manipuri phanek and innaphi in contrasting handwoven stripes, worn with a sleeveless but fully covered choli",
+            "Naga woven shawl with geometric patterns layered over a long-sleeved wrap dress, completely modest",
+            "Mizo Puan wrap skirt with vibrant striped borders paired with a plain high-neck long-sleeve top",
+            "Tripuri Rignai and Risa handwoven wrap dress with traditional tribal borders"
+        ]
+    },
+    "parsi_attire": {
+        "name": "parsi_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "Parsi gara saree in ivory silk embroidered with Chinese motifs and a heavily embroidered blouse with full sleeves",
+            "koliyari itar saree with a high-neck embroidered thekdi blouse, fully covered and elegantly pleated",
+            "soft pastel gara border saree with an embroidered round collar blouse and kataab accents"
+        ]
+    },
+    "kashmiri_attire": {
+        "name": "kashmiri_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "Kashmiri sozni-embroidered pheran in ivory with delicate chain-stitch work, flowing and modest over a salwar",
+            "tilla-embroidered pheran with a matching taram necklace, fully covered with long sleeves and a flowing hem",
+            "chocolate-brown pheran with fine zari borders, worn modestly with a dupatta",
+            "Ari embroidery velvet pheran in jewel tones, paired with a loose salwar and head scarf"
+        ]
+    },
+    "sindhi_attire": {
+        "name": "sindhi_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "Sindhi ajrak-print touk saree with mirror-work blouse, draped modestly to the ankle",
+            "bright salwar kameez with a bold ajrak print dupatta draped over both shoulders",
+            "silk saree with sindhi embroidery on the border paired with a covered sleeveless blouse"
+        ]
+    },
+    "himachali_attire": {
+        "name": "himachali_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "traditional Himachali Dhahtu headscarf paired with a long woollen Pattu gown pinned at the shoulders over a full-sleeve shirt",
+            "Chamba embroidered kurta paired with a fitted churidar and a hand-woven woollen shawl draped around the shoulders",
+            "Kinnauri handloom woollen jacket over a plain long tunic, worn with a traditional embroidered cap"
+        ]
+    },
+    "bhojpuri_attire": {
+        "name": "bhojpuri_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "vibrant yellow and orange cotton saree with traditional border pleats, worn with a three-quarter sleeve blouse",
+            "embroidered cotton salwar kameez with a heavy zari dupatta draped across the chest",
+            "traditional chanderi silk saree with zari border, draped in the regional Seedha Pallu style"
+        ]
+    },
+    "magahi_attire": {
+        "name": "magahi_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "handloom Tussar silk saree in natural shades with red borders, draped neatly over a modest round-neck blouse",
+            "fine cotton embroidered kurta paired with a flowing skirt and a long printed dupatta"
+        ]
+    },
+    "sikkimese_attire": {
+        "name": "sikkimese_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "traditional Sikkimese Bakhu gown tied securely at the waist with a silk sash over a full-sleeved Honju blouse",
+            "Bhutia-style silk Bakhu in deep maroon layered over a high-collared satin blouse"
+        ]
+    },
+    "anglo_indian_attire": {
+        "name": "anglo_indian_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "vintage-inspired tea-length floral dress with a modest high neckline and cardigan",
+            "tailored linen blazer over a modest knee-length pencil dress and pearl accessories"
+        ]
+    },
+    "haryanvi_attire": {
+        "name": "haryanvi_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "vibrant twirlable Daaman skirt paired with a high-neck Angia top and a broad printed Chunder dupatta covering the head",
+            "pleated cotton Daaman in deep blue with a bright yellow short shirt and a silver-piped odhni draped across the torso"
+        ]
+    },
+    "adivasi_attire": {
+        "name": "adivasi_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "Santhali two-piece Panchi Parhan woven cotton drape with bold striped borders, wrapped neatly with a high-neck cotton blouse",
+            "Gond tribal hand-spun cotton saree with natural dye motifs, draped tightly around the waist and pinned modestly over the shoulder"
+        ]
+    },
+    "afro_indian_attire": {
+        "name": "afro_indian_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "Siddi community hand-woven cotton saree with rich geometric borders, draped casually with an elbow-sleeve blouse",
+            "bright printed cotton salwar kameez paired with a traditional head wrap"
+        ]
+    },
+    "garhwali_attire": {
+        "name": "garhwali_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "traditional Garhwali Ghagri skirt with a long jacket-style kurti and a broad red Odhni secured around the waist",
+            "woollen handloom saree draped over a full-sleeved blouse, accented with a classic Nath ornament"
+        ]
+    },
+    "generic_ethnic_attire": {
+        "name": "generic_ethnic_attire",
+        "selector": "random",
+        "safe_for_work": true,
+        "values": [
+            "traditional regional ethnic wear: a richly embroidered silk saree draped modestly with a covered blouse",
+            "regional salwar kameez with a floor-length dupatta, fully modest and elegant",
+            "handloom ethnic suit with intricate woven borders, high neckline and full coverage"
+        ]
+    },
+    "photography_mode": {
+        "name": "photography_mode",
+        "selector": "random",
+        "values": [
+            "Close-up portrait framing from the collarbone up, focusing on facial expressions and fine texturing",
+            "Medium shot framed from the waist up, balancing outfit details with torso posture",
+            "Full-body wide portrait capturing the complete drape of the attire and environmental context",
+            "Environmental candid shot with wide aperture to create a soft, cinematic background bokeh"
+        ]
+    },
+    "location_setting": {
+        "name": "location_setting",
+        "selector": "random",
+        "values": [
+            "Traditional courtyard with carved wooden pillars and sunlit terracotta tiles",
+            "Lush natural outdoors with dappled sunlight filtering through a dense tree canopy",
+            "Rustic village path during golden hour with warm ambient side-lighting",
+            "Minimalist studio setup with soft diffused natural side window illumination"
+        ]
+    },
+    "model_pose_and_expression": {
+        "name": "model_pose_and_expression",
+        "selector": "random",
+        "values": [
+            "Head-on frontal pose: Subject faces the camera directly with body squared or slightly turned, hands relaxed by the side, featuring a serene and composed expression.",
+            "Three-quarter candid turn: Body turned to a 3/4 angle while the head turns back toward the lens; eyes glance slightly past the camera as one hand gently rests near the jawline.",
+            "Dynamic motion pose: Captured mid-step with hair blowing gently in the breeze; one hand adjusts the flowing edge of her saree pallu while delivering a genuine, broad smile.",
+            "Joyful tilt pose: Body angled at 3/4 with head tilted slightly back as if caught in mid-laughter; eyes crinkled with hands rising instinctively toward her chest.",
+            "Pensive seated pose: Seated against a stone pillar or ledge, leaning forward slightly with hands folded gracefully on her lap and an contemplative gaze.",
+            "Over-the-shoulder glance: Walking away from the camera and glancing back over her shoulder, framing the intricate details of the back blouse and pallu drape."
+        ]
     }
 }

@@ -58,7 +58,7 @@ PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 5.0
-SLEEP_BETWEEN_TURNS = 2.0
+SLEEP_BETWEEN_TURNS = 10.0
 MAX_MESSAGES_PER_AGENT = 10
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
 SELF_CHAT_PROMPT_FILE = "/home/palash/local-ai-files/self_chat.txt"
@@ -323,26 +323,214 @@ def _pick_detail_value(task, name, spec):
     return values[0]
 
 
+def _merge_value_defs(spec, master, _seen=None):
+    """Resolve ``ref`` / ``refs`` against the master dictionary.
+
+    The ``values`` across every referenced master definition are unioned
+    (order-preserving and deduplicated) so a single field can draw from several
+    value pools at once. Resolution is recursive: a referenced definition may
+    itself carry ``ref`` / ``refs``, allowing one value set to be composed from
+    others. ``_seen`` guards against reference cycles.
+
+    As before, an explicit inline ``values`` list on the spec wins outright over
+    the merged pool (mirroring the old single-``ref`` override behaviour). The
+    returned dict is ready to hand to :func:`_pick_detail_value`.
+    """
+    if not isinstance(spec, dict):
+        return spec
+    _seen = set() if _seen is None else _seen
+
+    ref = spec.get("ref")
+    refs = spec.get("refs")
+    if refs is not None:
+        if isinstance(refs, (str, bytes)):
+            refs = [refs]
+        else:
+            refs = list(refs)
+        if ref is not None and ref not in refs:
+            refs.insert(0, ref)
+    elif ref is not None:
+        refs = [ref]
+    else:
+        refs = []
+
+    merged = dict(spec)
+    if not refs:
+        return merged
+
+    values = list(spec.get("values") or [])
+    selector = merged.get("selector")
+    name = merged.get("name")
+    count = merged.get("count")
+    separator = merged.get("separator")
+
+    for key in refs:
+        if key in _seen:
+            continue
+        entry = master.get(key) if isinstance(master, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        sub = _merge_value_defs(entry, master, _seen | {key})
+        for v in sub.get("values") or []:
+            if isinstance(v, (list, tuple, dict)) or v in values:
+                continue
+            values.append(v)
+        if selector is None:
+            selector = sub.get("selector")
+        if name is None:
+            name = sub.get("name")
+        if count is None:
+            count = sub.get("count")
+        if separator is None:
+            separator = sub.get("separator")
+
+    if spec.get("values") is not None:
+        values = list(spec["values"])
+
+    if spec.get("name") is not None:
+        name = spec["name"]
+
+    if values:
+        merged["values"] = values
+    else:
+        merged.pop("values", None)
+    if selector is not None:
+        merged["selector"] = selector
+    if name is not None:
+        merged["name"] = name
+    if count is not None:
+        merged["count"] = count
+    if separator is not None:
+        merged["separator"] = separator
+    merged.pop("ref", None)
+    merged.pop("refs", None)
+    return merged
+
+
+def _pick_when_branch(table, value):
+    """Select a ``when`` branch by exact match on a resolved value.
+
+    ``*`` acts as a fallback when no exact branch matches. If the trigger value
+    is a list (multi-select), any one of its elements may match.
+    """
+    if not isinstance(table, dict):
+        return None
+    if isinstance(value, (list, tuple)):
+        candidates = [v for v in value if v is not None]
+    elif value is not None:
+        candidates = [value]
+    else:
+        candidates = []
+    for candidate in candidates:
+        if str(candidate) in table:
+            return table[str(candidate)]
+    if "*" in table:
+        return table["*"]
+    return None
+
+
+def _resolve_when_spec(spec, task, master, trigger_values):
+    """Resolve a spec's ``when`` conditions into a value-definition dict.
+
+    Each ``when`` entry maps an already-resolved field name to a branch table
+    (``{value: def}``). One branch is chosen per trigger field; a field with
+    multiple triggers ANDs its branches together by unioning their pools. A
+    missing trigger (or unmatched value without a ``*`` fallback) skips the
+    field entirely by returning ``None``.
+    """
+    when = spec.get("when")
+    if not isinstance(when, dict) or not when:
+        return None
+
+    branches = []
+    for trigger, table in when.items():
+        if not isinstance(table, dict):
+            continue
+        branch = _pick_when_branch(table, trigger_values.get(trigger))
+        if branch is None:
+            return None
+        branches.append(branch)
+
+    if not branches:
+        return None
+    if len(branches) == 1:
+        return dict(branches[0]) if isinstance(branches[0], dict) else branches[0]
+
+    refs, values = [], []
+    seen_values = set()
+    selector = name = count = separator = None
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        branch_refs = branch.get("refs")
+        if branch_refs is None and branch.get("ref") is not None:
+            branch_refs = [branch["ref"]]
+        if isinstance(branch_refs, (str, bytes)):
+            branch_refs = [branch_refs]
+        for r in branch_refs or []:
+            if r not in refs:
+                refs.append(r)
+        for v in branch.get("values") or []:
+            if isinstance(v, (list, tuple, dict)):
+                continue
+            if v not in seen_values:
+                seen_values.add(v)
+                values.append(v)
+        if selector is None:
+            selector = branch.get("selector")
+        if name is None:
+            name = branch.get("name")
+        if count is None and branch.get("count") is not None:
+            count = branch.get("count")
+        if separator is None and branch.get("separator") is not None:
+            separator = branch.get("separator")
+
+    merged = {}
+    if refs:
+        merged["refs"] = refs
+    if values:
+        merged["values"] = values
+    for key, val in (
+        ("selector", selector),
+        ("name", name),
+        ("count", count),
+        ("separator", separator),
+    ):
+        if val is not None:
+            merged[key] = val
+    return merged or None
+
+
 def _resolve_field_value(spec, task, master):
     """Resolve a single detail field spec into ``(name, value)``."""
     if not isinstance(spec, dict):
         return "", str(spec)
 
-    ref = spec.get("ref")
-    if ref and master and isinstance(master.get(ref), dict):
-        # Start with master definition, then override with spec
-        merged = dict(master[ref])
-        merged.update(spec)
-        spec = merged
+    refs = spec.get("refs")
+    merged = _merge_value_defs(spec, master)
 
-    # If name wasn't explicitly provided in spec, fallback to master's name or ref key
-    name = str(spec.get("name") or ref or "").strip()
-    value = _pick_detail_value(task, name, spec)
+    # If name wasn't explicitly provided in spec, fall back to master's name,
+    # then to the first referenced pool key.
+    name = str(merged.get("name") or spec.get("name") or "").strip()
+    if not name:
+        first_ref = (
+            refs[0]
+            if isinstance(refs, list) and refs
+            else spec.get("ref") or ""
+        )
+        name = str(first_ref or "").strip()
+    value = _pick_detail_value(task, name, merged)
     return name, value
 
 
 def resolve_details(details, task, master=None, freq_filter="Per Round"):
-    """Resolve field specs matching a specific change frequency."""
+    """Resolve field specs matching a specific change frequency.
+
+    Fields carrying a ``when`` block are resolved in a second pass, once the
+    plain fields they depend on have been resolved (their values form the
+    trigger map). A trigger field is resolved exactly once even though it lives
+    in both passes (its result is cached).
+    """
     if master is None:
         master = MASTER_DETAILS
 
@@ -359,8 +547,33 @@ def resolve_details(details, task, master=None, freq_filter="Per Round"):
     else:
         return str(details) if freq_filter == "Per Round" else ""
 
-    parts = []
+    needed_triggers = set()
     for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("change_freq", "Per Round") != freq_filter:
+            continue
+        when = spec.get("when")
+        if isinstance(when, dict) and when:
+            needed_triggers.update(k for k, t in when.items() if isinstance(t, dict))
+
+    cached = {}
+    trigger_values = {}
+    for i, spec in enumerate(specs):
+        if not needed_triggers:
+            break
+        if not isinstance(spec, dict) or spec.get("when"):
+            continue
+        if spec.get("change_freq", "Per Round") != freq_filter:
+            continue
+        name, value = _resolve_field_value(spec, task, master)
+        cached[i] = (name, value)
+        key = str(spec.get("name") or name)
+        if key in needed_triggers:
+            trigger_values[key] = value
+
+    parts = []
+    for i, spec in enumerate(specs):
         if not isinstance(spec, dict):
             if freq_filter == "Per Round":
                 parts.append(str(spec))
@@ -371,14 +584,30 @@ def resolve_details(details, task, master=None, freq_filter="Per Round"):
         if spec_freq != freq_filter:
             continue
 
-        name, value = _resolve_field_value(spec, task, master)
+        sep = None
+        if spec.get("when"):
+            branch = _resolve_when_spec(spec, task, master, trigger_values)
+            if branch is None:
+                continue
+            outer_name = spec.get("name")
+            eff = dict(branch) if isinstance(branch, dict) else {"value": branch}
+            if outer_name:
+                eff["name"] = outer_name
+            name, value = _resolve_field_value(eff, task, master)
+            sep = eff.get("separator")
+        elif i in cached:
+            name, value = cached[i]
+            sep = spec.get("separator")
+        else:
+            name, value = _resolve_field_value(spec, task, master)
+            sep = spec.get("separator")
         if not name or value is None:
             continue
         if isinstance(value, (list, tuple)):
             formatted = [_fmt_detail_value(v) for v in value]
             if not formatted:
                 continue
-            rendered = _join_values(formatted, spec.get("separator"))
+            rendered = _join_values(formatted, sep)
         else:
             rendered = _fmt_detail_value(value)
         if not rendered:
@@ -412,8 +641,45 @@ def resolve_details_fields(details, task, master=None):
         return {}
 
     fields = {}
+
+    needed_triggers = set()
     for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        when = spec.get("when")
+        if isinstance(when, dict) and when:
+            needed_triggers.update(k for k, t in when.items() if isinstance(t, dict))
+
+    cached = {}
+    trigger_values = {}
+    for i, spec in enumerate(specs):
+        if not needed_triggers:
+            break
+        if not isinstance(spec, dict) or spec.get("when"):
+            continue
         name, value = _resolve_field_value(spec, task, master)
+        cached[i] = (name, value)
+        key = str(spec.get("name") or name)
+        if key in needed_triggers:
+            trigger_values[key] = value
+
+    for i, spec in enumerate(specs):
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("when"):
+            branch = _resolve_when_spec(spec, task, master, trigger_values)
+            if branch is None:
+                continue
+            outer_name = spec.get("name")
+            eff = dict(branch) if isinstance(branch, dict) else {"value": branch}
+            if outer_name:
+                eff["name"] = outer_name
+            name, value = _resolve_field_value(eff, task, master)
+        elif i in cached:
+            name, value = cached[i]
+        else:
+            name, value = _resolve_field_value(spec, task, master)
+
         if not name or value is None:
             continue
         if isinstance(value, (list, tuple)):
@@ -1189,7 +1455,7 @@ def run_single_conversation(
         time.sleep(SLEEP_BETWEEN_TURNS)
         print("LLM Rest Over")
 
-    finalize_story(fname, citations)
+    finalize_story(fname, stories_dir, citations)
 
     print("=== Title phase ===")
     with open(fname, "r", encoding="utf-8") as f:
@@ -1582,7 +1848,8 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
         f.writelines(lines)
 
 
-def finalize_story(fname, citations):
+def finalize_story(fname, stories_dir, citations):
+    sanitize_story_file(fname, stories_dir)
     if citations:
         lines = ["\n---\n\n## Citations & References\n\n"]
         for num, (url, (title, query)) in enumerate(citations.items(), start=1):
@@ -1614,6 +1881,46 @@ def story_images_in_order(stories_dir, markdown_text):
         if os.path.isfile(full):
             ordered.append((fname, full))
     return ordered
+
+
+def sanitize_story_images(text, stories_dir):
+    """Drop markdown image references whose target file does not exist.
+
+    The story agents and the editor sometimes emit ``![...](path)`` lines that
+    point at hallucinated filenames or ComfyUI ``/output/`` URLs that were never
+    copied into the story folder (real embedded copies always use the
+    ``img_rN_Speaker_idx.ext`` scheme). Removing those references keeps the
+    published markdown free of dead/broken image tags.
+    """
+    def _fix(match):
+        ref = match.group(1)
+        fname = os.path.basename(ref.split("?")[0].split("#")[0])
+        if not fname:
+            return match.group(0)
+        if os.path.isfile(os.path.join(stories_dir, fname)):
+            return match.group(0)
+        print(f"[images] Dropping broken image reference: {ref}")
+        return ""
+
+    return re.sub(r"!\[[^\]]*\]\(([^)]*)\)", _fix, text)
+
+
+def sanitize_story_file(fname, stories_dir):
+    """Rewrite a story markdown file in place, dropping broken image references.
+
+    Used defensively after the round and after the editor phase so a dead image
+    tag can never reach the hosted page."""
+    try:
+        with open(fname, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        print(f"[images] Could not read {fname}: {e}")
+        return
+    cleaned = sanitize_story_images(text, stories_dir)
+    if cleaned != text:
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write(cleaned)
+        print(f"[images] sanitized {os.path.basename(fname)}")
 
 
 def extract_markdown_fence(text):
@@ -1692,6 +1999,7 @@ def run_editor(
         if not revised:
             print("[editor] Editor returned an empty revision; keeping original")
             return None
+        revised = sanitize_story_images(revised, stories_dir)
         with open(edited_path, "w", encoding="utf-8") as f:
             f.write(revised + "\n")
         print(f"[editor] Saved edited story to {edited_path}")
@@ -1746,6 +2054,7 @@ def run_moderator(
         source = editor_path if editor_path else fname
         with open(source, "r", encoding="utf-8") as f:
             markdown_text = f.read()
+        markdown_text = sanitize_story_images(markdown_text, stories_dir)
         for img_fname, full in story_images_in_order(stories_dir, markdown_text):
             wait_for_user_to_leave()
             call_llm(

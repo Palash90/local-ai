@@ -239,7 +239,7 @@ class TestResolveDetails:
         assert self_chat.resolve_details(details, "Task X", master=master) == "animals: horse and cow"
 
     def test_master_ref_from_module(self, self_chat, monkeypatch):
-        monkeypatch.setattr(self_chat, "DETAIL_MASTER", {
+        monkeypatch.setattr(self_chat, "MASTER_DETAILS", {
             "time_of_day": {"selector": "roundrobin", "values": ["day", "night"]},
         })
         monkeypatch.setattr(self_chat, "_detail_cycles", {})
@@ -250,6 +250,144 @@ class TestResolveDetails:
     def test_unknown_ref_falls_back_to_local(self, self_chat):
         details = [{"name": "animal", "ref": "no_such_pool", "value": "cow"}]
         assert self_chat.resolve_details(details, "Task X", master={}) == "animal: cow"
+
+
+class TestRefsAndWhen:
+    def test_refs_unions_multiple_master_sets(self, self_chat, monkeypatch):
+        master = {
+            "prime_adult": {"name": "age_group", "values": ["25-30", "31-40"]},
+            "late_adult": {"name": "age_group", "values": ["41-50"]},
+        }
+        calls = []
+
+        def fake_choice(seq):
+            calls.append(list(seq))
+            return seq[0]
+
+        monkeypatch.setattr(self_chat.random, "choice", fake_choice)
+        details = [{"name": "age", "refs": ["prime_adult", "late_adult"], "selector": "random"}]
+        assert self_chat.resolve_details(details, "Task X", master=master) == "age: 25-30"
+        assert calls == [["25-30", "31-40", "41-50"]]
+
+    def test_refs_string_shorthand(self, self_chat, monkeypatch):
+        master = {
+            "a": {"values": ["1", "2"]},
+            "b": {"values": ["3"]},
+        }
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        details = [{"name": "x", "refs": "a", "selector": "random"}]
+        assert self_chat.resolve_details(details, "Task Y", master=master) == "x: 1"
+
+    def test_refs_inline_values_override(self, self_chat, monkeypatch):
+        master = {"a": {"values": ["1", "2"]}, "b": {"values": ["3"]}}
+        monkeypatch.setattr(self_chat, "_detail_cycles", {})
+        details = [{"name": "x", "refs": ["a", "b"], "selector": "roundrobin", "values": ["9"]}]
+        assert self_chat.resolve_details(details, "Task Z", master=master) == "x: 9"
+
+    def test_recursive_ref_resolves(self, self_chat, monkeypatch):
+        master = {
+            "base": {"values": ["a", "b"]},
+            "child": {"ref": "base", "selector": "roundrobin"},
+        }
+        monkeypatch.setattr(self_chat, "_detail_cycles", {})
+        details = [{"name": "v", "ref": "child"}]
+        assert self_chat.resolve_details(details, "Task X", master=master) == "v: a"
+        assert self_chat.resolve_details(details, "Task X", master=master) == "v: b"
+
+    def test_reference_cycle_terminates(self, self_chat, monkeypatch):
+        master = {
+            "loop_a": {"values": ["1"], "ref": "loop_b"},
+            "loop_b": {"values": ["2"], "ref": "loop_a"},
+        }
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        details = [{"name": "x", "ref": "loop_a", "selector": "random"}]
+        out = self_chat.resolve_details(details, "Task X", master=master)
+        assert out in ("x: 1", "x: 2")
+
+    def test_when_selects_branch_by_value(self, self_chat, monkeypatch):
+        master = {"bengali_attire": {"values": ["Tant saree", "Jamdani"]}}
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        details = [
+            {"name": "ethnicity", "value": "Bengali"},
+            {"name": "clothes", "when": {
+                "ethnicity": {"Bengali": {"ref": "bengali_attire"}, "*": {"value": "generic"}}
+            }},
+        ]
+        assert self_chat.resolve_details(details, "Task X", master=master) == \
+            "ethnicity: Bengali, clothes: Tant saree"
+
+    def test_when_falls_back_to_star(self, self_chat, monkeypatch):
+        master = {"bengali_attire": {"values": ["Tant saree", "Jamdani"]}}
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        details = [
+            {"name": "ethnicity", "value": "Punjabi"},
+            {"name": "clothes", "when": {
+                "ethnicity": {"Bengali": {"ref": "bengali_attire"}, "*": {"value": "generic"}}
+            }},
+        ]
+        assert self_chat.resolve_details(details, "Task X", master=master) == \
+            "ethnicity: Punjabi, clothes: generic"
+
+    def test_when_missing_trigger_skips_field(self, self_chat):
+        details = [
+            {"name": "ethnicity", "value": "Bengali"},
+            {"name": "clothes", "when": {
+                "gender": {"female": {"value": "x"}}
+            }},
+        ]
+        assert self_chat.resolve_details(details, "Task X", master={}) == "ethnicity: Bengali"
+
+    def test_when_multiple_triggers_and(self, self_chat, monkeypatch):
+        master = {
+            "m_attire": {"values": ["silk saree"]},
+            "m_hair": {"values": ["braid"]},
+        }
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        details = [
+            {"name": "ethnicity", "value": "Bengali"},
+            {"name": "gender", "value": "female"},
+            {"name": "clothes", "when": {
+                "ethnicity": {"Bengali": {"ref": "m_attire"}, "*": {"value": "plain"}},
+                "gender": {"female": {"ref": "m_attire"}, "*": {"value": "plain"}},
+            }},
+        ]
+        assert self_chat.resolve_details(details, "Task X", master=master) == \
+            "ethnicity: Bengali, gender: female, clothes: silk saree"
+
+    def test_when_multiple_triggers_unmatched_skips(self, self_chat):
+        details = [
+            {"name": "ethnicity", "value": "Bengali"},
+            {"name": "gender", "value": "male"},
+            {"name": "clothes", "when": {
+                "ethnicity": {"Bengali": {"value": "saree"}},
+                "gender": {"female": {"value": "x"}},  # no '*' fallback
+            }},
+        ]
+        assert self_chat.resolve_details(details, "Task X", master={}) == \
+            "ethnicity: Bengali, gender: male"
+
+    def test_when_trigger_resolved_once_not_twice(self, self_chat, monkeypatch):
+        monkeypatch.setattr(self_chat, "_detail_cycles", {})
+        details = [
+            {"name": "hero", "selector": "roundrobin", "values": ["a", "b"]},
+            {"name": "sidekick", "when": {"hero": {"a": {"value": "x"}, "b": {"value": "y"}}}},
+        ]
+        assert self_chat.resolve_details(details, "Task W") == "hero: a, sidekick: x"
+        assert self_chat.resolve_details(details, "Task W") == "hero: b, sidekick: y"
+
+    def test_when_in_fields_resolver(self, self_chat, monkeypatch):
+        master = {"bengali_attire": {"values": ["Tant saree", "Jamdani"]}}
+        monkeypatch.setattr(self_chat.random, "choice", lambda seq: seq[0])
+        details = [
+            {"name": "ethnicity", "value": "Bengali"},
+            {"name": "clothes", "when": {
+                "ethnicity": {"Bengali": {"ref": "bengali_attire"}, "*": {"value": "generic"}}
+            }},
+        ]
+        assert self_chat.resolve_details_fields(details, "Task X", master=master) == {
+            "ethnicity": "Bengali",
+            "clothes": "Tant saree",
+        }
 
 
 class TestResolveDetailsFields:
@@ -364,9 +502,9 @@ class TestLoadConfigFile:
             "master_details": {"farm_animals": {"selector": "random", "values": ["cow"]}},
             "tasks": [{"task": "One"}],
         }))
-        monkeypatch.setattr(self_chat, "DETAIL_MASTER", {})
+        monkeypatch.setattr(self_chat, "MASTER_DETAILS", {})
         tasks, *_ = self_chat.load_config_file(str(p))
-        assert self_chat.DETAIL_MASTER == {"farm_animals": {"selector": "random", "values": ["cow"]}}
+        assert self_chat.MASTER_DETAILS == {"farm_animals": {"selector": "random", "values": ["cow"]}}
         assert [t["task"] for t in tasks] == ["One"]
 
 
@@ -886,7 +1024,7 @@ class TestFinalizeStory:
         fname = fname.replace(".md", "_20260808_123456.md")
         with open(fname, "w") as f:
             f.write("# Story\n")
-        self_chat.finalize_story(fname, {"http://a": ("Title A", "query")})
+        self_chat.finalize_story(fname, str(tmp_path), {"http://a": ("Title A", "query")})
         with open(fname) as f:
             content = f.read()
         assert "## Citations & References" in content
@@ -897,9 +1035,20 @@ class TestFinalizeStory:
         fname = str(tmp_path / "story.md")
         with open(fname, "w") as f:
             f.write("# Story\n")
-        self_chat.finalize_story(fname, {})
+        self_chat.finalize_story(fname, str(tmp_path), {})
         with open(fname) as f:
             assert f.read() == "# Story\n"
+
+    def test_drops_broken_image_refs(self, self_chat, tmp_path):
+        fname = str(tmp_path / "story.md")
+        with open(fname, "w") as f:
+            f.write("![ok](real.png)\n\n![Kaya](img_r1_Kaya_0.png)\n\nSome text.\n")
+        (tmp_path / "img_r1_Kaya_0.png").write_bytes(b"imgdata")
+        self_chat.finalize_story(fname, str(tmp_path), {})
+        content = (tmp_path / "story.md").read_text()
+        assert "![ok](real.png)" not in content
+        assert "![Kaya](img_r1_Kaya_0.png)" in content
+        assert "Some text." in content
 
 
 class TestSaveTranscript:

@@ -2,6 +2,7 @@
   "tasks": [
     {
       "task": "Satire column on different office cultures",
+      "inactive": true,
       "turns": 4,
       "details": [
         {
@@ -44,6 +45,7 @@
     },
     {
       "task": "A bedtime story for kids",
+      "inactive": true,
       "turns": 5,
       "details": [
         {
@@ -82,6 +84,7 @@
     },
     {
       "task": "A day at the farm",
+      "inactive": true,
       "turns": 4,
       "details": [
         {
@@ -132,6 +135,7 @@
     },
     {
       "task": "A science article for kids",
+      "inactive": true,
       "turns": 6,
       "details": [
         {
@@ -175,6 +179,7 @@
     },
     {
       "task": "Traditional Festival Sweet Recipe & Cultural Story",
+      "inactive": true,
       "turns": 5,
       "details": [
         {
@@ -223,6 +228,7 @@
     },
     {
       "task": "Futuristic Invention Pitch & Conceptual Breakdown",
+      "inactive": true,
       "turns": 5,
       "details": [
         {
@@ -265,6 +271,7 @@
     },
     {
       "task": "Bone-Chilling Real-World Adventure",
+      "inactive": true,
       "turns": 7,
       "details": [
         {
@@ -295,6 +302,7 @@
     },
     {
       "task": "Psychological Horror Short Story",
+      "inactive": true,
       "turns": 6,
       "details": [
         {
@@ -325,6 +333,7 @@
     },
     {
       "task": "Historical Mystery & Unsolved Legend",
+      "inactive": true,
       "turns": 6,
       "details": [
         {
@@ -368,6 +377,7 @@
     },
     {
       "task": "Cybernetic Breakthrough Investigation",
+      "inactive": true,
       "turns": 4,
       "details": [
         {
@@ -402,6 +412,7 @@
     },
     {
       "task": "High-Stakes Surveillance Intercept",
+      "inactive": true,
       "turns": 4,
       "details": [
         {
@@ -432,6 +443,7 @@
     },
     {
       "task": "The Locked-Vault Disappearance",
+      "inactive": true,
       "turns": 5,
       "details": [
         {
@@ -466,6 +478,7 @@
     },
     {
       "task": "Extreme Wilderness Rescue Expedition",
+      "inactive": true,
       "turns": 4,
       "details": [
         {
@@ -496,6 +509,7 @@
     },
     {
       "task": "Flash News Daily Briefing",
+      "inactive": true,
       "turns": 2,
       "details": [
         {
@@ -522,6 +536,7 @@
     },
     {
       "task": "Headline Adapted Human Interest Narrative",
+      "inactive": true,
       "turns": 4,
       "details": [
         {
@@ -549,6 +564,177 @@
       "mediums": [
         "text"
       ]
+    },
+    {
+      "task": "The 'Bharat's Bloom' Visual Memoir: A curated collection of fashion portraits capturing the soul and diversity of Indian womanhood.",
+      "inactive": false,
+      "turns": 8,
+      "details": [
+        {
+          "name": "description",
+          "value": "This is a high-caliber photographic journey where the models are the primary storytellers. As the visionary lens, we capture high-quality portraits of women across every corner of India."
+        },
+        {
+          "name": "age",
+          "refs": ["prime_adult_class_age_group"],
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "ethnicity",
+          "ref": "feature_indian_ethnicity",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "face shape",
+          "ref": "feature_face_shape",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "skin tone and texture",
+          "ref": "feature_skin_tone_texture",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "eye shape",
+          "ref": "feature_eye_shape",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "eye color",
+          "ref": "feature_eye_color",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "eyebrows",
+          "ref": "feature_eyebrows",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "under_eye_structure",
+          "ref": "feature_under_eye_area",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "nose type",
+          "ref": "feature_nose_type",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "cheekbone_structure",
+          "ref": "feature_cheekbones",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "lip_shape",
+          "ref": "feature_lip_shape",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "jawline_and_chin",
+          "ref": "feature_jawline",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "forehead_and_hairline",
+          "ref": "feature_forehead_and_hairline",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "ear_structure",
+          "ref": "feature_ears_and_lobes",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "hair style",
+          "ref": "feature_female_hair_style",
+          "change_freq": "Per Turn"
+        },
+        
+        {
+          "name": "jewellery",
+          "ref": "feature_female_jewelry_accessories",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "Photography Mode",
+          "ref": "photography_mode"
+        },
+        {
+          "name": "location",
+          "ref": "location_setting"
+        },
+        {
+          "name": "model pose",
+          "ref": "model_pose_and_expression"
+        },
+        {
+          "name": "clothes description",
+          "change_freq": "Per Turn",
+          "when": {
+            "ethnicity": {
+              "Bengali": { "ref": "bengali_attire" },
+              "Punjabi": { "ref": "punjabi_attire" },
+              "Gujrati": { "ref": "western_indian_attire" },
+              "Rajasthani": { "ref": "western_indian_attire" },
+              "Malyali": { "ref": "south_indian_attire" },
+              "Konkan": { "ref": "south_indian_attire" },
+              "Tuluva": { "ref": "south_indian_attire" },
+              "Dravidian": { "ref": "south_indian_attire" },
+              "Marathi": { "ref": "maharashtrian_attire" },
+              "Assamese": { "ref": "north_east_attire" },
+              "Manipuri": { "ref": "north_east_attire" },
+              "Naga": { "ref": "north_east_attire" },
+              "Sikkimese": { "ref": "north_east_attire" },
+              "Parsi": { "ref": "parsi_attire" },
+              "Kashmiri Muslim": { "ref": "kashmiri_attire" },
+              "Sindhi": { "ref": "sindhi_attire" },
+              "*": { "ref": "generic_ethnic_attire" }
+            }
+          }
+        },
+        {
+          "name": "color palette",
+          "ref": "color_palette_mood",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "lighting_ambience",
+          "ref": "lighting_ambience",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "time of day",
+          "ref": "time_of_day",
+          "change_freq": "Per Turn"
+        },
+        {
+          "name": "CRITICAL INSTRUCTION",
+          "value": "NO NUDITY AND NOT TOO EXPOSING BUT CAN BE REVEALING"
+        },
+        {
+          "name": "CRITICAL TEXT USAGE RESTRICTION",
+          "value": "Use text only for single line captioning the image. No story writing."
+        }
+      ],
+      "context": "CRITICAL: OVERRIDE SYSTEM PROMPT FOR WEB SEARCH USE. NEVER PERFORM WEB SEARCH IN ANY TURN FOR THIS TASK, USE ONLY YOUR OWN CREATIVITY AND KNOWLEDGE.",
+      "roles": [
+        "premium"
+      ],
+      "path": "/home/palash/my-files/stories",
+      "languages": [
+        "English"
+      ],
+      "genre": "Regional Fashion",
+      "mediums": [
+        "image"
+      ],
+      "checklist": {
+        "editor": [
+          "**Visual Count:** Ensure the content integrates a minimum of 4 images, targeting 4-8 for maximum visual impact.",
+          "The generated images should adhere to artistic and cultural quality",
+          "Every single image must possess a rich caption detailing the State/Region, the cultural/religious context, and the specific physical ethnicity/look of the subject."
+        ]
+      }
     }
   ]
 }
