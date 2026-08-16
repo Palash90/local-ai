@@ -302,6 +302,16 @@ def _pick_detail_value(task, name, spec):
     if not values:
         return None
 
+    count = _resolve_count(task, name, spec) if spec.get("count") is not None else None
+    if count is not None and count > 1:
+        if selector in ("roundrobin", "roundrobin_multi"):
+            key = (task, name)
+            n = len(values)
+            start = _detail_cycles.get(key, 0) % n
+            _detail_cycles[key] = start + count
+            return [values[(start + i) % n] for i in range(min(count, n))]
+        return random.sample(values, min(count, len(values)))
+
     if selector == "random":
         return random.choice(values)
 
@@ -537,6 +547,80 @@ def _spec_in_filter(spec, freq_filter):
 def _has_per_turn_details(details):
     """True if a task spec has any genuinely per-turn field."""
     return any(_spec_in_filter(s, "Per Turn") for s in _details_specs(details))
+
+
+def _character_fields(details_spec):
+    """Field specs flagged ``character: true`` — the story's named cast."""
+    return [
+        s
+        for s in _details_specs(details_spec)
+        if isinstance(s, dict) and s.get("character")
+    ]
+
+
+def _pick_character_name(task, field_name, names, skip=()):
+    """Pick a character name for the round (round-robins across rounds).
+
+    ``skip`` is a set of names already taken this round, so multi-member cast
+    slots (``count > 1``) never reuse a name within the same round.
+    """
+    values = [
+        n
+        for n in (names or [])
+        if isinstance(n, str) and n.strip() and n not in skip
+    ]
+    if not values:
+        return ""
+    key = (task, field_name, "<name>")
+    idx = _detail_cycles.get(key, 0) % len(values)
+    _detail_cycles[key] = idx + 1
+    return values[idx]
+
+
+def build_cast(task, details_spec, round_fields):
+    """Decide and NAME the story's characters for this round.
+
+    Returns a list of ``(label, species, name)`` triples: one per field flagged
+    ``character: true``, expanded into ``count`` members when the field carries a
+    count. Species come from the already-resolved per-round value pool (a list
+    means a multi-member slot); names are assigned deterministically from the
+    field's ``names`` list (rotating across rounds, never reused within a round),
+    so the cast — including its size — is fixed and repeatable before a single
+    word of story is written.
+    """
+    cast = []
+    fields = round_fields or {}
+    for spec in _character_fields(details_spec):
+        label = str(spec.get("name") or "").strip()
+        value = fields.get(label, spec.get("value"))
+        species_list = value if isinstance(value, (list, tuple)) else [value]
+        used = set()
+        for species in species_list:
+            species = str(species or "").strip()
+            if not species:
+                continue
+            name = _pick_character_name(task, label, spec.get("names"), skip=used)
+            if name:
+                used.add(name)
+            cast.append((label, species, name or species))
+    return cast
+
+
+def format_cast_block(cast):
+    """Render the decided-and-named cast as an immutable per-turn directive."""
+    if not cast:
+        return ""
+    lines = [
+        "## Characters (already decided and named for this story — immutable)",
+    ]
+    for label, species, name in cast:
+        lines.append(f"- {name} — the {label}, {species}")
+    lines.append(
+        "HARD RULE: These are the ONLY characters in this story. Never create, "
+        "name, or depict any additional character in the text or in any image; "
+        "every generated image must show only these named characters."
+    )
+    return "\n".join(lines)
 
 
 def _resolve_field_value(spec, task, master):
@@ -1087,11 +1171,34 @@ def run_dry_run():
 _PROHIBITED_NAMES = ("Kaya", "Kolpo", "কায়া", "কল্প", "काया", "कल्प")
 
 
-def verify_task_fulfillment(original_text, check_text, mediums, language):
+def _is_placeholder_query(query):
+    """Detect a generic search query that grounds a citation in nothing real.
+
+    Suitable-for/recent/kids/lighthearted phrasing (or a very short query) means
+    the model searched for "something" rather than a concrete reported event, so
+    the resulting citation is decorative, not grounding.
+    """
+    q = (query or "").strip()
+    if not q or len(q) < 12:
+        return True
+    generic = [
+        r"\brecent\b[^.,]*\bsuitable\s+for\b",
+        r"\bsuitable\s+for\b",
+        r"\bfor\s+(kids|children)\b",
+        r"(latest|top|interesting|random|lighthearted)\s+(news|story|article|event)",
+        r"\bnews\b[^.,]*\bfor\b",
+    ]
+    return any(re.search(p, q, re.I) for p in generic)
+
+
+def verify_task_fulfillment(
+    original_text, check_text, mediums, language, retrieved_citations=None
+):
     """Deterministic (no-LLM) checks that catch the failure classes an editor/
     moderator LLM keeps missing: declared medium never delivered, header fields
-    dropped during editing, citations dropped, wrong script/language, and
-    agent-name leaks. Returns a list of problem strings (empty = all good)."""
+    dropped during editing, citations dropped or fabricated, ungrounded
+    citations, wrong script/language, and agent-name leaks. Returns a list of
+    problem strings (empty = all good)."""
     problems = []
 
     if "audio" in mediums:
@@ -1110,10 +1217,26 @@ def verify_task_fulfillment(original_text, check_text, mediums, language):
             problems.append(f"Editor dropped the '{field}' header field.")
 
     if (
-        "## Citations & References" in original_text
-        and "## Citations & References" not in check_text
+        re.search(r"#+\s+Citations?\s*&?\s*References?", original_text)
+        and not re.search(r"#+\s+Citations?\s*&?\s*References?", check_text)
     ):
         problems.append("Editor dropped the Citations & References section.")
+
+    if retrieved_citations is not None:
+        published = re.findall(r"\[[^\]]*\]\((https?://[^)\s]+)\)", check_text)
+        backed = set(retrieved_citations)
+        unbacked = [u for u in published if u not in backed]
+        if unbacked:
+            problems.append(
+                f"{len(unbacked)} citation URL(s) in the story were never retrieved by a web search."
+            )
+        if published and backed:
+            queries = {q for _, q in retrieved_citations.values()}
+            if queries and all(_is_placeholder_query(q) for q in queries):
+                problems.append(
+                    "Citations are ungrounded: every search used a generic placeholder "
+                    "query instead of sourcing the story from a real reported event."
+                )
 
     if not check_language_script(check_text, language):
         problems.append(
@@ -1288,6 +1411,7 @@ def build_input(
     context=None,
     turns=None,
     per_turn_details="",
+    cast=None,
 ):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
@@ -1301,6 +1425,9 @@ def build_input(
         "[SYSTEM DIRECTIVE: Place ALL meta-analysis, praise, and planning OUTSIDE the [CONTENT] tags. ",
         "The [CONTENT] block must ONLY contain clean narrative/visual deliverable text.]",
     ]
+
+    if cast:
+        lines.append(cast)
 
     if context is not None:
         lines.append(context)
@@ -1373,6 +1500,11 @@ def run_single_conversation(
     print(f"[persona] Genre: {genre} | Dynamic: {relationship} ({mood})")
     print(f"[persona] Kaya: {kaya_info.get('role')} — {kaya_info.get('persona')}")
     print(f"[persona] Kolpo: {kolpo_info.get('role')} — {kolpo_info.get('persona')}")
+
+    # Decide and name the story's characters once per round, before any turn.
+    cast_block = format_cast_block(build_cast(task, details_spec, round_fields))
+    if cast_block:
+        print(f"[cast] {cast_block.splitlines()[1]} ...")
 
     s = STARTING_CONVERSATION.replace("%task%", task)
     s = s.replace("%mediums%", " , ".join(medium))
@@ -1478,6 +1610,7 @@ def run_single_conversation(
             context,
             turns,
             per_turn_details=per_turn_str,
+            cast=cast_block,
         )
 
         wait_for_user_to_leave()
@@ -1582,6 +1715,7 @@ def run_single_conversation(
         language=language,
         details=details,
         checklist=checklist,
+        cast=cast_block,
     )
 
     print("=== Deterministic verification ===")
@@ -1590,7 +1724,7 @@ def run_single_conversation(
     check_source = edited_path if edited_path else fname
     with open(check_source, "r", encoding="utf-8") as f:
         check_text = f.read()
-    problems = verify_task_fulfillment(original_text, check_text, medium, language)
+    problems = verify_task_fulfillment(original_text, check_text, medium, language, citations)
 
     if problems:
         print(
@@ -1888,13 +2022,18 @@ def strip_model_citations(text):
 
 
 def extract_tagged_content(text):
-    """Return only the text inside [CONTENT]...[/CONTENT] blocks, discarding
-    everything else (planning talk, meta-commentary). Returns None if no
-    [CONTENT] block is present at all — the caller treats that as a
-    planning-only turn with nothing to publish. Multiple blocks are
+    """Return only the text inside [CONTENT] blocks.
+
+    The closing tag may appear as ``[/CONTENT]`` (as instructed in the system
+    prompt) or as the ``[END CONTENT]`` variant the models actually emit; both
+    are accepted, so a turn's narrative is never mistaken for planning chatter.
+    Returns None if no [CONTENT] block is present at all — the caller treats
+    that as a planning-only turn with nothing to publish. Multiple blocks are
     concatenated in order."""
     blocks = re.findall(
-        r"\[CONTENT\](.*?)\[/CONTENT\]", text, flags=re.DOTALL | re.IGNORECASE
+        r"\[CONTENT\](.*?)(?:\[/CONTENT\]|\[END CONTENT\]|\[END\])",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
     )
     if not blocks:
         return None
@@ -2009,6 +2148,119 @@ def sanitize_story_images(text, stories_dir):
     return re.sub(r"!\[[^\]]*\]\(([^)]*)\)", _fix, text)
 
 
+_IMAGE_LINE_RE = re.compile(r"^\s*!\[[^\]]*\]\(([^)]+)\)\s*$")
+
+
+def _image_anchors(markdown_text):
+    """Map each image filename to the narrative paragraph right before it.
+
+    Story files store one turn per entry as ``<small> label, paragraph(s),
+    image``; the paragraph adjacent to an image is the scene that image
+    illustrates, which is what re-anchoring matches against when the editor
+    regroups image references.
+    """
+    anchors = {}
+    pending = []
+    for line in markdown_text.splitlines():
+        if _IMAGE_LINE_RE.match(line):
+            anchor = ""
+            for block in reversed(pending):
+                if "".join(block).strip():
+                    anchor = "\n".join(block)
+                    break
+            for ref in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", line):
+                fn = os.path.basename(ref)
+                anchors[fn] = anchor
+            pending = []
+            continue
+        if line.strip().startswith("<small") and line.strip().endswith("</small>"):
+            pending = []
+            continue
+        if not line.strip():
+            pending.append([])
+            continue
+        if pending:
+            pending[-1].append(line)
+        else:
+            pending.append([line])
+    return anchors
+
+
+def _paragraph_overlap_score(a, b):
+    """Token Jaccard overlap between two text blocks (0..1)."""
+    def _toks(s):
+        return set(re.findall(r"[a-z0-9]+", s.lower()))
+    left, right = _toks(a), _toks(b)
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def reanchor_story_images(revised, original, stories_dir):
+    """Keep every image embedded inline, right after the narrative it illustrates.
+
+    The editor is free to polish prose but sometimes regroups all image
+    references at the top or bottom of the story. This re-anchors each image (in
+    the order it appeared in the original story) to the revised paragraph whose
+    wording most resembles the turn text the image originally followed, so
+    images reliably stay embedded inside the story flow.
+    """
+    ordered = [fn for fn, _ in story_images_in_order(stories_dir, original)]
+    if not ordered:
+        return revised
+    anchors = _image_anchors(original)
+    if not anchors:
+        return revised
+
+    lines = revised.splitlines()
+    ref_by_fn = {}
+    for line in lines:
+        if _IMAGE_LINE_RE.match(line):
+            ref = re.search(r"!\[[^\]]*\]\(([^)]+)\)", line).group(1)
+            ref_by_fn.setdefault(os.path.basename(ref).split("?")[0].split("#")[0], line)
+    missing = [fn for fn in ordered if fn not in ref_by_fn]
+    if missing:
+        print(f"[images] Re-anchor: {len(missing)} reference(s) missing from revision: {missing}")
+        return revised
+
+    blocks = []
+    cur = []
+    for line in lines:
+        if _IMAGE_LINE_RE.match(line) or not line.strip():
+            if cur:
+                blocks.append(cur)
+                cur = []
+            continue
+        cur.append(line)
+    if cur:
+        blocks.append(cur)
+    block_texts = ["\n".join(b).strip() for b in blocks]
+
+    attach = []
+    prev = 0
+    for fn in ordered:
+        anchor = anchors.get(fn, "")
+        best, score = -1, -1.0
+        for i in range(prev, len(block_texts)):
+            s = _paragraph_overlap_score(block_texts[i], anchor)
+            if s > score:
+                score, best = s, i
+        if best < 0:
+            best = min(prev, len(block_texts) - 1)
+        attach.append(best)
+        prev = best + 1
+
+    out = []
+    for i, block in enumerate(blocks):
+        out.extend(block)
+        for k, fn in enumerate(ordered):
+            if attach[k] == i:
+                out.append("")
+                out.append(ref_by_fn[fn])
+        out.append("")
+    return "\n".join(out).strip() + "\n"
+
+
 def sanitize_story_file(fname, stories_dir):
     """Rewrite a story markdown file in place, dropping broken image references.
 
@@ -2045,6 +2297,7 @@ def run_editor(
     language="",
     details="",
     checklist=None,
+    cast="",
 ):
     """Editor phase: review images + markdown, write story_rN_ts.edited.md."""
     try:
@@ -2060,6 +2313,7 @@ def run_editor(
             "%mediums%": ", ".join(mediums or []),
             "%language%": language or "",
             "%details%": details or "None",
+            "%cast%": cast or "None",
             "%checklist%": checklist_for(genre, "editor", checklist),
         }
         for placeholder, value in context_tokens.items():
@@ -2104,6 +2358,7 @@ def run_editor(
             print("[editor] Editor returned an empty revision; keeping original")
             return None
         revised = sanitize_story_images(revised, stories_dir)
+        revised = reanchor_story_images(revised, markdown_text, stories_dir)
         with open(edited_path, "w", encoding="utf-8") as f:
             f.write(revised + "\n")
         print(f"[editor] Saved edited story to {edited_path}")
@@ -2126,6 +2381,7 @@ def run_moderator(
     language="",
     details="",
     checklist=None,
+    cast="",
 ):
     """Moderator phase: GREEN/RED verdict, written to story_rN_ts.moderation.json."""
     try:
@@ -2141,6 +2397,7 @@ def run_moderator(
             "%mediums%": ", ".join(mediums or []),
             "%language%": language or "",
             "%details%": details or "None",
+            "%cast%": cast or "None",
             "%checklist%": checklist_for(genre, "moderator", checklist),
         }
         for placeholder, value in context_tokens.items():

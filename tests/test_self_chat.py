@@ -454,6 +454,59 @@ class TestRoundAndTurnPasses:
         assert self_chat._detail_cycles == {("Task X", "hero"): 1}
 
 
+class TestNamedCast:
+    SPEC = [
+        {"name": "hero", "character": True, "names": ["Barnaby", "Noor", "Milo"]},
+        {"name": "hero's companion", "character": True,
+         "names": ["Pip", "Daisy", "Rusty"]},
+        {"name": "time of day", "ref": "time_of_day"},
+    ]
+    FIELDS = {"hero": "a sleepy kitten", "hero's companion": "rabbit",
+              "time of day": "dusk"}
+
+    def test_cast_decides_and_names_characters(self, self_chat):
+        self_chat._detail_cycles.clear()
+        cast = self_chat.build_cast("Bedtime", self.SPEC, self.FIELDS)
+        assert [c[0] for c in cast] == ["hero", "hero's companion"]
+        assert [c[1] for c in cast] == ["a sleepy kitten", "rabbit"]
+        assert [c[2] for c in cast] == ["Barnaby", "Pip"]
+        assert "time of day" not in [c[0] for c in cast]
+        self_chat._detail_cycles.clear()
+
+    def test_names_rotate_across_rounds(self, self_chat):
+        self_chat._detail_cycles.clear()
+        c1 = self_chat.build_cast("Bedtime", self.SPEC, self.FIELDS)
+        c2 = self_chat.build_cast("Bedtime", self.SPEC, self.FIELDS)
+        assert c1[0][2] == "Barnaby"
+        assert c2[0][2] == "Noor"
+        self_chat._detail_cycles.clear()
+
+    def test_format_cast_block_lists_cast_and_hard_rule(self, self_chat):
+        self_chat._detail_cycles.clear()
+        cast = self_chat.build_cast("Bedtime", self.SPEC, self.FIELDS)
+        block = self_chat.format_cast_block(cast)
+        assert "Barnaby — the hero, a sleepy kitten" in block
+        assert "Pip — the hero's companion, rabbit" in block
+        assert "ONLY characters" in block
+        assert "any additional character" in block
+        self_chat._detail_cycles.clear()
+
+    def test_build_input_carries_cast(self, self_chat):
+        cast = self_chat.format_cast_block(
+            [("hero", "a sleepy kitten", "Barnaby")]
+        )
+        prompt = self_chat.build_input(
+            "A", 2, "", "English", "Bedtime", cast=cast
+        )
+        assert "Barnaby" in prompt
+        assert "ONLY characters" in prompt
+
+    def test_empty_cast_ignored(self, self_chat):
+        assert self_chat.format_cast_block([]) == ""
+        prompt = self_chat.build_input("A", 1, "", "English", "Task")
+        assert "Characters (already decided" not in prompt
+
+
 class TestThemeHelpers:
     def test_build_combo_dict(self, self_chat):
         persona = {
@@ -689,6 +742,52 @@ class TestVerifyTaskFulfillment:
         )
         assert any("chapter 3 is missing" in p for p in problems)
 
+    def test_citations_heading_level_tolerated(self, self_chat):
+        check = self.ORIGINAL.replace("## Citations & References", "# Citations & References")
+        problems = self_chat.verify_task_fulfillment(
+            self.ORIGINAL, check, ["text"], "English"
+        )
+        assert not any("Citations" in p and "dropped" in p for p in problems)
+
+    def test_ungrounded_citations_flagged(self, self_chat):
+        retrieved = {
+            "https://kidsnews.com.au": (
+                "KidsNews",
+                "recent lighthearted news event suitable for children 5-12",
+            ),
+        }
+        check = (
+            self.ORIGINAL
+            + "\n\n1. [KidsNews](https://kidsnews.com.au) *(source: "
+            "recent lighthearted news event suitable for children 5-12)*\n"
+        )
+        problems = self_chat.verify_task_fulfillment(
+            self.ORIGINAL, check, ["text"], "English", retrieved
+        )
+        assert any("ungrounded" in p for p in problems)
+
+    def test_fabricated_citation_url_flagged(self, self_chat):
+        check = (
+            self.ORIGINAL
+            + "\n\n1. [Invented Source](https://example.com/not-retrieved)\n"
+        )
+        problems = self_chat.verify_task_fulfillment(
+            self.ORIGINAL, check, ["text"], "English", {"https://example.com/retrieved": (".", "how bees make honey")}
+        )
+        assert any("never retrieved" in p for p in problems)
+
+    def test_grounded_citations_pass(self, self_chat):
+        url = "https://news.example.com/bees-return"
+        retrieved = {url: ("Bees Return", "how many honeybees returned to the hive this spring")}
+        check = (
+            self.ORIGINAL
+            + f"\n\n1. [Bees Return]({url}) *(source: how many honeybees returned to the hive this spring)*\n"
+        )
+        problems = self_chat.verify_task_fulfillment(
+            self.ORIGINAL, check, ["text"], "English", retrieved
+        )
+        assert not any("nretrieved" in p or "ngrounded" in p for p in problems)
+
 
 class TestIsDuplicate:
     def test_no_previous(self, self_chat):
@@ -821,6 +920,64 @@ class TestExtractMarkdownFence:
 
     def test_no_fence(self, self_chat):
         assert self_chat.extract_markdown_fence("  plain text  ") == "plain text"
+
+
+class TestExtractTaggedContent:
+    def test_closing_slash_tag(self, self_chat):
+        assert self_chat.extract_tagged_content(
+            "[CONTENT]Once upon a time[/CONTENT]"
+        ) == "Once upon a time"
+
+    def test_closing_end_tag(self, self_chat):
+        assert self_chat.extract_tagged_content(
+            "[CONTENT]Once upon a time[END CONTENT]"
+        ) == "Once upon a time"
+
+    def test_end_tag_multiline_case_insensitive(self, self_chat):
+        text = "Plan: align.\n[CONTENT]\npara one\n\npara two\n[end content]"
+        assert self_chat.extract_tagged_content(text) == "para one\n\npara two"
+
+    def test_multiple_blocks_concatenated(self, self_chat):
+        text = "[CONTENT]first[/CONTENT] rest [CONTENT]second[END CONTENT]"
+        assert self_chat.extract_tagged_content(text) == "first\n\nsecond"
+
+    def test_no_block_returns_none(self, self_chat):
+        assert self_chat.extract_tagged_content("just planning chatter") is None
+
+
+class TestReanchorStoryImages:
+    def _write_images(self, stories_dir, fnames):
+        for f in fnames:
+            (stories_dir / f).write_bytes(b"x")
+
+    def test_images_grouped_at_top_get_embedded_inline(self, self_chat, tmp_path):
+        self._write_images(tmp_path, ["img_1.png", "img_2.png"])
+        original = (
+            "# Title\n\n"
+            '<small style="color:#888">_Round 1 · Kaya Turn 1_</small>\n\n'
+            "The kitten stretched in the candlelight.\n\n"
+            "![alt](img_1.png)\n\n"
+            '<small style="color:#888">_Round 1 · Kaya Turn 2_</small>\n\n'
+            "The rabbit sniffed the dark soil.\n\n"
+            "![alt](img_2.png)\n"
+        )
+        revised = (
+            "# Title\n\n"
+            "![alt](img_1.png)\n\n"
+            "![alt](img_2.png)\n\n"
+            "The kitten stretched in the candlelight.\n\n"
+            "The rabbit sniffed the dark soil.\n\n## Citations\n\n1. [x](url)\n"
+        )
+        out = self_chat.reanchor_story_images(revised, original, str(tmp_path))
+        k1 = out.index("img_1.png")
+        k2 = out.index("img_2.png")
+        assert k1 < k2
+        body = out
+        # image 1 must sit after the kitten paragraph, image 2 after the rabbit one
+        assert out.index("The kitten stretched") < k1
+        assert k1 < out.index("The rabbit sniffed")
+        assert out.index("The rabbit sniffed") < k2
+        assert "The kitten stretched in the candlelight." in out
 
 
 class TestCollectCitations:

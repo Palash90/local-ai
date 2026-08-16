@@ -7,6 +7,14 @@ You never delete or edit anything. You only categorize the story and briefly exp
 - Declared language(s): %language%
 - Task details: %details%
 
+## Named characters (immutable)
+%cast%
+
+The characters above were decided and named before writing. The story text and
+every image may only depict these named characters. A RED verdict is warranted
+if any character that is not in this list appears in the story text or in any
+image.
+
 ## Genre-specific checklist
 Give a RED verdict if ANY item below fails. Only give GREEN if every item on this list passes.
 

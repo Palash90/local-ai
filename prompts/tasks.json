@@ -79,13 +79,35 @@
         {
           "name": "hero",
           "ref": "kids_hero",
-          "change_freq": "Per Round"
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
         },
         {
           "name": "hero's companion",
           "ref": "story_animals",
           "selector": "random",
-          "change_freq": "Per Round"
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Pip",
+            "Daisy",
+            "Rusty",
+            "Bella",
+            "Momo",
+            "Biscuit",
+            "Sparks",
+            "Willa"
+          ]
         },
         {
           "name": "setting",
