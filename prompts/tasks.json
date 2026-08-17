@@ -200,7 +200,7 @@
     },
     {
       "task": "A science article for kids",
-      "inactive": true,
+      "inactive": false,
       "turns": 6,
       "details": [
         {

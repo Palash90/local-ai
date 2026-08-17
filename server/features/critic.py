@@ -40,8 +40,12 @@ _VERIFY_SYSTEM = (
 )
 
 _META_RE = re.compile(
-    r"(?P<meta>\([^()\n]{0,180}?\))\s*\[(?P<url>https?://[^\s\]<>']+)\]"
+    r"(?P<meta>[\[(][^)\]\[(\n]{0,180}[\]\)])\s*\[(?P<url>https?://[^\s\]<>']+)\]"
 )
+# A citation whose URL slot is empty, e.g. `[ScienceDirect Review] []` or the
+# markdown link form `[Some Review]()`. These are fabricated by construction —
+# there is nothing to verify.
+_EMPTY_CITE_RE = re.compile(r"(?P<meta>[\[(][^)\]\[(\n]{0,180}[\]\)])\s*\[\s*\]")
 _PLAIN_URL_RE = re.compile(r"(?<!\w)(https?://[^\s\]<>()]+)")
 _CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
@@ -49,7 +53,8 @@ _TAGLINE = "\n\n<details>\n<summary>Source verification</summary>"
 
 
 def _critic_completion(system, user, mode="gpu", max_tokens=600):
-    """Secondary, non-streamed, low-temperature LLM call."""
+    """Secondary, non-streamed, low-temperature LLM call. Retries once and
+    never raises — returns None only when the model itself is unreachable."""
     payload = {
         "model": M.server_model_id(mode),
         "messages": [
@@ -60,13 +65,20 @@ def _critic_completion(system, user, mode="gpu", max_tokens=600):
         "temperature": 0.2,
         "stream": False,
     }
-    try:
-        r = requests.post(M.server_url(mode), json=payload, timeout=120)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        print(f"[critic] LLM call failed (mode={mode}): {e}")
-        return None
+    last_err = None
+    for attempt in range(2):
+        try:
+            r = requests.post(M.server_url(mode), json=payload, timeout=120)
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"].get("content")
+            if content:
+                return content
+            last_err = "empty content in response"
+        except Exception as e:
+            last_err = str(e)
+        print(f"[critic] LLM call failed (mode={mode}, attempt {attempt + 1}/2): {last_err}")
+        time.sleep(1.0)
+    return None
 
 
 def _parse_verdict(text):
@@ -98,6 +110,16 @@ def extract_citations(answer):
     for idx, para in enumerate(paras):
         stripped = _CODE_FENCE_RE.sub("", para)
         structured = []
+        for m in _EMPTY_CITE_RE.finditer(stripped):
+            # Empty-URL citations are individually meaningful (each must be
+            # stripped and flagged), so no URL-based dedupe applies here.
+            citations.append({
+                "idx": idx,
+                "start": m.start(),
+                "end": m.end(),
+                "url": "",
+                "meta": m.group("meta").strip(),
+            })
         for m in _META_RE.finditer(stripped):
             url = m.group("url").rstrip(".,;:]")
             if url in seen:
@@ -125,6 +147,67 @@ def extract_citations(answer):
                 "meta": None,
             })
     return citations
+
+
+def _norm_url(url):
+    """Normalize a URL for equality checks: lowercase host, drop fragment and
+    trailing slash, keep path and query."""
+    try:
+        from urllib.parse import urlsplit
+
+        p = urlsplit(url or "")
+        path = p.path.rstrip("/") or "/"
+        parts = [p.netloc.lower() or url, path]
+        if p.query:
+            parts.append(f"?{p.query}")
+        return "".join(parts)
+    except Exception:
+        return (url or "").rstrip("/")
+
+
+def _retrieved_urls(task_id):
+    """All URLs the research agent actually opened or saw in search results.
+
+    Rebuilt from the task's ``_search_details`` (every ``web_search`` result
+    URL plus every ``fetch_page`` URL and any link inside fetched content). A
+    citation that is NOT in here was never grounded by the agent's own tools.
+    """
+    urls = set()
+    with M._data_lock:
+        details = list(M.tasks.get(task_id, {}).get("_search_details", []))
+    for entry in details:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("tool") == "fetch_page":
+            u = entry.get("url", "")
+            if u:
+                urls.add(_norm_url(u))
+            for m in _PLAIN_URL_RE.finditer(entry.get("content", "") or ""):
+                urls.add(_norm_url(m.group(0).rstrip(".,;:]")))
+            continue
+        for r in entry.get("results", []) or []:
+            if isinstance(r, dict):
+                u = r.get("url") or r.get("link") or ""
+                if u:
+                    urls.add(_norm_url(u))
+    return urls
+
+
+def _citation_exists(url):
+    """Existence probe for a source the agent never retrieved: re-search the
+    URL itself and require a same-URL hit. Used before ANY invention verdict."""
+    try:
+        res = json.loads(M.web_search(url))
+    except Exception as e:
+        print(f"[critic] existence probe failed for {url}: {e}")
+        return False
+    target = _norm_url(url)
+    for r in res.get("results", []) or []:
+        if isinstance(r, dict):
+            for u in (r.get("url"), r.get("link")):
+                if u and _norm_url(u) == target:
+                    return True
+    return False
 
 
 def _fetch_source(url, max_chars=6000):
@@ -258,14 +341,20 @@ def _verify_one(cit, mode):
         else:
             verdict = {**verdict, "corrected_meta": None}
 
-    if action == "UNVERIFIABLE" and verdict and src and not src.get("ok"):
-        # Transient fetch failure? One more direct fetch before stripping.
-        src2 = _fetch_source(cit["url"])
-        v2, f2 = _verify_source(cit, src2, mode)
-        if not f2 and v2 and v2.get("exists"):
-            verdict = v2
-            src = src2
-            action = classify(v2, src2)
+    if action == "UNVERIFIABLE" and verdict and not (src and src.get("ok")):
+        # The page could not be fetched directly (403/404/timeout). Before
+        # stripping, run targeted re-searches so a real but blocked/retired
+        # source gets a second chance (e.g. via search snippets or mirrors).
+        for _ in range(max(1, M.VERIFY_RETRIES)):
+            src2 = _search_and_fetch(cit["url"], cit.get("meta") or "")
+            if not src2.get("ok"):
+                continue
+            v2, f2 = _verify_source(cit, src2, mode)
+            if not f2 and v2 and v2.get("exists"):
+                verdict = v2
+                src = src2
+                action = classify(v2, src2)
+                break
 
     if action == "METADATA_FIX":
         corrected = (verdict or {}).get("corrected_meta")
@@ -331,11 +420,49 @@ def run_verification(task_id, sid, answer, mode="gpu"):
     if not citations:
         return answer, verdicts
 
+    # Deterministic anti-fabrication gate, computed ONCE per task: the set of
+    # URLs the agent genuinely retrieved, and per-URL usage so a single source
+    # backing many separate claims is surfaced. This runs before any critic
+    # LLM call and is decisive even when the critic model is unavailable.
+    retrieved = _retrieved_urls(task_id)
+    from collections import Counter
+
+    # Count every inline citation occurrence in the raw answer (not the
+    # deduped citation list) so a single URL backing several claims is
+    # surfaced, even when the parser dedupes the repeated citation.
+    usage = Counter()
+    for m in _META_RE.finditer(_CODE_FENCE_RE.sub("", answer or "")):
+        usage[m.group("url").rstrip(".,;:]")] += 1
+    per_cite_usage = {c["url"]: usage.get(c["url"], 0) for c in citations if c["url"]}
+    max_cites = int(getattr(M, "VERIFY_MAX_CITES_PER_URL", 3))
+
     per_para = {}
     for cit in citations:
         para = paras[cit["idx"]] if cit["idx"] < len(paras) else ""
         cit["prepared"] = para
-        action, note, replace, verdict = _verify_one(cit, mode)
+        pre_action = None
+        pre_note = ""
+        if not cit["url"]:
+            pre_action, pre_note = "UNVERIFIABLE", (
+                "citation has no URL to verify — cannot exist"
+            )
+        elif cit["url"] not in retrieved:
+            if not _citation_exists(cit["url"]):
+                pre_action, pre_note = "UNVERIFIABLE", (
+                    "URL was never retrieved by research and no verification "
+                    "search could find it — likely fabricated"
+                )
+        over = per_cite_usage.get(cit["url"], 0)
+        over_note = (""
+                     if over <= max_cites
+                     else f" SAME SOURCE CITED {over} TIMES for {over} separate claims — verify each maps to it.")
+
+        if pre_action is not None:
+            action, note, replace, verdict = pre_action, pre_note.strip(), "", None
+        else:
+            action, note, replace, verdict = _verify_one(cit, mode)
+        if over_note and action != "UNVERIFIABLE":
+            note = (note or "") + over_note
         verdicts.append({
             "url": cit["url"],
             "meta": cit.get("meta"),

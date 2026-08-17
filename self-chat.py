@@ -71,6 +71,11 @@ USERNAME_EDITOR = "editor"
 USERNAME_MODERATOR = "moderator"
 EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/editor.txt"
 MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/moderator.txt"
+CRITIQUE_PROMPT_FILE = "/home/palash/local-ai-files/contexts/critique.txt"
+
+# Kaya↔Kolpo cross-critique: at most this many retries on the same failing spot
+# before giving up and letting the deterministic gate auto-RED the story.
+MAX_CRITIQUE_RETRIES = 2
 
 DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 
@@ -1149,6 +1154,14 @@ def run_dry_run():
             "%details%",
             "%checklist%",
         },
+        CRITIQUE_PROMPT_FILE: {
+            "%genre%",
+            "%mediums%",
+            "%language%",
+            "%details%",
+            "%checklist%",
+            "%cast%",
+        },
     }
     for path, placeholders in handled.items():
         name = os.path.basename(path)
@@ -1361,7 +1374,7 @@ def wait_for_user_to_leave():
 """
 
 
-def call_llm(token, session_id, message, image_b64=None):
+def call_llm(token, session_id, message, image_b64=None, no_tools=False):
     headers = {"X-Auth-Token": token}
 
     payload = {
@@ -1373,6 +1386,8 @@ def call_llm(token, session_id, message, image_b64=None):
         payload["mode"] = "gpu"
     if image_b64:
         payload["image"] = image_b64
+    if no_tools:
+        payload["no_tools"] = True
 
     submit_respo = requests.post(
         f"{BASE_URL}/api/chat",
@@ -1706,17 +1721,22 @@ def run_single_conversation(
     stories_dir, fname = apply_title(title, stories_dir, fname)
     print(f"Story renamed to: {fname}\n")
 
-    print("=== Editor phase ===")
-    edited_path = run_editor(
+    print("=== Cross-critique phase (Kaya↔Kolpo self-verify) ===")
+    edited_path = run_cross_critique(
         stories_dir,
         fname,
         task,
         genre,
+        token_a,
+        session_a,
+        token_b,
+        session_b,
         mediums=medium,
         language=language,
         details=details,
         checklist=checklist,
         cast=cast_block,
+        citations=citations,
     )
 
     print("=== Deterministic verification ===")
@@ -2287,6 +2307,133 @@ def extract_markdown_fence(text):
     if match:
         return match.group(1).strip()
     return text.strip()
+
+
+def run_cross_critique(
+    stories_dir,
+    fname,
+    task,
+    genre,
+    token_a,
+    session_a,
+    token_b,
+    session_b,
+    mediums=None,
+    language="",
+    details="",
+    checklist=None,
+    cast="",
+    citations=None,
+    retries=MAX_CRITIQUE_RETRIES,
+):
+    """Kaya↔Kolpo cross-critique of the finished story (research-style self-verify).
+
+    The deterministic gate (verify_task_fulfillment) runs on the authored story
+    first — the cheap, no-LLM check. When it is clean, the slow LLM re-write is
+    skipped entirely and the story the two agents wrote is kept as-is. When
+    violations exist, the two agents become the verifiers: each retry has one of
+    them (rotating Kaya/Kolpo) review their partner's copy, name the exact spot
+    of every violation, and return a corrected markdown where ONLY those spots
+    changed. The gate re-runs after every attempt; residual problems after
+    ``retries`` attempts surface as an auto-RED (never a silently shipped story).
+
+    Returns the path to the ``.edited.md`` file, or ``None`` to keep the original.
+    """
+    try:
+        with open(fname, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        print(f"[critique] Could not read story {fname}: {e}")
+        return None
+
+    def _gate(check_text):
+        return verify_task_fulfillment(
+            text, check_text, mediums, language, retrieved_citations=citations
+        )
+
+    problems = _gate(text)
+    if not problems:
+        print("[critique] PASS — no deterministic violations, skipping LLM rewrite")
+        return None
+
+    try:
+        prompt = open(CRITIQUE_PROMPT_FILE, encoding="utf-8").read()
+        context_tokens = {
+            "%genre%": genre,
+            "%mediums%": ", ".join(mediums or []),
+            "%language%": language or "",
+            "%details%": details or "None",
+            "%checklist%": checklist_for(genre, "editor", checklist),
+            "%cast%": cast or "None",
+        }
+        for placeholder, value in context_tokens.items():
+            prompt = prompt.replace(placeholder, value)
+    except OSError as e:
+        print(f"[critique] Could not read prompt file: {e}")
+        return None
+
+    edited_path = fname.replace(".md", ".edited.md")
+    partners = [
+        (AGENT_NAMES["A"], token_a),
+        (AGENT_NAMES["B"], token_b),
+    ]
+    for attempt in range(max(1, retries)):
+        name, token = partners[attempt % len(partners)]
+        print(
+            f"[critique] Attempt {attempt + 1}/{max(1, retries)} by {name}: "
+            f"{len(problems)} residual violation(s)"
+        )
+        for p in problems:
+            print(f"[critique]   - {p}")
+        try:
+            session_id = create_session(
+                token, f"Cross-critique attempt {attempt + 1}", system_prompt=prompt
+            )
+        except Exception as e:
+            print(f"[critique] {name} could not start a critique session: {e}")
+            break
+        try:
+            wait_for_user_to_leave()
+            result = call_llm(
+                token,
+                session_id,
+                "Here is the complete story markdown:\n\n"
+                + text
+                + "\n\nVerification violations to resolve:\n"
+                + "\n".join(f"- {p}" for p in problems)
+                + "\n\nFollow your WORK MODE exactly: quote each violation's spot, "
+                "then return your CRITIQUE comment and the complete corrected "
+                "markdown in a single ```markdown code block, changing only the "
+                "flagged spots.",
+                no_tools=True,
+            )
+            revised = extract_markdown_fence(result["text"])
+            if revised:
+                revised = scrub_agent_names(revised)
+                revised = normalize_markdown_lines(revised)
+                revised = sanitize_story_images(revised, stories_dir)
+                revised = reanchor_story_images(revised, text, stories_dir)
+            if not revised:
+                print(f"[critique] {name} returned no markdown; keeping original")
+                continue
+            residual = _gate(revised)
+            if not residual:
+                with open(edited_path, "w", encoding="utf-8") as f:
+                    f.write(revised + "\n")
+                print(f"[critique] PASS after {name}'s retry — saved {edited_path}")
+                return edited_path
+            text = revised
+            problems = residual
+        except Exception as e:
+            print(f"[critique] Attempt {attempt + 1} failed: {e}")
+        finally:
+            if not keep_sessions:
+                delete_session(token, session_id)
+
+    print(f"[critique] FAIL after retries — {len(problems)} residual violation(s):")
+    for p in problems:
+        print(f"[critique]   - {p}")
+    return None
 
 
 def run_editor(

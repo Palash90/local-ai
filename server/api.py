@@ -627,6 +627,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "client_timestamp": body.get("client_timestamp"),
                 "research": bool(body.get("research")),
                 "cpu": bool(body.get("cpu")) and bool(body.get("research")),
+                "no_tools": bool(body.get("no_tools")),
             }
             # Route to the GPU lane (interactive UI users) or the lane chosen
             # by SELF_CHAT_MODE — cpu (self-chat agents on the RAM-backed CPU
@@ -661,6 +662,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "mode": mode,
                     "research": bool(body.get("research")),
                     "cpu": cpu_flagged,
+                    "no_tools": bool(body.get("no_tools")),
                 }
             self.send_json({"task_id": task_id})
         elif self.path == "/api/extract-file":

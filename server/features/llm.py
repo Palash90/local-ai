@@ -261,7 +261,8 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             print(f"[llm_round] Round {round_num} includes {len(tool_msgs)} tool message(s) with search results")  # DEBUG
         with M._data_lock:
             task_user = M.tasks.get(task_id, {}).get("_user", "")
-        tool_free = task_user in M.TOOL_FREE_AGENTS
+            task_no_tools = M.tasks.get(task_id, {}).get("no_tools", False)
+        tool_free = task_user in M.TOOL_FREE_AGENTS or task_no_tools
         payload = {
             "model": M.server_model_id(mode),
             "messages": messages,

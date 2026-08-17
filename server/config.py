@@ -51,6 +51,7 @@ FORCE_GPU_LANE = True
 # is deliberately NO overall cap on a report's verification budget.
 VERIFY_RETRIES = 2          # extra search/fetch attempts per citation
 VERIFY_FETCH_CHARS = 6000   # source text shown to the critic LLM per citation
+VERIFY_MAX_CITES_PER_URL = 3  # flag a source cited for more distinct claims than this
 
 # Review-only self-chat roles that must NEVER call tools. The editor/moderator
 # are the same creative LLM as the story-writing agents, and with the tool list
