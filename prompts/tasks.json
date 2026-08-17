@@ -201,11 +201,12 @@
     {
       "task": "A science article for kids",
       "inactive": false,
+      "research": true,
       "turns": 6,
       "details": [
         {
           "name": "research",
-          "value": "Perform a web search for fascinating, real-world science updates or curious facts, and ensure all factual claims map directly to the retrieved search sources."
+          "value": "Perform a research for a fascinating, real-world science update or curious fact, then write the research report in an engaging kids story format."
         },
         {
           "name": "topic",
@@ -229,7 +230,7 @@
           ]
         }
       ],
-      "genre": "News",
+      "genre": "Education",
       "roles": [
         "free"
       ],
@@ -239,7 +240,8 @@
         "Hindi"
       ],
       "mediums": [
-        "text"
+        "text",
+        "image"
       ]
     },
     {

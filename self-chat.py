@@ -221,6 +221,7 @@ def _parse_tasks(items):
         context = item.get("context") or None
         turns = MAX_MESSAGES_PER_AGENT
         raw_turns = item.get("turns")
+        research = bool(item.get("research"))
         if raw_turns is not None:
             try:
                 turns = int(raw_turns)
@@ -241,6 +242,7 @@ def _parse_tasks(items):
                 "inactive": inactive,
                 "context": context,
                 "turns": turns,
+                "research": research
             }
         )
     return tasks
@@ -1374,7 +1376,7 @@ def wait_for_user_to_leave():
 """
 
 
-def call_llm(token, session_id, message, image_b64=None, no_tools=False):
+def call_llm(token, session_id, message, image_b64=None, no_tools=False, research=False):
     headers = {"X-Auth-Token": token}
 
     payload = {
@@ -1388,6 +1390,8 @@ def call_llm(token, session_id, message, image_b64=None, no_tools=False):
         payload["image"] = image_b64
     if no_tools:
         payload["no_tools"] = True
+    if research:
+        payload["research"] = True
 
     submit_respo = requests.post(
         f"{BASE_URL}/api/chat",
@@ -1491,6 +1495,7 @@ def run_single_conversation(
     task_roles=None,
     round_fields=None,
     per_turn_task=False,
+    research=False
 ):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
@@ -1631,13 +1636,11 @@ def run_single_conversation(
 
         wait_for_user_to_leave()
 
-        print(prompt)
-
-        result = call_llm(token, session, prompt, image_b64=shared_image_b64)
+        result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=research)
         reply = result["text"]
         if not reply.strip():
             prompt += "\n[SYSTEM ERROR: Your previous output was empty. Generate real story content now.]"
-            result = call_llm(token, session, prompt, image_b64=shared_image_b64)
+            result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=research)
             reply = result["text"]
             if not reply.strip():
                 if turn_theme_id:
@@ -1653,7 +1656,7 @@ def run_single_conversation(
         if is_duplicate(reply, incoming):
             # Re-prompt agent to generate new content instead of repeating
             prompt += "\n[SYSTEM ERROR: Your previous output was identical to your partner's. Generate unique content now.]"
-            result = call_llm(token, session, prompt, image_b64=shared_image_b64)
+            result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=research)
             reply = result["text"]
 
         if turn_theme_id:
@@ -2742,6 +2745,7 @@ def run_forever():
                     turns=spec.get("turns"),
                     round_fields=round_fields,
                     per_turn_task=per_turn_task,
+                    research=spec.get("research")
                 )
             except Exception as e:
                 traceback.print_exc()
