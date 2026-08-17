@@ -60,6 +60,8 @@ from server.config import (  # noqa: F401
     UPLOADS_DIR,
     USERS_FILE,
     VENV_PYTHON,
+    VERIFY_FETCH_CHARS,
+    VERIFY_RETRIES,
     build_sys_content,
 )
 
@@ -249,6 +251,12 @@ from server.features.orchestration import (  # noqa: E402
     location_str,
     set_client_location,
     set_status,
+)
+
+from server.features.critic import (  # noqa: E402
+    extract_citations,
+    run_verification,
+    run_verification_worker,
 )
 
 # Point the M proxy at this module: from here on, feature modules resolve all

@@ -45,6 +45,13 @@ if SELF_CHAT_MODE not in ("cpu", "gpu"):
 # admission and in task_mode().
 FORCE_GPU_LANE = True
 
+# Research self-verification ("critic" pass). After a research answer is
+# generated, each inline "(Author, Venue, Year) [url]" citation is re-fetched
+# and checked by a second LLM call. These bounds are per-citation only — there
+# is deliberately NO overall cap on a report's verification budget.
+VERIFY_RETRIES = 2          # extra search/fetch attempts per citation
+VERIFY_FETCH_CHARS = 6000   # source text shown to the critic LLM per citation
+
 # Review-only self-chat roles that must NEVER call tools. The editor/moderator
 # are the same creative LLM as the story-writing agents, and with the tool list
 # enabled (tool_choice "auto") they spontaneously call generate_image/edit_image
