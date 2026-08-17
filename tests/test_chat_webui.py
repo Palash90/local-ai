@@ -1725,7 +1725,7 @@ class TestFetchPageMore:
 
             @property
             def headers(self):
-                return {"Content-Type": "application/pdf"}
+                return {"Content-Type": "image/png"}
 
             def raise_for_status(self):
                 pass
@@ -1793,6 +1793,124 @@ class TestFetchPageMore:
         monkeypatch.setattr(chat_webui.requests, "get", boom)
         out = json.loads(chat_webui.fetch_page("http://x/"))
         assert "Failed to fetch page" in out["error"]
+
+
+class _DocResp:
+    """Fake requests.Response carrying raw bytes for document parsing."""
+
+    def __init__(self, payload, ctype, url="http://x/"):
+        self._payload = payload
+        self._ctype = ctype
+        self.url = url
+
+    @property
+    def content(self):
+        return self._payload if isinstance(self._payload, bytes) else self._payload.encode()
+
+    @property
+    def text(self):
+        return self.content.decode("utf-8", errors="replace")
+
+    @property
+    def headers(self):
+        return {"Content-Type": self._ctype}
+
+    def raise_for_status(self):
+        pass
+
+
+class TestFetchPageDocs:
+    def _stub(self, chat_webui, monkeypatch, resp):
+        monkeypatch.setattr("socket.gethostbyname", lambda host: "93.184.216.34")
+        monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: resp)
+
+    def test_pdf_parsed(self, chat_webui, monkeypatch):
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Hello PDF world")
+        raw = doc.tobytes()
+        doc.close()
+        self._stub(
+            chat_webui, monkeypatch, _DocResp(raw, "application/pdf", "http://x/report.pdf")
+        )
+        out = json.loads(chat_webui.fetch_page("http://x/report.pdf"))
+        assert out["content"].strip() == "Hello PDF world"
+        assert out["title"] == "report.pdf"
+
+    def test_pdf_octet_stream_parsed_by_magic(self, chat_webui, monkeypatch):
+        import fitz
+
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Magic bytes win")
+        raw = doc.tobytes()
+        doc.close()
+        self._stub(
+            chat_webui, monkeypatch, _DocResp(raw, "application/octet-stream", "http://x/odd.bin")
+        )
+        out = json.loads(chat_webui.fetch_page("http://x/odd.bin"))
+        assert "Magic bytes win" in out["content"]
+
+    def test_garbage_pdf_reports_error(self, chat_webui, monkeypatch):
+        self._stub(
+            chat_webui, monkeypatch, _DocResp(b"not really a pdf", "application/pdf")
+        )
+        out = json.loads(chat_webui.fetch_page("http://x/no.pdf"))
+        assert "PDF" in out["content"]
+
+    def test_csv_parsed(self, chat_webui, monkeypatch):
+        self._stub(
+            chat_webui,
+            monkeypatch,
+            _DocResp("name,age\nAlice,30\nBob,25\n", "text/csv", "http://x/data.csv"),
+        )
+        out = json.loads(chat_webui.fetch_page("http://x/data.csv"))
+        assert "Alice" in out["content"]
+        assert "|" in out["content"]
+
+    def test_xlsx_parsed(self, chat_webui, monkeypatch):
+        from io import BytesIO
+
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sales"
+        ws.append(["Name", "Amount"])
+        ws.append(["Widget", 42])
+        buf = BytesIO()
+        wb.save(buf)
+        raw = buf.getvalue()
+        self._stub(
+            chat_webui,
+            monkeypatch,
+            _DocResp(raw, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "http://x/data.xlsx"),
+        )
+        out = json.loads(chat_webui.fetch_page("http://x/data.xlsx"))
+        assert "Sales" in out["content"]
+        assert "Widget" in out["content"]
+
+    def test_legacy_xls_unsupported(self, chat_webui, monkeypatch):
+        raw = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 10
+        self._stub(
+            chat_webui,
+            monkeypatch,
+            _DocResp(raw, "application/vnd.ms-excel", "http://x/old.xls"),
+        )
+        out = json.loads(chat_webui.fetch_page("http://x/old.xls"))
+        assert ".xls" in out["error"]
+
+    def test_doc_content_truncated(self, chat_webui, monkeypatch):
+        big = "a,b\n" + "x,y\n" * 1000
+        self._stub(
+            chat_webui,
+            monkeypatch,
+            _DocResp(big, "text/csv", "http://x/big.csv"),
+        )
+        out = json.loads(chat_webui.fetch_page("http://x/big.csv", max_chars=80))
+        assert out["content"].endswith("...[truncated]")
 
 
 # ---------------------------------------------------------------------------

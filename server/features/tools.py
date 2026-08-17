@@ -19,6 +19,157 @@ WEB_SEARCH_ENRICH_TOP = 2
 WEB_SEARCH_ENRICH_CHARS = 6000
 WEB_SEARCH_ENRICH_TIMEOUT = 25
 
+# Content-Types treated as plain readable text by fetch_page. Everything else
+# (other binary/media types) is declined without ever being fed to the LLM.
+_TEXTISH_TYPES = (
+    "text/html",
+    "text/plain",
+    "application/xhtml",
+    "application/json",
+    "application/xml",
+)
+
+# Hard cap on how much text a parsed CSV/spreadsheet/PDF may yield before
+# fetch_page stops reading rows/pages, so gigantic documents don't stall or
+# blow up the response.
+PARSE_ROW_LIMIT = 20000
+PARSE_PDF_CHARS = 400000
+
+
+def _decode_response_text(raw):
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1", errors="replace")
+
+
+def _detect_doc_type(url, content_type, raw):
+    """Classify fetched content as ``pdf``/``csv``/``excel`` or ``None``.
+
+    Content-Type is trusted first, then the URL extension, then magic bytes.
+    Anything unrecognized returns ``None`` so :func:`fetch_page` declines it as
+    binary instead of trying to read it. Legacy ``.xls`` (OLE2 compound
+    documents) is detected separately since no parser is available for it.
+    """
+    ext = os.path.splitext(urlparse(url).path)[1].lower()
+    ctype = (content_type or "").split(";")[0].strip().lower()
+
+    if ctype == "application/pdf" or ext == ".pdf" or raw.startswith(b"%PDF-"):
+        return "pdf"
+    if ctype == "text/csv" or ext == ".csv":
+        return "csv"
+    # Legacy binary OLE2 compound documents are .xls; we cannot parse those
+    # without xlrd, so report them explicitly rather than guessing as binary.
+    # Checked before the generic Excel Types because .xls is served as
+    # application/vnd.ms-excel just like xlsx templates.
+    if ext == ".xls" or raw.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return "excel_xls_unsupported"
+    if ctype in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "application/excel",
+    ) or ext in (".xlsx", ".xlsm", ".xltm", ".xltx"):
+        return "excel"
+    # Documents served as a generic octet-stream still get parsed if the URL
+    # names a known document extension.
+    if ctype == "application/octet-stream" and ext in (
+        ".pdf",
+        ".csv",
+        ".xlsx",
+        ".xlsm",
+        ".xltm",
+        ".xltx",
+    ):
+        return "pdf" if ext == ".pdf" else ("csv" if ext == ".csv" else "excel")
+    return None
+
+
+def _doc_result(final_url, title, text, max_chars):
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n...[truncated]"
+    return json.dumps(
+        {
+            "url": final_url,
+            "title": title,
+            "content": text if text else "(No readable text content extracted)",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _parse_pdf(raw, url):
+    """Extract text from a PDF via PyMuPDF. Returns ``(text, title)``."""
+    doc_title = os.path.basename(urlparse(url).path) or "PDF document"
+    try:
+        import fitz
+
+        doc = fitz.open(stream=raw, filetype="pdf")
+        parts = []
+        total_chars = 0
+        for page in doc:
+            text = page.get_text("text")
+            parts.append(text)
+            total_chars += len(text)
+            if total_chars > PARSE_PDF_CHARS:
+                parts.append("\n...[truncated by size]")
+                break
+        doc.close()
+        body = "\n".join(parts).strip()
+        if not body:
+            body = "(No extractable text in PDF — the pages are likely scanned images.)"
+        return body, doc_title
+    except Exception as e:
+        print(f"[fetch_page] PDF parse failed: {e}")
+        return f"(Could not extract text from this PDF: {e})", doc_title
+
+
+def _parse_csv(raw, url):
+    """Parse CSV text into pipe-separated rows. Returns ``(text, title)``."""
+    import csv
+    import io
+
+    doc_title = os.path.basename(urlparse(url).path) or "CSV document"
+    try:
+        reader = csv.reader(io.StringIO(_decode_response_text(raw)))
+        rows = []
+        for i, row in enumerate(reader):
+            if i >= PARSE_ROW_LIMIT:
+                rows.append("...[truncated by row limit]")
+                break
+            rows.append(" | ".join("" if c is None else c.strip() for c in row))
+        body = "\n".join(rows).strip() or "(Empty CSV)"
+        return body, doc_title
+    except Exception as e:
+        print(f"[fetch_page] CSV parse failed: {e}")
+        return f"(Could not parse this CSV: {e})", doc_title
+
+
+def _parse_excel(raw, url):
+    """Extract every sheet of an .xlsx workbook as text rows. Returns (text, title)."""
+    import io
+
+    from openpyxl import load_workbook
+
+    doc_title = os.path.basename(urlparse(url).path) or "Excel spreadsheet"
+    try:
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        blocks = []
+        for sheet in wb.worksheets:
+            blocks.append(f"### Sheet: {sheet.title}")
+            for row_idx, row in enumerate(sheet.iter_rows(values_only=True)):
+                if row_idx >= PARSE_ROW_LIMIT:
+                    blocks.append("...[truncated by row limit]")
+                    break
+                blocks.append(" | ".join("" if v is None else str(v) for v in row))
+        wb.close()
+        body = "\n".join(blocks).strip() or "(Empty spreadsheet)"
+        return body, doc_title
+    except Exception as e:
+        print(f"[fetch_page] Excel parse failed: {e}")
+        return f"(Could not parse this spreadsheet: {e})", doc_title
+
 
 def web_search(query, current_time=None, current_location=None):
     ts = datetime.now()
@@ -124,9 +275,33 @@ def fetch_page(url, max_chars=24000):
     try:
         r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
         r.raise_for_status()
+        raw = getattr(r, "content", None)
+        if raw is None:
+            raw = r.text.encode("utf-8", errors="replace")
         ctype = r.headers.get("Content-Type", "").lower()
-        if not any(t in ctype for t in ("text/html", "text/plain", "application/xhtml", "application/json", "application/xml")):
-            return json.dumps({"url": url, "content_type": ctype, "error": "Skipped: page is not readable text content (likely binary/PDF/media)."})
+        kind = _detect_doc_type(url, ctype, raw)
+
+        if kind == "pdf":
+            text, doc_title = _parse_pdf(raw, url)
+            return _doc_result(r.url, doc_title, text, max_chars)
+        if kind == "csv":
+            text, doc_title = _parse_csv(raw, url)
+            return _doc_result(r.url, doc_title, text, max_chars)
+        if kind == "excel":
+            text, doc_title = _parse_excel(raw, url)
+            return _doc_result(r.url, doc_title, text, max_chars)
+        if kind == "excel_xls_unsupported":
+            return json.dumps(
+                {
+                    "url": url,
+                    "content_type": ctype,
+                    "error": "This is a legacy .xls spreadsheet, which is not supported. "
+                    "Please retry with a .xlsx or CSV version of the file.",
+                }
+            )
+
+        if not any(t in ctype for t in _TEXTISH_TYPES):
+            return json.dumps({"url": url, "content_type": ctype, "error": "Skipped: page is not readable text content (likely binary/media)."})
         if not r.encoding:
             r.encoding = r.apparent_encoding
         soup = BeautifulSoup(r.text, "html.parser")
