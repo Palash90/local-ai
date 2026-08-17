@@ -197,13 +197,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "fetch_page",
-            "description": "Fetch and read the full text content of a web page. Use this AFTER web_search when the search snippets are not enough to answer the question (e.g. you need details, data, or an article's body). Pass the full URL of the page to read.",
+            "description": "Fetch and read the full text content of a web page. Use this AFTER web_search when the search snippets are not enough to answer the question (e.g. you need details, data, or an article's body). Pass the full URL of the page to read. Long pages are returned one chunk at a time; if the result reports total_chunks greater than 1, call fetch_page again with chunk=2, 3, ... to read the rest. PDFs with no extractable text expose page_images rendered from the scanned pages.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
                         "description": "The full URL of the web page to fetch (must start with http:// or https://)."
+                    },
+                    "chunk": {
+                        "type": "integer",
+                        "description": "Which chunk of the page to read (1 = first). Omit to read the first chunk."
                     }
                 },
                 "required": ["url"],

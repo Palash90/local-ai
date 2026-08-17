@@ -52,9 +52,10 @@ def task_mode(task_id):
     server selected by ``SELF_CHAT_MODE`` (``"cpu"`` or ``"gpu"``); tasks from
     interactive users always use the GPU server. A per-task ``mode`` override
     (set at /api/chat admission, e.g. by ``self-chat.py --gpu``) wins over the
-    global flag for agent tasks. When ``FORCE_GPU_LANE`` is set (test-time),
-    every task — agent or not — runs on the GPU lane; a real web-UI human
-    request never runs on the CPU lane regardless of the flag.
+    global flag for agent tasks. An interactive user who explicitly opted into
+    the CPU lane for a research task (task marked ``cpu``) always runs on the
+    CPU server. When ``FORCE_GPU_LANE`` is set (test-time), every non-flagged
+    task — agent or not — runs on the GPU lane.
     """
     with M._data_lock:
         t = M.tasks.get(task_id)
@@ -62,6 +63,9 @@ def task_mode(task_id):
             return "gpu"
         user = t.get("_user", "")
         mode = t.get("mode")
+        cpu_flagged = bool(t.get("cpu"))
+    if cpu_flagged:
+        return "cpu"
     if M.FORCE_GPU_LANE:
         return "gpu"
     if user in M._agent_users and mode in ("gpu", "cpu"):

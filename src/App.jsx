@@ -208,7 +208,7 @@ export default function App() {
   }
 
   // ---- Chat / Send ----
-  async function handleSend(text, image) {
+  async function handleSend(text, image, research, cpu) {
     if (!currentSessionId) return
     const taskSid = currentSessionId
     setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
@@ -216,7 +216,7 @@ export default function App() {
     const userMsg = { role: 'user', content: text || '\uD83D\uDCC4 file', _timestamp: new Date().toISOString() }
 
     try {
-      const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined)
+      const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined, undefined, research, cpu)
       const taskId = data.task_id
 
       setPendingMessages(prev => ({

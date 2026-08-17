@@ -625,6 +625,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "audio": body.get("audio"),
                 "user": user,
                 "client_timestamp": body.get("client_timestamp"),
+                "research": bool(body.get("research")),
+                "cpu": bool(body.get("cpu")) and bool(body.get("research")),
             }
             # Route to the GPU lane (interactive UI users) or the lane chosen
             # by SELF_CHAT_MODE — cpu (self-chat agents on the RAM-backed CPU
@@ -632,10 +634,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # the two never wait behind each other. Agent users may override
             # the lane per request (self-chat.py --gpu sends mode="gpu"); the
             # override is ignored for interactive users, who always use GPU.
+            # Interactive users may also opt into the CPU lane explicitly for a
+            # research task via the UI's "CPU" toggle (gated on Research mode,
+            # and honored server-side only when research is set).
+            cpu_flagged = entry["cpu"]
             mode = body.get("mode")
             if mode not in ("gpu", "cpu") or user not in _agent_users:
                 mode = SELF_CHAT_MODE if user in _agent_users else "gpu"
-            if FORCE_GPU_LANE:
+            if cpu_flagged:
+                mode = "cpu"
+            if FORCE_GPU_LANE and not cpu_flagged:
                 # Test-time override: never admit anything to the CPU lane.
                 mode = "gpu"
             entry["mode"] = mode
@@ -651,6 +659,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "message": "Waiting in line...",
                     "session_id": sid,
                     "mode": mode,
+                    "research": bool(body.get("research")),
+                    "cpu": cpu_flagged,
                 }
             self.send_json({"task_id": task_id})
         elif self.path == "/api/extract-file":

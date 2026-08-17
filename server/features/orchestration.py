@@ -29,6 +29,16 @@ def _task_user(task_id):
         return M.tasks.get(task_id, {}).get("_user", "")
 
 
+def _task_max_rounds(task_id):
+    """Tool-loop round budget for a task: 10 for normal chats, 50 when the
+    UI's research toggle is on (stored on the task as ``research``)."""
+    with M._data_lock:
+        t = M.tasks.get(task_id, {})
+        if t.get("research"):
+            return M.MAX_TOOL_ROUNDS.get("research", 50)
+    return M.MAX_TOOL_ROUNDS.get("default", 10)
+
+
 def _set_task_error(task_id, error, sid=None):
     with M._data_lock:
         if task_id in M.tasks:
@@ -152,6 +162,8 @@ def _event_loop():
                     "_user": user,
                     "_client_timestamp": client_ts,
                     "mode": t.get("mode"),
+                    "research": bool(data.get("research")),
+                    "cpu": bool(data.get("cpu")),
                 }
             # (The owning lane's _current_task_ids[mode] was already set by
             # _queue_worker before this "start" event was posted.)
@@ -243,7 +255,7 @@ def _event_loop():
                     tt = M.tasks.get(task_id)
                     if tt:
                         tt["_round"] = round_num
-                if round_num < 10:
+                if round_num < M._task_max_rounds(task_id):
                     M._start_llm_round(task_id, sid, round_num)
                 else:
                     M._set_task_error(task_id, "Max tool rounds exceeded", sid)
@@ -275,7 +287,7 @@ def _event_loop():
                     tt = M.tasks.get(task_id)
                     if tt:
                         tt["_round"] = round_num
-                if round_num < 10:
+                if round_num < M._task_max_rounds(task_id):
                     M._start_llm_round(task_id, data["sid"], round_num)
                 else:
                     M._set_task_error(task_id, "Max tool rounds exceeded", data["sid"])
@@ -368,6 +380,8 @@ def _queue_worker(mode):
             audio=item.get("audio"),
             user=item.get("user", ""),
             client_timestamp=item.get("client_timestamp"),
+            research=item.get("research"),
+            cpu=item.get("cpu"),
         )
         # Wait for this task to finish (status becomes "done", "error" or "cancelled")
         # before dequeuing the next item IN THIS LANE. The other lane's worker

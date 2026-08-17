@@ -122,3 +122,31 @@ test('doc file attachment uploads and sends URL', async ({ page, mount }) => {
   await component.locator('#send-btn').click();
   expect(sent).toContain('[FILE: /uploads/notes.md](notes.md)');
 });
+
+test('cpu toggle is disabled until research is enabled', async ({ mount }) => {
+  const component = await mount(<InputBar onSend={async () => {}} hasPending={false} />);
+  await expect(component.locator('#cpu-toggle input')).toBeDisabled();
+  await component.locator('#research-toggle input').check();
+  await expect(component.locator('#cpu-toggle input')).toBeEnabled();
+});
+
+test('unchecking research resets the cpu flag', async ({ mount }) => {
+  const component = await mount(<InputBar onSend={async () => {}} hasPending={false} />);
+  await component.locator('#research-toggle input').check();
+  await component.locator('#cpu-toggle input').check();
+  await expect(component.locator('#cpu-toggle input')).toBeChecked();
+  await component.locator('#research-toggle input').uncheck();
+  await expect(component.locator('#cpu-toggle input')).not.toBeChecked();
+  await expect(component.locator('#cpu-toggle input')).toBeDisabled();
+});
+
+test('sends research and cpu flags with the message', async ({ mount }) => {
+  let sent = null;
+  const component = await mount(<InputBar onSend={async (...args) => { sent = args; }} hasPending={false} />);
+  await component.locator('#research-toggle input').check();
+  await component.locator('#cpu-toggle input').check();
+  await component.locator('#msg-input').fill('deep dive');
+  await component.locator('#send-btn').click();
+  expect(sent[2]).toBe(true);
+  expect(sent[3]).toBe(true);
+});

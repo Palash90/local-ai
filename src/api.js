@@ -85,8 +85,10 @@ function localISOString() {
     sign + pad(Math.floor(Math.abs(tz)/60)) + ':' + pad(Math.abs(tz)%60)
 }
 
-export async function sendMessage(sessionId, message, image, audio, clientTimestamp) {
+export async function sendMessage(sessionId, message, image, audio, clientTimestamp, research, cpu) {
   const body = { session_id: sessionId, message, client_timestamp: clientTimestamp || localISOString() };
+  if (research) body.research = true;
+  if (cpu) body.cpu = true;
   if (image) body.image = image;
   if (audio) body.audio = audio;
   const r = await authFetch('/api/chat', {

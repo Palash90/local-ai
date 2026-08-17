@@ -26,6 +26,8 @@ function readFileAsBase64(file) {
 
 export default function InputBar({ onSend, hasPending }) {
   const [text, setText] = useState('')
+  const [research, setResearch] = useState(false)
+  const [cpu, setCpu] = useState(false)
   const [attachedImage, setAttachedImage] = useState(null)
   const [attachedFile, setAttachedFile] = useState(null)
   const [attachedFileUrl, setAttachedFileUrl] = useState(null)
@@ -134,7 +136,7 @@ export default function InputBar({ onSend, hasPending }) {
       finalText = '[FILE: ' + attachedFileUrl + '](' + attachedFile + ')\n\n' + (msg || 'See attached file above.')
     }
     try {
-      await onSend(finalText, attachedImage)
+      await onSend(finalText, attachedImage, research, cpu)
     } finally {
       sendingRef.current = false
     }
@@ -167,6 +169,12 @@ export default function InputBar({ onSend, hasPending }) {
     setAttachedFileUrl(null)
   }
 
+  function handleResearchChange(e) {
+    const checked = e.target.checked
+    setResearch(checked)
+    if (!checked) setCpu(false)
+  }
+
   return (
     <div id="input-bar">
       <button id="attach-btn" onClick={() => fileInputRef.current?.click()}>+</button>
@@ -188,6 +196,14 @@ export default function InputBar({ onSend, hasPending }) {
         onKeyDown={handleKeyDown}
         onInput={handleInput}
       />
+      <label id="research-toggle" title="Research mode — lets the agent search and read pages for up to 50 tool rounds until your question is fully answered.">
+        <input type="checkbox" checked={research} onChange={handleResearchChange} />
+        Research
+      </label>
+      <label id="cpu-toggle" className={research ? '' : 'disabled'} title={research ? "Run the research on the CPU-backed server instead of the GPU." : "Only available with Research mode."}>
+        <input type="checkbox" checked={cpu} disabled={!research} onChange={e => setCpu(e.target.checked)} />
+        CPU
+      </label>
       <button id="send-btn" onClick={handleSend}><span className="send-icon">&#10148;</span><span className="send-text">{hasPending ? 'Queue' : 'Send'}</span></button>
     </div>
   )

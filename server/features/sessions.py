@@ -11,6 +11,19 @@ from datetime import datetime
 
 from server.features.state import M
 
+# Injected into the system prompt only when the UI's "research" toggle is on.
+RESEARCH_DIRECTIVE = """## Research Mode
+You are performing deep, sourced research on the user's question.
+- Plan: break the question into a few sub-questions/angles before answering.
+- Gather: use web_search and fetch_page repeatedly. Fetch full pages and, when
+  a page is long, read through it (a page may be returned in chunks).
+- Cite: record the exact URL for every fact you rely on. Never invent sources.
+- Verify: cross-check important claims against more than one source.
+- Conclude: answer only once the question is fully covered, then write a
+  structured report (summary, findings with citations, limitations).
+- Budget: you may keep searching/fetching for up to 50 rounds of tools, but
+  stop as soon as the question is actually answered."""
+
 
 def _session_file(user):
     return os.path.join(M.SESSIONS_DIR, f"sessions_{M._safe_username(user)}.json")
@@ -202,6 +215,9 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
     full_sys_content = f"{base_sys}\n\n{date_loc_context}{context_block}"
     for blk in extra_prompts:
         full_sys_content += f"\n\n## {blk.get('name', 'System Prompt')}\n{blk.get('content', '')}"
+    with M._data_lock:
+        if M.tasks.get(task_id, {}).get("research"):
+            full_sys_content += f"\n\n{RESEARCH_DIRECTIVE}"
     full_sys_content = full_sys_content.replace(
         "%current_time%", ts.strftime("%Y-%m-%d %A %H:%M")
     )

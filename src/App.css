@@ -1159,6 +1159,81 @@ a.page-modal-url:hover {
   display: none;
 }
 
+#research-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #a0a0b8;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+  transition: all .2s;
+}
+
+#research-toggle:hover {
+  border-color: rgba(74, 108, 247, 0.4);
+  color: #e0e0e0;
+}
+
+#research-toggle:has(input:checked) {
+  border-color: rgba(106, 76, 247, 0.6);
+  color: #c4a6ff;
+  background: rgba(106, 76, 247, 0.12);
+}
+
+#research-toggle input {
+  accent-color: #6a4cf7;
+  cursor: pointer;
+}
+
+#cpu-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #a0a0b8;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+  transition: all .2s;
+}
+
+#cpu-toggle:hover:not(.disabled) {
+  border-color: rgba(74, 108, 247, 0.4);
+  color: #e0e0e0;
+}
+
+#cpu-toggle:has(input:checked) {
+  border-color: rgba(74, 108, 247, 0.6);
+  color: #7fb8ff;
+  background: rgba(74, 108, 247, 0.12);
+}
+
+#cpu-toggle.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#cpu-toggle input {
+  accent-color: #4a6cf7;
+  cursor: pointer;
+}
+
+#cpu-toggle.disabled input {
+  cursor: not-allowed;
+}
+
 #attach-btn {
   background: rgba(255, 255, 255, 0.04);
   color: #888;

@@ -35,6 +35,11 @@ _TEXTISH_TYPES = (
 PARSE_ROW_LIMIT = 20000
 PARSE_PDF_CHARS = 400000
 
+# When a PDF has no extractable text (scanned pages), render up to this many
+# pages to PNG files so the multimodal model can read the page images.
+PDF_PAGE_IMAGE_LIMIT = 8
+PDF_PAGE_IMAGE_ZOOM = 1.5
+
 
 def _decode_response_text(raw):
     for enc in ("utf-8-sig", "utf-8", "latin-1"):
@@ -86,21 +91,89 @@ def _detect_doc_type(url, content_type, raw):
     return None
 
 
-def _doc_result(final_url, title, text, max_chars):
-    if len(text) > max_chars:
-        text = text[:max_chars] + "\n...[truncated]"
-    return json.dumps(
-        {
-            "url": final_url,
-            "title": title,
-            "content": text if text else "(No readable text content extracted)",
-        },
-        ensure_ascii=False,
-    )
+def _chunk_pages(text, size):
+    """Split ``text`` into chunks of up to ``size`` characters."""
+    if len(text) <= size:
+        return [text]
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+def _doc_result(final_url, title, text, max_chars, chunk=1, page_images=None):
+    """Build the ``fetch_page`` JSON payload.
+
+    Long text is split into chunks of up to ``max_chars`` chars and only chunk
+    number ``chunk`` is returned; the payload exposes ``total_chunks`` and
+    ``next_chunk`` so the agent can page through the rest by calling
+    ``fetch_page`` again with ``chunk=2,3,...``. ``page_images`` (rendered PDF
+    pages) are attached alongside so a multimodal model can read scanned pages.
+    """
+    text = (text or "").strip() or "(No readable text content extracted)"
+    pages = _chunk_pages(text, max_chars)
+    idx = max(0, min(chunk - 1, len(pages) - 1))
+    body = pages[idx]
+    if page_images:
+        body += (
+            "\n\n[This PDF has no extractable text — the pages below were rendered "
+            "as images. Use the read_image tool on each URL to view a page.]"
+        )
+    payload = {"url": final_url, "title": title, "content": body}
+    if page_images:
+        payload["page_images"] = page_images
+    if len(pages) > 1:
+        payload["chunk"] = idx + 1
+        payload["total_chunks"] = len(pages)
+        payload["next_chunk"] = idx + 2 if idx + 1 < len(pages) else None
+        payload["note"] = (
+            f"Page content is split across {len(pages)} chunks. Call fetch_page "
+            f"again with chunk={idx + 2} to read the next chunk."
+            if payload["next_chunk"]
+            else "End of page content."
+        )
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _render_pdf_pages(doc, url):
+    """Render image-only PDF pages (scanned) to PNG files the model can view.
+
+    Rendered files land under ``IMG_PATH/pdf_pages`` and are returned as
+    ``/output/pdf_pages/...`` URLs so ``read_image`` / ``resolve_image_path``
+    can resolve them. Returns an empty list when nothing could be rendered.
+    """
+    import hashlib
+
+    slug = hashlib.md5(url.encode("utf-8", errors="replace")).hexdigest()[:12]
+    outdir = os.path.join(M.IMG_PATH, "pdf_pages")
+    try:
+        os.makedirs(outdir, exist_ok=True)
+    except OSError as e:
+        print(f"[fetch_page] PDF page render dir failed: {e}")
+        return []
+    urls = []
+    for i, page in enumerate(doc):
+        if i >= PDF_PAGE_IMAGE_LIMIT:
+            break
+        try:
+            import fitz
+
+            pix = page.get_pixmap(
+                matrix=fitz.Matrix(PDF_PAGE_IMAGE_ZOOM, PDF_PAGE_IMAGE_ZOOM)
+            )
+            fname = f"{slug}-p{i + 1}.png"
+            pix.save(os.path.join(outdir, fname))
+            urls.append(f"/output/pdf_pages/{fname}")
+        except Exception as e:
+            print(f"[fetch_page] PDF page {i + 1} render failed: {e}")
+            break
+    return urls
 
 
 def _parse_pdf(raw, url):
-    """Extract text from a PDF via PyMuPDF. Returns ``(text, title)``."""
+    """Extract text from a PDF via PyMuPDF.
+
+    Returns ``(text, title, page_images)``. If the PDF has no extractable text
+    (scanned pages) the first ``PDF_PAGE_IMAGE_LIMIT`` pages are rendered to PNG
+    files and returned as ``/output/pdf_pages/...`` URLs.
+    """
     doc_title = os.path.basename(urlparse(url).path) or "PDF document"
     try:
         import fitz
@@ -115,14 +188,16 @@ def _parse_pdf(raw, url):
             if total_chars > PARSE_PDF_CHARS:
                 parts.append("\n...[truncated by size]")
                 break
-        doc.close()
         body = "\n".join(parts).strip()
+        page_images = []
         if not body:
+            page_images = _render_pdf_pages(doc, url)
             body = "(No extractable text in PDF — the pages are likely scanned images.)"
-        return body, doc_title
+        doc.close()
+        return body, doc_title, page_images
     except Exception as e:
         print(f"[fetch_page] PDF parse failed: {e}")
-        return f"(Could not extract text from this PDF: {e})", doc_title
+        return f"(Could not extract text from this PDF: {e})", doc_title, []
 
 
 def _parse_csv(raw, url):
@@ -247,7 +322,7 @@ def _enrich_top_results(results):
     return results
 
 
-def fetch_page(url, max_chars=24000):
+def fetch_page(url, max_chars=24000, chunk=1):
     import ipaddress
     import socket
 
@@ -255,6 +330,10 @@ def fetch_page(url, max_chars=24000):
 
     if not url:
         return json.dumps({"url": "", "error": "No URL provided."})
+    try:
+        chunk = max(1, int(chunk or 1))
+    except (TypeError, ValueError):
+        chunk = 1
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -282,14 +361,14 @@ def fetch_page(url, max_chars=24000):
         kind = _detect_doc_type(url, ctype, raw)
 
         if kind == "pdf":
-            text, doc_title = _parse_pdf(raw, url)
-            return _doc_result(r.url, doc_title, text, max_chars)
+            text, doc_title, page_images = _parse_pdf(raw, url)
+            return _doc_result(r.url, doc_title, text, max_chars, chunk, page_images)
         if kind == "csv":
             text, doc_title = _parse_csv(raw, url)
-            return _doc_result(r.url, doc_title, text, max_chars)
+            return _doc_result(r.url, doc_title, text, max_chars, chunk)
         if kind == "excel":
             text, doc_title = _parse_excel(raw, url)
-            return _doc_result(r.url, doc_title, text, max_chars)
+            return _doc_result(r.url, doc_title, text, max_chars, chunk)
         if kind == "excel_xls_unsupported":
             return json.dumps(
                 {
@@ -311,13 +390,7 @@ def fetch_page(url, max_chars=24000):
         main = soup.find("main") or soup.find("article") or soup.find("body") or soup
         text = main.get_text(separator="\n", strip=True)
         text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-        if len(text) > max_chars:
-            text = text[:max_chars] + "\n...[truncated]"
-        return json.dumps({
-            "url": r.url,
-            "title": title,
-            "content": text or "(No readable text content extracted)",
-        }, ensure_ascii=False)
+        return _doc_result(r.url, title, text, max_chars, chunk)
     except Exception as e:
         print(f"[fetch_page] Failed: {e}")
         return json.dumps({"url": url, "error": f"Failed to fetch page: {e}"})
@@ -429,7 +502,7 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
     elif tool_name == "fetch_page":
         M.set_status(task_id, f"Fetching page: {args.get('url', '')}...")
         try:
-            result = M.fetch_page(args.get("url", ""))
+            result = M.fetch_page(args.get("url", ""), chunk=args.get("chunk", 1))
         except Exception as e:
             print(f"[fetch_page] Unhandled exception for task {task_id}: {e}")
             result = json.dumps({"url": args.get("url", ""), "error": str(e)})

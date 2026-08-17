@@ -326,6 +326,18 @@ class TestChat:
         st = env["handler"]("/api/status/%s" % task_id)
         assert st.json["status"] == "queued"
 
+    def test_research_flag_stored(self, api_env):
+        env = api_env
+        sid = _create_session(env, env["auth_a"])
+        r = env["handler"]("/api/chat", method="POST",
+                           data={"message": "deep dive", "session_id": sid, "research": True},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        task_id = r.json["task_id"]
+        entry = next(t for t in env["chat"]._task_queues["gpu"] if t["task_id"] == task_id)
+        assert entry["research"] is True
+        assert env["chat"].tasks[task_id]["research"] is True
+
     def test_agent_task_queued_on_cpu_lane_by_default(self, api_env):
         env = api_env
         env["chat"]._agent_users.add("alice")
@@ -432,6 +444,34 @@ class TestChat:
         assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
         assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
         assert env["chat"].tasks[task_id]["mode"] == "gpu"
+
+    def test_cpu_flag_routes_research_task_to_cpu_lane(self, api_env):
+        env = api_env
+        sid = _create_session(env, env["auth_a"])
+        r = env["handler"]("/api/chat", method="POST",
+                           data={"message": "heavy research", "session_id": sid,
+                                 "research": True, "cpu": True},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        task_id = r.json["task_id"]
+        assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
+        assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
+        assert env["chat"].tasks[task_id]["cpu"] is True
+        assert env["chat"].tasks[task_id]["mode"] == "cpu"
+
+    def test_cpu_flag_ignored_without_research(self, api_env):
+        env = api_env
+        sid = _create_session(env, env["auth_a"])
+        r = env["handler"]("/api/chat", method="POST",
+                           data={"message": "hi", "session_id": sid,
+                                 "cpu": True},
+                           headers=env["auth_a"])
+        assert r.status == 200
+        task_id = r.json["task_id"]
+        assert any(t["task_id"] == task_id for t in env["chat"]._task_queues["gpu"])
+        assert not any(t["task_id"] == task_id for t in env["chat"]._task_queues["cpu"])
+        entry = next(t for t in env["chat"]._task_queues["gpu"] if t["task_id"] == task_id)
+        assert entry["cpu"] is False
 
     def test_queue_full_returns_503(self, api_env):
         env = api_env

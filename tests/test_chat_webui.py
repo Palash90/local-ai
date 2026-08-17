@@ -585,7 +585,7 @@ class TestFetchPage:
         assert out["title"] == "Example"
         assert "Hello world" in out["content"]
 
-    def test_truncates_long_content(self, chat_webui, monkeypatch):
+    def test_splits_long_content_into_chunks(self, chat_webui, monkeypatch):
         monkeypatch.setattr("socket.gethostbyname", lambda host: "93.184.216.34")
 
         class FakeResp:
@@ -594,7 +594,8 @@ class TestFetchPage:
 
             @property
             def text(self):
-                return "<html><body><main>" + "word " * 5000 + "</main></body></html>"
+                body = " ".join("word%d" % i for i in range(500))
+                return "<html><body><main>" + body + "</main></body></html>"
 
             @property
             def headers(self):
@@ -604,8 +605,17 @@ class TestFetchPage:
                 pass
 
         monkeypatch.setattr(chat_webui.requests, "get", lambda *a, **k: FakeResp())
-        out = json.loads(chat_webui.fetch_page("http://example.com/", max_chars=100))
-        assert out["content"].endswith("...[truncated]")
+        first = json.loads(chat_webui.fetch_page("http://example.com/", max_chars=100))
+        assert first["chunk"] == 1
+        assert first["total_chunks"] > 1
+        assert first["next_chunk"] == 2
+        assert len(first["content"]) == 100
+        assert not first["content"].endswith("...[truncated]")
+
+        second = json.loads(chat_webui.fetch_page("http://example.com/", max_chars=100, chunk=2))
+        assert second["chunk"] == 2
+        assert len(second["content"]) == 100
+        assert second["content"] != first["content"]
 
 
 class TestFinalizeTask:
@@ -1283,6 +1293,16 @@ class TestActiveModelId:
         chat_webui.tasks["t1"] = {"_user": "alice", "mode": "cpu"}
         assert chat_webui.task_mode("t1") == "gpu"
 
+    def test_task_mode_cpu_flag_wins_for_human(self, chat_webui, monkeypatch):
+        chat_webui._agent_users.clear()
+        monkeypatch.setattr(chat_webui, "FORCE_GPU_LANE", True)
+        chat_webui.tasks["t1"] = {"_user": "alice", "mode": "gpu", "cpu": True}
+        chat_webui.tasks["t2"] = {"_user": "bob", "mode": "cpu", "cpu": True}
+        chat_webui.tasks["t3"] = {"_user": "carol", "cpu": True}
+        assert chat_webui.task_mode("t1") == "cpu"
+        assert chat_webui.task_mode("t2") == "cpu"
+        assert chat_webui.task_mode("t3") == "cpu"
+
     def test_task_mode_bad_override_ignored(self, chat_webui, monkeypatch):
         chat_webui._agent_users.clear()
         chat_webui._agent_users.add("editor")
@@ -1902,7 +1922,7 @@ class TestFetchPageDocs:
         out = json.loads(chat_webui.fetch_page("http://x/old.xls"))
         assert ".xls" in out["error"]
 
-    def test_doc_content_truncated(self, chat_webui, monkeypatch):
+    def test_doc_content_chunked(self, chat_webui, monkeypatch):
         big = "a,b\n" + "x,y\n" * 1000
         self._stub(
             chat_webui,
@@ -1910,7 +1930,29 @@ class TestFetchPageDocs:
             _DocResp(big, "text/csv", "http://x/big.csv"),
         )
         out = json.loads(chat_webui.fetch_page("http://x/big.csv", max_chars=80))
-        assert out["content"].endswith("...[truncated]")
+        assert out["total_chunks"] > 1
+        assert out["chunk"] == 1
+        assert out["next_chunk"] == 2
+        assert len(out["content"]) == 80
+
+    def test_scanned_pdf_renders_page_images(self, chat_webui, temp_paths, monkeypatch):
+        import fitz
+
+        doc = fitz.open()
+        doc.new_page()
+        doc.new_page()
+        raw = doc.tobytes()
+        doc.close()
+        self._stub(
+            chat_webui, monkeypatch, _DocResp(raw, "application/pdf", "http://x/scanned.pdf")
+        )
+        out = json.loads(chat_webui.fetch_page("http://x/scanned.pdf"))
+        assert out["page_images"]
+        for url in out["page_images"]:
+            assert url.startswith("/output/pdf_pages/")
+            assert url.endswith(".png")
+            fpath = os.path.join(temp_paths, "output", url[len("/output/"):])
+            assert os.path.exists(fpath)
 
 
 # ---------------------------------------------------------------------------
@@ -2080,7 +2122,7 @@ class TestDispatchToolMore:
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
         monkeypatch.setattr(
             chat_webui, "fetch_page",
-            lambda url: json.dumps({"url": "http://x/", "title": "T", "content": "body"}),
+            lambda url, chunk=1: json.dumps({"url": "http://x/", "title": "T", "content": "body"}),
         )
         chat_webui.tasks["t1"] = {"session_id": "s1"}
         tc = {"id": "tc1", "function": {"name": "fetch_page", "arguments": json.dumps({"url": "http://x/"})}}
@@ -2092,7 +2134,7 @@ class TestDispatchToolMore:
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
 
-        def boom(url):
+        def boom(url, chunk=1):
             raise RuntimeError("bad page")
 
         monkeypatch.setattr(chat_webui, "fetch_page", boom)
@@ -2105,7 +2147,7 @@ class TestDispatchToolMore:
     def test_fetch_page_non_json_result(self, chat_webui, monkeypatch):
         events = []
         chat_webui._event_post = lambda *a, **k: events.append((a, k))
-        monkeypatch.setattr(chat_webui, "fetch_page", lambda url: "not json at all")
+        monkeypatch.setattr(chat_webui, "fetch_page", lambda url, chunk=1: "not json at all")
         chat_webui.tasks["t1"] = {"session_id": "s1"}
         tc = {"id": "tc1", "function": {"name": "fetch_page", "arguments": json.dumps({"url": "http://x/"})}}
         chat_webui._dispatch_tool("t1", "s1", tc, None, 0, 0)
@@ -3000,6 +3042,31 @@ class TestEventLoop:
         ev = [("tool_ok", "t1", {"sid": "s1", "tc_id": "c1", "result": "{}", "round": 9, "tool_index": 0})]
         self._run(chat_webui, monkeypatch, ev)
         assert chat_webui.tasks["t1"]["status"] == "error"
+
+    def test_start_stores_research_flag(self, chat_webui, temp_paths, monkeypatch):
+        chat_webui.sessions.clear()
+        chat_webui.sessions_meta.clear()
+        chat_webui.sessions["s1"] = []
+        chat_webui.sessions_meta["s1"] = {"name": "N", "user_id": "a", "created": 1, "updated": 1, "system_prompts": []}
+        chat_webui.tasks["t1"] = {"status": "queued", "session_id": "s1", "mode": "gpu"}
+        ev = [
+            ("start", "t1", {"sid": "s1", "message": "do deep research", "image": None, "audio": None, "user": "alice", "client_timestamp": None, "research": True}),
+        ]
+        self._run(chat_webui, monkeypatch, ev)
+        assert chat_webui.tasks["t1"]["research"] is True
+
+    def test_tool_ok_research_round_limit(self, chat_webui, temp_paths, monkeypatch):
+        chat_webui.sessions.clear()
+        chat_webui.sessions_meta.clear()
+        chat_webui.sessions["s1"] = []
+        chat_webui.sessions_meta["s1"] = {"name": "N", "user_id": "a", "created": 1, "updated": 1, "system_prompts": []}
+        chat_webui.tasks["t1"] = {"status": "working", "_state": "tools_running", "_pending_tools": 1, "session_id": "s1", "research": True}
+        ev = [("tool_ok", "t1", {"sid": "s1", "tc_id": "c1", "result": "{}", "round": 9, "tool_index": 0})]
+        self._run(chat_webui, monkeypatch, ev)
+        # research tasks get the 50-round budget, not the 10-round default
+        assert chat_webui.tasks["t1"]["_round"] == 10
+        assert chat_webui.tasks["t1"]["_state"] == "llm_waiting"
+        assert chat_webui.tasks["t1"]["status"] == "working"
 
     def test_llm_ok_wrong_state(self, chat_webui, temp_paths, monkeypatch):
         chat_webui.tasks["t1"] = {"status": "working", "_state": "tools_running", "session_id": "s1"}

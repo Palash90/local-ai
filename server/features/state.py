@@ -74,6 +74,12 @@ _data_lock = threading.Lock()
 
 MAX_QUEUE_SIZE = 5
 
+# Tool-loop budget per task. Normal chats stay light (10 LLM rounds ≈ small
+# number of tool calls); tasks sent with the UI's "research" toggle get the
+# deep recursive budget so the agent can chunk-walk pages and re-search until
+# the question is answered.
+MAX_TOOL_ROUNDS = {"default": 10, "research": 50}
+
 # Two independent task lanes so interactive UI (GPU) users and self-chat
 # agents (CPU) never queue behind each other. Each lane has its own list,
 # lock/condition and "currently running" marker. Only image-generation VRAM
