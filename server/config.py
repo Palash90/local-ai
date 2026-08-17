@@ -106,7 +106,7 @@ LLAMA_SERVER_ARGS = [
     "-fa", "on",
     "--ctx-size", "24576",       # 24K context for interactive UI chat
     "-ctk", "q8_0",
-    "-ctv", "q4_0", # If you really need a very big context on VRAM, can make it q4_0
+    "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q8_0
     "--no-mmproj-offload",
 
     # Threads & Batching

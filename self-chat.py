@@ -6,6 +6,7 @@ import argparse
 import requests
 import re
 import shutil
+import traceback
 from difflib import SequenceMatcher
 from datetime import datetime
 import random
@@ -2574,43 +2575,51 @@ def run_forever():
                 f"=== Starting round {round_number}: {task} (genre: {genre}, roles: {', '.join(roles)}) ===\n"
             )
             start_time = time.time()
-            transcript, session_a, session_b, fname = run_single_conversation(
-                token_a,
-                token_b,
-                round_number,
-                task,
-                mediums,
-                languages,
-                roles,
-                genre,
-                details,
-                details_spec,
-                checklist,
-                path,
-                context,
-                persona=persona,
-                themes_context=themes_block,
-                turns=spec.get("turns"),
-                round_fields=round_fields,
-                per_turn_task=per_turn_task,
-            )
-            if theme_id:
-                done = theme_api(
-                    "complete",
+            try:
+                transcript, session_a, session_b, fname = run_single_conversation(
                     token_a,
-                    operation="complete",
-                    theme_id=theme_id,
+                    token_b,
+                    round_number,
+                    task,
+                    mediums,
+                    languages,
+                    roles,
+                    genre,
+                    details,
+                    details_spec,
+                    checklist,
+                    path,
+                    context,
+                    persona=persona,
+                    themes_context=themes_block,
+                    turns=spec.get("turns"),
+                    round_fields=round_fields,
+                    per_turn_task=per_turn_task,
                 )
-                if done.get("ok"):
-                    print(f"[theme] Marked {theme_id} completed")
-                else:
-                    print(
-                        f"[theme] Could not mark {theme_id} completed: {done.get('error')}"
+            except Exception as e:
+                traceback.print_exc()
+                print(
+                    f"[error] Round {round_number} failed for task '{task}': {e}\n"
+                    f"        Skipping to the next task so the flow keeps running."
+                )
+            else:
+                if theme_id:
+                    done = theme_api(
+                        "complete",
+                        token_a,
+                        operation="complete",
+                        theme_id=theme_id,
                     )
-            # save_transcript(transcript, round_number)
-            if not keep_sessions:
-                delete_session(token_a, session_a)
-                delete_session(token_b, session_b)
+                    if done.get("ok"):
+                        print(f"[theme] Marked {theme_id} completed")
+                    else:
+                        print(
+                            f"[theme] Could not mark {theme_id} completed: {done.get('error')}"
+                        )
+                # save_transcript(transcript, round_number)
+                if not keep_sessions:
+                    delete_session(token_a, session_a)
+                    delete_session(token_b, session_b)
             round_number += 1
             task_index += 1
             elapsed = time.time() - start_time
