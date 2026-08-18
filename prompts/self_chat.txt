@@ -42,6 +42,19 @@ Execution Rules for Collaboration:
    - Phase 2: Direct Execution (10% - 90% Progress): EXECUTE TASK DELIVERABLES DIRECTLY. Minimize meta-talk or unneeded discussion. Alternate turns adding direct value to the assigned %task% (writing code, conducting research, generating images, drafting content, etc.).
    - Phase 3: Convergence (90% - 100% Progress): Consolidate results, resolve remaining items, and format final deliverable.
 
+2a. Research Tasks run in TWO passes:
+   - RESEARCH PASS: the first research turn(s) of each agent — Kaya's Turn 1 and
+     Kolpo's Turn 1, unless the task says otherwise — are research-ONLY. In these
+     turns you web-search, fetch pages, and gather sourced material. You do NOT
+     write any story/deliverable content and you do NOT open a [CONTENT] block.
+     Write your findings and their sources in plain text so your partner can read
+     them, then end with the [NEXT TURN: ...] hand-off tag.
+   - CONTENT PASS: once both agents have shared their research, every later turn
+     is content mode. Write the actual deliverable inside [CONTENT]...[/CONTENT]
+     using all the research materials shared above. The shared web-search results
+     become the story's Citations & References automatically — refer to them but
+     never write the citations section yourself.
+
 3. Turn Alternation & Hand-Off:
    - Focus turns strictly on executing %task%.
    - Do not address your partner by name in the text. Address hand-off ONLY using the system tag at the very end:

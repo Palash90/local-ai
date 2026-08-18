@@ -222,6 +222,9 @@ def _parse_tasks(items):
         turns = MAX_MESSAGES_PER_AGENT
         raw_turns = item.get("turns")
         research = bool(item.get("research"))
+        research_turns = int(item.get("research_turns") or 1)
+        if research_turns < 1:
+            research_turns = 1
         if raw_turns is not None:
             try:
                 turns = int(raw_turns)
@@ -242,7 +245,8 @@ def _parse_tasks(items):
                 "inactive": inactive,
                 "context": context,
                 "turns": turns,
-                "research": research
+                "research": research,
+                "research_turns": research_turns,
             }
         )
     return tasks
@@ -1090,6 +1094,12 @@ def run_dry_run():
             print(f"  mediums:     {medium}{flag}")
         print(f"  roles:       {', '.join(roles)}")
         print(f"  turns:       {spec.get('turns') or MAX_MESSAGES_PER_AGENT} per agent")
+        if spec.get("research"):
+            print(
+                f"  research:    YES — first {spec.get('research_turns') or 1} turn(s) of each agent are research-only"
+            )
+        else:
+            print("  research:    no — direct content turns from the start")
         if isinstance(details, list):
             names = [
                 d.get("name", "?") if isinstance(d, dict) else "?" for d in details
@@ -1432,6 +1442,8 @@ def build_input(
     turns=None,
     per_turn_details="",
     cast=None,
+    mode="content",
+    research_turns=0,
 ):
     current_agent = AGENT_NAMES[speaker]
     partner_agent = AGENT_NAMES["B" if speaker == "A" else "A"]
@@ -1452,7 +1464,19 @@ def build_input(
     if context is not None:
         lines.append(context)
 
-    if message_number <= 2:
+    if mode == "research":
+        # Research phase: gather and share sourced material only. Content turns
+        # (which follow once BOTH agents have contributed research) write the
+        # actual deliverable inside [CONTENT] using the shared materials.
+        lines.append(
+            "[RESEARCH MODE: This turn is for research ONLY. Perform web searches "
+            "and fetch pages to gather sourced facts, figures, and material needed "
+            f"for the task. Do NOT write any final story or deliverable content yet, "
+            "and do NOT open a [CONTENT] block this turn. Write your findings and "
+            "their sources in plain text so your partner can read them, then end "
+            f"with [NEXT TURN: {partner_agent}]."
+        )
+    elif message_number <= 2:
         lines.append(
             f"Immediately establish your role and provide the first creative deliverable inside [CONTENT] tags."
         )
@@ -1465,6 +1489,13 @@ def build_input(
         lines.append(
             f"[PHASE 2: DIRECT EXECUTION] Continue building content turn-by-turn. "
             f"Do not send meta-talk or prematurely end the story. Speak in {lang}."
+        )
+
+    if mode == "content" and research_turns and message_number == research_turns + 1:
+        lines.append(
+            "[CONTENT MODE: Research is complete and all gathered materials are "
+            "shared above. Now write the actual deliverable story using those "
+            "materials, wrapping every publishable part in [CONTENT]...[/CONTENT]."
         )
 
     if per_turn_details:
@@ -1495,7 +1526,8 @@ def run_single_conversation(
     task_roles=None,
     round_fields=None,
     per_turn_task=False,
-    research=False
+    research=False,
+    research_turns=1
 ):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
@@ -1622,6 +1654,13 @@ def run_single_conversation(
             if logged.get("ok"):
                 turn_theme_id = (logged.get("theme") or {}).get("id")
                 print(f"[theme] Reserved turn combination {turn_theme_id}")
+        # Two-phase flow for research tasks: the first research_turns of EACH
+        # agent are research-only (gather + share sourced material, no
+        # [CONTENT] block), then the agents switch to content mode and write
+        # the deliverable using every piece of research that was shared.
+        in_research_phase = research and message_number <= research_turns
+        mode = "research" if in_research_phase else "content"
+        eff_research_turns = research_turns if research else 0
         prompt = build_input(
             current_speaker,
             message_number,
@@ -1632,15 +1671,17 @@ def run_single_conversation(
             turns,
             per_turn_details=per_turn_str,
             cast=cast_block,
+            mode=mode,
+            research_turns=eff_research_turns,
         )
 
         wait_for_user_to_leave()
 
-        result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=research)
+        result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=in_research_phase)
         reply = result["text"]
         if not reply.strip():
             prompt += "\n[SYSTEM ERROR: Your previous output was empty. Generate real story content now.]"
-            result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=research)
+            result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=in_research_phase)
             reply = result["text"]
             if not reply.strip():
                 if turn_theme_id:
@@ -1656,7 +1697,7 @@ def run_single_conversation(
         if is_duplicate(reply, incoming):
             # Re-prompt agent to generate new content instead of repeating
             prompt += "\n[SYSTEM ERROR: Your previous output was identical to your partner's. Generate unique content now.]"
-            result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=research)
+            result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=in_research_phase)
             reply = result["text"]
 
         if turn_theme_id:
@@ -1669,6 +1710,7 @@ def run_single_conversation(
             "text": reply,
             "image": result.get("image"),
             "searches": result.get("searches"),
+            "publish": not in_research_phase,
         }
         transcript.append(entry)
         append_story_entry(entry, fname, citations, stories_dir, round_number, idx)
@@ -2053,12 +2095,30 @@ def extract_tagged_content(text):
     are accepted, so a turn's narrative is never mistaken for planning chatter.
     Returns None if no [CONTENT] block is present at all — the caller treats
     that as a planning-only turn with nothing to publish. Multiple blocks are
-    concatenated in order."""
+    concatenated in order.
+
+    As a defensive fallback, a message that OPENS with ``[CONTENT]`` but is
+    truncated or never closes the tag (the research mode used to provoke this)
+    still yields its narrative: everything from the ``[CONTENT]`` marker up to
+    the next structural tag (``[NEXT TURN:`` / ``[END CONVERSATION]`` /
+    ``[IMAGE GENERATION CALL:]``) or the end of the message."""
     blocks = re.findall(
         r"\[CONTENT\](.*?)(?:\[/CONTENT\]|\[END CONTENT\]|\[END\])",
         text,
         flags=re.DOTALL | re.IGNORECASE,
     )
+    if not blocks:
+        # Fallback for an unclosed [CONTENT] block. Only trigger when the
+        # message clearly starts with the marker, so a 0-block Phase-1 planning
+        # turn (no [CONTENT] at all) is still treated as nothing to publish.
+        m = re.match(r"(?is)\s*\[CONTENT\]\s*(.*)$", text)
+        if m:
+            rest = m.group(1)
+            rest = re.split(
+                r"(?is)\s*\[(?:NEXT TURN\s*:|END CONVERSATION\]|IMAGE GENERATION CALL\s*:|THEME LOGGED\s*:|IMAGE SHARED\s*:)", rest, maxsplit=1
+            )[0]
+            rest = rest.strip()
+            blocks = [rest] if rest else []
     if not blocks:
         return None
     return "\n\n".join(b.strip() for b in blocks if b.strip())
@@ -2068,6 +2128,15 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     speaker = entry.get("speaker", "Unknown")
     raw_text = entry.get("text", "")
     turn = entry.get("message", idx)
+
+    # Research-phase turns gather and share material; they must never publish
+    # narrative or images, but their web-search results still feed citations.
+    if entry.get("publish") is False:
+        collect_citations(citations, entry.get("searches"))
+        print(
+            f"[content] {speaker} turn {turn} — research phase, citations captured only"
+        )
+        return
 
     content = extract_tagged_content(raw_text)
     if content is None:
@@ -2745,7 +2814,8 @@ def run_forever():
                     turns=spec.get("turns"),
                     round_fields=round_fields,
                     per_turn_task=per_turn_task,
-                    research=spec.get("research")
+                    research=spec.get("research"),
+                    research_turns=spec.get("research_turns") or 1,
                 )
             except Exception as e:
                 traceback.print_exc()

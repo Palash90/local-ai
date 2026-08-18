@@ -190,7 +190,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
         else:
             prompt_id = data["prompt_id"]
             found_file = None
-            for _ in range(120):
+            for _ in range(300):
                 time.sleep(1)
                 try:
                     hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
@@ -233,7 +233,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
                         }
                     )
             else:
-                print(f"[generate_image] TIMEOUT for task {task_id} after 120s")  # DEBUG
+                print(f"[generate_image] TIMEOUT for task {task_id} after 300s")  # DEBUG
                 result = json.dumps({"error": "Image generation timeout"})
     except Exception as e:
         result = json.dumps({"error": str(e)})
@@ -407,7 +407,7 @@ def edit_image(
         else:
             prompt_id = data["prompt_id"]
             found_file = None
-            for _ in range(120):
+            for _ in range(300):
                 time.sleep(1)
                 try:
                     hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
