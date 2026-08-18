@@ -39,7 +39,12 @@ You are performing deep, sourced research on the user's question.
 - Conclude: answer only once the question is fully covered, then write a
   structured report (summary, findings with citations, limitations).
 - Budget: you may keep searching/fetching for up to 50 rounds of tools, but
-  stop as soon as the question is actually answered."""
+  stop as soon as the question is actually answered.
+- Social Media & Unverified Content: Treat social media platforms 
+  (X/Twitter, Reddit, forums, public blogs) strictly as anecdotal opinions or leads, 
+  never as primary factual proof. Do not cite social media claims as verified facts 
+  unless cross-checked and corroborated by an authoritative primary source 
+ (official documentation, peer-reviewed study, or established publication)."""
 
 
 def _session_file(user):

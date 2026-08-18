@@ -577,9 +577,7 @@ def _pick_character_name(task, field_name, names, skip=()):
     slots (``count > 1``) never reuse a name within the same round.
     """
     values = [
-        n
-        for n in (names or [])
-        if isinstance(n, str) and n.strip() and n not in skip
+        n for n in (names or []) if isinstance(n, str) and n.strip() and n not in skip
     ]
     if not values:
         return ""
@@ -648,9 +646,7 @@ def _resolve_field_value(spec, task, master):
     name = str(merged.get("name") or spec.get("name") or "").strip()
     if not name:
         first_ref = (
-            refs[0]
-            if isinstance(refs, list) and refs
-            else spec.get("ref") or ""
+            refs[0] if isinstance(refs, list) and refs else spec.get("ref") or ""
         )
         name = str(first_ref or "").strip()
 
@@ -658,7 +654,9 @@ def _resolve_field_value(spec, task, master):
     return name, value
 
 
-def resolve_details(details, task, master=None, freq_filter="Per Round", preferred=None):
+def resolve_details(
+    details, task, master=None, freq_filter="Per Round", preferred=None
+):
     """Resolve field specs matching a specific change frequency.
 
     Fields carrying a ``when`` block are resolved in a second pass, once the
@@ -1242,10 +1240,9 @@ def verify_task_fulfillment(
         if f"**{field}:**" in original_text and f"**{field}:**" not in check_text:
             problems.append(f"Editor dropped the '{field}' header field.")
 
-    if (
-        re.search(r"#+\s+Citations?\s*&?\s*References?", original_text)
-        and not re.search(r"#+\s+Citations?\s*&?\s*References?", check_text)
-    ):
+    if re.search(
+        r"#+\s+Citations?\s*&?\s*References?", original_text
+    ) and not re.search(r"#+\s+Citations?\s*&?\s*References?", check_text):
         problems.append("Editor dropped the Citations & References section.")
 
     if retrieved_citations is not None:
@@ -1302,7 +1299,9 @@ def login(username, password):
     return resp.json()["token"]
 
 
-def create_session(token, name, system_prompts=None, context_tokens=None, system_prompt=None):
+def create_session(
+    token, name, system_prompts=None, context_tokens=None, system_prompt=None
+):
     body = {"name": name}
     if system_prompts:
         body["system_prompts"] = system_prompts
@@ -1386,7 +1385,9 @@ def wait_for_user_to_leave():
 """
 
 
-def call_llm(token, session_id, message, image_b64=None, no_tools=False, research=False):
+def call_llm(
+    token, session_id, message, image_b64=None, no_tools=False, research=False
+):
     headers = {"X-Auth-Token": token}
 
     payload = {
@@ -1527,7 +1528,7 @@ def run_single_conversation(
     round_fields=None,
     per_turn_task=False,
     research=False,
-    research_turns=1
+    research_turns=1,
 ):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
@@ -1620,7 +1621,10 @@ def run_single_conversation(
                     details_spec, task, MASTER_DETAILS, freq_filter="Per Turn"
                 )
                 combo = build_combo_dict(
-                    genre, mood, persona_details, {**(round_fields or {}), **turn_fields}
+                    genre,
+                    mood,
+                    persona_details,
+                    {**(round_fields or {}), **turn_fields},
                 )
                 if not check_combo_used(token_a, combo, level="turn"):
                     break
@@ -1677,16 +1681,31 @@ def run_single_conversation(
 
         wait_for_user_to_leave()
 
-        result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=in_research_phase)
+        result = call_llm(
+            token,
+            session,
+            prompt,
+            image_b64=shared_image_b64,
+            research=in_research_phase,
+        )
         reply = result["text"]
         if not reply.strip():
             prompt += "\n[SYSTEM ERROR: Your previous output was empty. Generate real story content now.]"
-            result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=in_research_phase)
+            result = call_llm(
+                token,
+                session,
+                prompt,
+                image_b64=shared_image_b64,
+                research=in_research_phase,
+            )
             reply = result["text"]
             if not reply.strip():
                 if turn_theme_id:
                     theme_api(
-                        "complete", token_a, operation="complete", theme_id=turn_theme_id
+                        "complete",
+                        token_a,
+                        operation="complete",
+                        theme_id=turn_theme_id,
                     )
                     print(f"[theme] Marked turn {turn_theme_id} completed")
                 print(
@@ -1697,7 +1716,13 @@ def run_single_conversation(
         if is_duplicate(reply, incoming):
             # Re-prompt agent to generate new content instead of repeating
             prompt += "\n[SYSTEM ERROR: Your previous output was identical to your partner's. Generate unique content now.]"
-            result = call_llm(token, session, prompt, image_b64=shared_image_b64, research=in_research_phase)
+            result = call_llm(
+                token,
+                session,
+                prompt,
+                image_b64=shared_image_b64,
+                research=in_research_phase,
+            )
             reply = result["text"]
 
         if turn_theme_id:
@@ -1790,7 +1815,9 @@ def run_single_conversation(
     check_source = edited_path if edited_path else fname
     with open(check_source, "r", encoding="utf-8") as f:
         check_text = f.read()
-    problems = verify_task_fulfillment(original_text, check_text, medium, language, citations)
+    problems = verify_task_fulfillment(
+        original_text, check_text, medium, language, citations
+    )
 
     if problems:
         print(
@@ -2121,7 +2148,7 @@ def extract_tagged_content(text):
     the next structural tag (``[NEXT TURN:`` / ``[END CONVERSATION]`` /
     ``[IMAGE GENERATION CALL:]``) or the end of the message."""
     blocks = re.findall(
-        r"\[CONTENT\](.*?)(?:\[/CONTENT\]|\[END CONTENT\]|\[END\])",
+        r"\[CONTENT\](.*?)(?:\[/CONTENT\]|\[END CONTENT\]|\[END\]|$)",
         text,
         flags=re.DOTALL | re.IGNORECASE,
     )
@@ -2133,7 +2160,9 @@ def extract_tagged_content(text):
         if m:
             rest = m.group(1)
             rest = re.split(
-                r"(?is)\s*\[(?:NEXT TURN\s*:|END CONVERSATION\]|IMAGE GENERATION CALL\s*:|THEME LOGGED\s*:|IMAGE SHARED\s*:)", rest, maxsplit=1
+                r"(?is)\s*\[(?:NEXT TURN\s*:|END CONVERSATION\]|IMAGE GENERATION CALL\s*:|THEME LOGGED\s*:|IMAGE SHARED\s*:)",
+                rest,
+                maxsplit=1,
             )[0]
             rest = rest.strip()
             blocks = [rest] if rest else []
@@ -2247,6 +2276,7 @@ def sanitize_story_images(text, stories_dir):
     ``img_rN_Speaker_idx.ext`` scheme). Removing those references keeps the
     published markdown free of dead/broken image tags.
     """
+
     def _fix(match):
         ref = match.group(1)
         fname = os.path.basename(ref.split("?")[0].split("#")[0])
@@ -2300,8 +2330,10 @@ def _image_anchors(markdown_text):
 
 def _paragraph_overlap_score(a, b):
     """Token Jaccard overlap between two text blocks (0..1)."""
+
     def _toks(s):
         return set(re.findall(r"[a-z0-9]+", s.lower()))
+
     left, right = _toks(a), _toks(b)
     if not left or not right:
         return 0.0
@@ -2329,10 +2361,14 @@ def reanchor_story_images(revised, original, stories_dir):
     for line in lines:
         if _IMAGE_LINE_RE.match(line):
             ref = re.search(r"!\[[^\]]*\]\(([^)]+)\)", line).group(1)
-            ref_by_fn.setdefault(os.path.basename(ref).split("?")[0].split("#")[0], line)
+            ref_by_fn.setdefault(
+                os.path.basename(ref).split("?")[0].split("#")[0], line
+            )
     missing = [fn for fn in ordered if fn not in ref_by_fn]
     if missing:
-        print(f"[images] Re-anchor: {len(missing)} reference(s) missing from revision: {missing}")
+        print(
+            f"[images] Re-anchor: {len(missing)} reference(s) missing from revision: {missing}"
+        )
         return revised
 
     blocks = []
