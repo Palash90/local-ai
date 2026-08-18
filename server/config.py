@@ -147,7 +147,6 @@ LLAMA_SERVER_ARGS_CPU = [
     "-fa", "off",
     "--ctx-size", "65536",
     "-ctk", "q8_0",            # Quantized KV cache keeps RAM usage low
-    "-ctv", "q8_0",
     # Keep the multimodal projector (mmproj) in RAM too. llama-server
     # offloads the mmproj to the GPU by DEFAULT even with --n-gpu-layers 0,
     # which cudaMalloc-OOMs on the 4 GiB card while the GPU server is loaded.
