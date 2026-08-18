@@ -893,6 +893,32 @@ class TestNormalizeMarkdownLines:
         assert out.endswith("\n")
 
 
+class TestStripImageMarkers:
+    def test_removes_image_reference_line(self, self_chat):
+        text = "Para one\n\n**(Image Reference: The magnificent squid from the last turn)**"
+        assert self_chat.strip_image_markers(text) == "Para one"
+
+    def test_removes_image_placeholder_line(self, self_chat):
+        text = "**(Image Placeholder: /output//gen_73ee8225__00001_.png)**"
+        assert self_chat.strip_image_markers(text) == ""
+
+    def test_removes_square_bracket_marker(self, self_chat):
+        text = "[Image Placeholder: /output//foo.png]"
+        assert self_chat.strip_image_markers(text) == ""
+
+    def test_keeps_prose_and_real_embeds(self, self_chat):
+        text = "Some prose ![Kolpo](img_r1_Kolpo_2.png) continues"
+        assert self_chat.strip_image_markers(text) == text
+
+    def test_keeps_bold_heading(self, self_chat):
+        text = "**Bold heading** still bold"
+        assert self_chat.strip_image_markers(text) == text
+
+    def test_keeps_inline_marker_inside_sentence(self, self_chat):
+        text = "Some sentence (Image placeholder: x) mid text"
+        assert self_chat.strip_image_markers(text) == text
+
+
 class TestStripModelCitations:
     def test_removes_citations_block(self, self_chat):
         text = "Some story\n\n## Citations & References\n\n1. [x](url)"

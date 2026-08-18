@@ -1967,6 +1967,24 @@ def clean_speaker_text(speaker, text):
     return cleaned.replace("[END CONVERSATION]", "").strip()
 
 
+def strip_image_markers(text):
+    """Drop model-authored image placeholder/reference marker lines.
+
+    The agents occasionally write standalone notes such as ``**(Image
+    Reference: the squid from the last turn)**`` or ``**(Image Placeholder:
+    /output/...png)**`` instead of (or alongside) a real ``![...](...)``
+    embed. These add nothing to the published story, so the whole line is
+    removed. Only lines that ARE the marker are stripped — real image embeds
+    (`![alt](file)`) and surrounding prose are left untouched.
+    """
+    pattern = re.compile(
+        r"(?im)^\s*\*{0,2}\s*[\[\(]\s*image\s+(?:reference|placeholder|ref|ph)"
+        r"\s*:[^\]\)]*[\]\)]\s*\*{0,2}\s*$"
+    )
+    stripped = pattern.sub("", text or "")
+    return re.sub(r"\n{3,}", "\n\n", stripped).strip()
+
+
 def scrub_agent_names(text):
     """Deterministically remove the agents' names from story content.
 
@@ -2167,6 +2185,7 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     cleaned = clean_speaker_text(speaker, content)
     cleaned = scrub_agent_names(cleaned)
     cleaned = strip_model_citations(cleaned)
+    cleaned = strip_image_markers(cleaned)
     lines = [
         f'<small style="color:#888">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n',
         f"{cleaned}\n\n",
@@ -2484,6 +2503,7 @@ def run_cross_critique(
                 revised = scrub_agent_names(revised)
                 revised = normalize_markdown_lines(revised)
                 revised = sanitize_story_images(revised, stories_dir)
+                revised = strip_image_markers(revised)
                 revised = reanchor_story_images(revised, text, stories_dir)
             if not revised:
                 print(f"[critique] {name} returned no markdown; keeping original")
@@ -2578,6 +2598,7 @@ def run_editor(
             print("[editor] Editor returned an empty revision; keeping original")
             return None
         revised = sanitize_story_images(revised, stories_dir)
+        revised = strip_image_markers(revised) if revised else revised
         revised = reanchor_story_images(revised, markdown_text, stories_dir)
         with open(edited_path, "w", encoding="utf-8") as f:
             f.write(revised + "\n")
