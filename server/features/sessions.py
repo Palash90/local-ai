@@ -286,6 +286,7 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
                 "role": "user",
                 "content": content,
                 "_timestamp": datetime.now().isoformat(),
+                "_research": bool(M.tasks.get(task_id, {}).get("research")),
             }
         )
         if M.sessions_meta[sid]["name"] in ("New Chat", ""):

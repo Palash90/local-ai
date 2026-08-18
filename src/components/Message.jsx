@@ -8,6 +8,20 @@ import StatusBox from './StatusBox'
 
 marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
 
+// Research-mode citations are stored as `(Author, Venue, Year) [https://url]`
+// (the critic parses the square-bracketed URL), but marked would swallow the
+// trailing `]` into the link href. Turn `[https://url]` into a proper markdown
+// link at render time so no stray bracket shows. Fenced code blocks are
+// skipped to avoid corrupting their contents.
+const normalizeCitationLinks = (text) => {
+  if (!text) return text
+  const RE = /\[(https?:\/\/[^\s\]<>]+)\](?!\s*\()/g
+  return text
+    .split(/(```[\s\S]*?```)/g)
+    .map((seg, i) => (i % 2 === 1 ? seg : seg.replace(RE, '[$1]($1)')))
+    .join('')
+}
+
 const fileLinkExt = {
   name: 'fileLink',
   level: 'inline',
@@ -535,7 +549,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
         const langAttr = lang ? ` class="language-${lang.split(/\s/)[0]}"` : ''
         return `<div class="code-block"><button type="button" class="copy-code-btn" data-i="${idx}" title="Copy code">Copy</button><pre><code${langAttr}>${code}</code></pre></div>\n`
       }
-      const out = DOMPurify.sanitize(marked.parse(text, { renderer }))
+      const out = DOMPurify.sanitize(marked.parse(normalizeCitationLinks(text), { renderer }))
       codeRef.current = codeBlocks
       return out
     } catch {
@@ -623,8 +637,11 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
     <div className={`msg ${role}`} ref={elRef}>
       {timestamp && <span className="msg-timestamp">{timestamp}</span>}
       <div className="msg-header">
-        {role === 'bot' && msg._elapsed_ms != null && (
-          <span className="msg-elapsed" title="Time from hitting Enter to full answer">&#9202; {formatElapsed(msg._elapsed_ms)}</span>
+        {role === 'user' && msg._research && (
+        <span className="tool-badge research" title="This message was sent with the Research toggle on">Research</span>
+      )}
+      {role === 'bot' && msg._elapsed_ms != null && (
+          <span className="msg-elapsed" title="Time from task start to completion">&#9202; {formatElapsed(msg._elapsed_ms)}</span>
         )}
         {role === 'bot' && toolsUsed.length > 0 && (() => {
           let fetchIdx = 0

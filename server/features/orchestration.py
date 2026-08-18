@@ -43,10 +43,14 @@ def _set_task_error(task_id, error, sid=None):
     with M._data_lock:
         if task_id in M.tasks:
             d = M.tasks[task_id]
+            elapsed_ms = None
+            if d.get("_started_at") is not None:
+                elapsed_ms = int((time.time() - d.get("_started_at")) * 1000)
             M.tasks[task_id] = {
                 "status": "error",
                 "error": str(error),
                 "session_id": d.get("session_id", sid),
+                "_elapsed_ms": elapsed_ms,
             }
 
 
@@ -85,6 +89,11 @@ def _finalize_task(task_id, sid, msg_content, body):
         print(f"[finalize] image_file='{image_filename}' → image_url='{image_url}' for task {task_id}")  # DEBUG
     timings = body.get("timings", {})
     predicted_per_second = timings.get("predicted_per_second")
+    with M._data_lock:
+        started_at = t.get("_started_at")
+    elapsed_ms = None
+    if started_at is not None:
+        elapsed_ms = int((time.time() - started_at) * 1000)
     reasoning = (
         body.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
     )
@@ -99,6 +108,8 @@ def _finalize_task(task_id, sid, msg_content, body):
         "_gen_prompt": gen_prompt,
         "_image_model": image_model,
         "_search_details": search_details,
+        "_research": bool(t.get("research")),
+        "_elapsed_ms": elapsed_ms,
     }
     if verification is not None:
         msg_entry["_verification"] = verification
@@ -130,6 +141,7 @@ def _finalize_task(task_id, sid, msg_content, body):
                 "_image_model": image_model,
                 "_search_details": search_details,
                 "reasoning": reasoning,
+                "_elapsed_ms": elapsed_ms,
             }
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
@@ -173,6 +185,7 @@ def _event_loop():
                     "research": bool(data.get("research")),
                     "cpu": bool(data.get("cpu")),
                     "no_tools": bool(data.get("no_tools")),
+                    "_started_at": t.get("_started_at"),
                 }
             # (The owning lane's _current_task_ids[mode] was already set by
             # _queue_worker before this "start" event was posted.)
@@ -395,6 +408,9 @@ def _queue_worker(mode):
                 continue
             item = task_queue.pop(0)
             M._current_task_ids[mode] = item["task_id"]
+            with M._data_lock:
+                if item["task_id"] in M.tasks:
+                    M.tasks[item["task_id"]]["_started_at"] = time.time()
         M._event_post(
             "start",
             item["task_id"],

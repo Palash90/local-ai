@@ -249,6 +249,13 @@ TOOLS = [
                             ]
                         ),
                     },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "enum": ["landscape", "portrait", "square"],
+                        "description": "Image framing/aspect ratio. "
+                        "landscape = wide scene (default), portrait = tall or "
+                        "single-subject close-up, square = balanced illustration.",
+                    },
                 },
                 "required": ["prompt", "model"],
             },

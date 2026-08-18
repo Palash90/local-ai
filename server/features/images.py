@@ -13,6 +13,21 @@ from server.features.state import M
 from server.features.users import _safe_username
 
 
+# LLM-selectable framing presets for generate_image. All values are divisible
+# by 8 (latent-safe for EmptySD3LatentImage) and stay near the ~2 MP budget of
+# the default 1920x1080, so VRAM usage and generation time are stable no matter
+# which framing the model picks.
+ASPECT_SIZES = {
+    "landscape": (1920, 1080),
+    "portrait": (1080, 1920),
+    "square": (1440, 1440),
+}
+
+
+def _aspect_dims(aspect_ratio):
+    return ASPECT_SIZES.get(aspect_ratio, ASPECT_SIZES["landscape"])
+
+
 def _output_dir(user):
     return os.path.join(M.COMFYUI_OUTPUT, _safe_username(user))
 
@@ -55,12 +70,14 @@ def free_comfyui_vram():
     return False
 
 
-def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
+def generate_image(prompt, task_id, negative_prompt="", model="z_image", aspect_ratio="landscape"):
     print(f"\n[image] Generating image for task {task_id} with the prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image generation...")
     # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
     # The CPU server (self-chat agents) keeps running untouched.
     M.unload_llama_model("gpu")
+
+    width, height = _aspect_dims(aspect_ratio)
 
     user = M._task_user(task_id)
     gen_tag = str(uuid.uuid4())[:8]
@@ -84,7 +101,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
             },
             "68": {
                 "class_type": "EmptySD3LatentImage",
-                "inputs": {"width": 1920, "height": 1080, "batch_size": 1},
+                "inputs": {"width": width, "height": height, "batch_size": 1},
             },
             "69": {
                 "class_type": "ModelSamplingAuraFlow",
@@ -141,7 +158,7 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image"):
             },
             "5": {
                 "class_type": "EmptySD3LatentImage",
-                "inputs": {"width": 1920, "height": 1080, "batch_size": 1},
+                "inputs": {"width": width, "height": height, "batch_size": 1},
             },
             "6": {
                 "class_type": "KSampler",
@@ -498,6 +515,7 @@ def _run_generate_image(task_id, args):
         task_id=task_id,
         negative_prompt=args.get("negative_prompt", ""),
         model=args.get("model") or "z_image",
+        aspect_ratio=args.get("aspect_ratio") or "landscape",
     )
     res_data = json.loads(result)
     if "file" in res_data:

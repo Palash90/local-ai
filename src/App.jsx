@@ -221,7 +221,7 @@ export default function App() {
 
       setPendingMessages(prev => ({
         ...prev,
-        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg, _startMs: Date.now() },
+        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg },
       }))
 
       const stored = getStoredPending()
@@ -251,11 +251,10 @@ export default function App() {
     })
     if (st.status === 'done') {
       const userMsg = pending._userMsg
-      const startMs = pending._startMs
       const assistantMsg = {
         role: 'assistant',
         content: st.response || '',
-        _elapsed_ms: startMs != null ? Date.now() - startMs : null,
+        _elapsed_ms: st._elapsed_ms != null ? st._elapsed_ms : null,
         _reasoning: st.reasoning || '',
         _image_url: st.image || st._image_url,
         _gen_prompt: st.gen_prompt,
