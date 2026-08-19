@@ -69,10 +69,11 @@ echo "=== 3. Writing Nginx Master Configuration ==="
 cat << 'EOF' | sudo tee /etc/nginx/sites-available/homeserver > /dev/null
 server {
     listen 443 ssl;
-    server_name _;
+    listen [::]:443 ssl;
+    server_name home.palashkantikundu.in;
 
-    ssl_certificate     /etc/nginx/certs/server.pem;
-    ssl_certificate_key /etc/nginx/certs/server-key.pem;
+    ssl_certificate     /etc/letsencrypt/live/home.palashkantikundu.in/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/home.palashkantikundu.in/privkey.pem;
 
     client_max_body_size 512M;
     client_body_buffer_size 128k;
@@ -255,7 +256,7 @@ server {
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
-    server_name _;
+    server_name home.palashkantikundu.in;
     return 301 https://$host$request_uri;
 }
 EOF
