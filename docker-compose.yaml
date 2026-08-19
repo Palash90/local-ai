@@ -1,62 +1,65 @@
 version: '3.8'
 
 services:
-  # 1. SearXNG Container (Has internet access)
+  # 1. SearXNG Container
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
     restart: unless-stopped
     networks:
-      - external-net   # Access to Host and Internet
-      - internal-net   # Accessible by ai-container
+      - external-net
+      - internal-net
     ports:
-      - "8080:8080"    # Host can access SearXNG at http://localhost:8080
+      - "8080:8080"
     environment:
-      - SEARXNG_BASE_URL=http://localhost:8080/
+      - SEARXNG_BASE_URL=https://127.0.0.1/search/
 
-  # 2. AI Container (GPU access, shared memory, restricted network)
-  ai-container:
-    image: ubuntu:24.04
-    container_name: ai-container
-    restart: unless-stopped
-    command: tail -f /dev/null  # Keeps container running
-    ipc: host                    # Share host memory / IPC namespace for high-performance AI workloads
-    
-    # GPU Configuration (Requires NVIDIA Container Toolkit on host)
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-    # Runtime config for chat-webui.py (bind all interfaces so published ports work;
-    # point web search at the SearXNG sibling service)
-    environment:
-      - CHAT_HOST=0.0.0.0
-      - SEARXNG_URL=http://searxng:8080/search
-
-    # Shared File System
+  # 2. Nextcloud Database
+  cloud-db:
+    container_name: cloud-db
+    image: mariadb:10.11
+    restart: always
+    command: --transaction-isolation=READ-COMMITTED --log-bin-trust-function-creators=1
+    networks:
+      - internal-net
     volumes:
-      - ~/local-ai-files:/root/local-ai-files:rw
-      - ~/git/local-ai:/root/git/local-ai:rw # rw so setup.sh can build the frontend in-container
+      - db_data:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: your_root_password
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: your_db_password
 
-    # Network: internet needed for setup (apt, git, npm, CUDA toolkit) and runtime
-    # (fetch_page, Nominatim, edge-tts). SearXNG is reached via internal-net.
+  # 3. Nextcloud Application
+  cloud-app:
+    container_name: cloud-app
+    image: nextcloud
+    restart: always
     networks:
       - external-net
       - internal-net
     ports:
-      - "8081:8081"    # Port 8081 exposed to Host OS, for other AI works
-      - "3001:3001"    # The actual port of the chatbot
+      - "8082:80"
+    depends_on:
+      - cloud-db
+    volumes:
+      - nextcloud_data:/var/www/html
+      - /mnt/wwn-0x50014ee2173893e0-part1/BackUp-Copy-2:/mnt/my_backups:ro
+    environment:
+      MYSQL_HOST: cloud-db
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: your_db_password
+      # Dynamic Host & Subpath rules
+      OVERWRITEPROTOCOL: "https"
+      OVERWRITEWEBROOT: "/cloud"
 
 networks:
-  # Network with internet gateway for SearXNG and Host
   external-net:
     driver: bridge
-
-  # Isolated network with NO internet gateway
   internal-net:
     driver: bridge
-    internal: true     # Prevents traffic from leaving this bridge network to the internet
+
+volumes:
+  db_data:
+  nextcloud_data:

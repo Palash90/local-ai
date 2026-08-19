@@ -5,6 +5,7 @@ import binascii
 import glob
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime
@@ -67,6 +68,31 @@ def _save_upload_image(image_b64, user=""):
     with open(fpath, "wb") as f:
         f.write(raw)
     return f"/uploads/{fname}"
+
+
+def _resolve_image_url(image, user=""):
+    """Return the stored URL for a chat image that may be base64 or a link.
+
+    The UI now uploads attached photos up front (``/api/upload-image``) and
+    passes the resulting ``/uploads/...`` link with the chat request instead of
+    embedding the raw base64. Accept either form so both old and new clients
+    keep working: raw base64 blobs are written to disk, already-stored links
+    and ``data:`` URLs are returned as-is.
+    """
+    if not image:
+        return None
+    s = str(image).strip()
+    if s.startswith("data:image/"):
+        s = s.split(",", 1)[-1]
+    if s.startswith(("/uploads/", "/output/", "/api/image/")) or re.match(
+        r"^https?://", s
+    ):
+        return s
+    try:
+        return _save_upload_image(s, user)
+    except (ValueError, binascii.Error):
+        pass
+    return None
 
 
 def _migrate_data_urls(messages):
@@ -252,7 +278,7 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         full_sys_content = full_sys_content.replace("%current_location%", "not available")
     for token, value in context_tokens.items():
         full_sys_content = full_sys_content.replace(token, value)
-    image_url = _save_upload_image(image_b64, user) if image_b64 else None
+    image_url = _resolve_image_url(image_b64, user)
     if user_context:
         print(
             f"[context] Injected {len(user_context)} chars of context for user '{user}'"

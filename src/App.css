@@ -1181,6 +1181,13 @@ a.page-modal-url:hover {
   transition: all .2s;
 }
 
+#research-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 #research-toggle:hover {
   border-color: rgba(74, 108, 247, 0.4);
   color: #e0e0e0;
@@ -1712,6 +1719,18 @@ input[type=file] {
   #input-bar {
     padding: 8px 12px 10px;
     gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  #research-toggles {
+    order: 3;
+    flex-basis: 100%;
+    gap: 6px;
+  }
+
+  #research-toggle, #cpu-toggle {
+    padding: 6px 10px;
+    font-size: 11px;
   }
 
   #input-bar button {

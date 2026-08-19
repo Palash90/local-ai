@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react'
-import { extractFile } from '../api'
+import { extractFile, uploadImage } from '../api'
 
 const CODE_EXTS = new Set([
   '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.hpp',
@@ -67,7 +67,7 @@ export default function InputBar({ onSend, hasPending }) {
       const reader = new FileReader()
       reader.onload = (ev) => {
         const img = new Image()
-        img.onload = () => {
+        img.onload = async () => {
           let w = img.naturalWidth
           let h = img.naturalHeight
           const MAX_DIM = 1920
@@ -81,7 +81,12 @@ export default function InputBar({ onSend, hasPending }) {
           ctx.drawImage(img, 0, 0, w, h)
           const compressed = c.toDataURL('image/jpeg', 0.8)
           const b64 = compressed.split(',')[1]
-          setAttachedImage(b64)
+          try {
+            const res = await uploadImage(b64, 'jpg')
+            setAttachedImage(res.url || b64)
+          } catch {
+            setAttachedImage(b64)
+          }
           if (imagePreviewRef.current) {
             imagePreviewRef.current.src = compressed
             imagePreviewRef.current.style.display = 'block'
@@ -196,14 +201,16 @@ export default function InputBar({ onSend, hasPending }) {
         onKeyDown={handleKeyDown}
         onInput={handleInput}
       />
-      <label id="research-toggle" title="Research mode — lets the agent search and read pages for up to 50 tool rounds until your question is fully answered.">
-        <input type="checkbox" checked={research} onChange={handleResearchChange} />
-        Research
-      </label>
-      <label id="cpu-toggle" className={research ? '' : 'disabled'} title={research ? "Run the research on the CPU-backed server instead of the GPU." : "Only available with Research mode."}>
-        <input type="checkbox" checked={cpu} disabled={!research} onChange={e => setCpu(e.target.checked)} />
-        CPU
-      </label>
+      <div id="research-toggles">
+        <label id="research-toggle" title="Research mode — lets the agent search and read pages for up to 50 tool rounds until your question is fully answered.">
+          <input type="checkbox" checked={research} onChange={handleResearchChange} />
+          Research
+        </label>
+        <label id="cpu-toggle" className={research ? '' : 'disabled'} title={research ? "Run the research on the CPU-backed server instead of the GPU." : "Only available with Research mode."}>
+          <input type="checkbox" checked={cpu} disabled={!research} onChange={e => setCpu(e.target.checked)} />
+          CPU
+        </label>
+      </div>
       <button id="send-btn" onClick={handleSend}><span className="send-icon">&#10148;</span><span className="send-text">{hasPending ? 'Queue' : 'Send'}</span></button>
     </div>
   )

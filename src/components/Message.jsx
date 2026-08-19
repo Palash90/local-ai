@@ -3,7 +3,7 @@ import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import DOMPurify from 'dompurify'
 import { speak as apiSpeak, getTaskStatus as apiGetTaskStatus, shareMessage as apiShareMessage } from '../api'
-import { downloadFile } from '../utils'
+import { downloadFile, toApiImage } from '../utils'
 import StatusBox from './StatusBox'
 
 marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
@@ -575,10 +575,10 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
   const searchDetails = msg._search_details || []
   const fetchDetails = searchDetails.filter(d => d && d.tool === 'fetch_page')
   const genPrompt = msg._gen_prompt
-  const imageUrl = msg._image_url
+  const imageUrl = toApiImage(msg._image_url)
   const imageModel = msg._image_model
   const isUserImgUrl = typeof userImg === 'string' && (userImg.startsWith('/') || /^https?:/.test(userImg))
-  const userImgSrc = userImg ? (isUserImgUrl ? userImg : 'data:image/jpeg;base64,' + userImg) : null
+  const userImgSrc = userImg ? (isUserImgUrl ? toApiImage(userImg) : 'data:image/jpeg;base64,' + userImg) : null
 
   if (
     msg.role === 'assistant' &&

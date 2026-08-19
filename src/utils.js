@@ -1,3 +1,11 @@
+export function toApiImage(url) {
+  if (!url || typeof url !== 'string') return url
+  if (url.startsWith('data:') || /^https?:/i.test(url) || url.startsWith('/api/image/')) return url
+  if (url.startsWith('/uploads/') || url.startsWith('/output/')) return '/api/image/' + url.slice(1)
+  if (url.startsWith('/')) return '/api/image/' + url.slice(1)
+  return url
+}
+
 export async function downloadFile(url, fallbackName = 'file') {
   const full = url.startsWith('http') || url.startsWith('data:') ? url : window.location.origin + url
   const filename = full.split('/').pop() || fallbackName

@@ -149,6 +149,15 @@ export async function extractFile(name, dataB64) {
   return r.json();
 }
 
+export async function uploadImage(dataB64, ext = 'jpg') {
+  const r = await authFetch('/api/upload-image', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: dataB64, ext }),
+  });
+  return r.json();
+}
+
 export async function fetchTasks() {
   const r = await authFetch('/api/tasks');
   return r.json();

@@ -30,6 +30,42 @@ from server.config import (
     UPLOADS_DIR,
 )
 
+IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+
+
+def resolve_image_file(image_id):
+    """Resolve an ``/api/image/<id>`` identifier to a local image file path.
+
+    Accepts ids shaped like the stored image URLs — ``uploads/<name>`` (user
+    uploads) or ``output/<rel>`` (ComfyUI generated images) — plus bare
+    filenames, which are looked up in the uploads dir first.
+    """
+    if not image_id:
+        return None
+    raw = urlparse(image_id).path
+    raw = raw.lstrip("/")
+    base = None
+    if raw.startswith("uploads/"):
+        base, rel = UPLOADS_DIR, raw[len("uploads/"):]
+    elif raw.startswith("output/"):
+        base, rel = COMFYUI_OUTPUT, raw[len("output/"):]
+    else:
+        base, rel = UPLOADS_DIR, os.path.basename(raw)
+    root = os.path.realpath(base)
+    fpath = os.path.realpath(os.path.join(root, rel))
+    if fpath != root and not fpath.startswith(root + os.sep):
+        return None
+    if not os.path.isfile(fpath):
+        return None
+    return fpath
+
 # ---------------------------------------------------------------------------
 # Shared application state — injected by chat-webui.py via set_app_state().
 # ---------------------------------------------------------------------------
@@ -247,6 +283,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Disposition", "inline")
+                self.end_headers()
+                with open(fpath, "rb") as f:
+                    self._safe_write(f.read())
+                return
+            self.send_error(404)
+        elif self.path.startswith("/api/image/"):
+            image_id = self.path[len("/api/image/"):]
+            fpath = resolve_image_file(image_id)
+            if fpath:
+                ext = os.path.splitext(fpath)[1].lower()
+                ctype = IMAGE_MIME.get(ext, "image/jpeg")
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Disposition", "inline")
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
                 self.end_headers()
                 with open(fpath, "rb") as f:
                     self._safe_write(f.read())
@@ -678,6 +729,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 f.write(raw)
             file_url = f"/uploads/{safe_name}"
             self.send_json({"url": file_url, "name": name})
+        elif self.path == "/api/upload-image":
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            data_b64 = body.get("data", "")
+            ext = (body.get("ext") or "jpg").lstrip(".").lower()
+            if ext not in ("png", "jpg", "jpeg", "webp", "gif", "bmp"):
+                ext = "jpg"
+            try:
+                raw = base64.b64decode(data_b64, validate=False)
+            except Exception:
+                self.send_json({"error": "Invalid image data"}, status=400)
+                return
+            safe_name = str(uuid.uuid4()) + "." + ext
+            os.makedirs(UPLOADS_DIR, exist_ok=True)
+            filepath = os.path.join(UPLOADS_DIR, safe_name)
+            with open(filepath, "wb") as f:
+                f.write(raw)
+            self.send_json({"url": f"/uploads/{safe_name}"})
         elif self.path == "/api/tts":
             user = get_current_user(self.headers)
             if not user:

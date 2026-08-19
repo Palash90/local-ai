@@ -1,9 +1,12 @@
 """The event loop, task queue and task-state helpers that drive a chat request."""
 
+import base64
 import json
 import os
+import re
 import time
 
+from server.features.context import resolve_image_path
 from server.features.state import M
 
 
@@ -27,6 +30,32 @@ def set_client_location(value):
 def _task_user(task_id):
     with M._data_lock:
         return M.tasks.get(task_id, {}).get("_user", "")
+
+
+def _image_bytes_b64(image):
+    """Normalize an uploaded image to base64 bytes.
+
+    The UI may pass a ``/uploads/...`` link (uploaded ahead of time) instead of
+    raw base64. Image code downstream (edit_image, ComfyUI input writing)
+    expects actual bytes, so resolve links to their on-disk contents here.
+    """
+    if not image:
+        return None
+    s = str(image)
+    if not (s.startswith(("/uploads/", "/output/", "/api/image/")) or re.match(
+        r"^https?://", s
+    )):
+        if s.startswith("data:image/"):
+            s = s.split(",", 1)[-1]
+        return s
+    fpath = resolve_image_path(s)
+    if fpath:
+        try:
+            with open(fpath, "rb") as f:
+                return base64.b64encode(f.read()).decode()
+        except OSError:
+            pass
+    return None
 
 
 def _task_max_rounds(task_id):
@@ -177,7 +206,7 @@ def _event_loop():
                     "_tools_used": [],
                     "_search_details": [],
                     "_original_message": user_message,
-                    "_original_image": image_b64,
+                    "_original_image": _image_bytes_b64(image_b64),
                     "_audio": audio_b64,
                     "_user": user,
                     "_client_timestamp": client_ts,
