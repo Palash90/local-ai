@@ -1,13 +1,4 @@
 node_modules
 dist
 *.pyc
-# Playwright test artifacts & reports
-/playwright-report/
-/test-results/
-/playwright/.cache/
-
-# Code coverage reports
-/coverage/
-/.nyc_output/
-/coverage-js/
 *.log
