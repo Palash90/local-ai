@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # 1. SearXNG Container
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
@@ -11,8 +10,10 @@ services:
       - internal-net
     ports:
       - "8080:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     environment:
-      - SEARXNG_BASE_URL=https://127.0.0.1/search/
+      - SEARXNG_BASE_URL=http://127.0.0.1:8080/search/
 
   # 2. Nextcloud Database
   cloud-db:

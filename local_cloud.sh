@@ -104,7 +104,7 @@ server {
         sub_filter_once off;
         sub_filter_types text/html;
         sub_filter '</head>' '
-        <div id="global-nav-bar" style="position:absolute;top:16px;right:24px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
+        <div id="global-nav-bar" style="position:absolute;top:16px;right:60px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
             <a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">🏠 Home</a>
             <span style="color:#484f58;">|</span>
             <a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a>
