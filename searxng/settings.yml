@@ -2,7 +2,7 @@ use_default_settings: true
 
 server:
   secret_key: "ultrasecretkeyforsearxng"
-  base_url: "http://127.0.0.1:8080/search/"
+  base_url: false
   limiter: false
 
 search:

@@ -34,18 +34,23 @@ cat << 'EOF' | sudo tee /var/www/dashboard/index.html > /dev/null
         </a>
         <a href="/stories/" class="card">
             <div class="icon">📖</div>
-            <div class="title">Chat Stories</div>
+            <div class="title">AI Generated Stories</div>
             <div class="desc">/stories/</div>
         </a>
         <a href="/search/" class="card">
             <div class="icon">🔍</div>
-            <div class="title">SearXNG</div>
+            <div class="title">Search Engine</div>
             <div class="desc">/search/</div>
         </a>
         <a href="/cloud/" class="card">
             <div class="icon">☁️</div>
             <div class="title">Nextcloud</div>
             <div class="desc">/cloud/</div>
+        </a>
+        <a href="/cloud/apps/files/files/136?dir=/Media/Public/E-books/" class="card">
+            <div class="icon">📚</div>
+            <div class="title">Books</div>
+            <div class="desc">E-books</div>
         </a>
         <a href="/code/" class="card">
             <div class="icon">💻</div>
@@ -104,7 +109,7 @@ server {
         sub_filter_once off;
         sub_filter_types text/html;
         sub_filter '</head>' '
-        <div id="global-nav-bar" style="position:absolute;top:16px;right:60px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
+        <div id="global-nav-bar" style="position:absolute;top:8px;right:80px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
             <a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">🏠 Home</a>
             <span style="color:#484f58;">|</span>
             <a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a>
@@ -166,7 +171,7 @@ server {
 
     # 3. SearXNG Search Engine (Port 8080)
     location /search/ {
-        proxy_pass http://127.0.0.1:8080/;
+        proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
