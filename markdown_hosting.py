@@ -2,7 +2,6 @@ import os
 import json
 import html
 import shutil
-import threading
 import markdown
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exception_handlers import http_exception_handler
@@ -16,10 +15,6 @@ load_dotenv()
 app = FastAPI()
 
 BASE_STORIES_DIR = "./stories"
-
-# State matching chat-webui.py
-_active_tokens = {}
-_tokens_lock = threading.Lock()
 
 # Directory roots resolved from environment variables.
 # Hierarchy: everyone -> free dir, premium +1 dir, admin +1 more dir.

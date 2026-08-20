@@ -26,13 +26,14 @@ bash setup.sh
 #      diffusion_models/z_image_turbo_bf16.safetensors
 #      text_encoders/qwen_3_4b.safetensors
 #      vae/ae.safetensors
-#    (optional) nano ~/local-ai-files/users.json   # set passwords
 
 # 3. Run — nothing else to configure
 cd ~/git/local-ai && python chat-webui.py
 ```
 
 Access at `http://chat.local` or `http://localhost:3001`.
+
+Authentication is unified SSO via Authentik — see "Authentication (SSO)" below.
 
 Self-chat agents (editor/moderator/registered agents) run on the CPU llama-server
 (`http://localhost:8079`) by default so they never compete with interactive UI
@@ -107,6 +108,42 @@ Access at `http://localhost:3001` (published from the container). Notes:
 - Config/data dirs (`~/local-ai-files`) are shared with the host, so models and
   sessions persist across container restarts.
 
+## Authentication (SSO)
+
+Authentication is unified **SSO via Authentik** — the single identity provider for
+every app on the box. There is **no `users.json` and no per-app password database**;
+users, passwords and roles live in Authentik.
+
+**Two identity paths:**
+
+1. **Browsers** — nginx runs an `auth_request` subrequest against the Authentik
+   proxy outpost (`location /ak-auth-ai` in `local_cloud.sh`). If the SSO session is
+   valid the outpost answers 200 and populates `X-Authentik-*` claim headers, which
+   nginx forwards to the upstream apps. On 401 nginx sends the browser to the SSO
+   portal (`@ak-sso-ai`). The SPA calls `/api/check-auth` on load to learn who the
+   user is.
+2. **Machine agents** (`self-chat.py`) — authenticate via Authentik's OAuth2 password
+   grant and send the JWT as `Authorization: Bearer <token>`. Backends verify the
+   signature against Authentik's JWKS (`server/auth.py` → `identity_from_bearer`).
+
+Resolved identity is always a dict — `username`, `email`, `name`, `groups`, `role`
+(`free`/`premium`/`admin` from the user's Authentik groups) and the Authentik `uid`
+(`server/auth.py` → `get_identity`). Roles decide Story collection access and the
+"overwrite user context" admin action.
+
+**Enabling steps** (one-time):
+
+1. Fill the `AUTHENTIK_*` / `POSTGRES_*` secrets in `.env` (see `authentik-compose.yaml`).
+2. Start Authentik: `docker compose -f authentik-compose.yaml up -d`.
+3. Open `https://<host>/sso/if/flow/initial-setup/` and create the admin account.
+4. Provision groups/users, the `local-ai` OIDC provider and the proxy outpost:
+   `python3 scripts/authentik_bootstrap.py`.
+5. Deploy the proxy outpost (`ghcr.io/goauthentik/proxy`) with the outpost token the
+   bootstrap script prints, on `127.0.0.1:9010` (nginx's `ak_outpost` upstream).
+6. Ensure the apps are only reachable through the nginx front-end in `local_cloud.sh`
+   (the `auth_request` gate on `/ai/`, `/api/`, `/stories/`, `/story/`), then reload
+   nginx.
+
 ## Security & Deployment Notes
 
 > **Intended scope: a private, trusted home deployment** — e.g. a household of a few
@@ -115,20 +152,28 @@ Access at `http://localhost:3001` (published from the container). Notes:
 > production, the public internet, or a shared LAN where many unknown users work —
 > do **not** use it under those conditions.
 
-- **File endpoints are unauthenticated.** `/output/...` (generated images) and
-  `/uploads/...` (uploaded documents) are served without requiring a login token
-  (`chat-webui.py` `do_GET`). Anyone who can reach port 3001 and knows a filename can
-  download them. Do not upload sensitive files you wouldn't want shared on the LAN.
+> **Authentication is unified SSO.** Browser access requires an Authentik session
+> (nginx `auth_request`), and per-user identity comes from the forwarded
+> `X-Authentik-*` headers (see "Authentication (SSO)" below). The notes that follow
+> assume the SSO-enabled nginx front-end (`local_cloud.sh`); running `chat-webui.py`
+> directly on port 3001 bypasses all of it.
+
+- **Bypass on bare `chat-webui.py`.** Running `python chat-webui.py` directly serves
+  port 3001 **without** the nginx SSO gate, so `identity_from_headers` finds no
+  `X-Authentik-*` headers and every endpoint treats the caller as unauthenticated.
+  Always front it with `local_cloud.sh`'s nginx config for real protection.
+- **File endpoints are unauthenticated on bare 3001.** `/output/...` (generated
+  images) and `/uploads/...` (uploaded documents) are served without an identity
+  check (`chat-webui.py` `do_GET`). Anyone who can reach port 3001 and knows a
+  filename can download them. Behind the SSO nginx gate (`/ai/`, `/api/`) these are
+  still protected because the whole location is gated at the edge.
 - **CORS is wide open.** Responses carry `Access-Control-Allow-Origin: *`
-  (`chat-webui.py` `do_OPTIONS`/`send_json`). A malicious page on the LAN could call
-  the API and read responses (login is still required via `X-Auth-Token`).
-- **Default credentials.** A fresh `setup.sh` run creates `admin` / `admin`
-  (`users.json`). Change it immediately — `nano ~/local-ai-files/users.json`.
-- **Plaintext passwords.** `users.json` stores passwords in plaintext and compares them
-  directly (`chat-webui.py` `/api/login`). Keep that file readable only by you
-  (`chmod 600`).
-- **No TLS/HTTPS.** Login tokens and chat content travel in plaintext. Fine on a
-  trusted LAN; never port-forward 3001/8081/8079 without adding TLS in front.
+  (`chat-webui.py` `do_OPTIONS`/`send_json`). A malicious page on the same origin
+  context could call the API and read responses; SSO cookies are HttpOnly and
+  SameSite-bound so cross-origin pages cannot use the session.
+- **No TLS/HTTPS on bare 3001.** Login and chat content travel in plaintext if you
+  connect without nginx. Always use the TLS-terminating nginx front-end
+  (`local_cloud.sh`); never port-forward 3001/8081/8079 directly.
 - **No content guardrails.** The model outputs whatever the loaded model produces; there
   is no moderation or kid-safe filter in the stack. Choose your model accordingly and
   set expectations for anyone using it.
@@ -192,7 +237,7 @@ graph TD
     subgraph DataDir ["Data (~/local-ai-files/)"]
         DF1["model.json\nLLM model ids:\ngpu (chat UI)\n+ cpu (self-chat)"]
         DF2["models.json\nComfyUI image model defs\nz_image (turbo)"]
-        DF3["users.json\nUser credentials + context paths"]
+        DF3["Authentik (external)\nUsers, groups, SSO roles\ncontexts/<user>.txt\nPer-user persistent context"]
         DF4["sys_prompt.txt\nSystem prompt template\n%model_list% %current_time%\n%current_location%"]
         DF5["session/sessions_<user>.json\nPer-user persisted chat sessions"]
         DF6["my-models/\nLLM GGUF model files"]
@@ -261,7 +306,7 @@ graph TD
         LK4["_image_queue + _image_worker\nSerializes image jobs\n(image loading can starve GPU)"]
         LK5["_data_lock: threading.Lock\nGuards sessions, tasks, model_status"]
         LK6["_model_transition_lock\nSerializes load/unload of LLM"]
-        LK7["_tokens_lock\nGuards _active_tokens dict"]
+        LK7["_tokens_lock\nGuards _agent_tokens/_agent_users\n(self-chat agent tracking)"]
         LK8["_queue_locks + _queue_conds\nPer-lane task queues\n(gpu lane + cpu lane)\nCondition variables"]
     end
 ```
@@ -270,7 +315,7 @@ graph TD
 
 ```mermaid
 graph TD
-    A["python chat-webui.py"] --> A1["Load configs at module import:\nmodel.json, models.json,\nsys_prompt.txt, users.json"]
+    A["python chat-webui.py"] --> A1["Load configs at module import:\nmodel.json, models.json,\nsys_prompt.txt"]
     A --> B["load_sessions()\nLoad per-user session files"]
     A1 & B --> C{"GPU llama-server /health\nHTTP GET localhost:8081?"}
     C -- "200 OK" --> C2{"CPU llama-server /health\nHTTP GET localhost:8079?"}
@@ -336,12 +381,12 @@ agents throughout. Per-server idle timestamps drive independent unloads
 graph TD
     Client([User Client])
 
-    subgraph AuthEndpoints ["Auth"]
-        Client -->|"POST /api/login\n{username, password}"| Login["Validate against users.json\nIssue UUID token to _active_tokens"]
-        Client -->|"POST /api/logout\nX-Auth-Token"| Logout["Remove token"]
-        Client -->|"GET /api/check-auth"| CheckAuth{"Token valid?"}
-        CheckAuth -- Yes --> AuthOK["{authenticated: true, username}"]
+    subgraph AuthEndpoints ["Auth (SSO)"]
+        Client -->|"Browser: nginx auth_request\n→ Authentik SSO portal"| SSO["SSO session cookie set\nX-Authentik-* forwarded upstream"]
+        Client -->|"GET /api/check-auth"| CheckAuth["identity from\nX-Authentik-* headers"]
+        CheckAuth -- Yes --> AuthOK["{authenticated: true, username, role}"]
         CheckAuth -- No --> AuthNO["{authenticated: false}"]
+        Client -->|"Agents: POST /sso/... token\nAuthorization: Bearer <JWT>"| Bearer["Verify JWT against\nAuthentik JWKS"]
     end
 
     subgraph SessionEndpoints ["Session Management"]
@@ -390,10 +435,10 @@ graph TD
 
 ```mermaid
 graph TD
-    Client([User Client]) -->|"POST /api/chat\nX-Auth-Token"| EndpointChat
+    Client([User Client]) -->|"POST /api/chat\n(SSO session via nginx)"| EndpointChat
 
     EndpointChat["Handler.do_POST: /api/chat"]
-    EndpointChat --> AuthCheck{"get_current_user\nvia X-Auth-Token"}
+    EndpointChat --> AuthCheck{"get_current_user\nvia X-Authentik-*/JWT"}
     AuthCheck -- No --> AuthErr[401 Unauthorized]
     AuthCheck -- Yes --> SessionCheck{"Session exists\nand owned by user?"}
     SessionCheck -- No --> SessionErr[404 Session not found]

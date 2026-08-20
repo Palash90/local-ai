@@ -68,8 +68,8 @@ _user_last_seen = {}
 _user_last_seen_lock = threading.Lock()
 
 # A human user counts as "active" (blocking self-chat agents) while any of
-# their tokens has been seen within this window. The browser's 2s model-status
-# poll carries the auth token, acting as a heartbeat.
+# their requests has been seen within this window. The browser's 2s model-status
+# poll acts as the heartbeat.
 ACTIVE_WINDOW_SECONDS = 120
 
 _effective_contexts = {}

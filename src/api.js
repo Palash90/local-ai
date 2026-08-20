@@ -1,34 +1,17 @@
 // Authentication is handled by nginx + Authentik SSO (the X-Authentik-*
 // claim headers are injected upstream by nginx's auth_request). The browser
 // never holds a token; on 401 nginx redirects to the SSO portal.
-const TOKEN_KEY = 'auth_token';
-
-function authToken() {
-  return '';
-}
-
 async function authFetch(url, options = {}) {
   options.headers = options.headers || {};
   const r = await fetch(url, options);
   if (r.status === 401) {
-    localStorage.removeItem(TOKEN_KEY);
     window.dispatchEvent(new CustomEvent('auth:unauthorized'));
   }
   return r;
 }
 
-// Login is served by the Authentik SSO portal (nginx auth_request redirects
-// unauthenticated browsers there). Kept as a programmatic helper that simply
-// sends the user to the SSO start page.
-export async function login(username, password) {
-  window.location.assign('/sso/outpost.goauthentik.io/start?rd=' + encodeURIComponent(window.location.href));
-  throw new Error('SSO login redirect');
-}
-
 export async function logout() {
-  await authFetch('/api/logout', { method: 'POST' }).catch(() => {});
-  localStorage.removeItem(TOKEN_KEY);
-  window.location.assign('/sso/outpost.goauthentik.io/end?rd=/');
+  window.location.assign('/outpost.goauthentik.io/end?rd=/');
 }
 
 export async function checkAuth() {
