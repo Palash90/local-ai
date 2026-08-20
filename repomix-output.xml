@@ -109,335 +109,13 @@ requirements.txt
 self-chat.py
 server_startup_commands.md
 setup.sh
+sso-debugging.md
 ufw_rules.txt
 vite.config.js
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
-
-<file path="server/track_dashboard.py">
-#!/usr/bin/env python3
-"""Request tracking dashboard for the local nginx.
-
-Reads the custom nginx access log (json lines, one per request) written by
-local_cloud.sh (log_format `track`), aggregates per-request metadata, and
-serves a minimal dashboard.
-
-What it answers (from nginx's own request metadata):
-  - Did the request come from GCP?          -> X-Via-GCP header ($http_x_via_gcp)
-  - What request was made?                  -> method + URI + status
-  - Outbound egress per request             -> $bytes_sent (bytes sent to client)
-  - Inbound  egress per request             -> $request_length (bytes from client)
-  - Which app initiated it?                 -> user-agent classification (Android
-                                              app / iOS app / desktop app / browser / CLI)
-
-Run:            python3 server/track_dashboard.py [--port 8093] [--log PATH]
-Serve via nginx: location /track/ { proxy_pass http://127.0.0.1:8093/; }
-"""
-
-import argparse
-import json
-import os
-import threading
-import time
-from collections import Counter, defaultdict
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
-
-DEFAULT_LOG = "/var/log/nginx/track.log"
-DEFAULT_PORT = 8093
-
-APP_PATTERNS = [
-    ("Nextcloud Android", "nextcloud-android"),
-    ("Nextcloud iOS", "nextcloud-ios"),
-    ("Nextcloud Desktop", "nextcloud-desktop"),
-    ("Nextcloud DAVx5", "davx5"),
-    ("curl", "curl"),
-    ("wget", "wget"),
-    ("Python requests", "python-requests"),
-    ("Rclone/Nextcloud", "rclone"),
-    ("Browser Chrome", "chrome"),
-    ("Browser Firefox", "firefox"),
-    ("Browser Safari", "safari"),
-    ("Browser Edge", "edg"),
-    ("Browser (other Mozilla)", "mozilla"),
-]
-
-
-def classify_app(ua):
-    ua = (ua or "").lower()
-    if "nextcloud-android" in ua:
-        return "Nextcloud Android app"
-    if "nextcloud-ios" in ua or "nextcloudmobile" in ua:
-        return "Nextcloud iOS app"
-    if "nextcloud-desktop" in ua:
-        return "Nextcloud Desktop app"
-    for label, needle in APP_PATTERNS:
-        if needle in ua:
-            return label
-    if ua:
-        return "Unknown client"
-    return "(no user-agent)"
-
-
-def status_class(status):
-    try:
-        s = int(status)
-    except (TypeError, ValueError):
-        return "?"
-    return f"{s // 100}xx"
-
-
-class Tracker:
-    def __init__(self, log_path, keep_entries=5000):
-        self.path = log_path
-        self.keep = keep_entries
-        self.lock = threading.Lock()
-        self.reset()
-
-    def reset(self):
-        self.total = 0
-        self.gcp_total = 0
-        self.by_app = Counter()
-        self.by_uri_top = Counter()
-        self.by_method = Counter()
-        self.by_status = Counter()
-        self.out_bytes = {"all": 0, "gcp": 0, "non_gcp": 0}
-        self.in_bytes = {"all": 0, "gcp": 0, "non_gcp": 0}
-        self.recent = []
-        self.start_ts = time.time()
-        self.last_ts = None
-
-    def _ingest(self, raw):
-        try:
-            r = json.loads(raw)
-        except (ValueError, TypeError):
-            return
-        self.total += 1
-        gcp = str(r.get("gcp") or "").strip().lower()
-        is_gcp = gcp in ("1", "true", "yes", "on")
-        if is_gcp:
-            self.gcp_total += 1
-
-        ua = r.get("ua") or ""
-        app = classify_app(ua)
-        self.by_app[app] += 1
-
-        uri = r.get("uri") or "/"
-        self.by_uri_top[uri] += 1
-
-        method = r.get("method") or "-"
-        self.by_method[method] += 1
-
-        status = r.get("status") or 0
-        self.by_status[status_class(status)] += 1
-
-        out = int(r.get("out") or 0)
-        inc = int(r.get("in") or 0)
-        bucket = "gcp" if is_gcp else "non_gcp"
-        self.out_bytes["all"] += out
-        self.out_bytes[bucket] += out
-        self.in_bytes["all"] += inc
-        self.in_bytes[bucket] += inc
-
-        ts = r.get("time") or time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        self.last_ts = ts
-        entry = {
-            "time": ts,
-            "gcp": is_gcp,
-            "app": app,
-            "method": method,
-            "uri": uri,
-            "status": status,
-            "in": inc,
-            "out": out,
-        }
-        self.recent.append(entry)
-        if len(self.recent) > self.keep:
-            self.recent = self.recent[-self.keep:]
-
-    def poll(self):
-        """Read newly appended lines from the log and ingest them."""
-        if not os.path.exists(self.path):
-            return
-        pos = getattr(self, "_offset", 0)
-        size = os.path.getsize(self.path)
-        if size < pos:
-            # rotated/truncated — restart from the beginning
-            pos = 0
-        with open(self.path, "rb") as f:
-            f.seek(pos)
-            lines = f.read()
-            self._offset = f.tell()
-        for raw in lines.decode("utf-8", "replace").splitlines():
-            self._ingest(raw)
-
-    def stats(self):
-        with self.lock:
-            self.poll()
-            top_uri = self.by_uri_top.most_common(25)
-            return {
-                "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "uptime_secs": int(time.time() - self.start_ts),
-                "last_seen": self.last_ts,
-                "total": self.total,
-                "gcp_total": self.gcp_total,
-                "non_gcp_total": self.total - self.gcp_total,
-                "in_bytes": dict(self.in_bytes),
-                "out_bytes": dict(self.out_bytes),
-                "by_app": self.by_app.most_common(),
-                "by_method": self.by_method.most_common(),
-                "by_status": self.by_status.most_common(),
-                "top_uri": top_uri,
-                "recent": list(reversed(self.recent[-200:])),
-            }
-
-
-TRACKER = None
-
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
-        pass
-
-    def _send(self, code, content_type, body):
-        self.send_response(code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        path = urlparse(self.path).path
-        if path == "/api/stats":
-            data = json.dumps(TRACKER.stats()).encode()
-            self._send(200, "application/json", data)
-        elif path in ("/", "/index.html"):
-            self._send(200, "text/html; charset=utf-8", PAGE.encode())
-        else:
-            self._send(404, "text/plain", b"not found")
-
-
-PAGE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Request Tracker</title>
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 24px; }
-h1 { color: #58a6ff; font-size: 22px; margin-bottom: 4px; }
-.sub { color: #8b949e; font-size: 13px; margin-bottom: 20px; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 20px; }
-.card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; }
-.card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #8b949e; }
-.card .val { font-size: 26px; font-weight: 700; color: #58a6ff; }
-.card .subval { font-size: 12px; color: #8b949e; margin-top: 2px; }
-.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
-.panel { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
-.panel h3 { color: #58a6ff; font-size: 14px; margin-bottom: 10px; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #21262d; }
-th { color: #8b949e; font-weight: 600; }
-.bar { display: inline-block; height: 10px; border-radius: 3px; background: #1f6feb; vertical-align: middle; }
-.bar-gcp { background: #f85149; }
-.gcp-yes { color: #f85149; font-weight: 600; }
-.gcp-no  { color: #3fb950; font-weight: 600; }
-tr.recent:hover td { background: #1c2128; }
-@media (prefers-reduced-motion: reduce) { * { transition: none; } }
-</style>
-</head>
-<body>
-<h1>Request Tracker</h1>
-<div class="sub" id="meta">loading…</div>
-<div class="grid" id="cards"></div>
-<div class="cols">
-  <div class="panel"><h3>By app / initiator</h3><table id="appTable"></table></div>
-  <div class="panel"><h3>Top URIs</h3><table id="uriTable"></table></div>
-  <div class="panel"><h3>Methods</h3><table id="methodTable"></table></div>
-  <div class="panel"><h3>Status</h3><table id="statusTable"></table></div>
-</div>
-<div class="panel"><h3>Recent requests</h3><table id="recentTable"></table></div>
-<script>
-function fmtBytes(n) {
-  if (n >= 1<<30) return (n/(1<<30)).toFixed(2)+' GiB';
-  if (n >= 1<<20) return (n/(1<<20)).toFixed(2)+' MiB';
-  if (n >= 1<<10) return (n/(1<<10)).toFixed(1)+' KiB';
-  return n+' B';
-}
-function barRow(label, count, total, color) {
-  const w = total ? (count/total*100) : 0;
-  return '<tr><td>'+label+'</td><td>'+count+'</td><td><span class="bar '+(color||'')+'" style="width:'+w.toFixed(1)+'%"></span></td></tr>';
-}
-function render(s) {
-  const gcpPct = s.total ? (s.gcp_total/s.total*100).toFixed(1) : '0';
-  document.getElementById('meta').textContent =
-    'Generated '+s.generated+' · tracking for '+Math.floor(s.uptime_secs/60)+' min · last request '+s.last_seen;
-  const cards = [
-    {label:'Total requests', val:s.total},
-    {label:'From GCP', val:s.gcp_total, sub:gcpPct+'% of all', cls:'gcp-yes'},
-    {label:'Not GCP', val:s.non_gcp_total, cls:'gcp-no', sub:(100-parseFloat(gcpPct)).toFixed(1)+'% of all'},
-    {label:'Inbound (from clients)', val:fmtBytes(s.in_bytes.all), sub:'GCP '+fmtBytes(s.in_bytes.gcp)},
-    {label:'Outbound (to clients)', val:fmtBytes(s.out_bytes.all), sub:'GCP '+fmtBytes(s.out_bytes.gcp)},
-  ];
-  document.getElementById('cards').innerHTML = cards.map(c =>
-    '<div class="card"><div class="label">'+c.label+'</div><div class="val '+(c.cls||'')+'">'+c.val+'</div><div class="subval">'+(c.sub||'')+'</div></div>'
-  ).join('');
-  const total = s.total || 1;
-  document.getElementById('appTable').innerHTML =
-    '<tr><th>App</th><th>Requests</th><th style="width:40%"></th></tr>' +
-    s.by_app.map(r=>barRow(r[0],r[1],total)).join('');
-  document.getElementById('uriTable').innerHTML =
-    '<tr><th>URI</th><th>Requests</th><th style="width:40%"></th></tr>' +
-    s.top_uri.map(r=>barRow(r[0],r[1],total)).join('');
-  document.getElementById('methodTable').innerHTML =
-    '<tr><th>Method</th><th>Requests</th><th style="width:40%"></th></tr>' +
-    s.by_method.map(r=>barRow(r[0],r[1],total)).join('');
-  document.getElementById('statusTable').innerHTML =
-    '<tr><th>Class</th><th>Requests</th><th style="width:40%"></th></tr>' +
-    s.by_status.map(r=>barRow(r[0],r[1],total)).join('');
-  document.getElementById('recentTable').innerHTML =
-    '<tr><th>Time</th><th>GCP</th><th>App</th><th>Method</th><th>URI</th><th>Status</th><th>Inb</th><th>Out</th></tr>' +
-    s.recent.map(r =>
-      '<tr class="recent"><td>'+r.time+'</td><td class="'+(r.gcp?'gcp-yes':'gcp-no')+'">'+(r.gcp?'yes':'no')+'</td><td>'+(r.app||'')+'</td><td>'+r.method+'</td><td>'+r.uri+'</td><td>'+r.status+'</td><td>'+fmtBytes(r.in)+'</td><td>'+fmtBytes(r.out)+'</td></tr>'
-    ).join('');
-}
-function refresh() {
-  fetch('/api/stats').then(r=>r.json()).then(render).catch(()=>{});
-}
-refresh();
-setInterval(refresh, 5000);
-</script>
-</body>
-</html>
-"""
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--log", default=DEFAULT_LOG)
-    parser.add_argument("--bind", default="127.0.0.1")
-    args = parser.parse_args()
-
-    global TRACKER
-    TRACKER = Tracker(args.log)
-    # Prime with existing log content on startup.
-    TRACKER.poll()
-
-    os.makedirs(os.path.dirname(args.log), exist_ok=True)
-    server = ThreadingHTTPServer((args.bind, args.port), Handler)
-    print(f"[track] dashboard on http://{args.bind}:{args.port} reading {args.log}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-
-
-if __name__ == "__main__":
-    main()
-</file>
 
 <file path="src/components/LocationPrompt.jsx">
 export default function LocationPrompt({ onAllow, onDeny, error }) {
@@ -703,10 +381,6 @@ import './App.css'
 createRoot(document.getElementById('root')).render(<App />)
 </file>
 
-<file path=".repomixignore">
-prompts/master_details.json
-</file>
-
 <file path="index.html">
 <!DOCTYPE html>
 <html lang="en">
@@ -917,6 +591,46 @@ EOF
 ```shell
 sudo systemctl restart avahi-daemon
 ```
+</file>
+
+<file path="sso-debugging.md">
+# Here's a recap of the debugging session — you were fixing SSO/logout for `home.palashkantikundu.in/ai`:
+
+**1. Initial 404 on `/ai/`**
+
+- Root cause: `local-ai-authentik-outpost-1` was `unhealthy`, so `auth_request` calls to it failed and the login redirect chain dead-ended in a 404.
+
+**2. Outpost `unhealthy`, config had a typo**
+
+- `authentik-compose.yaml` had `UTHENTIK_TOKEN` (missing the leading `A`) instead of `AUTHENTIK_TOKEN` — the env var was silently ignored.
+
+**3. `502 Bad Gateway` fetching outpost config**
+
+- After fixing the typo, the outpost was trying to reach Authentik via the *public* URL (`https://home.palashkantikundu.in/sso/`), round-tripping out to the internet unnecessarily. Fixed by pointing `AUTHENTIK_HOST` at the internal Docker service name instead, and adding `AUTHENTIK_HOST_BROWSER` for user-facing redirects.
+
+**4. `404 Not Found` fetching outpost config**
+
+- `AUTHENTIK_HOST` was missing the `/sso/` path suffix that `AUTHENTIK_WEB__PATH: /sso/` requires on the server side. Fixed to `http://authentik-server:9000/sso/`.
+
+**5. OAuth "Redirect URI Error"**
+
+- The Proxy Provider's **External Host** field in the Authentik admin UI was pointing at an internal address instead of `https://home.palashkantikundu.in`. Fixed in the admin UI, then restarted the outpost to re-sync.
+
+**6. 502 on the app itself**
+
+- Traced to checking whether `chat-webui.py` (port 3001) was actually running — this resolved once confirmed/started.
+
+**7. Login worked. Logout redirected to `/sso/outpost.goauthentik.io/end?rd=/` → 404**
+
+- Found the bug in `src/api.js`: the logout URL was hardcoded with an incorrect `/sso/` prefix. Nginx only routes `/outpost.goauthentik.io/*` at the domain root, not under `/sso/`. Fixed the JS to `window.location.assign('/outpost.goauthentik.io/end?rd=/')` and rebuilt the frontend.
+
+**8. Still 404 on `/outpost.goauthentik.io/end?rd=/` — unresolved**
+
+- Confirmed via nginx access log that nginx is routing this correctly (the 404 comes from the outpost itself, not nginx).
+- Confirmed via direct `curl` to `127.0.0.1:9010` (bypassing nginx) that the outpost returns a bare `404 page not found` for this path.
+- Current working theory: the `/end` logout endpoint needs the browser's Authentik session cookie to identify which provider/session to terminate, and it may not be present/forwarded on that request. **Next steps left open:** check dev tools for the `authentik_proxy_*` cookie on that request, and retest the curl call with that cookie attached to confirm.
+
+That last piece (logout 404) is where we left off — still open.
 </file>
 
 <file path="ufw_rules.txt">
@@ -1913,6 +1627,329 @@ def load_dotenv(path=None):
 load_dotenv()
 </file>
 
+<file path="server/track_dashboard.py">
+#!/usr/bin/env python3
+"""Request tracking dashboard for the local nginx.
+
+Reads the custom nginx access log (json lines, one per request) written by
+local_cloud.sh (log_format `track`), aggregates per-request metadata, and
+serves a minimal dashboard.
+
+What it answers (from nginx's own request metadata):
+  - Did the request come from GCP?          -> X-Via-GCP header ($http_x_via_gcp)
+  - What request was made?                  -> method + URI + status
+  - Outbound egress per request             -> $bytes_sent (bytes sent to client)
+  - Inbound  egress per request             -> $request_length (bytes from client)
+  - Which app initiated it?                 -> user-agent classification (Android
+                                              app / iOS app / desktop app / browser / CLI)
+
+Run:            python3 server/track_dashboard.py [--port 8093] [--log PATH]
+Serve via nginx: location /track/ { proxy_pass http://127.0.0.1:8093/; }
+"""
+
+import argparse
+import json
+import os
+import threading
+import time
+from collections import Counter, defaultdict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
+
+DEFAULT_LOG = "/var/log/nginx/track.log"
+DEFAULT_PORT = 8093
+
+APP_PATTERNS = [
+    ("Nextcloud Android", "nextcloud-android"),
+    ("Nextcloud iOS", "nextcloud-ios"),
+    ("Nextcloud Desktop", "nextcloud-desktop"),
+    ("Nextcloud DAVx5", "davx5"),
+    ("curl", "curl"),
+    ("wget", "wget"),
+    ("Python requests", "python-requests"),
+    ("Rclone/Nextcloud", "rclone"),
+    ("Browser Chrome", "chrome"),
+    ("Browser Firefox", "firefox"),
+    ("Browser Safari", "safari"),
+    ("Browser Edge", "edg"),
+    ("Browser (other Mozilla)", "mozilla"),
+]
+
+
+def classify_app(ua):
+    ua = (ua or "").lower()
+    if "nextcloud-android" in ua:
+        return "Nextcloud Android app"
+    if "nextcloud-ios" in ua or "nextcloudmobile" in ua:
+        return "Nextcloud iOS app"
+    if "nextcloud-desktop" in ua:
+        return "Nextcloud Desktop app"
+    for label, needle in APP_PATTERNS:
+        if needle in ua:
+            return label
+    if ua:
+        return "Unknown client"
+    return "(no user-agent)"
+
+
+def status_class(status):
+    try:
+        s = int(status)
+    except (TypeError, ValueError):
+        return "?"
+    return f"{s // 100}xx"
+
+
+class Tracker:
+    def __init__(self, log_path, keep_entries=5000):
+        self.path = log_path
+        self.keep = keep_entries
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        self.total = 0
+        self.gcp_total = 0
+        self.by_app = Counter()
+        self.by_uri_top = Counter()
+        self.by_method = Counter()
+        self.by_status = Counter()
+        self.out_bytes = {"all": 0, "gcp": 0, "non_gcp": 0}
+        self.in_bytes = {"all": 0, "gcp": 0, "non_gcp": 0}
+        self.recent = []
+        self.start_ts = time.time()
+        self.last_ts = None
+
+    def _ingest(self, raw):
+        try:
+            r = json.loads(raw)
+        except (ValueError, TypeError):
+            return
+        self.total += 1
+        gcp = str(r.get("gcp") or "").strip().lower()
+        is_gcp = gcp in ("1", "true", "yes", "on")
+        if is_gcp:
+            self.gcp_total += 1
+
+        ua = r.get("ua") or ""
+        app = classify_app(ua)
+        self.by_app[app] += 1
+
+        uri = r.get("uri") or "/"
+        self.by_uri_top[uri] += 1
+
+        method = r.get("method") or "-"
+        self.by_method[method] += 1
+
+        status = r.get("status") or 0
+        self.by_status[status_class(status)] += 1
+
+        out = int(r.get("out") or 0)
+        inc = int(r.get("in") or 0)
+        bucket = "gcp" if is_gcp else "non_gcp"
+        self.out_bytes["all"] += out
+        self.out_bytes[bucket] += out
+        self.in_bytes["all"] += inc
+        self.in_bytes[bucket] += inc
+
+        ts = r.get("time") or time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        self.last_ts = ts
+        entry = {
+            "time": ts,
+            "gcp": is_gcp,
+            "app": app,
+            "method": method,
+            "uri": uri,
+            "status": status,
+            "in": inc,
+            "out": out,
+        }
+        self.recent.append(entry)
+        if len(self.recent) > self.keep:
+            self.recent = self.recent[-self.keep:]
+
+    def poll(self):
+        """Read newly appended lines from the log and ingest them."""
+        if not os.path.exists(self.path):
+            return
+        pos = getattr(self, "_offset", 0)
+        size = os.path.getsize(self.path)
+        if size < pos:
+            # rotated/truncated — restart from the beginning
+            pos = 0
+        with open(self.path, "rb") as f:
+            f.seek(pos)
+            lines = f.read()
+            self._offset = f.tell()
+        for raw in lines.decode("utf-8", "replace").splitlines():
+            self._ingest(raw)
+
+    def stats(self):
+        with self.lock:
+            self.poll()
+            top_uri = self.by_uri_top.most_common(25)
+            return {
+                "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "uptime_secs": int(time.time() - self.start_ts),
+                "last_seen": self.last_ts,
+                "total": self.total,
+                "gcp_total": self.gcp_total,
+                "non_gcp_total": self.total - self.gcp_total,
+                "in_bytes": dict(self.in_bytes),
+                "out_bytes": dict(self.out_bytes),
+                "by_app": self.by_app.most_common(),
+                "by_method": self.by_method.most_common(),
+                "by_status": self.by_status.most_common(),
+                "top_uri": top_uri,
+                "recent": list(reversed(self.recent[-200:])),
+            }
+
+
+TRACKER = None
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, content_type, body):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/api/stats":
+            data = json.dumps(TRACKER.stats()).encode()
+            self._send(200, "application/json", data)
+        elif path in ("/", "/index.html"):
+            self._send(200, "text/html; charset=utf-8", PAGE.encode())
+        else:
+            self._send(404, "text/plain", b"not found")
+
+
+PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Request Tracker</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 24px; }
+h1 { color: #58a6ff; font-size: 22px; margin-bottom: 4px; }
+.sub { color: #8b949e; font-size: 13px; margin-bottom: 20px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 20px; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; }
+.card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #8b949e; }
+.card .val { font-size: 26px; font-weight: 700; color: #58a6ff; }
+.card .subval { font-size: 12px; color: #8b949e; margin-top: 2px; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.panel { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+.panel h3 { color: #58a6ff; font-size: 14px; margin-bottom: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #21262d; }
+th { color: #8b949e; font-weight: 600; }
+.bar { display: inline-block; height: 10px; border-radius: 3px; background: #1f6feb; vertical-align: middle; }
+.bar-gcp { background: #f85149; }
+.gcp-yes { color: #f85149; font-weight: 600; }
+.gcp-no  { color: #3fb950; font-weight: 600; }
+tr.recent:hover td { background: #1c2128; }
+@media (prefers-reduced-motion: reduce) { * { transition: none; } }
+</style>
+</head>
+<body>
+<h1>Request Tracker</h1>
+<div class="sub" id="meta">loading…</div>
+<div class="grid" id="cards"></div>
+<div class="cols">
+  <div class="panel"><h3>By app / initiator</h3><table id="appTable"></table></div>
+  <div class="panel"><h3>Top URIs</h3><table id="uriTable"></table></div>
+  <div class="panel"><h3>Methods</h3><table id="methodTable"></table></div>
+  <div class="panel"><h3>Status</h3><table id="statusTable"></table></div>
+</div>
+<div class="panel"><h3>Recent requests</h3><table id="recentTable"></table></div>
+<script>
+function fmtBytes(n) {
+  if (n >= 1<<30) return (n/(1<<30)).toFixed(2)+' GiB';
+  if (n >= 1<<20) return (n/(1<<20)).toFixed(2)+' MiB';
+  if (n >= 1<<10) return (n/(1<<10)).toFixed(1)+' KiB';
+  return n+' B';
+}
+function barRow(label, count, total, color) {
+  const w = total ? (count/total*100) : 0;
+  return '<tr><td>'+label+'</td><td>'+count+'</td><td><span class="bar '+(color||'')+'" style="width:'+w.toFixed(1)+'%"></span></td></tr>';
+}
+function render(s) {
+  const gcpPct = s.total ? (s.gcp_total/s.total*100).toFixed(1) : '0';
+  document.getElementById('meta').textContent =
+    'Generated '+s.generated+' · tracking for '+Math.floor(s.uptime_secs/60)+' min · last request '+s.last_seen;
+  const cards = [
+    {label:'Total requests', val:s.total},
+    {label:'From GCP', val:s.gcp_total, sub:gcpPct+'% of all', cls:'gcp-yes'},
+    {label:'Not GCP', val:s.non_gcp_total, cls:'gcp-no', sub:(100-parseFloat(gcpPct)).toFixed(1)+'% of all'},
+    {label:'Inbound (from clients)', val:fmtBytes(s.in_bytes.all), sub:'GCP '+fmtBytes(s.in_bytes.gcp)},
+    {label:'Outbound (to clients)', val:fmtBytes(s.out_bytes.all), sub:'GCP '+fmtBytes(s.out_bytes.gcp)},
+  ];
+  document.getElementById('cards').innerHTML = cards.map(c =>
+    '<div class="card"><div class="label">'+c.label+'</div><div class="val '+(c.cls||'')+'">'+c.val+'</div><div class="subval">'+(c.sub||'')+'</div></div>'
+  ).join('');
+  const total = s.total || 1;
+  document.getElementById('appTable').innerHTML =
+    '<tr><th>App</th><th>Requests</th><th style="width:40%"></th></tr>' +
+    s.by_app.map(r=>barRow(r[0],r[1],total)).join('');
+  document.getElementById('uriTable').innerHTML =
+    '<tr><th>URI</th><th>Requests</th><th style="width:40%"></th></tr>' +
+    s.top_uri.map(r=>barRow(r[0],r[1],total)).join('');
+  document.getElementById('methodTable').innerHTML =
+    '<tr><th>Method</th><th>Requests</th><th style="width:40%"></th></tr>' +
+    s.by_method.map(r=>barRow(r[0],r[1],total)).join('');
+  document.getElementById('statusTable').innerHTML =
+    '<tr><th>Class</th><th>Requests</th><th style="width:40%"></th></tr>' +
+    s.by_status.map(r=>barRow(r[0],r[1],total)).join('');
+  document.getElementById('recentTable').innerHTML =
+    '<tr><th>Time</th><th>GCP</th><th>App</th><th>Method</th><th>URI</th><th>Status</th><th>Inb</th><th>Out</th></tr>' +
+    s.recent.map(r =>
+      '<tr class="recent"><td>'+r.time+'</td><td class="'+(r.gcp?'gcp-yes':'gcp-no')+'">'+(r.gcp?'yes':'no')+'</td><td>'+(r.app||'')+'</td><td>'+r.method+'</td><td>'+r.uri+'</td><td>'+r.status+'</td><td>'+fmtBytes(r.in)+'</td><td>'+fmtBytes(r.out)+'</td></tr>'
+    ).join('');
+}
+function refresh() {
+  fetch('/api/stats').then(r=>r.json()).then(render).catch(()=>{});
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
+"""
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--log", default=DEFAULT_LOG)
+    parser.add_argument("--bind", default="127.0.0.1")
+    args = parser.parse_args()
+
+    global TRACKER
+    TRACKER = Tracker(args.log)
+    # Prime with existing log content on startup.
+    TRACKER.poll()
+
+    os.makedirs(os.path.dirname(args.log), exist_ok=True)
+    server = ThreadingHTTPServer((args.bind, args.port), Handler)
+    print(f"[track] dashboard on http://{args.bind}:{args.port} reading {args.log}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
 <file path="src/components/ImageLightbox.jsx">
 import { useEffect, useRef, useState, useCallback } from 'react'
 
@@ -2186,118 +2223,8 @@ export async function downloadFile(url, fallbackName = 'file') {
 }
 </file>
 
-<file path="authentik-compose.yaml">
-# Authentik — the single identity provider for every app (SSO).
-#
-# Run with:  docker compose -f authentik-compose.yaml up -d
-# Manager UI:  https://home.palashkantikundu.in/sso/if/admin/
-
-version: '3.8'
-
-services:
-  authentik-postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-authentik}
-      POSTGRES_USER: ${POSTGRES_USER:-authentik}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  authentik-redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: --save 60 1 --loglevel warning
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  authentik-server:
-    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2025.2.1}
-    restart: unless-stopped
-    command: server
-    ports:
-      - "127.0.0.1:9008:9000"
-      - "127.0.0.1:9443:9443"
-    environment:
-      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
-      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN:?set AUTHENTIK_TOKEN in .env}
-      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
-      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
-      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-}
-      # FIXED: Points to external HTTPS domain so SSO redirects work properly
-      AUTHENTIK_URL: ${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}
-      AUTHENTIK_PORT: "9000"
-      AUTHENTIK_REDIS__HOST: authentik-redis
-      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
-      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
-      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
-      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
-      AUTHENTIK_CORS__ALLOWED_ORIGINS: '*'
-      AUTHENTIK_WEB__PATH: /sso/
-      AUTHENTIK_COOKIE_DOMAIN: ${AUTHENTIK_COOKIE_DOMAIN:-home.palashkantikundu.in}
-      AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS: "127.0.0.1/32,10.66.66.0/8,172.16.0.0/12,192.168.0.0/16"
-    volumes:
-      - media:/media
-      - custom-templates:/templates
-    depends_on:
-      authentik-postgres:
-        condition: service_healthy
-      authentik-redis:
-        condition: service_healthy
-
-  authentik-worker:
-    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2025.2.1}
-    restart: unless-stopped
-    command: worker
-    environment:
-      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
-      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN:?set AUTHENTIK_TOKEN in .env}
-      AUTHENTIK_URL: ${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}
-      AUTHENTIK_REDIS__HOST: authentik-redis
-      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
-      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
-      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
-      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - media:/media
-      - custom-templates:/templates
-      - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      authentik-postgres:
-        condition: service_healthy
-      authentik-redis:
-        condition: service_healthy
-  
-  authentik-outpost:
-    image: ghcr.io/goauthentik/proxy:2025.2.1
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:9010:9000"
-    environment:
-      AUTHENTIK_HOST: "http://authentik-server:9000/sso/"
-      AUTHENTIK_HOST_BROWSER: "https://home.palashkantikundu.in/sso/"
-      AUTHENTIK_INSECURE: "true"
-      AUTHENTIK_TOKEN: "${AUTHENTIK_OUTPOST_TOKEN:?set in .env}"
-    depends_on:
-      authentik-server:
-        condition: service_started
-
-volumes:
-  pg_data:
-  redis_data:
-  media:
-  custom-templates:
+<file path=".repomixignore">
+prompts/master_details.json
 </file>
 
 <file path="genre_creator.py">
@@ -3878,6 +3805,120 @@ export default function ChatArea({ messages, pendingMessages, currentSessionId, 
 }
 </file>
 
+<file path="authentik-compose.yaml">
+# Authentik — the single identity provider for every app (SSO).
+#
+# Run with:  docker compose -f authentik-compose.yaml up -d
+# Manager UI:  https://home.palashkantikundu.in/sso/if/admin/
+
+version: '3.8'
+
+services:
+  authentik-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-authentik}
+      POSTGRES_USER: ${POSTGRES_USER:-authentik}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  authentik-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2025.2.1}
+    restart: unless-stopped
+    command: server
+    ports:
+      - "127.0.0.1:9008:9000"
+      - "127.0.0.1:9443:9443"
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
+      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN:?set AUTHENTIK_TOKEN in .env}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-}
+      # FIXED: Points to external HTTPS domain so SSO redirects work properly
+      AUTHENTIK_URL: ${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}
+      AUTHENTIK_PORT: "9000"
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
+      AUTHENTIK_CORS__ALLOWED_ORIGINS: '*'
+      AUTHENTIK_WEB__PATH: /sso/
+      AUTHENTIK_COOKIE_DOMAIN: ${AUTHENTIK_COOKIE_DOMAIN:-home.palashkantikundu.in}
+      AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS: "127.0.0.1/32,10.66.66.0/8,172.16.0.0/12,192.168.0.0/16"
+    volumes:
+      - media:/media
+      - custom-templates:/templates
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2025.2.1}
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
+      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN:?set AUTHENTIK_TOKEN in .env}
+      AUTHENTIK_URL: ${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - media:/media
+      - custom-templates:/templates
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+  
+  authentik-outpost:
+    image: ghcr.io/goauthentik/proxy:2025.2.1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9010:9000"
+    environment:
+      AUTHENTIK_HOST: "http://authentik-server:9000/sso/"
+      AUTHENTIK_HOST_BROWSER: "https://home.palashkantikundu.in/sso/"
+      AUTHENTIK_INSECURE: "true"
+      AUTHENTIK_TOKEN: "${AUTHENTIK_OUTPOST_TOKEN:?set in .env}"
+    depends_on:
+      authentik-server:
+        condition: service_started
+
+volumes:
+  pg_data:
+  redis_data:
+  media:
+  custom-templates:
+</file>
+
 <file path="prompts/moderator.txt">
 You are the Story Moderator. You review finished, edited stories and give a final verdict: GREEN (approved for publishing) or RED (rejected).
 You never delete or edit anything. You only categorize the story and briefly explain your verdict.
@@ -4751,191 +4792,6 @@ echo "  Access at: http://chat.local  or  http://localhost:3001"
 echo "============================================"
 </file>
 
-<file path="src/api.js">
-// Authentication is handled by nginx + Authentik SSO (the X-Authentik-*
-// claim headers are injected upstream by nginx's auth_request). The browser
-// never holds a token; on 401 nginx redirects to the SSO portal.
-async function authFetch(url, options = {}) {
-  options.headers = options.headers || {};
-  const r = await fetch(url, options);
-  if (r.status === 401) {
-    window.dispatchEvent(new CustomEvent('auth:unauthorized'));
-  }
-  return r;
-}
-
-export async function logout() {
-  window.location.assign('/outpost.goauthentik.io/end?rd=/');
-}
-
-export async function checkAuth() {
-  const r = await authFetch('/api/check-auth');
-  return r.json();
-}
-
-export async function fetchSessions() {
-  const r = await authFetch('/api/sessions');
-  return r.json();
-}
-
-export async function fetchMessages(sessionId) {
-  const r = await authFetch(`/api/sessions/${sessionId}/messages`);
-  return r.json();
-}
-
-export async function createSession() {
-  const r = await authFetch('/api/sessions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: 'New Chat' }),
-  });
-  return r.json();
-}
-
-export async function deleteSession(sessionId) {
-  await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
-}
-
-export async function renameSession(sessionId, name) {
-  await authFetch(`/api/sessions/${sessionId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  });
-}
-
-function localISOString() {
-  const d = new Date()
-  const tz = -d.getTimezoneOffset()
-  const sign = tz >= 0 ? '+' : '-'
-  const pad = n => String(Math.abs(n)).padStart(2, '0')
-  return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + 'T' +
-    pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) +
-    sign + pad(Math.floor(Math.abs(tz)/60)) + ':' + pad(Math.abs(tz)%60)
-}
-
-export async function sendMessage(sessionId, message, image, audio, clientTimestamp, research, cpu) {
-  const body = { session_id: sessionId, message, client_timestamp: clientTimestamp || localISOString() };
-  if (research) body.research = true;
-  if (cpu) body.cpu = true;
-  if (image) body.image = image;
-  if (audio) body.audio = audio;
-  const r = await authFetch('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (r.status === 503) {
-    const err = await r.json();
-    throw new Error(err.error || 'Server is busy');
-  }
-  return r.json();
-}
-
-export async function getTaskStatus(taskId) {
-  const r = await fetch(`/api/status/${taskId}`);
-  return r.json();
-}
-
-export async function getModelStatus() {
-  const r = await fetch('/api/model-status');
-  return r.json();
-}
-
-export async function sendLocation(latitude, longitude, taskId) {
-  await fetch('/api/location', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ latitude, longitude, task_id: taskId }),
-  });
-}
-
-export async function denyLocation(taskId) {
-  await fetch('/api/location', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ denied: true, task_id: taskId }),
-  });
-}
-
-export async function speak(text, voice) {
-  const r = await authFetch('/api/tts', {
-    method: 'POST',
-    body: JSON.stringify({ text, voice: voice || undefined }),
-  });
-  return r.json();
-}
-
-export async function extractFile(name, dataB64) {
-  const r = await authFetch('/api/extract-file', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, data: dataB64 }),
-  });
-  return r.json();
-}
-
-export async function uploadImage(dataB64, ext = 'jpg') {
-  const r = await authFetch('/api/upload-image', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: dataB64, ext }),
-  });
-  return r.json();
-}
-
-export async function fetchTasks() {
-  const r = await authFetch('/api/tasks');
-  return r.json();
-}
-
-export async function createTask(data) {
-  const r = await authFetch('/api/tasks', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  return r.json();
-}
-
-export async function updateTask(taskId, data) {
-  const r = await authFetch(`/api/tasks/${taskId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  return r.json();
-}
-
-export async function deleteTask(taskId) {
-  await authFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
-}
-
-export async function shareMessage(sessionId, msgIndex) {
-  const r = await authFetch('/api/shares', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, msg_index: msgIndex }),
-  });
-  return r.json();
-}
-
-export async function listShares() {
-  const r = await authFetch('/api/shares');
-  return r.json();
-}
-
-export async function revokeShare(token) {
-  const r = await authFetch(`/api/shares/${token}`, { method: 'DELETE' });
-  return r.json();
-}
-
-export async function fetchPublicShare(token) {
-  const r = await fetch(`/api/public/share/${encodeURIComponent(token)}`);
-  return r.json();
-}
-</file>
-
 <file path=".gitignore">
 node_modules
 dist
@@ -5165,1030 +5021,189 @@ export default function InputBar({ onSend, hasPending }) {
 }
 </file>
 
-<file path="local_cloud.sh">
-#!/usr/bin/env bash
-set -e
-
-echo "=== 1. Setting permissions on external media drive ==="
-# sudo chown -R www-data:www-data /mnt/wwn-0x50014ee2173893e0-part1/BackUp-Copy-2/
-# sudo chmod -R 0750 /mnt/wwn-0x50014ee2173893e0-part1/BackUp-Copy-2/
-
-echo "=== 2. Creating Dashboard HTML ==="
-sudo mkdir -p /var/www/dashboard
-cat << 'EOF' | sudo tee /var/www/dashboard/index.html > /dev/null
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Homeserver Dashboard</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; width: 100%; max-width: 900px; }
-        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; text-decoration: none; color: inherit; transition: transform 0.2s, border-color 0.2s; text-align: center; }
-        .card:hover { transform: translateY(-4px); border-color: #58a6ff; }
-        .icon { font-size: 40px; margin-bottom: 12px; }
-        .title { font-size: 18px; font-weight: 600; color: #58a6ff; margin-bottom: 6px; }
-        .desc { font-size: 13px; color: #8b949e; }
-    </style>
-</head>
-<body>
-    <div class="grid">
-        <a href="/ai/" class="card">
-            <div class="icon">🤖</div>
-            <div class="title">Local AI</div>
-            <div class="desc">/ai/</div>
-        </a>
-        <a href="/stories/" class="card">
-            <div class="icon">📖</div>
-            <div class="title">AI Generated Stories</div>
-            <div class="desc">/stories/</div>
-        </a>
-        <a href="/search/" class="card">
-            <div class="icon">🔍</div>
-            <div class="title">Search Engine</div>
-            <div class="desc">/search/</div>
-        </a>
-        <a href="/cloud/" class="card">
-            <div class="icon">☁️</div>
-            <div class="title">Nextcloud</div>
-            <div class="desc">/cloud/</div>
-        </a>
-        <a href="/cloud/apps/files/files/136?dir=/Media/Public/E-books/" class="card">
-            <div class="icon">📚</div>
-            <div class="title">Books</div>
-            <div class="desc">E-books</div>
-        </a>
-        <a href="/code/" class="card">
-            <div class="icon">💻</div>
-            <div class="title">Code Hoster</div>
-            <div class="desc">/code/</div>
-        </a>
-        <a href="/track/" class="card">
-            <div class="icon">📊</div>
-            <div class="title">Request Tracker</div>
-            <div class="desc">/track/</div>
-        </a>
-    </div>
-</body>
-</html>
-EOF
-
-sudo chown -R www-data:www-data /var/www/dashboard
-sudo chmod -R 755 /var/www/dashboard
-
-echo "=== 3. Writing Nginx Master Configuration ==="
-cat << 'EOF' | sudo tee /etc/nginx/sites-available/homeserver > /dev/null
-map $http_x_via_gcp $gcp_overlay {
-    "true"  '<div id="gcp-overlay" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background-color:rgba(239,68,68,0.05);border-top:3px solid rgba(239,68,68,0.6);pointer-events:none;z-index:999998;"></div>';
-    default '';
+<file path="src/api.js">
+// Authentication is handled by nginx + Authentik SSO (the X-Authentik-*
+// claim headers are injected upstream by nginx's auth_request). The browser
+// never holds a token; on 401 nginx redirects to the SSO portal.
+async function authFetch(url, options = {}) {
+  options.headers = options.headers || {};
+  const r = await fetch(url, options);
+  if (r.status === 401) {
+    window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+  }
+  return r;
 }
 
-map $http_user_agent $cloud_inject {
-    "~*nextcloud-(android|ios|desktop)" '';
-    default '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+export async function logout() {
+  window.location.assign('/outpost.goauthentik.io/end?rd=/');
 }
 
-upstream ak_outpost {
-    server 127.0.0.1:9010;
-}
-upstream ak_server {
-    server 127.0.0.1:9008;
-}
-map $http_upgrade $connection_upgrade {
-    default upgrade;
-    ''      close;
+export async function checkAuth() {
+  const r = await authFetch('/api/check-auth');
+  return r.json();
 }
 
-log_format track escape=json '{"time":"$time_iso8601","gcp":"$http_x_via_gcp","ip":"$remote_addr","method":"$request_method","uri":"$request_uri","status":$status,"in":$request_length,"out":$bytes_sent,"ua":"$http_user_agent"}';
-
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    server_name home.palashkantikundu.in;
-
-    ssl_certificate     /etc/letsencrypt/live/home.palashkantikundu.in/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/home.palashkantikundu.in/privkey.pem;
-
-    client_max_body_size 512M;
-    client_body_buffer_size 128k;
-
-    access_log /var/log/nginx/track.log track;
-
-    # Expose Outpost traffic directly so browser auth flow and internal calls do not fail
-    location /outpost.goauthentik.io/ {
-        proxy_pass http://ak_outpost;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-
-    # Internal auth checking block
-    location /ak-auth-ai {
-        internal;
-        proxy_pass http://ak_outpost/outpost.goauthentik.io/auth/nginx;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length "";
-        proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_no_cache 1;
-        proxy_cache_bypass 1;
-    }
-
-    # Redirect unauthenticated users directly to Outpost start portal
-    location @ak-sso-ai {
-        internal;
-        return 302 /outpost.goauthentik.io/start?rd=$scheme://$http_host$request_uri;
-    }
-
-    location / {
-        root /var/www/dashboard;
-        index index.html;
-
-        sub_filter_once off;
-        sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
-    }
-
-    # Authentik SSO Core (matches both /sso and /sso/*)
-    location /sso {
-        proxy_pass http://ak_server;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host $host;
-    }
-
-    # 1. Local AI App
-    location /ai/ {
-        auth_request /ak-auth-ai;
-        auth_request_set $authentik_username $upstream_http_x_authentik_username;
-        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
-        auth_request_set $authentik_email $upstream_http_x_authentik_email;
-        auth_request_set $authentik_name $upstream_http_x_authentik_name;
-        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
-        error_page 401 = @ak-sso-ai;
-
-        proxy_pass http://127.0.0.1:3001/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Authentik-Username $authentik_username;
-        proxy_set_header X-Authentik-Groups $authentik_groups;
-        proxy_set_header X-Authentik-Email $authentik_email;
-        proxy_set_header X-Authentik-Name $authentik_name;
-        proxy_set_header X-Authentik-UID $authentik_uid;
-
-        sub_filter_once off;
-        sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;top:8px;right:80px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
-    }
-
-    location ^~ /api/public/ {
-        proxy_pass http://127.0.0.1:3001/api/public/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-
-    location /api/ {
-        auth_request /ak-auth-ai;
-        auth_request_set $authentik_username $upstream_http_x_authentik_username;
-        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
-        auth_request_set $authentik_email $upstream_http_x_authentik_email;
-        auth_request_set $authentik_name $upstream_http_x_authentik_name;
-        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
-        error_page 401 = @ak-sso-ai;
-
-        proxy_pass http://127.0.0.1:3001/api/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Authentik-Username $authentik_username;
-        proxy_set_header X-Authentik-Groups $authentik_groups;
-        proxy_set_header X-Authentik-Email $authentik_email;
-        proxy_set_header X-Authentik-Name $authentik_name;
-        proxy_set_header X-Authentik-UID $authentik_uid;
-    }
-
-    # 2. Chat Stories App
-    location /stories/ {
-        auth_request /ak-auth-ai;
-        auth_request_set $authentik_username $upstream_http_x_authentik_username;
-        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
-        auth_request_set $authentik_email $upstream_http_x_authentik_email;
-        auth_request_set $authentik_name $upstream_http_x_authentik_name;
-        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
-        error_page 401 = @ak-sso-ai;
-
-        proxy_pass http://127.0.0.1:3002/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Authentik-Username $authentik_username;
-        proxy_set_header X-Authentik-Groups $authentik_groups;
-        proxy_set_header X-Authentik-Email $authentik_email;
-        proxy_set_header X-Authentik-Name $authentik_name;
-        proxy_set_header X-Authentik-UID $authentik_uid;
-
-        sub_filter_once off;
-        sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
-    }
-
-    location /story/ {
-        auth_request /ak-auth-ai;
-        auth_request_set $authentik_username $upstream_http_x_authentik_username;
-        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
-        auth_request_set $authentik_email $upstream_http_x_authentik_email;
-        auth_request_set $authentik_name $upstream_http_x_authentik_name;
-        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
-        error_page 401 = @ak-sso-ai;
-
-        proxy_pass http://127.0.0.1:3002/story/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Authentik-Username $authentik_username;
-        proxy_set_header X-Authentik-Groups $authentik_groups;
-        proxy_set_header X-Authentik-Email $authentik_email;
-        proxy_set_header X-Authentik-Name $authentik_name;
-        proxy_set_header X-Authentik-UID $authentik_uid;
-
-        sub_filter_once off;
-        sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
-    }
-
-    location /media/ {
-        auth_request /ak-auth-ai;
-        auth_request_set $authentik_username $upstream_http_x_authentik_username;
-        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
-        auth_request_set $authentik_email $upstream_http_x_authentik_email;
-        auth_request_set $authentik_name $upstream_http_x_authentik_name;
-        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
-        error_page 401 = @ak-sso-ai;
-
-        proxy_pass http://127.0.0.1:3002/media/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Authentik-Username $authentik_username;
-        proxy_set_header X-Authentik-Groups $authentik_groups;
-        proxy_set_header X-Authentik-Email $authentik_email;
-        proxy_set_header X-Authentik-Name $authentik_name;
-        proxy_set_header X-Authentik-UID $authentik_uid;
-    }
-
-    # 3. SearXNG
-    location /search/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Script-Name /search;
-        proxy_set_header Accept-Encoding "";
-
-        sub_filter_once off;
-        sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
-    }
-
-    # 4. Nextcloud
-    location /cloud/ {
-        proxy_pass http://127.0.0.1:8082/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-Port 443;
-        
-        proxy_max_temp_file_size 2048m;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-        proxy_set_header Accept-Encoding "";
-
-        sub_filter_once off;
-        sub_filter_types text/html;
-        sub_filter '</body>' '$cloud_inject';
-    }
-
-    location /.well-known/carddav { return 301 $scheme://$host/cloud/remote.php/dav; }
-    location /.well-known/caldav { return 301 $scheme://$host/cloud/remote.php/dav; }
-
-    # 5. Code Hoster
-    location /code/ {
-        proxy_pass http://127.0.0.1:9000/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Accept-Encoding "";
-
-        sub_filter_once off;
-        sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
-    }
-
-    # 6. Request tracking dashboard
-    location /track/ {
-        auth_request /ak-auth-ai;
-        auth_request_set $authentik_username $upstream_http_x_authentik_username;
-        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
-        auth_request_set $authentik_email $upstream_http_x_authentik_email;
-        auth_request_set $authentik_name $upstream_http_x_authentik_name;
-        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
-        error_page 401 = @ak-sso-ai;
-
-        proxy_pass http://127.0.0.1:8093/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Authentik-Username $authentik_username;
-        proxy_set_header X-Authentik-Groups $authentik_groups;
-        proxy_set_header X-Authentik-Email $authentik_email;
-        proxy_set_header X-Authentik-Name $authentik_name;
-        proxy_set_header X-Authentik-UID $authentik_uid;
-
-        sub_filter_once off;
-        sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;top:8px;right:80px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
-    }
+export async function fetchSessions() {
+  const r = await authFetch('/api/sessions');
+  return r.json();
 }
 
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name home.palashkantikundu.in;
-    return 301 https://$host$request_uri;
+export async function fetchMessages(sessionId) {
+  const r = await authFetch(`/api/sessions/${sessionId}/messages`);
+  return r.json();
 }
-EOF
 
-echo "=== 4. Reloading Nginx ==="
-sudo mkdir -p /var/log/nginx
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo ln -sf /etc/nginx/sites-available/homeserver /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-
-echo "=== 4b. Request Tracking Dashboard ==="
-sudo touch /var/log/nginx/track.log
-sudo chmod 640 /var/log/nginx/track.log
-if [ -n "$CHAT_DIR" ] && [ -f "$CHAT_DIR/server/track_dashboard.py" ]; then
-    if ! pgrep -f "server/track_dashboard.py" > /dev/null; then
-        nohup python3 "$CHAT_DIR/server/track_dashboard.py" --log /var/log/nginx/track.log \
-            > /tmp/track_dashboard.log 2>&1 &
-        echo "    Request Tracker started on http://localhost:8093/track/"
-    else
-        echo "    Request Tracker already running"
-    fi
-else
-    echo "    Skipping python tracker start: \$CHAT_DIR is unset or file missing."
-fi
-
-echo "=== 5. Dynamic Nextcloud Container Configuration ==="
-NC_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E 'cloud-app|nextcloud' | head -n 1)
-
-if [ -n "$NC_CONTAINER" ]; then
-    echo "Found Nextcloud container: $NC_CONTAINER"
-    
-    docker exec --user www-data "$NC_CONTAINER" php occ files:scan --all
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set overwritewebroot --value="/cloud"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set overwrite.cli.url --value="https://home.palashkantikundu.in/cloud"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set overwriteprotocol --value="https"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set trusted_domains 0 --value="*"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set files_external_allow_create_new_local --value="true" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ app:enable files_external
-
-    echo "--- Configuring Nextcloud SSO via authentik (oidc_login) ---"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_provider_url --value="${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}/application/o/${AUTH_CLIENT_ID:-local-ai}/"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_client_id --value="${AUTH_CLIENT_ID:-local-ai}"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_client_secret --value="${AUTH_CLIENT_SECRET:-}"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_scope --value="openid profile email groups"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_auto_redirect --value="true" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_disable_registration --value="false" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_create_group_membership --value="true" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_group_mapping --value='{"admin":"admin","premium":"premium","free":"free"}' --type=json
-    echo "Restarting Nextcloud container..."
-    docker restart "$NC_CONTAINER"
-else
-    echo "Error: Nextcloud container not found!"
-    exit 1
-fi
-
-echo "=== All tasks completed successfully ==="
-</file>
-
-<file path="README.md">
-# Local AI - LLM + Image Generation Setup
-
-Self-hosted LLM + image generation stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM).
-
-## Requirements
-
-- NVIDIA GPU with the driver working — check with `nvidia-smi`.
-- **Host OS path:** CUDA toolkit (`nvcc`) needed to build llama.cpp. `setup.sh` installs
-  it automatically if it's missing.
-- **Dockerized path:** **NVIDIA Container Toolkit** on the *host* (for `--gpus`), plus
-  CUDA toolkit *inside* the container (`setup.sh` installs it there too).
-
-## Quick Start — Host OS
-
-```bash
-# 1. Clone and build
-git clone <this-repo> ~/git/local-ai
-cd ~/git/local-ai
-bash setup.sh
-
-# 2. Post-processing — download your models (setup.sh does NOT download them)
-#    LLM (chat):   put a GGUF into ~/local-ai-files/my-models/
-#                  model.json holds "gpu" (chat UI) and "cpu" (self-chat agents)
-#                  model ids — edit it if you use other models
-#    Image (z_image): copy these into ~/local-ai/ComfyUI/models/:
-#      diffusion_models/z_image_turbo_bf16.safetensors
-#      text_encoders/qwen_3_4b.safetensors
-#      vae/ae.safetensors
-
-# 3. Run — nothing else to configure
-cd ~/git/local-ai && python chat-webui.py
-```
-
-Access at `http://chat.local` or `http://localhost:3001`.
-
-Authentication is unified SSO via Authentik — see "Authentication (SSO)" below.
-
-Self-chat agents (editor/moderator/registered agents) run on the CPU llama-server
-(`http://localhost:8079`) by default so they never compete with interactive UI
-users for VRAM. To run them on the interactive GPU server instead, set the
-`SELF_CHAT_MODE` environment variable to `gpu`:
-
-```bash
-SELF_CHAT_MODE=gpu python chat-webui.py
-```
-
-You can also edit `SELF_CHAT_MODE` in `server/config.py`.
-
-`chat-webui.py` auto-starts the two llama-servers on boot if they're down, and
-starts ComfyUI on demand, so no manual service startup is required. If you prefer
-to run the services manually:
-
-```bash
-# GPU llama-server — interactive chat UI users (VRAM-backed, 24K context)
-~/local-ai/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 --port 8081 \
-    --models-dir ~/local-ai-files/my-models/ \
-    --jinja -ngl 99 -fa on --ctx-size 24576 \
-    -ctk q8_0 -ctv q8_0 \
-    --no-mmproj-offload
-
-# CPU llama-server — automated self-chat agents (RAM-backed, concurrent)
-~/local-ai/llama.cpp/build/bin/llama-server \
-    --host 0.0.0.0 --port 8079 \
-    --models-dir ~/local-ai-files/my-models/ \
-    --jinja --n-gpu-layers 0 -fa off --ctx-size 32768 \
-    -ctk q8_0 -nkvo \
-    --reasoning-budget 4096 \
-    --no-mmproj-offload --device none
-
-cd ~/local-ai/ComfyUI && source venv/bin/activate && python main.py \
-    --lowvram \
-    --input-directory ~/local-ai-files/ComfyUI/input \
-    --output-directory ~/local-ai-files/ComfyUI/output
-```
-
-## Quick Start — Dockerized (GPU)
-
-The repo ships a `docker-compose.yaml` that runs the same stack inside an
-`ubuntu:24.04` container with GPU passthrough, with SearXNG as a sibling service.
-
-```bash
-# 1. Start services (SearXNG + ai-container with GPU + shared dirs)
-docker compose up -d
-
-# 2. Enter the container and run setup
-docker exec -it ai-container bash
-cd /root/git/local-ai
-bash setup.sh
-
-# 3. Post-processing — download models into the shared host dirs
-#    (same list as the Host OS path, but the image models land in
-#     ~/local-ai/ComfyUI/models/ on the HOST, which is mounted into the container)
-
-# 4. Run — inside the container
-cd /root/git/local-ai && python chat-webui.py
-```
-
-Access at `http://localhost:3001` (published from the container). Notes:
-
-- **Requires the NVIDIA Container Toolkit on the host**; the compose already passes
-  `--gpus` to the container.
-- `setup.sh` auto-detects the container: runs without `sudo`, skips systemd/mDNS/nginx
-  (not available in a container), skips starting SearXNG (provided by compose), and
-  installs the CUDA toolkit inside the container if `nvcc` is missing.
-- The container needs internet during setup (`apt`, `git clone`, `npm`, CUDA toolkit);
-  the compose attaches it to `external-net`.
-- Config/data dirs (`~/local-ai-files`) are shared with the host, so models and
-  sessions persist across container restarts.
-
-## Authentication (SSO)
-
-Authentication is unified **SSO via Authentik** — the single identity provider for
-every app on the box. There is **no `users.json` and no per-app password database**;
-users, passwords and roles live in Authentik.
-
-**Two identity paths:**
-
-1. **Browsers** — nginx runs an `auth_request` subrequest against the Authentik
-   proxy outpost (`location /ak-auth-ai` in `local_cloud.sh`). If the SSO session is
-   valid the outpost answers 200 and populates `X-Authentik-*` claim headers, which
-   nginx forwards to the upstream apps. On 401 nginx sends the browser to the SSO
-   portal (`@ak-sso-ai`). The SPA calls `/api/check-auth` on load to learn who the
-   user is.
-2. **Machine agents** (`self-chat.py`) — authenticate via Authentik's OAuth2 password
-   grant and send the JWT as `Authorization: Bearer <token>`. Backends verify the
-   signature against Authentik's JWKS (`server/auth.py` → `identity_from_bearer`).
-
-Resolved identity is always a dict — `username`, `email`, `name`, `groups`, `role`
-(`free`/`premium`/`admin` from the user's Authentik groups) and the Authentik `uid`
-(`server/auth.py` → `get_identity`). Roles decide Story collection access and the
-"overwrite user context" admin action.
-
-**Enabling steps** (one-time):
-
-1. Fill the `AUTHENTIK_*` / `POSTGRES_*` secrets in `.env` (see `authentik-compose.yaml`).
-2. Start Authentik: `docker compose -f authentik-compose.yaml up -d`.
-3. Open `https://<host>/sso/if/flow/initial-setup/` and create the admin account.
-4. Provision groups/users, the `local-ai` OIDC provider and the proxy outpost:
-   `python3 scripts/authentik_bootstrap.py`.
-5. Deploy the proxy outpost (`ghcr.io/goauthentik/proxy`) with the outpost token the
-   bootstrap script prints, on `127.0.0.1:9010` (nginx's `ak_outpost` upstream).
-6. Ensure the apps are only reachable through the nginx front-end in `local_cloud.sh`
-   (the `auth_request` gate on `/ai/`, `/api/`, `/stories/`, `/story/`), then reload
-   nginx.
-
-## Security & Deployment Notes
-
-> **Intended scope: a private, trusted home deployment** — e.g. a household of a few
-> users on a home LAN (this project targets ~2–4 concurrent users). The following
-> limitations are **accepted risk** for that use case. This stack is **not** built for
-> production, the public internet, or a shared LAN where many unknown users work —
-> do **not** use it under those conditions.
-
-> **Authentication is unified SSO.** Browser access requires an Authentik session
-> (nginx `auth_request`), and per-user identity comes from the forwarded
-> `X-Authentik-*` headers (see "Authentication (SSO)" below). The notes that follow
-> assume the SSO-enabled nginx front-end (`local_cloud.sh`); running `chat-webui.py`
-> directly on port 3001 bypasses all of it.
-
-- **Bypass on bare `chat-webui.py`.** Running `python chat-webui.py` directly serves
-  port 3001 **without** the nginx SSO gate, so `identity_from_headers` finds no
-  `X-Authentik-*` headers and every endpoint treats the caller as unauthenticated.
-  Always front it with `local_cloud.sh`'s nginx config for real protection.
-- **File endpoints are unauthenticated on bare 3001.** `/output/...` (generated
-  images) and `/uploads/...` (uploaded documents) are served without an identity
-  check (`chat-webui.py` `do_GET`). Anyone who can reach port 3001 and knows a
-  filename can download them. Behind the SSO nginx gate (`/ai/`, `/api/`) these are
-  still protected because the whole location is gated at the edge.
-- **CORS is wide open.** Responses carry `Access-Control-Allow-Origin: *`
-  (`chat-webui.py` `do_OPTIONS`/`send_json`). A malicious page on the same origin
-  context could call the API and read responses; SSO cookies are HttpOnly and
-  SameSite-bound so cross-origin pages cannot use the session.
-- **No TLS/HTTPS on bare 3001.** Login and chat content travel in plaintext if you
-  connect without nginx. Always use the TLS-terminating nginx front-end
-  (`local_cloud.sh`); never port-forward 3001/8081/8079 directly.
-- **No content guardrails.** The model outputs whatever the loaded model produces; there
-  is no moderation or kid-safe filter in the stack. Choose your model accordingly and
-  set expectations for anyone using it.
-- **Third-party calls.** `fetch_page` and location lookup call external services
-  (SearXNG backends, `nominatim.openstreetmap.org`), and optional TTS can use
-  Microsoft `edge-tts` unless you configure the local Piper voices. If strict data
-  residency matters, disable or replace these.
-- **Compose exposes SearXNG on all host interfaces** (`8080:8080`), while the host path
-  binds it to `127.0.0.1`. Bind it to localhost if you don't need LAN-wide search.
-
-## System Design
-
-### 1. Infrastructure & Network
-
-```mermaid
-graph TD
-    subgraph Hardware ["Hardware (RTX 3050 Laptop)"]
-        HW1["GPU: NVIDIA RTX 3050 — 4 GB VRAM"]
-        HW2["RAM: 16 GB"]
-        HW3["Same dev machine hosts everything"]
-        HW4["Target: 2–4 concurrent users"]
-    end
-
-    subgraph ExternalServices ["External Services"]
-        Docker["Docker Engine"]
-        Docker --> SearXNG["SearXNG Container\nlocalhost:8080\nRestart: unless-stopped"]
-        Nginx["Nginx Reverse Proxy\nchat.local:80 → localhost:3001"]
-        Avahi["avahi-daemon\nmDNS: chat.local"]
-    end
-
-    subgraph Network ["Network Topology"]
-        LAN["LAN Devices"] -->|"http://chat.local"| Nginx
-        Nginx -->|"proxy_pass\nUpgrade + X-Real-IP"| HTTPServer["chat-webui.py\n0.0.0.0:3001"]
-        HTTPServer -->|"localhost:8081"| LLamaGPU["llama-server (GPU)\ninteractive UI users"]
-        HTTPServer -->|"localhost:8079"| LLamaCPU["llama-server (CPU)\nself-chat agents"]
-        HTTPServer -->|"localhost:8188"| ComfyUIRuntime["ComfyUI"]
-        HTTPServer -->|"localhost:8080/search"| SearXNG
-        HTTPServer -->|"nominatim.openstreetmap.org"| Nominatim["Reverse Geocoding"]
-    end
-
-    subgraph StartupOrder ["Startup (manual)"]
-        SO1["1. llama-server (GPU)\n--port 8081"] --> SO2["2. llama-server (CPU)\n--port 8079"]
-        SO2 --> SO3["3. ComfyUI\nvenv → python main.py --lowvram"]
-        SO3 --> SO4["4. chat-webui.py\npython chat-webui.py"]
-        SO5["chat-webui.py on boot:\nGPU /health OK? else restart_servers\n→ ensure CPU server → SearXNG\nreachable? else sys.exit(1)"]
-    end
-```
-
-### 2. File Layout & Build
-
-```mermaid
-graph TD
-    subgraph CodeRepo ["Code (~/local-ai/)"]
-        CR1["chat-webui.py\nMain server — Python 3"]
-        CR2["setup.sh\nBootstrap: installs deps,\nclones repos, creates templates"]
-        CR3["dist/\nVite-built SPA frontend"]
-        CR4["llama.cpp/ git clone\nBuilt: cmake -DGGML_CUDA=ON\nBinary: build/bin/llama-server"]
-        CR5["ComfyUI/ git clone\nvenv: ComfyUI/venv/\nRequires: requirements.txt"]
-    end
-
-    subgraph DataDir ["Data (~/local-ai-files/)"]
-        DF1["model.json\nLLM model ids:\ngpu (chat UI)\n+ cpu (self-chat)"]
-        DF2["models.json\nComfyUI image model defs\nz_image (turbo)"]
-        DF3["Authentik (external)\nUsers, groups, SSO roles\ncontexts/<user>.txt\nPer-user persistent context"]
-        DF4["sys_prompt.txt\nSystem prompt template\n%model_list% %current_time%\n%current_location%"]
-        DF5["session/sessions_<user>.json\nPer-user persisted chat sessions"]
-        DF6["my-models/\nLLM GGUF model files"]
-        DF7["ComfyUI/input/\nTemp files for image editing"]
-        DF8["ComfyUI/output/\nGenerated/edited images"]
-        DF9["contexts/\nPer-user persistent context"]
-        DF10["searxng/\nSearXNG config volume"]
-        DF11["uploads/\nUploaded files saved to disk\n(code/docs via /api/extract-file)"]
-        DF12["tasks.db\nSQLite to-do tasks + reminders"]
-    end
-
-    subgraph BuildFlags ["Build Flags"]
-        BF1["llama.cpp\ncmake -DGGML_CUDA=ON\n-DCMAKE_BUILD_TYPE=Release\n-j nproc"]
-        BF2["ComfyUI\npip install requirements.txt\nin Python venv"]
-        BF3["Frontend\nnpm install && npm run build\nVite to dist/"]
-        BF4["System deps\ngit python3 cmake avahi-daemon\npdftotext catdoc antiword\nnginx docker.io"]
-    end
-```
-
-### 3. Runtime Constants & Locks
-
-```mermaid
-graph TD
-    subgraph RCNetwork ["Service URLs"]
-        RC1["LLAMA_BASE = localhost:8081 (GPU)\nLLAMA_URL = /v1/chat/completions"]
-        RC2["LLAMA_BASE_CPU = localhost:8079 (CPU)\nLLAMA_URL_CPU = /v1/chat/completions"]
-        RC3["COMFYUI_URL = localhost:8188"]
-        RC4["SEARXNG_URL = localhost:8080/search"]
-        RC5["HOST = 0.0.0.0  PORT = 3001"]
-    end
-
-    subgraph RCLlama ["llama-server Args (two concurrent servers)"]
-        RCL1["GPU: --host 0.0.0.0 --port 8081\n--n-gpu-layers 99 -fa on --jinja"]
-        RCL2["CPU: --host 0.0.0.0 --port 8079\n--n-gpu-layers 0 -fa off\n--device none --jinja"]
-        RCL3["--models-dir ~/local-ai-files/my-models/"]
-        RCL4["GPU: --ctx-size 24576 (24K)\nCPU: --ctx-size 32768 (32K)"]
-        RCL5["--reasoning-budget 4096\n(CPU server only)"]
-        RCL6["-ctk q8_0 (KV cache quant, both)\n-ctv q8_0 (GPU only)\n-nkvo (CPU only)"]
-        RCL7["--no-mmproj-offload on BOTH servers\n(multimodal projector stays in RAM —\notherwise its ~950 MiB on the 4 GiB card\nstarves the CPU server's worker buffers)"]
-        RCL8["Routing: agent task → 8079 CPU,\nUI task → 8081 GPU (task_mode)"]
-    end
-
-    subgraph RCThermal ["Thermal and RAM Thresholds"]
-        RT1["TEMP_THRESHOLD_ON = 85 C"]
-        RT2["TEMP_THRESHOLD_OFF = 75 C"]
-        RT3["RAM_EVAC_THRESHOLD = 95%"]
-        RT4["RAM_RESUME_THRESHOLD = 70%"]
-    end
-
-    subgraph RCLimits ["Limits and Pools"]
-        RL1["MAX_QUEUE_SIZE = 5 (per lane)"]
-        RL2["MAX_INPUT_TOKENS = 24576 (24K)"]
-        RL3["_llm_pools: gpu 1 / cpu 4 workers\n(CPU_PARALLEL_SLOTS = 4)"]
-        RL4["_tool_pools: gpu 2 / cpu 2 workers"]
-        RL5["Max tool rounds = 10"]
-        RL6["Idle unload = 300s"]
-        RL7["LLM timeout = 600s"]
-        RL8["ComfyUI poll = 120s"]
-        RL9["REASONING_BUDGET = 4096 (CPU server)"]
-    end
-
-    subgraph RCThreads ["Thread Pools and Locks"]
-        LK1["_llm_pools: ThreadPoolExecutor\nper lane (gpu 1, cpu 4)\nLLM calls run per-lane"]
-        LK2["_tool_pools: ThreadPoolExecutor\nper lane (gpu 2, cpu 2)"]
-        LK3["_event_queue: queue.Queue\nDecouples dequeue from dispatch"]
-        LK4["_image_queue + _image_worker\nSerializes image jobs\n(image loading can starve GPU)"]
-        LK5["_data_lock: threading.Lock\nGuards sessions, tasks, model_status"]
-        LK6["_model_transition_lock\nSerializes load/unload of LLM"]
-        LK7["_tokens_lock\nGuards _agent_tokens/_agent_users\n(self-chat agent tracking)"]
-        LK8["_queue_locks + _queue_conds\nPer-lane task queues\n(gpu lane + cpu lane)\nCondition variables"]
-    end
-```
-
-### 4. Server Startup
-
-```mermaid
-graph TD
-    A["python chat-webui.py"] --> A1["Load configs at module import:\nmodel.json, models.json,\nsys_prompt.txt"]
-    A --> B["load_sessions()\nLoad per-user session files"]
-    A1 & B --> C{"GPU llama-server /health\nHTTP GET localhost:8081?"}
-    C -- "200 OK" --> C2{"CPU llama-server /health\nHTTP GET localhost:8079?"}
-    C -- "Dead" --> Restart["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn ComfyUI Popen (no poll here)\n4. Spawn GPU llama-server (8081)\n5. Spawn CPU llama-server (8079)\n6. Poll each /health 2s up to 120s\n7. Kill on timeout"]
-    C2 -- "Dead" --> EnsureCPU["ensure_llama_server cpu:\nrestart CPU llama-server only\n(GPU stays running)"]
-    C2 -- "200 OK" --> D{"SearXNG reachable\non localhost:8080?"}
-    EnsureCPU --> D
-    D -- "Yes" --> E["Start 7 Daemon Threads"]
-    D -- "No" --> Exit["print ERROR & sys.exit(1)"]
-    Restart --> D
-
-    subgraph Daemons ["Background Daemon Threads"]
-        E1["_event_loop\nSingle-threaded event dispatcher"]
-        E2["_queue_worker gpu\nSequential dequeuer\n(GPU lane — UI users)"]
-        E3["_queue_worker cpu\nSequential dequeuer\n(CPU lane — self-chat agents)"]
-        E4["_image_worker\nSerialized image jobs\n(one at a time)"]
-        E5["_idle_unload_loop\nPolls every 10s"]
-        E6["_thermal_monitor\nPolls every 10s"]
-        E7["_reminder_loop\nPolls every 30s"]
-    end
-    E --> E1 & E2 & E3 & E4 & E5 & E6 & E7
-    E --> F["HTTPServer.serve_forever\n0.0.0.0:3001"]
-```
-
-### 5. Model State Machine
-
-Two independent state machines run concurrently — one per llama-server.
-
-```mermaid
-stateDiagram-v2
-    direction LR
-
-    state "GPU server (8081) — UI users" as G {
-        [*] --> unloaded: gpu
-        unloaded --> loading : load_llama_model("gpu")
-        loading --> chat_loaded : 200 from /models/load\n+ health check passes
-        loading --> unloaded : failed
-        chat_loaded --> unloading : unload_llama_model("gpu")
-        unloading --> unloaded : 200 from /models/unload
-        unloading --> chat_loaded : failed but health OK
-        chat_loaded --> image_active : generate_image\nor edit_image starts
-        image_active --> chat_loaded : free_comfyui_vram\n+ load_llama_model("gpu")
-    end
-
-    state "CPU server (8079) — self-chat agents" as C {
-        [*] --> cpu_unloaded
-        cpu_unloaded --> cpu_loading : load_llama_model("cpu")
-        cpu_loading --> cpu_loaded : 200 from /models/load\n+ health check passes
-        cpu_loading --> cpu_unloaded : failed
-        cpu_loaded --> cpu_unloading : unload_llama_model("cpu")
-        cpu_unloading --> cpu_unloaded : 200 from /models/unload
-        cpu_unloading --> cpu_loaded : failed but health OK
-    }
-```
-
-Image generation unloads **only** the GPU server; the CPU server keeps serving
-agents throughout. Per-server idle timestamps drive independent unloads
-(`_last_llm_use` for GPU, `_cpu_last_llm_use` for CPU).
-
-### 6. REST API Endpoints
-
-```mermaid
-graph TD
-    Client([User Client])
-
-    subgraph AuthEndpoints ["Auth (SSO)"]
-        Client -->|"Browser: nginx auth_request\n→ Authentik SSO portal"| SSO["SSO session cookie set\nX-Authentik-* forwarded upstream"]
-        Client -->|"GET /api/check-auth"| CheckAuth["identity from\nX-Authentik-* headers"]
-        CheckAuth -- Yes --> AuthOK["{authenticated: true, username, role}"]
-        CheckAuth -- No --> AuthNO["{authenticated: false}"]
-        Client -->|"Agents: POST /sso/... token\nAuthorization: Bearer <JWT>"| Bearer["Verify JWT against\nAuthentik JWKS"]
-    end
-
-    subgraph SessionEndpoints ["Session Management"]
-        Client -->|"POST /api/sessions"| NewSession["Create UUID session\nStore in sessions_meta"]
-        Client -->|"GET /api/sessions"| ListSessions["List user sessions\nSorted by updated desc"]
-        Client -->|"GET /api/sessions/:id/messages"| GetMessages["Return messages\n+ token_estimate"]
-        Client -->|"PUT /api/sessions/:id"| RenameSession["Rename session"]
-        Client -->|"DELETE /api/sessions/:id"| DeleteSession["Delete session + cleanup\nassociated output images\nand uploaded files"]
-    end
-
-    subgraph TaskEndpoints ["Task Management"]
-        Client -->|"GET /api/tasks"| ListTasks["List user tasks\nwith reminders"]
-        Client -->|"POST /api/tasks"| CreateTask["Create task\n(title, priority, due_date, reminder)"]
-        Client -->|"PUT /api/tasks/:id"| UpdateTask["Update task fields"]
-        Client -->|"DELETE /api/tasks/:id"| DeleteTask["Delete task"]
-    end
-
-    subgraph AgentEndpoints ["Agent / Presence"]
-        Client -->|"POST /api/register-agent"| RegisterAgent["Create agent token\nfor self-chat bots\n(kolpo, kaya, editor, moderator)"]
-        Client -->|"POST /api/leaving"| Leaving["Set user's active window\nnow → end (presence)"]
-        Client -->|"GET /api/active-users"| ActiveUsers["List currently active users\n(presence tracking)"]
-    end
-
-    subgraph UtilityEndpoints ["Utility"]
-        Client -->|"GET /api/model-status"| ModelStatus["model_status, _last_tps\n_overheated, _gpu_temp,\nreminder_count, max_context"]
-        Client -->|"POST /api/extract-file"| ExtractFile["Save uploaded file to disk\n(~/local-ai-files/uploads/)\nReturn {url, name}\nText extraction happens later\nvia the read_file tool"]
-        Client -->|"POST /api/location"| SetLocation["Reverse geocode via Nominatim\nstore _client_location"]
-        Client -->|"GET /api/user-context"| GetUserCtx["Read user context file"]
-        Client -->|"POST /api/user-context\n{action: write|overwrite|read}"| SetUserCtx["Write / overwrite / read\nuser context file"]
-        Client -->|"POST /api/tts"| TTS["Text-to-speech via Piper (local)\nor edge-tts (cloud fallback)"]
-        Client -->|"GET /output/:filename"| ServeImage["Serve generated images\nfrom ComfyUI output dir (no auth)"]
-        Client -->|"GET /uploads/:filename"| ServeUpload["Serve uploaded files\n(no auth)"]
-    end
-
-    subgraph SPA ["Static / SPA Serving"]
-        Client -->|"GET /"| SPAIndex["Serve dist/index.html"]
-        Client -->|"GET /*"| SPAAssets["Serve dist/ assets\nor SPA fallback to index.html"]
-    end
-
-    subgraph StatusPolling ["Status Polling"]
-        Client -->|"GET /api/status/:task_id"| PollStatus["Return tasks id:\nstatus message response\n tools_used image etc"]
-    end
-```
-
-### 7. Chat Ingress Flow
-
-```mermaid
-graph TD
-    Client([User Client]) -->|"POST /api/chat\n(SSO session via nginx)"| EndpointChat
-
-    EndpointChat["Handler.do_POST: /api/chat"]
-    EndpointChat --> AuthCheck{"get_current_user\nvia X-Authentik-*/JWT"}
-    AuthCheck -- No --> AuthErr[401 Unauthorized]
-    AuthCheck -- Yes --> SessionCheck{"Session exists\nand owned by user?"}
-    SessionCheck -- No --> SessionErr[404 Session not found]
-    SessionCheck -- Yes --> RouteAtAdmission{"user in\n_agent_users?"}
-    RouteAtAdmission -- "agent (cpu)" --> LaneCPU["lane = cpu\nQueue: _task_queues['cpu']"]
-    RouteAtAdmission -- "user (gpu)" --> LaneGPU["lane = gpu\nQueue: _task_queues['gpu']"]
-    LaneCPU --> QueueCheck{"len lane queue\n< MAX_QUEUE_SIZE 5?"}
-    LaneGPU --> QueueCheck
-    QueueCheck -- No --> QueueBusy[503 Server Busy]
-    QueueCheck -- Yes --> EnqueueTask["lane queue.append\n_queue_conds[lane].notify"]
-    EnqueueTask --> TaskInit["tasks task_id =\nstatus queued"]
-    TaskInit --> ReturnTaskID["Return task_id to Client"]
-    ReturnTaskID -. "mode resolved later\nin task_mode(task_id)" .-> TaskMode["agent → 8079 CPU\nuser → 8081 GPU"]
-    TaskMode --> EnsureServer["ensure + load that\nmode's llama-server"]
-```
-
-### 8. Queue Workers (one per lane)
-
-A separate worker drains each lane (`_queue_worker("gpu")`, `_queue_worker("cpu")`),
-each with its own lock/condition/queue. The two lanes never wait behind each other;
-they only share hardware when both need the GPU (chat load / image gen), which is
-arbitrated separately. (The CPU-lane "yield to human presence" pause is disabled in
-the current code — self-chat agents run on the CPU server continuously.)
-
-```mermaid
-graph TD
-    E2["_queue_worker(mode)\ngpu or cpu"] --> QueueLoop["queue_cond[mode].wait\nblock on empty queue"]
-    QueueLoop --> PauseCheck{"overheated and mode=gpu\nor ram_evacuating?"}
-    PauseCheck -- Yes --> MarkWaiting["Set all queued tasks in\nthis lane to status waiting\npause label"]
-    MarkWaiting --> PauseWait["queue_cond.wait 5s"] --> QueueLoop
-    PauseCheck -- No --> PopTask["item = lane queue.pop 0\n_current_task_ids[mode] = task_id"]
-    PopTask --> PostStart["event_post start\nsession_id message image\naudio user client_timestamp"]
-    PostStart --> TaskDoneWait{"Poll tasks id.status\nevery 0.5s"}
-    TaskDoneWait -- "done or error" --> ClearTask["_current_task_ids[mode] = None\nqueue_cond.notify_all"]
-    ClearTask --> QueueLoop
-```
-
-### 9. Event Loop Pipeline
-
-```mermaid
-graph TD
-    E1["_event_loop"] --> EvLoop["Loop: event_queue.get\nev_type task_id data"]
-    EvLoop --> EvDispatch{"ev_type?"}
-
-    EvDispatch -- "start" --> EvStart["Store task metadata:\n_tools_used, _search_details\n_original_message, _original_image\n_audio, _user, _client_timestamp"]
-    EvStart --> PrepSession["prepare_session:\n1. Compute mode = task_mode(task_id)\n   (agent → cpu 8079, user → gpu 8081)\n2. Ensure + load that mode's server\n3. Inject sys prompt + date + location\n4. Inject user context\n5. Append user msg to session\n6. Auto-name session from message\n7. save_sessions\n[...]" ]
-    PrepSession --> StartRound0["start_llm_round round 0"]
-
-    EvDispatch -- "llm_ok" --> LLMOK{"state == llm_waiting\nand has tool_calls?"}
-    LLMOK -- "No tools" --> Finalize["_finalize_task:\n1. Build msg_entry with reasoning\n   tools_used, image_url etc\n2. Append to session\n3. save_sessions\n4. tasks id = status done\n5. Reset + update that\n   mode's idle timestamp"]
-    LLMOK -- "Has tools" --> SubmitTools["1. Append assistant msg\n2. state = tools_running\n3. pending_tools = count\n4. save_sessions\n5. Submit to that\n   task's lane tool pool"]
-
-    EvDispatch -- "llm_err" --> LLMERR{"state == llm_waiting?"}
-    LLMERR -- Yes --> LLMErrAction["_set_task_error:\ntasks id = status error"]
-    LLMERR -- No --> EvLoop
-
-    EvDispatch -- "tool_ok" --> ToolOK["1. Append tool result to session\n2. pending_tools minus 1\n3. save_sessions"]
-    ToolOK --> AllToolsDone{"pending_tools <= 0?"}
-    AllToolsDone -- No --> EvLoop
-    AllToolsDone -- Yes --> NextRoundCheck{"round+1 < 10?"}
-    NextRoundCheck -- Yes --> NextRound["start_llm_round round N+1\nFeed tool results back to LLM"]
-    NextRoundCheck -- No --> MaxRoundsErr["_set_task_error:\nMax tool rounds exceeded"]
-
-    EvDispatch -- "tool_err" --> ToolERR["1. Append error as tool result\n2. pending_tools minus 1\n3. save_sessions\n4. Same round-limit logic"]
-```
-
-### 10. LLM Worker
-
-```mermaid
-graph TD
-    StartRound0["start_llm_round\n(mode from task_mode)"] --> LLMWorker["_llm_worker\nin _llm_pools[mode]\n(gpu 1 / cpu 4 workers)"]
-    LLMWorker --> PayloadBuild["Build payload:\nmodel (mode's model id)\nmessages tools\ntool_choice auto\nmax_tokens 24576\nstream true\n(CPU server: --reasoning-budget 4096)"]
-    PayloadBuild --> StreamReq["POST llama-server\n(mode's base: 8081 gpu / 8079 cpu)\nv1/chat/completions\nstream=True timeout=600s"]
-    StreamReq --> StreamParse["Parse SSE stream:\n- reasoning_content delta\n  accumulate in reasoning_buf\n- content delta\n  accumulate in content_buf\n- tool_calls delta\n  reassemble by index[...]" ]
-    StreamParse --> BuildAssistantMsg["Build assistant msg:\nrole assistant content\nreasoning_content tool_calls"]
-    BuildAssistantMsg --> LLMOKPost["event_post llm_ok\nbody choices message"]
-    LLMOKPost --> EvLoop["Back to _event_loop"]
-
-    StreamReq -. "exception" .-> LLMException["event_post llm_err\nif image or vision in error\nuser-friendly message"]
-```
-
-### 11. Tool Worker
-
-```mermaid
-graph TD
-    SubmitTools["Submit to _tool_pools[mode]\ngpu 2 / cpu 2 workers"] --> ToolWorker["_tool_worker\nin the task's lane pool"]
-    ToolWorker --> ParseArgs["Parse tc.function.arguments\nfrom JSON string"]
-    ParseArgs --> ChooseTool{"tc.function.name?"}
-
-    ChooseTool -- "web_search" --> ExecSearch["1. set_status Searching\n2. Get _client_timestamp\n3. web_search query client_ts:\n   Append city to query\n   GET SearXNG search json\n   Return to[...]" ]
-    ExecSearch --> ToolPost["event_post tool_ok"]
-
-    ChooseTool -- "fetch_page" --> FetchPage["1. set_status Fetching\n2. fetch_page URL:\n   Validate URL (no private IPs)\n   GET with browser headers\n   Parse HTML (BeautifulSoup)\n   Return title + content"]
-    FetchPage --> ToolPost
-
-    ChooseTool -- "generate_image" --> GenGuard{"already generated\nimage this task?"}
-    GenGuard -- Yes --> GenReject["Return error:\nImage generation limit reached"]
-    GenGuard -- No --> EnqueueImage["_enqueue_image_job\nImage worker (single, serialized)"]
-    EnqueueImage --> GenImage["1. unload_llama_model('gpu')\n2. Build ComfyUI workflow:\n   z_image 8 steps res_multistep\n   (default; sd3_5_medium 20\n   steps euler if in models.json)\n3. ensure_comfyui_running\n4. POST /prompt\n5. Poll history 120s\n6. free_comfyui_vram\n7. load_llama_model('gpu')\n8. 5s GPU cooldown\n(CPU agents keep running)"]
-    GenImage --> ToolPost
-
-    ChooseTool -- "edit_image" --> EditEnqueue["_enqueue_image_job\nImage worker (single, serialized)"]
-    EditEnqueue --> EditImage["1. Find source image:\n   Check _image_url in session\n   Check base64 in user messages\n2. unload_llama_model('gpu')\n3. Write input to ComfyUI/input\n4. Build img2img workflow (denoise)\n5. ensure_comfyui_running\n6. POST /prompt\n7. Poll history 120s\n8. free_comfyui_vram\n9. load_llama_model('gpu')\n10. 5s GPU cooldown\n(CPU agents keep running)"]
-    EditImage --> ToolPost
-
-    ChooseTool -- "get_user_location" --> GetLoc["If _client_location cached: return it\nElse: set_status location_needed\nWait for browser geolocation\n(60s timeout)\nReturn location or 'denied'"]
-    GetLoc --> ToolPost
-
-    ChooseTool -- "read_file" --> ReadFile["1. Validate file_url in /uploads/\n2. Read file from uploads dir\n3. Extract text via:\n   fitz (PDF), python-docx (DOCX)\n   catdoc/antiword (DOC)\n   openpyxl (XLSX)\n4. Return content"]
-    ReadFile --> ToolPost
-
-    ChooseTool -- "update_user_context" --> ExecContext["write_user_context:\nAppend timestamped entry\nto user context file"]
-    ExecContext --> ToolPost
-
-    ChooseTool -- "manage_tasks" --> ManageTasks["SQLite tasks DB ops:\ncreate/update/complete/delete/list/get\nPer-user, with reminders"]
-    ManageTasks --> ToolPost
-
-    ChooseTool -- "unknown" --> ToolUnknown["Return error:\nUnknown tool"]
-    ToolUnknown --> ToolPost
-```
-
-### 12. Resource Management
-
-```mermaid
-graph TD
-    E4["_thermal_monitor"] --> ThermalLoop["Loop every 10s"]
-    ThermalLoop --> CheckGPU["nvidia-smi GPU temp"]
-    CheckGPU --> GPUTempCheck{"Temp >= 85 C?"}
-    GPUTempCheck -- Yes --> SetOverheat["_overheated = True"]
-    GPUTempCheck -- No --> CheckCool{"_overheated\nand Temp <= 75 C?"}
-    CheckCool -- Yes --> UnsetOverheat["_overheated = False"]
-    SetOverheat --> ThermalAction{"Is GPU lane\ntask running?"}
-    ThermalAction -- No --> ThermalUnload["GPU model_status?"]
-    ThermalUnload -- "chat_loaded" --> UnloadModel["unload_llama_model('gpu')\n(CPU server untouched)"]
-    ThermalUnload -- "image_active" --> FreeVRAM["free_comfyui_vram"]
-    ThermalAction -- Yes --> ThermalSkip["Skip let task finish"]
-    UnsetOverheat --> RAMCheck1
-
-    ThermalLoop --> RAMCheck1{"not evacuating\nand RAM >= 95%?"}
-    RAMCheck1 -- Yes --> EvacuateRAM["_evacuate_ram:\n1. ram_evacuating = True\n2. Requeue in-flight task\n   to front of EACH lane\n   (gpu + cpu) status error\n3. kill_llama_server (both 8081 + 8079)\n4. kill_comfyui\n5. Wait until RAM <= 70%\n6. restart_servers()"]
-    RAMCheck1 -- No --> ThermalLoop
-
-    E3["_idle_unload_loop"] --> IdleLoop["Loop every 10s"]
-    IdleLoop --> IdleCheck{"chat_loaded (gpu)\nidle > 300s\nno queue tasks?"}
-    IdleCheck -- Yes --> UnloadModel2["unload_llama_model('gpu')\nRelease VRAM weights"]
-    IdleCheck -- No --> IdleLoop
-    IdleLoop --> IdleCheck2{"cpu_loaded\n_cpu_last_llm_use idle > 300s\nno queue tasks?"}
-    IdleCheck2 -- Yes --> UnloadModel3["unload_llama_model('cpu')\nRelease RAM weights"]
-    IdleCheck2 -- No --> IdleLoop
-```
+export async function createSession() {
+  const r = await authFetch('/api/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'New Chat' }),
+  });
+  return r.json();
+}
+
+export async function deleteSession(sessionId) {
+  await authFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+}
+
+export async function renameSession(sessionId, name) {
+  await authFetch(`/api/sessions/${sessionId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+function localISOString() {
+  const d = new Date()
+  const tz = -d.getTimezoneOffset()
+  const sign = tz >= 0 ? '+' : '-'
+  const pad = n => String(Math.abs(n)).padStart(2, '0')
+  return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + 'T' +
+    pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) +
+    sign + pad(Math.floor(Math.abs(tz)/60)) + ':' + pad(Math.abs(tz)%60)
+}
+
+export async function sendMessage(sessionId, message, image, audio, clientTimestamp, research, cpu) {
+  const body = { session_id: sessionId, message, client_timestamp: clientTimestamp || localISOString() };
+  if (research) body.research = true;
+  if (cpu) body.cpu = true;
+  if (image) body.image = image;
+  if (audio) body.audio = audio;
+  const r = await authFetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.status === 503) {
+    const err = await r.json();
+    throw new Error(err.error || 'Server is busy');
+  }
+  return r.json();
+}
+
+export async function getTaskStatus(taskId) {
+  const r = await fetch(`/api/status/${taskId}`);
+  return r.json();
+}
+
+export async function getModelStatus() {
+  const r = await fetch('/api/model-status');
+  return r.json();
+}
+
+export async function sendLocation(latitude, longitude, taskId) {
+  await fetch('/api/location', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ latitude, longitude, task_id: taskId }),
+  });
+}
+
+export async function denyLocation(taskId) {
+  await fetch('/api/location', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ denied: true, task_id: taskId }),
+  });
+}
+
+export async function speak(text, voice) {
+  const r = await authFetch('/api/tts', {
+    method: 'POST',
+    body: JSON.stringify({ text, voice: voice || undefined }),
+  });
+  return r.json();
+}
+
+export async function extractFile(name, dataB64) {
+  const r = await authFetch('/api/extract-file', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, data: dataB64 }),
+  });
+  return r.json();
+}
+
+export async function uploadImage(dataB64, ext = 'jpg') {
+  const r = await authFetch('/api/upload-image', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: dataB64, ext }),
+  });
+  return r.json();
+}
+
+export async function fetchTasks() {
+  const r = await authFetch('/api/tasks');
+  return r.json();
+}
+
+export async function createTask(data) {
+  const r = await authFetch('/api/tasks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  return r.json();
+}
+
+export async function updateTask(taskId, data) {
+  const r = await authFetch(`/api/tasks/${taskId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  return r.json();
+}
+
+export async function deleteTask(taskId) {
+  await authFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+}
+
+export async function shareMessage(sessionId, msgIndex) {
+  const r = await authFetch('/api/shares', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, msg_index: msgIndex }),
+  });
+  return r.json();
+}
+
+export async function listShares() {
+  const r = await authFetch('/api/shares');
+  return r.json();
+}
+
+export async function revokeShare(token) {
+  const r = await authFetch(`/api/shares/${token}`, { method: 'DELETE' });
+  return r.json();
+}
+
+export async function fetchPublicShare(token) {
+  const r = await fetch(`/api/public/share/${encodeURIComponent(token)}`);
+  return r.json();
+}
 </file>
 
 <file path="server/features/tools.py">
@@ -8663,6 +7678,1032 @@ input[type=file] {
 #location-allow-btn:hover {
   background: #5b7dfa;
 }
+</file>
+
+<file path="local_cloud.sh">
+#!/usr/bin/env bash
+set -e
+
+echo "=== 1. Setting permissions on external media drive ==="
+# sudo chown -R www-data:www-data /mnt/wwn-0x50014ee2173893e0-part1/BackUp-Copy-2/
+# sudo chmod -R 0750 /mnt/wwn-0x50014ee2173893e0-part1/BackUp-Copy-2/
+
+echo "=== 2. Creating Dashboard HTML ==="
+sudo mkdir -p /var/www/dashboard
+cat << 'EOF' | sudo tee /var/www/dashboard/index.html > /dev/null
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Homeserver Dashboard</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; width: 100%; max-width: 900px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; text-decoration: none; color: inherit; transition: transform 0.2s, border-color 0.2s; text-align: center; }
+        .card:hover { transform: translateY(-4px); border-color: #58a6ff; }
+        .icon { font-size: 40px; margin-bottom: 12px; }
+        .title { font-size: 18px; font-weight: 600; color: #58a6ff; margin-bottom: 6px; }
+        .desc { font-size: 13px; color: #8b949e; }
+    </style>
+</head>
+<body>
+    <div class="grid">
+        <a href="/ai/" class="card">
+            <div class="icon">🤖</div>
+            <div class="title">Local AI</div>
+            <div class="desc">/ai/</div>
+        </a>
+        <a href="/stories/" class="card">
+            <div class="icon">📖</div>
+            <div class="title">AI Generated Stories</div>
+            <div class="desc">/stories/</div>
+        </a>
+        <a href="/search/" class="card">
+            <div class="icon">🔍</div>
+            <div class="title">Search Engine</div>
+            <div class="desc">/search/</div>
+        </a>
+        <a href="/cloud/" class="card">
+            <div class="icon">☁️</div>
+            <div class="title">Nextcloud</div>
+            <div class="desc">/cloud/</div>
+        </a>
+        <a href="/cloud/apps/files/files/136?dir=/Media/Public/E-books/" class="card">
+            <div class="icon">📚</div>
+            <div class="title">Books</div>
+            <div class="desc">E-books</div>
+        </a>
+        <a href="/code/" class="card">
+            <div class="icon">💻</div>
+            <div class="title">Code Hoster</div>
+            <div class="desc">/code/</div>
+        </a>
+        <a href="/track/" class="card">
+            <div class="icon">📊</div>
+            <div class="title">Request Tracker</div>
+            <div class="desc">/track/</div>
+        </a>
+    </div>
+</body>
+</html>
+EOF
+
+sudo chown -R www-data:www-data /var/www/dashboard
+sudo chmod -R 755 /var/www/dashboard
+
+echo "=== 3. Writing Nginx Master Configuration ==="
+cat << 'EOF' | sudo tee /etc/nginx/sites-available/homeserver > /dev/null
+map $http_x_via_gcp $gcp_overlay {
+    "true"  '<div id="gcp-overlay" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background-color:rgba(239,68,68,0.05);border-top:3px solid rgba(239,68,68,0.6);pointer-events:none;z-index:999998;"></div>';
+    default '';
+}
+
+map $http_user_agent $cloud_inject {
+    "~*nextcloud-(android|ios|desktop)" '';
+    default '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+}
+
+upstream ak_outpost {
+    server 127.0.0.1:9010;
+}
+upstream ak_server {
+    server 127.0.0.1:9008;
+}
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+log_format track escape=json '{"time":"$time_iso8601","gcp":"$http_x_via_gcp","ip":"$remote_addr","method":"$request_method","uri":"$request_uri","status":$status,"in":$request_length,"out":$bytes_sent,"ua":"$http_user_agent"}';
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name home.palashkantikundu.in;
+
+    ssl_certificate     /etc/letsencrypt/live/home.palashkantikundu.in/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/home.palashkantikundu.in/privkey.pem;
+
+    client_max_body_size 512M;
+    client_body_buffer_size 128k;
+
+    access_log /var/log/nginx/track.log track;
+
+    # Expose Outpost traffic directly so browser auth flow and internal calls do not fail
+    location /outpost.goauthentik.io/ {
+        proxy_pass http://ak_outpost;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # Internal auth checking block
+    location /ak-auth-ai {
+        internal;
+        proxy_pass http://ak_outpost/outpost.goauthentik.io/auth/nginx;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Original-URL $scheme://$http_host$request_uri;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
+    }
+
+    # Redirect unauthenticated users directly to Outpost start portal
+    location @ak-sso-ai {
+        internal;
+        return 302 /outpost.goauthentik.io/start?rd=$scheme://$http_host$request_uri;
+    }
+
+    location / {
+        root /var/www/dashboard;
+        index index.html;
+
+        sub_filter_once off;
+        sub_filter_types text/html;
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+    }
+
+    # Authentik SSO Core (matches both /sso and /sso/*)
+    location /sso {
+        proxy_pass http://ak_server;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+    }
+
+    # 1. Local AI App
+    location /ai/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+        error_page 401 = @ak-sso-ai;
+
+        proxy_pass http://127.0.0.1:3001/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Accept-Encoding "";
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+        proxy_set_header X-Authentik-Email $authentik_email;
+        proxy_set_header X-Authentik-Name $authentik_name;
+        proxy_set_header X-Authentik-UID $authentik_uid;
+
+        sub_filter_once off;
+        sub_filter_types text/html;
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;top:8px;right:80px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+    }
+
+    location ^~ /api/public/ {
+        proxy_pass http://127.0.0.1:3001/api/public/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location /api/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+        error_page 401 = @ak-sso-ai;
+
+        proxy_pass http://127.0.0.1:3001/api/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+        proxy_set_header X-Authentik-Email $authentik_email;
+        proxy_set_header X-Authentik-Name $authentik_name;
+        proxy_set_header X-Authentik-UID $authentik_uid;
+    }
+
+    # 2. Chat Stories App
+    location /stories/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+        error_page 401 = @ak-sso-ai;
+
+        proxy_pass http://127.0.0.1:3002/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Accept-Encoding "";
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+        proxy_set_header X-Authentik-Email $authentik_email;
+        proxy_set_header X-Authentik-Name $authentik_name;
+        proxy_set_header X-Authentik-UID $authentik_uid;
+
+        sub_filter_once off;
+        sub_filter_types text/html;
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+    }
+
+    location /story/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+        error_page 401 = @ak-sso-ai;
+
+        proxy_pass http://127.0.0.1:3002/story/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+        proxy_set_header X-Authentik-Email $authentik_email;
+        proxy_set_header X-Authentik-Name $authentik_name;
+        proxy_set_header X-Authentik-UID $authentik_uid;
+
+        sub_filter_once off;
+        sub_filter_types text/html;
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+    }
+
+    location /media/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+        error_page 401 = @ak-sso-ai;
+
+        proxy_pass http://127.0.0.1:3002/media/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+        proxy_set_header X-Authentik-Email $authentik_email;
+        proxy_set_header X-Authentik-Name $authentik_name;
+        proxy_set_header X-Authentik-UID $authentik_uid;
+    }
+
+    # 3. SearXNG
+    location /search/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Script-Name /search;
+        proxy_set_header Accept-Encoding "";
+
+        sub_filter_once off;
+        sub_filter_types text/html;
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+    }
+
+    # 4. Nextcloud
+    location /cloud/ {
+        proxy_pass http://127.0.0.1:8082/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port 443;
+        
+        proxy_max_temp_file_size 2048m;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Accept-Encoding "";
+
+        sub_filter_once off;
+        sub_filter_types text/html;
+        sub_filter '</body>' '$cloud_inject';
+    }
+
+    location /.well-known/carddav { return 301 $scheme://$host/cloud/remote.php/dav; }
+    location /.well-known/caldav { return 301 $scheme://$host/cloud/remote.php/dav; }
+
+    # 5. Code Hoster
+    location /code/ {
+        proxy_pass http://127.0.0.1:9000/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Accept-Encoding "";
+
+        sub_filter_once off;
+        sub_filter_types text/html;
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+    }
+
+    # 6. Request tracking dashboard
+    location /track/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+        error_page 401 = @ak-sso-ai;
+
+        proxy_pass http://127.0.0.1:8093/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Accept-Encoding "";
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+        proxy_set_header X-Authentik-Email $authentik_email;
+        proxy_set_header X-Authentik-Name $authentik_name;
+        proxy_set_header X-Authentik-UID $authentik_uid;
+
+        sub_filter_once off;
+        sub_filter_types text/html;
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;top:8px;right:80px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+    }
+}
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name home.palashkantikundu.in;
+    return 301 https://$host$request_uri;
+}
+EOF
+
+echo "=== 4. Reloading Nginx ==="
+sudo mkdir -p /var/log/nginx
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo ln -sf /etc/nginx/sites-available/homeserver /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+
+echo "=== 4b. Request Tracking Dashboard ==="
+sudo touch /var/log/nginx/track.log
+sudo chmod 640 /var/log/nginx/track.log
+if [ -n "$CHAT_DIR" ] && [ -f "$CHAT_DIR/server/track_dashboard.py" ]; then
+    if ! pgrep -f "server/track_dashboard.py" > /dev/null; then
+        nohup python3 "$CHAT_DIR/server/track_dashboard.py" --log /var/log/nginx/track.log \
+            > /tmp/track_dashboard.log 2>&1 &
+        echo "    Request Tracker started on http://localhost:8093/track/"
+    else
+        echo "    Request Tracker already running"
+    fi
+else
+    echo "    Skipping python tracker start: \$CHAT_DIR is unset or file missing."
+fi
+
+echo "=== 5. Dynamic Nextcloud Container Configuration ==="
+NC_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E 'cloud-app|nextcloud' | head -n 1)
+
+if [ -n "$NC_CONTAINER" ]; then
+    echo "Found Nextcloud container: $NC_CONTAINER"
+    
+    docker exec --user www-data "$NC_CONTAINER" php occ files:scan --all
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set overwritewebroot --value="/cloud"
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set overwrite.cli.url --value="https://home.palashkantikundu.in/cloud"
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set overwriteprotocol --value="https"
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set trusted_domains 0 --value="*"
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set files_external_allow_create_new_local --value="true" --type=boolean
+    docker exec --user www-data "$NC_CONTAINER" php occ app:enable files_external
+
+    echo "--- Configuring Nextcloud SSO via authentik (oidc_login) ---"
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_provider_url --value="${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}/application/o/${AUTH_CLIENT_ID:-local-ai}/"
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_client_id --value="${AUTH_CLIENT_ID:-local-ai}"
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_client_secret --value="${AUTH_CLIENT_SECRET:-}"
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_scope --value="openid profile email groups"
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_auto_redirect --value="true" --type=boolean
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_disable_registration --value="false" --type=boolean
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_create_group_membership --value="true" --type=boolean
+    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_group_mapping --value='{"admin":"admin","premium":"premium","free":"free"}' --type=json
+    echo "Restarting Nextcloud container..."
+    docker restart "$NC_CONTAINER"
+else
+    echo "Error: Nextcloud container not found!"
+    exit 1
+fi
+
+echo "=== All tasks completed successfully ==="
+</file>
+
+<file path="README.md">
+# Local AI - LLM + Image Generation Setup
+
+Self-hosted LLM + image generation stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM).
+
+## Requirements
+
+- NVIDIA GPU with the driver working — check with `nvidia-smi`.
+- **Host OS path:** CUDA toolkit (`nvcc`) needed to build llama.cpp. `setup.sh` installs
+  it automatically if it's missing.
+- **Dockerized path:** **NVIDIA Container Toolkit** on the *host* (for `--gpus`), plus
+  CUDA toolkit *inside* the container (`setup.sh` installs it there too).
+
+## Quick Start — Host OS
+
+```bash
+# 1. Clone and build
+git clone <this-repo> ~/git/local-ai
+cd ~/git/local-ai
+bash setup.sh
+
+# 2. Post-processing — download your models (setup.sh does NOT download them)
+#    LLM (chat):   put a GGUF into ~/local-ai-files/my-models/
+#                  model.json holds "gpu" (chat UI) and "cpu" (self-chat agents)
+#                  model ids — edit it if you use other models
+#    Image (z_image): copy these into ~/local-ai/ComfyUI/models/:
+#      diffusion_models/z_image_turbo_bf16.safetensors
+#      text_encoders/qwen_3_4b.safetensors
+#      vae/ae.safetensors
+
+# 3. Run — nothing else to configure
+cd ~/git/local-ai && python chat-webui.py
+```
+
+Access at `http://chat.local` or `http://localhost:3001`.
+
+Authentication is unified SSO via Authentik — see "Authentication (SSO)" below.
+
+Self-chat agents (editor/moderator/registered agents) run on the CPU llama-server
+(`http://localhost:8079`) by default so they never compete with interactive UI
+users for VRAM. To run them on the interactive GPU server instead, set the
+`SELF_CHAT_MODE` environment variable to `gpu`:
+
+```bash
+SELF_CHAT_MODE=gpu python chat-webui.py
+```
+
+You can also edit `SELF_CHAT_MODE` in `server/config.py`.
+
+`chat-webui.py` auto-starts the two llama-servers on boot if they're down, and
+starts ComfyUI on demand, so no manual service startup is required. If you prefer
+to run the services manually:
+
+```bash
+# GPU llama-server — interactive chat UI users (VRAM-backed, 24K context)
+~/local-ai/llama.cpp/build/bin/llama-server \
+    --host 0.0.0.0 --port 8081 \
+    --models-dir ~/local-ai-files/my-models/ \
+    --jinja -ngl 99 -fa on --ctx-size 24576 \
+    -ctk q8_0 -ctv q8_0 \
+    --no-mmproj-offload
+
+# CPU llama-server — automated self-chat agents (RAM-backed, concurrent)
+~/local-ai/llama.cpp/build/bin/llama-server \
+    --host 0.0.0.0 --port 8079 \
+    --models-dir ~/local-ai-files/my-models/ \
+    --jinja --n-gpu-layers 0 -fa off --ctx-size 32768 \
+    -ctk q8_0 -nkvo \
+    --reasoning-budget 4096 \
+    --no-mmproj-offload --device none
+
+cd ~/local-ai/ComfyUI && source venv/bin/activate && python main.py \
+    --lowvram \
+    --input-directory ~/local-ai-files/ComfyUI/input \
+    --output-directory ~/local-ai-files/ComfyUI/output
+```
+
+## Quick Start — Dockerized (GPU)
+
+The repo ships a `docker-compose.yaml` that runs the same stack inside an
+`ubuntu:24.04` container with GPU passthrough, with SearXNG as a sibling service.
+
+```bash
+# 1. Start services (SearXNG + ai-container with GPU + shared dirs)
+docker compose up -d
+
+# 2. Enter the container and run setup
+docker exec -it ai-container bash
+cd /root/git/local-ai
+bash setup.sh
+
+# 3. Post-processing — download models into the shared host dirs
+#    (same list as the Host OS path, but the image models land in
+#     ~/local-ai/ComfyUI/models/ on the HOST, which is mounted into the container)
+
+# 4. Run — inside the container
+cd /root/git/local-ai && python chat-webui.py
+```
+
+Access at `http://localhost:3001` (published from the container). Notes:
+
+- **Requires the NVIDIA Container Toolkit on the host**; the compose already passes
+  `--gpus` to the container.
+- `setup.sh` auto-detects the container: runs without `sudo`, skips systemd/mDNS/nginx
+  (not available in a container), skips starting SearXNG (provided by compose), and
+  installs the CUDA toolkit inside the container if `nvcc` is missing.
+- The container needs internet during setup (`apt`, `git clone`, `npm`, CUDA toolkit);
+  the compose attaches it to `external-net`.
+- Config/data dirs (`~/local-ai-files`) are shared with the host, so models and
+  sessions persist across container restarts.
+
+## Authentication (SSO)
+
+Authentication is unified **SSO via Authentik** — the single identity provider for
+every app on the box. There is **no `users.json` and no per-app password database**;
+users, passwords and roles live in Authentik.
+
+**Two identity paths:**
+
+1. **Browsers** — nginx runs an `auth_request` subrequest against the Authentik
+   proxy outpost (`location /ak-auth-ai` in `local_cloud.sh`). If the SSO session is
+   valid the outpost answers 200 and populates `X-Authentik-*` claim headers, which
+   nginx forwards to the upstream apps. On 401 nginx sends the browser to the SSO
+   portal (`@ak-sso-ai`). The SPA calls `/api/check-auth` on load to learn who the
+   user is.
+2. **Machine agents** (`self-chat.py`) — authenticate via Authentik's OAuth2 password
+   grant and send the JWT as `Authorization: Bearer <token>`. Backends verify the
+   signature against Authentik's JWKS (`server/auth.py` → `identity_from_bearer`).
+
+Resolved identity is always a dict — `username`, `email`, `name`, `groups`, `role`
+(`free`/`premium`/`admin` from the user's Authentik groups) and the Authentik `uid`
+(`server/auth.py` → `get_identity`). Roles decide Story collection access and the
+"overwrite user context" admin action.
+
+**Enabling steps** (one-time):
+
+1. Fill the `AUTHENTIK_*` / `POSTGRES_*` secrets in `.env` (see `authentik-compose.yaml`).
+2. Start Authentik: `docker compose -f authentik-compose.yaml up -d`.
+3. Open `https://<host>/sso/if/flow/initial-setup/` and create the admin account.
+4. Provision groups/users, the `local-ai` OIDC provider and the proxy outpost:
+   `python3 scripts/authentik_bootstrap.py`.
+5. Deploy the proxy outpost (`ghcr.io/goauthentik/proxy`) with the outpost token the
+   bootstrap script prints, on `127.0.0.1:9010` (nginx's `ak_outpost` upstream).
+6. Ensure the apps are only reachable through the nginx front-end in `local_cloud.sh`
+   (the `auth_request` gate on `/ai/`, `/api/`, `/stories/`, `/story/`), then reload
+   nginx.
+
+## Security & Deployment Notes
+
+> **Intended scope: a private, trusted home deployment** — e.g. a household of a few
+> users on a home LAN (this project targets ~2–4 concurrent users). The following
+> limitations are **accepted risk** for that use case. This stack is **not** built for
+> production, the public internet, or a shared LAN where many unknown users work —
+> do **not** use it under those conditions.
+
+> **Authentication is unified SSO.** Browser access requires an Authentik session
+> (nginx `auth_request`), and per-user identity comes from the forwarded
+> `X-Authentik-*` headers (see "Authentication (SSO)" below). The notes that follow
+> assume the SSO-enabled nginx front-end (`local_cloud.sh`); running `chat-webui.py`
+> directly on port 3001 bypasses all of it.
+
+- **Bypass on bare `chat-webui.py`.** Running `python chat-webui.py` directly serves
+  port 3001 **without** the nginx SSO gate, so `identity_from_headers` finds no
+  `X-Authentik-*` headers and every endpoint treats the caller as unauthenticated.
+  Always front it with `local_cloud.sh`'s nginx config for real protection.
+- **File endpoints are unauthenticated on bare 3001.** `/output/...` (generated
+  images) and `/uploads/...` (uploaded documents) are served without an identity
+  check (`chat-webui.py` `do_GET`). Anyone who can reach port 3001 and knows a
+  filename can download them. Behind the SSO nginx gate (`/ai/`, `/api/`) these are
+  still protected because the whole location is gated at the edge.
+- **CORS is wide open.** Responses carry `Access-Control-Allow-Origin: *`
+  (`chat-webui.py` `do_OPTIONS`/`send_json`). A malicious page on the same origin
+  context could call the API and read responses; SSO cookies are HttpOnly and
+  SameSite-bound so cross-origin pages cannot use the session.
+- **No TLS/HTTPS on bare 3001.** Login and chat content travel in plaintext if you
+  connect without nginx. Always use the TLS-terminating nginx front-end
+  (`local_cloud.sh`); never port-forward 3001/8081/8079 directly.
+- **No content guardrails.** The model outputs whatever the loaded model produces; there
+  is no moderation or kid-safe filter in the stack. Choose your model accordingly and
+  set expectations for anyone using it.
+- **Third-party calls.** `fetch_page` and location lookup call external services
+  (SearXNG backends, `nominatim.openstreetmap.org`), and optional TTS can use
+  Microsoft `edge-tts` unless you configure the local Piper voices. If strict data
+  residency matters, disable or replace these.
+- **Compose exposes SearXNG on all host interfaces** (`8080:8080`), while the host path
+  binds it to `127.0.0.1`. Bind it to localhost if you don't need LAN-wide search.
+
+## System Design
+
+### 1. Infrastructure & Network
+
+```mermaid
+graph TD
+    subgraph Hardware ["Hardware (RTX 3050 Laptop)"]
+        HW1["GPU: NVIDIA RTX 3050 — 4 GB VRAM"]
+        HW2["RAM: 16 GB"]
+        HW3["Same dev machine hosts everything"]
+        HW4["Target: 2–4 concurrent users"]
+    end
+
+    subgraph ExternalServices ["External Services"]
+        Docker["Docker Engine"]
+        Docker --> SearXNG["SearXNG Container\nlocalhost:8080\nRestart: unless-stopped"]
+        Nginx["Nginx Reverse Proxy\nchat.local:80 → localhost:3001"]
+        Avahi["avahi-daemon\nmDNS: chat.local"]
+    end
+
+    subgraph Network ["Network Topology"]
+        LAN["LAN Devices"] -->|"http://chat.local"| Nginx
+        Nginx -->|"proxy_pass\nUpgrade + X-Real-IP"| HTTPServer["chat-webui.py\n0.0.0.0:3001"]
+        HTTPServer -->|"localhost:8081"| LLamaGPU["llama-server (GPU)\ninteractive UI users"]
+        HTTPServer -->|"localhost:8079"| LLamaCPU["llama-server (CPU)\nself-chat agents"]
+        HTTPServer -->|"localhost:8188"| ComfyUIRuntime["ComfyUI"]
+        HTTPServer -->|"localhost:8080/search"| SearXNG
+        HTTPServer -->|"nominatim.openstreetmap.org"| Nominatim["Reverse Geocoding"]
+    end
+
+    subgraph StartupOrder ["Startup (manual)"]
+        SO1["1. llama-server (GPU)\n--port 8081"] --> SO2["2. llama-server (CPU)\n--port 8079"]
+        SO2 --> SO3["3. ComfyUI\nvenv → python main.py --lowvram"]
+        SO3 --> SO4["4. chat-webui.py\npython chat-webui.py"]
+        SO5["chat-webui.py on boot:\nGPU /health OK? else restart_servers\n→ ensure CPU server → SearXNG\nreachable? else sys.exit(1)"]
+    end
+```
+
+### 2. File Layout & Build
+
+```mermaid
+graph TD
+    subgraph CodeRepo ["Code (~/local-ai/)"]
+        CR1["chat-webui.py\nMain server — Python 3"]
+        CR2["setup.sh\nBootstrap: installs deps,\nclones repos, creates templates"]
+        CR3["dist/\nVite-built SPA frontend"]
+        CR4["llama.cpp/ git clone\nBuilt: cmake -DGGML_CUDA=ON\nBinary: build/bin/llama-server"]
+        CR5["ComfyUI/ git clone\nvenv: ComfyUI/venv/\nRequires: requirements.txt"]
+    end
+
+    subgraph DataDir ["Data (~/local-ai-files/)"]
+        DF1["model.json\nLLM model ids:\ngpu (chat UI)\n+ cpu (self-chat)"]
+        DF2["models.json\nComfyUI image model defs\nz_image (turbo)"]
+        DF3["Authentik (external)\nUsers, groups, SSO roles\ncontexts/<user>.txt\nPer-user persistent context"]
+        DF4["sys_prompt.txt\nSystem prompt template\n%model_list% %current_time%\n%current_location%"]
+        DF5["session/sessions_<user>.json\nPer-user persisted chat sessions"]
+        DF6["my-models/\nLLM GGUF model files"]
+        DF7["ComfyUI/input/\nTemp files for image editing"]
+        DF8["ComfyUI/output/\nGenerated/edited images"]
+        DF9["contexts/\nPer-user persistent context"]
+        DF10["searxng/\nSearXNG config volume"]
+        DF11["uploads/\nUploaded files saved to disk\n(code/docs via /api/extract-file)"]
+        DF12["tasks.db\nSQLite to-do tasks + reminders"]
+    end
+
+    subgraph BuildFlags ["Build Flags"]
+        BF1["llama.cpp\ncmake -DGGML_CUDA=ON\n-DCMAKE_BUILD_TYPE=Release\n-j nproc"]
+        BF2["ComfyUI\npip install requirements.txt\nin Python venv"]
+        BF3["Frontend\nnpm install && npm run build\nVite to dist/"]
+        BF4["System deps\ngit python3 cmake avahi-daemon\npdftotext catdoc antiword\nnginx docker.io"]
+    end
+```
+
+### 3. Runtime Constants & Locks
+
+```mermaid
+graph TD
+    subgraph RCNetwork ["Service URLs"]
+        RC1["LLAMA_BASE = localhost:8081 (GPU)\nLLAMA_URL = /v1/chat/completions"]
+        RC2["LLAMA_BASE_CPU = localhost:8079 (CPU)\nLLAMA_URL_CPU = /v1/chat/completions"]
+        RC3["COMFYUI_URL = localhost:8188"]
+        RC4["SEARXNG_URL = localhost:8080/search"]
+        RC5["HOST = 0.0.0.0  PORT = 3001"]
+    end
+
+    subgraph RCLlama ["llama-server Args (two concurrent servers)"]
+        RCL1["GPU: --host 0.0.0.0 --port 8081\n--n-gpu-layers 99 -fa on --jinja"]
+        RCL2["CPU: --host 0.0.0.0 --port 8079\n--n-gpu-layers 0 -fa off\n--device none --jinja"]
+        RCL3["--models-dir ~/local-ai-files/my-models/"]
+        RCL4["GPU: --ctx-size 24576 (24K)\nCPU: --ctx-size 32768 (32K)"]
+        RCL5["--reasoning-budget 4096\n(CPU server only)"]
+        RCL6["-ctk q8_0 (KV cache quant, both)\n-ctv q8_0 (GPU only)\n-nkvo (CPU only)"]
+        RCL7["--no-mmproj-offload on BOTH servers\n(multimodal projector stays in RAM —\notherwise its ~950 MiB on the 4 GiB card\nstarves the CPU server's worker buffers)"]
+        RCL8["Routing: agent task → 8079 CPU,\nUI task → 8081 GPU (task_mode)"]
+    end
+
+    subgraph RCThermal ["Thermal and RAM Thresholds"]
+        RT1["TEMP_THRESHOLD_ON = 85 C"]
+        RT2["TEMP_THRESHOLD_OFF = 75 C"]
+        RT3["RAM_EVAC_THRESHOLD = 95%"]
+        RT4["RAM_RESUME_THRESHOLD = 70%"]
+    end
+
+    subgraph RCLimits ["Limits and Pools"]
+        RL1["MAX_QUEUE_SIZE = 5 (per lane)"]
+        RL2["MAX_INPUT_TOKENS = 24576 (24K)"]
+        RL3["_llm_pools: gpu 1 / cpu 4 workers\n(CPU_PARALLEL_SLOTS = 4)"]
+        RL4["_tool_pools: gpu 2 / cpu 2 workers"]
+        RL5["Max tool rounds = 10"]
+        RL6["Idle unload = 300s"]
+        RL7["LLM timeout = 600s"]
+        RL8["ComfyUI poll = 120s"]
+        RL9["REASONING_BUDGET = 4096 (CPU server)"]
+    end
+
+    subgraph RCThreads ["Thread Pools and Locks"]
+        LK1["_llm_pools: ThreadPoolExecutor\nper lane (gpu 1, cpu 4)\nLLM calls run per-lane"]
+        LK2["_tool_pools: ThreadPoolExecutor\nper lane (gpu 2, cpu 2)"]
+        LK3["_event_queue: queue.Queue\nDecouples dequeue from dispatch"]
+        LK4["_image_queue + _image_worker\nSerializes image jobs\n(image loading can starve GPU)"]
+        LK5["_data_lock: threading.Lock\nGuards sessions, tasks, model_status"]
+        LK6["_model_transition_lock\nSerializes load/unload of LLM"]
+        LK7["_tokens_lock\nGuards _agent_tokens/_agent_users\n(self-chat agent tracking)"]
+        LK8["_queue_locks + _queue_conds\nPer-lane task queues\n(gpu lane + cpu lane)\nCondition variables"]
+    end
+```
+
+### 4. Server Startup
+
+```mermaid
+graph TD
+    A["python chat-webui.py"] --> A1["Load configs at module import:\nmodel.json, models.json,\nsys_prompt.txt"]
+    A --> B["load_sessions()\nLoad per-user session files"]
+    A1 & B --> C{"GPU llama-server /health\nHTTP GET localhost:8081?"}
+    C -- "200 OK" --> C2{"CPU llama-server /health\nHTTP GET localhost:8079?"}
+    C -- "Dead" --> Restart["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn ComfyUI Popen (no poll here)\n4. Spawn GPU llama-server (8081)\n5. Spawn CPU llama-server (8079)\n6. Poll each /health 2s up to 120s\n7. Kill on timeout"]
+    C2 -- "Dead" --> EnsureCPU["ensure_llama_server cpu:\nrestart CPU llama-server only\n(GPU stays running)"]
+    C2 -- "200 OK" --> D{"SearXNG reachable\non localhost:8080?"}
+    EnsureCPU --> D
+    D -- "Yes" --> E["Start 7 Daemon Threads"]
+    D -- "No" --> Exit["print ERROR & sys.exit(1)"]
+    Restart --> D
+
+    subgraph Daemons ["Background Daemon Threads"]
+        E1["_event_loop\nSingle-threaded event dispatcher"]
+        E2["_queue_worker gpu\nSequential dequeuer\n(GPU lane — UI users)"]
+        E3["_queue_worker cpu\nSequential dequeuer\n(CPU lane — self-chat agents)"]
+        E4["_image_worker\nSerialized image jobs\n(one at a time)"]
+        E5["_idle_unload_loop\nPolls every 10s"]
+        E6["_thermal_monitor\nPolls every 10s"]
+        E7["_reminder_loop\nPolls every 30s"]
+    end
+    E --> E1 & E2 & E3 & E4 & E5 & E6 & E7
+    E --> F["HTTPServer.serve_forever\n0.0.0.0:3001"]
+```
+
+### 5. Model State Machine
+
+Two independent state machines run concurrently — one per llama-server.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state "GPU server (8081) — UI users" as G {
+        [*] --> unloaded: gpu
+        unloaded --> loading : load_llama_model("gpu")
+        loading --> chat_loaded : 200 from /models/load\n+ health check passes
+        loading --> unloaded : failed
+        chat_loaded --> unloading : unload_llama_model("gpu")
+        unloading --> unloaded : 200 from /models/unload
+        unloading --> chat_loaded : failed but health OK
+        chat_loaded --> image_active : generate_image\nor edit_image starts
+        image_active --> chat_loaded : free_comfyui_vram\n+ load_llama_model("gpu")
+    end
+
+    state "CPU server (8079) — self-chat agents" as C {
+        [*] --> cpu_unloaded
+        cpu_unloaded --> cpu_loading : load_llama_model("cpu")
+        cpu_loading --> cpu_loaded : 200 from /models/load\n+ health check passes
+        cpu_loading --> cpu_unloaded : failed
+        cpu_loaded --> cpu_unloading : unload_llama_model("cpu")
+        cpu_unloading --> cpu_unloaded : 200 from /models/unload
+        cpu_unloading --> cpu_loaded : failed but health OK
+    }
+```
+
+Image generation unloads **only** the GPU server; the CPU server keeps serving
+agents throughout. Per-server idle timestamps drive independent unloads
+(`_last_llm_use` for GPU, `_cpu_last_llm_use` for CPU).
+
+### 6. REST API Endpoints
+
+```mermaid
+graph TD
+    Client([User Client])
+
+    subgraph AuthEndpoints ["Auth (SSO)"]
+        Client -->|"Browser: nginx auth_request\n→ Authentik SSO portal"| SSO["SSO session cookie set\nX-Authentik-* forwarded upstream"]
+        Client -->|"GET /api/check-auth"| CheckAuth["identity from\nX-Authentik-* headers"]
+        CheckAuth -- Yes --> AuthOK["{authenticated: true, username, role}"]
+        CheckAuth -- No --> AuthNO["{authenticated: false}"]
+        Client -->|"Agents: POST /sso/... token\nAuthorization: Bearer <JWT>"| Bearer["Verify JWT against\nAuthentik JWKS"]
+    end
+
+    subgraph SessionEndpoints ["Session Management"]
+        Client -->|"POST /api/sessions"| NewSession["Create UUID session\nStore in sessions_meta"]
+        Client -->|"GET /api/sessions"| ListSessions["List user sessions\nSorted by updated desc"]
+        Client -->|"GET /api/sessions/:id/messages"| GetMessages["Return messages\n+ token_estimate"]
+        Client -->|"PUT /api/sessions/:id"| RenameSession["Rename session"]
+        Client -->|"DELETE /api/sessions/:id"| DeleteSession["Delete session + cleanup\nassociated output images\nand uploaded files"]
+    end
+
+    subgraph TaskEndpoints ["Task Management"]
+        Client -->|"GET /api/tasks"| ListTasks["List user tasks\nwith reminders"]
+        Client -->|"POST /api/tasks"| CreateTask["Create task\n(title, priority, due_date, reminder)"]
+        Client -->|"PUT /api/tasks/:id"| UpdateTask["Update task fields"]
+        Client -->|"DELETE /api/tasks/:id"| DeleteTask["Delete task"]
+    end
+
+    subgraph AgentEndpoints ["Agent / Presence"]
+        Client -->|"POST /api/register-agent"| RegisterAgent["Create agent token\nfor self-chat bots\n(kolpo, kaya, editor, moderator)"]
+        Client -->|"POST /api/leaving"| Leaving["Set user's active window\nnow → end (presence)"]
+        Client -->|"GET /api/active-users"| ActiveUsers["List currently active users\n(presence tracking)"]
+    end
+
+    subgraph UtilityEndpoints ["Utility"]
+        Client -->|"GET /api/model-status"| ModelStatus["model_status, _last_tps\n_overheated, _gpu_temp,\nreminder_count, max_context"]
+        Client -->|"POST /api/extract-file"| ExtractFile["Save uploaded file to disk\n(~/local-ai-files/uploads/)\nReturn {url, name}\nText extraction happens later\nvia the read_file tool"]
+        Client -->|"POST /api/location"| SetLocation["Reverse geocode via Nominatim\nstore _client_location"]
+        Client -->|"GET /api/user-context"| GetUserCtx["Read user context file"]
+        Client -->|"POST /api/user-context\n{action: write|overwrite|read}"| SetUserCtx["Write / overwrite / read\nuser context file"]
+        Client -->|"POST /api/tts"| TTS["Text-to-speech via Piper (local)\nor edge-tts (cloud fallback)"]
+        Client -->|"GET /output/:filename"| ServeImage["Serve generated images\nfrom ComfyUI output dir (no auth)"]
+        Client -->|"GET /uploads/:filename"| ServeUpload["Serve uploaded files\n(no auth)"]
+    end
+
+    subgraph SPA ["Static / SPA Serving"]
+        Client -->|"GET /"| SPAIndex["Serve dist/index.html"]
+        Client -->|"GET /*"| SPAAssets["Serve dist/ assets\nor SPA fallback to index.html"]
+    end
+
+    subgraph StatusPolling ["Status Polling"]
+        Client -->|"GET /api/status/:task_id"| PollStatus["Return tasks id:\nstatus message response\n tools_used image etc"]
+    end
+```
+
+### 7. Chat Ingress Flow
+
+```mermaid
+graph TD
+    Client([User Client]) -->|"POST /api/chat\n(SSO session via nginx)"| EndpointChat
+
+    EndpointChat["Handler.do_POST: /api/chat"]
+    EndpointChat --> AuthCheck{"get_current_user\nvia X-Authentik-*/JWT"}
+    AuthCheck -- No --> AuthErr[401 Unauthorized]
+    AuthCheck -- Yes --> SessionCheck{"Session exists\nand owned by user?"}
+    SessionCheck -- No --> SessionErr[404 Session not found]
+    SessionCheck -- Yes --> RouteAtAdmission{"user in\n_agent_users?"}
+    RouteAtAdmission -- "agent (cpu)" --> LaneCPU["lane = cpu\nQueue: _task_queues['cpu']"]
+    RouteAtAdmission -- "user (gpu)" --> LaneGPU["lane = gpu\nQueue: _task_queues['gpu']"]
+    LaneCPU --> QueueCheck{"len lane queue\n< MAX_QUEUE_SIZE 5?"}
+    LaneGPU --> QueueCheck
+    QueueCheck -- No --> QueueBusy[503 Server Busy]
+    QueueCheck -- Yes --> EnqueueTask["lane queue.append\n_queue_conds[lane].notify"]
+    EnqueueTask --> TaskInit["tasks task_id =\nstatus queued"]
+    TaskInit --> ReturnTaskID["Return task_id to Client"]
+    ReturnTaskID -. "mode resolved later\nin task_mode(task_id)" .-> TaskMode["agent → 8079 CPU\nuser → 8081 GPU"]
+    TaskMode --> EnsureServer["ensure + load that\nmode's llama-server"]
+```
+
+### 8. Queue Workers (one per lane)
+
+A separate worker drains each lane (`_queue_worker("gpu")`, `_queue_worker("cpu")`),
+each with its own lock/condition/queue. The two lanes never wait behind each other;
+they only share hardware when both need the GPU (chat load / image gen), which is
+arbitrated separately. (The CPU-lane "yield to human presence" pause is disabled in
+the current code — self-chat agents run on the CPU server continuously.)
+
+```mermaid
+graph TD
+    E2["_queue_worker(mode)\ngpu or cpu"] --> QueueLoop["queue_cond[mode].wait\nblock on empty queue"]
+    QueueLoop --> PauseCheck{"overheated and mode=gpu\nor ram_evacuating?"}
+    PauseCheck -- Yes --> MarkWaiting["Set all queued tasks in\nthis lane to status waiting\npause label"]
+    MarkWaiting --> PauseWait["queue_cond.wait 5s"] --> QueueLoop
+    PauseCheck -- No --> PopTask["item = lane queue.pop 0\n_current_task_ids[mode] = task_id"]
+    PopTask --> PostStart["event_post start\nsession_id message image\naudio user client_timestamp"]
+    PostStart --> TaskDoneWait{"Poll tasks id.status\nevery 0.5s"}
+    TaskDoneWait -- "done or error" --> ClearTask["_current_task_ids[mode] = None\nqueue_cond.notify_all"]
+    ClearTask --> QueueLoop
+```
+
+### 9. Event Loop Pipeline
+
+```mermaid
+graph TD
+    E1["_event_loop"] --> EvLoop["Loop: event_queue.get\nev_type task_id data"]
+    EvLoop --> EvDispatch{"ev_type?"}
+
+    EvDispatch -- "start" --> EvStart["Store task metadata:\n_tools_used, _search_details\n_original_message, _original_image\n_audio, _user, _client_timestamp"]
+    EvStart --> PrepSession["prepare_session:\n1. Compute mode = task_mode(task_id)\n   (agent → cpu 8079, user → gpu 8081)\n2. Ensure + load that mode's server\n3. Inject sys prompt + date + location\n4. Inject user context\n5. Append user msg to session\n6. Auto-name session from message\n7. save_sessions\n[...]" ]
+    PrepSession --> StartRound0["start_llm_round round 0"]
+
+    EvDispatch -- "llm_ok" --> LLMOK{"state == llm_waiting\nand has tool_calls?"}
+    LLMOK -- "No tools" --> Finalize["_finalize_task:\n1. Build msg_entry with reasoning\n   tools_used, image_url etc\n2. Append to session\n3. save_sessions\n4. tasks id = status done\n5. Reset + update that\n   mode's idle timestamp"]
+    LLMOK -- "Has tools" --> SubmitTools["1. Append assistant msg\n2. state = tools_running\n3. pending_tools = count\n4. save_sessions\n5. Submit to that\n   task's lane tool pool"]
+
+    EvDispatch -- "llm_err" --> LLMERR{"state == llm_waiting?"}
+    LLMERR -- Yes --> LLMErrAction["_set_task_error:\ntasks id = status error"]
+    LLMERR -- No --> EvLoop
+
+    EvDispatch -- "tool_ok" --> ToolOK["1. Append tool result to session\n2. pending_tools minus 1\n3. save_sessions"]
+    ToolOK --> AllToolsDone{"pending_tools <= 0?"}
+    AllToolsDone -- No --> EvLoop
+    AllToolsDone -- Yes --> NextRoundCheck{"round+1 < 10?"}
+    NextRoundCheck -- Yes --> NextRound["start_llm_round round N+1\nFeed tool results back to LLM"]
+    NextRoundCheck -- No --> MaxRoundsErr["_set_task_error:\nMax tool rounds exceeded"]
+
+    EvDispatch -- "tool_err" --> ToolERR["1. Append error as tool result\n2. pending_tools minus 1\n3. save_sessions\n4. Same round-limit logic"]
+```
+
+### 10. LLM Worker
+
+```mermaid
+graph TD
+    StartRound0["start_llm_round\n(mode from task_mode)"] --> LLMWorker["_llm_worker\nin _llm_pools[mode]\n(gpu 1 / cpu 4 workers)"]
+    LLMWorker --> PayloadBuild["Build payload:\nmodel (mode's model id)\nmessages tools\ntool_choice auto\nmax_tokens 24576\nstream true\n(CPU server: --reasoning-budget 4096)"]
+    PayloadBuild --> StreamReq["POST llama-server\n(mode's base: 8081 gpu / 8079 cpu)\nv1/chat/completions\nstream=True timeout=600s"]
+    StreamReq --> StreamParse["Parse SSE stream:\n- reasoning_content delta\n  accumulate in reasoning_buf\n- content delta\n  accumulate in content_buf\n- tool_calls delta\n  reassemble by index[...]" ]
+    StreamParse --> BuildAssistantMsg["Build assistant msg:\nrole assistant content\nreasoning_content tool_calls"]
+    BuildAssistantMsg --> LLMOKPost["event_post llm_ok\nbody choices message"]
+    LLMOKPost --> EvLoop["Back to _event_loop"]
+
+    StreamReq -. "exception" .-> LLMException["event_post llm_err\nif image or vision in error\nuser-friendly message"]
+```
+
+### 11. Tool Worker
+
+```mermaid
+graph TD
+    SubmitTools["Submit to _tool_pools[mode]\ngpu 2 / cpu 2 workers"] --> ToolWorker["_tool_worker\nin the task's lane pool"]
+    ToolWorker --> ParseArgs["Parse tc.function.arguments\nfrom JSON string"]
+    ParseArgs --> ChooseTool{"tc.function.name?"}
+
+    ChooseTool -- "web_search" --> ExecSearch["1. set_status Searching\n2. Get _client_timestamp\n3. web_search query client_ts:\n   Append city to query\n   GET SearXNG search json\n   Return to[...]" ]
+    ExecSearch --> ToolPost["event_post tool_ok"]
+
+    ChooseTool -- "fetch_page" --> FetchPage["1. set_status Fetching\n2. fetch_page URL:\n   Validate URL (no private IPs)\n   GET with browser headers\n   Parse HTML (BeautifulSoup)\n   Return title + content"]
+    FetchPage --> ToolPost
+
+    ChooseTool -- "generate_image" --> GenGuard{"already generated\nimage this task?"}
+    GenGuard -- Yes --> GenReject["Return error:\nImage generation limit reached"]
+    GenGuard -- No --> EnqueueImage["_enqueue_image_job\nImage worker (single, serialized)"]
+    EnqueueImage --> GenImage["1. unload_llama_model('gpu')\n2. Build ComfyUI workflow:\n   z_image 8 steps res_multistep\n   (default; sd3_5_medium 20\n   steps euler if in models.json)\n3. ensure_comfyui_running\n4. POST /prompt\n5. Poll history 120s\n6. free_comfyui_vram\n7. load_llama_model('gpu')\n8. 5s GPU cooldown\n(CPU agents keep running)"]
+    GenImage --> ToolPost
+
+    ChooseTool -- "edit_image" --> EditEnqueue["_enqueue_image_job\nImage worker (single, serialized)"]
+    EditEnqueue --> EditImage["1. Find source image:\n   Check _image_url in session\n   Check base64 in user messages\n2. unload_llama_model('gpu')\n3. Write input to ComfyUI/input\n4. Build img2img workflow (denoise)\n5. ensure_comfyui_running\n6. POST /prompt\n7. Poll history 120s\n8. free_comfyui_vram\n9. load_llama_model('gpu')\n10. 5s GPU cooldown\n(CPU agents keep running)"]
+    EditImage --> ToolPost
+
+    ChooseTool -- "get_user_location" --> GetLoc["If _client_location cached: return it\nElse: set_status location_needed\nWait for browser geolocation\n(60s timeout)\nReturn location or 'denied'"]
+    GetLoc --> ToolPost
+
+    ChooseTool -- "read_file" --> ReadFile["1. Validate file_url in /uploads/\n2. Read file from uploads dir\n3. Extract text via:\n   fitz (PDF), python-docx (DOCX)\n   catdoc/antiword (DOC)\n   openpyxl (XLSX)\n4. Return content"]
+    ReadFile --> ToolPost
+
+    ChooseTool -- "update_user_context" --> ExecContext["write_user_context:\nAppend timestamped entry\nto user context file"]
+    ExecContext --> ToolPost
+
+    ChooseTool -- "manage_tasks" --> ManageTasks["SQLite tasks DB ops:\ncreate/update/complete/delete/list/get\nPer-user, with reminders"]
+    ManageTasks --> ToolPost
+
+    ChooseTool -- "unknown" --> ToolUnknown["Return error:\nUnknown tool"]
+    ToolUnknown --> ToolPost
+```
+
+### 12. Resource Management
+
+```mermaid
+graph TD
+    E4["_thermal_monitor"] --> ThermalLoop["Loop every 10s"]
+    ThermalLoop --> CheckGPU["nvidia-smi GPU temp"]
+    CheckGPU --> GPUTempCheck{"Temp >= 85 C?"}
+    GPUTempCheck -- Yes --> SetOverheat["_overheated = True"]
+    GPUTempCheck -- No --> CheckCool{"_overheated\nand Temp <= 75 C?"}
+    CheckCool -- Yes --> UnsetOverheat["_overheated = False"]
+    SetOverheat --> ThermalAction{"Is GPU lane\ntask running?"}
+    ThermalAction -- No --> ThermalUnload["GPU model_status?"]
+    ThermalUnload -- "chat_loaded" --> UnloadModel["unload_llama_model('gpu')\n(CPU server untouched)"]
+    ThermalUnload -- "image_active" --> FreeVRAM["free_comfyui_vram"]
+    ThermalAction -- Yes --> ThermalSkip["Skip let task finish"]
+    UnsetOverheat --> RAMCheck1
+
+    ThermalLoop --> RAMCheck1{"not evacuating\nand RAM >= 95%?"}
+    RAMCheck1 -- Yes --> EvacuateRAM["_evacuate_ram:\n1. ram_evacuating = True\n2. Requeue in-flight task\n   to front of EACH lane\n   (gpu + cpu) status error\n3. kill_llama_server (both 8081 + 8079)\n4. kill_comfyui\n5. Wait until RAM <= 70%\n6. restart_servers()"]
+    RAMCheck1 -- No --> ThermalLoop
+
+    E3["_idle_unload_loop"] --> IdleLoop["Loop every 10s"]
+    IdleLoop --> IdleCheck{"chat_loaded (gpu)\nidle > 300s\nno queue tasks?"}
+    IdleCheck -- Yes --> UnloadModel2["unload_llama_model('gpu')\nRelease VRAM weights"]
+    IdleCheck -- No --> IdleLoop
+    IdleLoop --> IdleCheck2{"cpu_loaded\n_cpu_last_llm_use idle > 300s\nno queue tasks?"}
+    IdleCheck2 -- Yes --> UnloadModel3["unload_llama_model('cpu')\nRelease RAM weights"]
+    IdleCheck2 -- No --> IdleLoop
+```
 </file>
 
 <file path="server/features/monitoring.py">
@@ -12513,152 +12554,6 @@ def _start_llm_round(task_id, sid, round_num):
     pool.submit(M._llm_worker, task_id, sid, round_num, messages, mode)
 </file>
 
-<file path="server/features/state.py">
-"""Shared application state and the entrypoint proxy.
-
-The chat engine's implementation lives in the :mod:`server.features` package,
-but the entrypoint module (``chat-webui.py``) remains the single owner of every
-shared value: containers, scalar flags, constants, config values and the
-cross-cutting helpers. Feature modules resolve those names at *call time*
-through the ``M`` proxy registered here, which simply forwards attribute reads
-and writes to the entrypoint module.
-
-This indirection is what keeps per-test monkeypatching working. The test-suite
-patches ``chat-webui.<name>`` (functions, containers, scalars, stdlib modules)
-and expects every feature module to observe those patches, so no feature module
-may bind a shared name at import time.
-"""
-
-import queue as _queue
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from server.config import CPU_PARALLEL_SLOTS
-
-class _Registry:
-    """Holds the single entrypoint module reference."""
-
-    entrypoint = None
-
-
-def register_entrypoint(module):
-    """Point the ``M`` proxy at the module that owns the shared state."""
-    _Registry.entrypoint = module
-
-
-class _Proxy:
-    """Forward attribute access to the registered entrypoint module."""
-
-    def __getattr__(self, name):
-        ep = _Registry.entrypoint
-        if ep is None:
-            raise AttributeError(
-                f"no entrypoint registered yet; import chat-webui.py before using {name}"
-            )
-        return getattr(ep, name)
-
-    def __setattr__(self, name, value):
-        _Registry.entrypoint.__setattr__(name, value)
-
-
-M = _Proxy()
-
-# ---------------------------------------------------------------------------
-# In-memory application state (the same objects chat-webui.py re-exports)
-# ---------------------------------------------------------------------------
-
-sessions = {}
-sessions_meta = {}
-tasks = {}
-shares = {}
-
-_active_tokens = {}
-_tokens_lock = threading.Lock()
-_agent_tokens = set()
-_agent_users = set()
-
-# Username → last-activity timestamp for SSO/header-authenticated clients.
-# With Authentik fronting the browser there is no per-request token anymore;
-# the browser's 2s model-status poll keeps touching this seat as the heartbeat.
-_user_last_seen = {}
-_user_last_seen_lock = threading.Lock()
-
-# A human user counts as "active" (blocking self-chat agents) while any of
-# their requests has been seen within this window. The browser's 2s model-status
-# poll acts as the heartbeat.
-ACTIVE_WINDOW_SECONDS = 120
-
-_effective_contexts = {}
-_effective_contexts_lock = threading.Lock()
-
-_model_transition_lock = threading.Lock()
-_data_lock = threading.Lock()
-
-MAX_QUEUE_SIZE = 5
-
-# Tool-loop budget per task. Normal chats stay light (10 LLM rounds ≈ small
-# number of tool calls); tasks sent with the UI's "research" toggle get the
-# deep recursive budget so the agent can chunk-walk pages and re-search until
-# the question is answered.
-MAX_TOOL_ROUNDS = {"default": 10, "research": 50}
-
-# Two independent task lanes so interactive UI (GPU) users and self-chat
-# agents (CPU) never queue behind each other. Each lane has its own list,
-# lock/condition and "currently running" marker. Only image-generation VRAM
-# choreography (see _image_queue in images.py) stays globally serialized,
-# since ComfyUI only has one physical GPU to render on regardless of which
-# lane requested the image.
-_task_queues = {"gpu": [], "cpu": []}
-_queue_locks = {"gpu": threading.Lock(), "cpu": threading.Lock()}
-_queue_conds = {mode: threading.Condition(lock) for mode, lock in _queue_locks.items()}
-_current_task_ids = {"gpu": None, "cpu": None}
-
-_event_queue = _queue.Queue()
-# Serializes image generation/editing so VRAM management (llama unload/free/load)
-# and the ``image_active`` model status never race between concurrent chats.
-_image_queue = _queue.Queue()
-# One LLM-round pool and one tool-call pool PER LANE. These used to be single
-# shared pools (_llm_pool max_workers=1, _tool_pool max_workers=2) — even after
-# splitting task admission into gpu/cpu lanes, actually *running* a round or a
-# tool call still funneled through those single shared pools, so a GPU (UI)
-# task and a CPU (agent) task would still block on each other's turn in the
-# pool. Splitting per-lane makes them genuinely independent end-to-end.
-_llm_pools = {"gpu": ThreadPoolExecutor(max_workers=1), "cpu": ThreadPoolExecutor(max_workers=CPU_PARALLEL_SLOTS)}
-_tool_pools = {"gpu": ThreadPoolExecutor(max_workers=2), "cpu": ThreadPoolExecutor(max_workers=2)}
-
-_location_events = {}
-
-# Scalars the engine reads and rebinds at runtime.
-#
-# There are TWO llama-servers running concurrently: the GPU server on 8081
-# serves interactive chat UI users, and the CPU server on 8079 serves automated
-# self-chat agents. Each keeps its own model status and idle timestamp.
-model_status = "unloaded"
-_cpu_model_status = "unloaded"
-_last_tps = None
-_last_llm_use = time.time()
-_cpu_last_llm_use = time.time()
-_client_location = None
-_overheated = False
-_gpu_temp = None
-_ram_evacuating = False
-_users_cache = None
-_users_cache_time = 0
-
-# Context / token budget constants.
-# The interactive UI chat runs on the GPU llama-server, which is launched with
-# --ctx-size 24576 (24K). Keep this in sync with server/config.py so the UI's
-# context meter and the /api/model-status payload reflect the real budget.
-MAX_INPUT_TOKENS = 24576
-AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
-
-# Monitoring constants.
-TEMP_THRESHOLD_ON = 90
-TEMP_THRESHOLD_OFF =75
-RAM_EVAC_THRESHOLD = 95
-RAM_RESUME_THRESHOLD = 70
-</file>
-
 <file path="server/features/sessions.py">
 """Conversation session persistence and per-request session preparation."""
 
@@ -12993,6 +12888,152 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         ms = M._cpu_model_status if mode == "cpu" else M.model_status
     if ms != "chat_loaded":
         M.load_llama_model(mode)
+</file>
+
+<file path="server/features/state.py">
+"""Shared application state and the entrypoint proxy.
+
+The chat engine's implementation lives in the :mod:`server.features` package,
+but the entrypoint module (``chat-webui.py``) remains the single owner of every
+shared value: containers, scalar flags, constants, config values and the
+cross-cutting helpers. Feature modules resolve those names at *call time*
+through the ``M`` proxy registered here, which simply forwards attribute reads
+and writes to the entrypoint module.
+
+This indirection is what keeps per-test monkeypatching working. The test-suite
+patches ``chat-webui.<name>`` (functions, containers, scalars, stdlib modules)
+and expects every feature module to observe those patches, so no feature module
+may bind a shared name at import time.
+"""
+
+import queue as _queue
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from server.config import CPU_PARALLEL_SLOTS
+
+class _Registry:
+    """Holds the single entrypoint module reference."""
+
+    entrypoint = None
+
+
+def register_entrypoint(module):
+    """Point the ``M`` proxy at the module that owns the shared state."""
+    _Registry.entrypoint = module
+
+
+class _Proxy:
+    """Forward attribute access to the registered entrypoint module."""
+
+    def __getattr__(self, name):
+        ep = _Registry.entrypoint
+        if ep is None:
+            raise AttributeError(
+                f"no entrypoint registered yet; import chat-webui.py before using {name}"
+            )
+        return getattr(ep, name)
+
+    def __setattr__(self, name, value):
+        _Registry.entrypoint.__setattr__(name, value)
+
+
+M = _Proxy()
+
+# ---------------------------------------------------------------------------
+# In-memory application state (the same objects chat-webui.py re-exports)
+# ---------------------------------------------------------------------------
+
+sessions = {}
+sessions_meta = {}
+tasks = {}
+shares = {}
+
+_active_tokens = {}
+_tokens_lock = threading.Lock()
+_agent_tokens = set()
+_agent_users = set()
+
+# Username → last-activity timestamp for SSO/header-authenticated clients.
+# With Authentik fronting the browser there is no per-request token anymore;
+# the browser's 2s model-status poll keeps touching this seat as the heartbeat.
+_user_last_seen = {}
+_user_last_seen_lock = threading.Lock()
+
+# A human user counts as "active" (blocking self-chat agents) while any of
+# their requests has been seen within this window. The browser's 2s model-status
+# poll acts as the heartbeat.
+ACTIVE_WINDOW_SECONDS = 120
+
+_effective_contexts = {}
+_effective_contexts_lock = threading.Lock()
+
+_model_transition_lock = threading.Lock()
+_data_lock = threading.Lock()
+
+MAX_QUEUE_SIZE = 5
+
+# Tool-loop budget per task. Normal chats stay light (10 LLM rounds ≈ small
+# number of tool calls); tasks sent with the UI's "research" toggle get the
+# deep recursive budget so the agent can chunk-walk pages and re-search until
+# the question is answered.
+MAX_TOOL_ROUNDS = {"default": 10, "research": 50}
+
+# Two independent task lanes so interactive UI (GPU) users and self-chat
+# agents (CPU) never queue behind each other. Each lane has its own list,
+# lock/condition and "currently running" marker. Only image-generation VRAM
+# choreography (see _image_queue in images.py) stays globally serialized,
+# since ComfyUI only has one physical GPU to render on regardless of which
+# lane requested the image.
+_task_queues = {"gpu": [], "cpu": []}
+_queue_locks = {"gpu": threading.Lock(), "cpu": threading.Lock()}
+_queue_conds = {mode: threading.Condition(lock) for mode, lock in _queue_locks.items()}
+_current_task_ids = {"gpu": None, "cpu": None}
+
+_event_queue = _queue.Queue()
+# Serializes image generation/editing so VRAM management (llama unload/free/load)
+# and the ``image_active`` model status never race between concurrent chats.
+_image_queue = _queue.Queue()
+# One LLM-round pool and one tool-call pool PER LANE. These used to be single
+# shared pools (_llm_pool max_workers=1, _tool_pool max_workers=2) — even after
+# splitting task admission into gpu/cpu lanes, actually *running* a round or a
+# tool call still funneled through those single shared pools, so a GPU (UI)
+# task and a CPU (agent) task would still block on each other's turn in the
+# pool. Splitting per-lane makes them genuinely independent end-to-end.
+_llm_pools = {"gpu": ThreadPoolExecutor(max_workers=1), "cpu": ThreadPoolExecutor(max_workers=CPU_PARALLEL_SLOTS)}
+_tool_pools = {"gpu": ThreadPoolExecutor(max_workers=2), "cpu": ThreadPoolExecutor(max_workers=2)}
+
+_location_events = {}
+
+# Scalars the engine reads and rebinds at runtime.
+#
+# There are TWO llama-servers running concurrently: the GPU server on 8081
+# serves interactive chat UI users, and the CPU server on 8079 serves automated
+# self-chat agents. Each keeps its own model status and idle timestamp.
+model_status = "unloaded"
+_cpu_model_status = "unloaded"
+_last_tps = None
+_last_llm_use = time.time()
+_cpu_last_llm_use = time.time()
+_client_location = None
+_overheated = False
+_gpu_temp = None
+_ram_evacuating = False
+_users_cache = None
+_users_cache_time = 0
+
+# Context / token budget constants.
+# The interactive UI chat runs on the GPU llama-server, which is launched with
+# --ctx-size 24576 (24K). Keep this in sync with server/config.py so the UI's
+# context meter and the /api/model-status payload reflect the real budget.
+MAX_INPUT_TOKENS = 24576
+AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
+
+# Monitoring constants.
+TEMP_THRESHOLD_ON = 90
+TEMP_THRESHOLD_OFF =75
+RAM_EVAC_THRESHOLD = 95
+RAM_RESUME_THRESHOLD = 70
 </file>
 
 <file path="markdown_hosting.py">
