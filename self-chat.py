@@ -11,6 +11,10 @@ from difflib import SequenceMatcher
 from datetime import datetime
 import random
 
+from server.dotenv import load_dotenv
+
+load_dotenv()
+
 parser = argparse.ArgumentParser(description="Self-chat story generator")
 parser.add_argument(
     "--config",

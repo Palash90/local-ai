@@ -13,6 +13,10 @@ from pydantic import BaseModel
 import json
 from urllib.parse import quote
 
+from server.dotenv import load_dotenv
+
+load_dotenv()
+
 app = FastAPI()
 
 BASE_STORIES_DIR = "./stories"

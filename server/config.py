@@ -2,6 +2,10 @@
 import json
 import os
 
+from server.dotenv import load_dotenv
+
+load_dotenv()
+
 LLAMA_BASE = "http://localhost:8081"
 LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
 
@@ -18,6 +22,17 @@ SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080/")
 COMFYUI_URL = "http://localhost:8188"
 HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
 PORT = 3001
+
+# GoDaddy Dynamic DNS — updates the AAAA record for DDNS_DOMAIN/DDNS_SUBDOMAIN
+# with this machine's stable global IPv6 on a timer (see the ConnectionManager
+# thread in server/features/monitoring.py). Secret credentials come from the
+# environment (e.g. an EnvironmentFile / /etc/environment); leave the keys
+# empty to disable the updater entirely.
+GODADDY_API_KEY = os.environ.get("GODADDY_API_KEY", "")
+GODADDY_API_SECRET = os.environ.get("GODADDY_API_SECRET", "")
+DDNS_DOMAIN = os.environ.get("DDNS_DOMAIN", "palashkantikundu.in")
+DDNS_SUBDOMAIN = os.environ.get("DDNS_SUBDOMAIN", "home")
+DDNS_CHECK_INTERVAL = int(os.environ.get("DDNS_CHECK_INTERVAL", "300"))
 
 # External origin used to build public share links. Set this to a portless URL
 # (e.g. http://192.168.1.10 or https://chat.example.com) when the server is also

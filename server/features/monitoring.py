@@ -14,6 +14,7 @@ import os
 import subprocess
 import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -343,7 +344,89 @@ def _thermal_monitor():
                 M._evacuate_ram()
 
 
+TARGET_HOSTS = ["10.66.66.1"]
+
+def _ping_host(host):
+    # -c 1: send 1 packet, -W 2: wait up to 2 seconds for a response
+    cmd = ["ping", "-c", "1", "-W", "2", host]
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return host, result.returncode == 0
+
+
+def _ddns_enabled():
+    """True when the GoDaddy API credentials are available in the environment."""
+    return bool(M.GODADDY_API_KEY and M.GODADDY_API_SECRET)
+
+
+def _get_current_ipv6():
+    """Get this machine's stable global IPv6 address."""
+    try:
+        iface = subprocess.check_output(
+            "ip -6 route show default | awk '{print $5; exit}'", shell=True, text=True
+        ).strip()
+        output = subprocess.check_output(
+            f"ip -6 addr show {iface} scope global", shell=True, text=True
+        )
+        for line in output.splitlines():
+            if "inet6" in line and "temporary" not in line:
+                return line.split()[1].split("/")[0]
+    except Exception as e:
+        print(f"[ddns] Failed to get IPv6: {e}")
+    return None
+
+
+def _update_godaddy_aaaa(new_ip):
+    url = f"https://api.godaddy.com/v1/domains/{M.DDNS_DOMAIN}/records/AAAA/{M.DDNS_SUBDOMAIN}"
+    headers = {
+        "Authorization": f"sso-key {M.GODADDY_API_KEY}:{M.GODADDY_API_SECRET}",
+        "Content-Type": "application/json",
+    }
+    resp = requests.put(url, headers=headers, json=[{"data": new_ip, "ttl": 600}])
+    if resp.status_code == 200:
+        print(f"[ddns] GoDaddy AAAA updated to {new_ip}")
+        return True
+    else:
+        print(f"[ddns] GoDaddy update failed ({resp.status_code}): {resp.text}")
+        return False
+
+
+_last_dns_check = 0
+_last_known_ipv6 = None
+
+
+def maybe_update_dns():
+    """Call on every ConnectionManager tick — self-throttles to DDNS_CHECK_INTERVAL."""
+    global _last_dns_check, _last_known_ipv6
+    if not _ddns_enabled():
+        return
+    interval = M.DDNS_CHECK_INTERVAL or 300
+    now = time.time()
+    if now - _last_dns_check < interval:
+        return  # not time yet, skip
+    _last_dns_check = now
+    current_ip = _get_current_ipv6()
+    if not current_ip:
+        return
+    if current_ip != _last_known_ipv6:
+        if _update_godaddy_aaaa(current_ip):
+            _last_known_ipv6 = current_ip
+
+
 def _connection_manager():
-    while True:
-        time.sleep(20)
-        
+    # Adjust max_workers to match the number of hosts or system resources
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        while True:
+            # Ping all machines concurrently
+            results = executor.map(_ping_host, TARGET_HOSTS)
+
+            # Process results
+            for host, is_alive in results:
+                if is_alive:
+                    print(f"[+] {host} is reachable")
+                else:
+                    print(f"[-] {host} is down/unreachable")
+
+            # Keep the GoDaddy AAAA record pointed at this machine's IPv6.
+            maybe_update_dns()
+
+            time.sleep(10)

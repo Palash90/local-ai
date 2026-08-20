@@ -2,3 +2,5 @@ node_modules
 dist
 *.pyc
 *.log
+# Environment / secrets (fill in your real values; never commit these)
+.env
