@@ -67,6 +67,12 @@ sudo chmod -R 755 /var/www/dashboard
 
 echo "=== 3. Writing Nginx Master Configuration ==="
 cat << 'EOF' | sudo tee /etc/nginx/sites-available/homeserver > /dev/null
+# Map dynamic GCP header check outside server block
+map $http_x_via_gcp $gcp_overlay {
+    "true"  '<div id="gcp-overlay" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background-color:rgba(239,68,68,0.05);border-top:3px solid rgba(239,68,68,0.6);pointer-events:none;z-index:999998;"></div>';
+    default '';
+}
+
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
@@ -78,24 +84,15 @@ server {
     client_max_body_size 512M;
     client_body_buffer_size 128k;
 
-    # Dashboard Root
     location / {
         root /var/www/dashboard;
         index index.html;
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</body>' '
-        <div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
-            <a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">🏠 Home</a>
-            <span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a>
-        </div>
-        </body>';
+        
+        # Injects overlay dynamically based on map evaluation
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a></div></body>';
     }
 
     # 1. Local AI App & API (Port 3001)
@@ -109,17 +106,7 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</head>' '
-        <div id="global-nav-bar" style="position:absolute;top:8px;right:80px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
-            <a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">🏠 Home</a>
-            <span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a>
-        </div>
-        </head>';
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;top:8px;right:80px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a></div></body>';
     }
 
     location /api/ {
@@ -141,17 +128,7 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</head>' '
-        <div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
-            <a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">🏠 Home</a>
-            <span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a>
-        </div>
-        </head>';
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a></div></body>';
     }
 
     location /story/ {
@@ -182,17 +159,7 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</head>' '
-        <div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
-            <a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">🏠 Home</a>
-            <span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a>
-        </div>
-        </head>';
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a></div></body>';
     }
 
     # 4. Nextcloud (Port 8082)
@@ -212,17 +179,7 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</head>' '
-        <div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
-            <a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">🏠 Home</a>
-            <span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a>
-        </div>
-        </head>';
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a></div></body>';
     }
 
     location /.well-known/carddav { return 301 $scheme://$host/cloud/remote.php/dav; }
@@ -239,17 +196,7 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</head>' '
-        <div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);">
-            <a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">🏠 Home</a>
-            <span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a>
-        </div>
-        </head>';
+        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a></div></body>';
     }
 }
 
