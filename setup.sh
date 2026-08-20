@@ -132,19 +132,10 @@ JSONEOF
     echo "    $FILES_DIR/models.json (matches the downloaded z_image files below)"
 fi
 
-if [ ! -f "$FILES_DIR/users.json" ]; then
-    cat > "$FILES_DIR/users.json" << JSONEOF
-{
-  "users": {
-    "admin": {
-      "password": "admin",
-      "context_file": "$FILES_DIR/contexts/admin.txt"
-    }
-  }
-}
-JSONEOF
-    echo "    $FILES_DIR/users.json (EDIT ME: set passwords)"
-fi
+# Users are managed by Authentik (unified SSO) — users.json is gone. See
+# authentik-compose.yaml + scripts/authentik_bootstrap.py to provision the
+# identity provider and its users/groups. Context files are derived from each
+# username at ~/local-ai-files/contexts/<user>.txt.
 
 if [ ! -f "$FILES_DIR/sys_prompt.txt" ]; then
     cat > "$FILES_DIR/sys_prompt.txt" << 'PROMPTEOF'

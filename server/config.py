@@ -44,6 +44,45 @@ SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL", "").strip().rstrip("/")
 REASONING_BUDGET = 4096
 CPU_PARALLEL_SLOTS = 4  # Set to desired number of concurrent CPU agent slots
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Unified RBAC / SSO — Authentik is the SINGLE identity provider.
+#
+# There is no users.json anymore. Browser users authenticate through nginx's
+# auth_request → Authentik proxy outpost (the X-Authentik-* claim headers are
+# trusted downstream); self-chat agents authenticate via an OAuth2 password
+# grant and send the resulting JWT as "Authorization: Bearer <token>", which
+# the backends verify against Authentik's JWKS (see server/auth.py).
+#
+# AUTHENTIK_BASE_URL must NOT have a trailing slash.
+# ─────────────────────────────────────────────────────────────────────────────
+AUTHENTIK_BASE_URL = os.environ.get("AUTHENTIK_BASE_URL", "https://home.palashkantikundu.in/sso").rstrip("/")
+AUTH_CLIENT_ID = os.environ.get("AUTH_CLIENT_ID", "local-ai")
+AUTH_CLIENT_SECRET = os.environ.get("AUTH_CLIENT_SECRET", "")
+AUTH_SCOPE = os.environ.get("AUTH_SCOPE", "openid profile email groups")
+# OIDC token endpoint used by the machine-agent password grant.
+AUTH_TOKEN_URL = os.environ.get(
+    "AUTH_TOKEN_URL", f"{AUTHENTIK_BASE_URL}/application/o/token/"
+)
+# JWKS endpoint used to verify access tokens. Authentik exposes it at
+# /application/o/<client_id>/jwks/.
+AUTH_JWKS_URL = os.environ.get(
+    "AUTH_JWKS_URL", f"{AUTHENTIK_BASE_URL}/application/o/{AUTH_CLIENT_ID}/jwks/"
+)
+AUTH_ISSUER = os.environ.get(
+    "AUTH_ISSUER", f"{AUTHENTIK_BASE_URL}/application/o/{AUTH_CLIENT_ID}/"
+)
+# Map Authentik group names → the role scale used by the story RBAC
+# (free < premium < admin). Users may be in multiple groups; the highest wins.
+AUTH_ROLE_GROUPS = {
+    "admin": "admin",
+    "premium": "premium",
+    "free": "free",
+}
+
+# Per-user context files are stored at ~/local-ai-files/contexts/<user>.txt
+# (the users.json "context_file" field is gone along with users.json).
+CONTEXTS_DIR = os.environ.get("CONTEXTS_DIR", os.path.expanduser("~/local-ai-files/contexts"))
+
 # Which llama-server self-chat agents run on: "cpu" (the RAM-backed CPU server
 # on 8079, so agents never compete with interactive UI users for VRAM) or "gpu"
 # (the interactive GPU server on 8081, sharing the VRAM-backed model). Override
@@ -189,7 +228,6 @@ SHARES_FILE = os.path.join(FILES_DIR, "shares.json")
 IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
-USERS_FILE = os.path.expanduser("~/local-ai-files/users.json")
 TASKS_DB = os.path.expanduser("~/local-ai-files/tasks.db")
 THEMES_DB = os.path.expanduser("~/local-ai-files/themes.db")
 IMAGE_TOKEN_COST = 1200

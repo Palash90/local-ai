@@ -1,0 +1,110 @@
+# Authentik — the single identity provider for every app (SSO).
+#
+# Run with:  docker compose -f authentik-compose.yaml up -d
+# Manager UI:  https://home.palashkantikundu.in/sso/if/admin/
+# (nginx already routes /sso/ → 127.0.0.1:9008; see local_cloud.sh)
+#
+# First-run only:
+#   1. Open https://<host>/sso/if/flow/initial-setup/ and create the admin
+#      account (AUTHENTIK_BOOTSTRAP_PASSWORD is ALSO honored, whichever you
+#      prefer).
+#   2. Optionally run scripts/authentik_bootstrap.py to create the groups,
+#      users, the OIDC provider and the proxy outpost programmatically.
+#   3. Deploy the proxy outpost (ghcr.io/goauthentik/proxy) with the OUTPOST
+#      token the bootstrap script prints — nginx's auth_request points at it.
+#
+# All secrets are read from the repo-root .env file.
+version: '3.8'
+
+services:
+  authentik-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-authentik}
+      POSTGRES_USER: ${POSTGRES_USER:-authentik}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  authentik-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2025.2.1}
+    restart: unless-stopped
+    command: server
+    # Host port 9008 → container 9000 (9000 is taken by the code hoster).
+    ports:
+      - "127.0.0.1:9008:9000"
+      - "127.0.0.1:9443:9443"
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
+      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN:?set AUTHENTIK_TOKEN in .env}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-}
+      # Reverse-proxy awareness: authentik lives at /sso/ on the public host.
+      AUTHENTIK_URL: ${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}
+      AUTHENTIK_PORT: "9000"
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
+      AUTHENTIK_CORS__ALLOWED_ORIGINS: '*'
+      # Session cookie/CSRF under the top-level domain so /ai/, /stories/
+      # and /cloud/ share the same SSO login.
+      AUTHENTIK_COOKIE_DOMAIN: ${AUTHENTIK_COOKIE_DOMAIN:-home.palashkantikundu.in}
+    volumes:
+      - media:/media
+      - custom-templates:/templates
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2025.2.1}
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
+      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN:?set AUTHENTIK_TOKEN in .env}
+      AUTHENTIK_URL: ${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - media:/media
+      - custom-templates:/templates
+      # Workers need docker access to deploy/scale embedded outposts.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+
+volumes:
+  pg_data:
+  redis_data:
+  media:
+  custom-templates:

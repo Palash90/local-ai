@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import * as api from './api'
-import LoginScreen from './components/LoginScreen'
 import ModelBar from './components/ModelBar'
 import Sidebar from './components/Sidebar'
 import ChatArea from './components/ChatArea'
@@ -47,27 +46,27 @@ export default function App() {
   const resolvedTasksRef = useRef(new Set())
 
   useEffect(() => {
-    const token = localStorage.getItem('auth_token') // or whatever key api.login uses
-    if (token) {
-      api.checkAuth()
-        .then(res => {
-          if (res.authenticated) {
-            setAuthenticated(true)
-            if (res.username) setUsername(res.username)
-            loadSessions().then(list => {
-              const lastSid = localStorage.getItem('last_sid')
-              if (lastSid && list.some(s => s.session_id === lastSid)) {
-                switchSession(lastSid)
-              } else if (list.length > 0) {
-                switchSession(list[0].session_id)
-              }
-            })
-          } else {
-            localStorage.removeItem('auth_token')
-          }
-        })
-        .catch(() => setAuthenticated(false))
-    }
+    // Authentication is enforced by nginx's auth_request against Authentik:
+    // by the time this SPA loads, the browser already has a valid SSO session
+    // and /api/check-auth answers from the forwarded X-Authentik-* headers.
+    api.checkAuth()
+      .then(res => {
+        if (res.authenticated) {
+          setAuthenticated(true)
+          if (res.username) setUsername(res.username)
+          loadSessions().then(list => {
+            const lastSid = localStorage.getItem('last_sid')
+            if (lastSid && list.some(s => s.session_id === lastSid)) {
+              switchSession(lastSid)
+            } else if (list.length > 0) {
+              switchSession(list[0].session_id)
+            }
+          })
+        } else {
+          setAuthenticated(false)
+        }
+      })
+      .catch(() => setAuthenticated(false))
   }, [])
 
   useEffect(() => {
@@ -93,27 +92,6 @@ export default function App() {
   }, [pendingMessages])
 
   // ---- Auth ----
-  async function handleLogin(username, password) {
-    console.log('[login] attempting login for', username)
-    let data
-    try {
-      data = await api.login(username, password)
-      console.log('[login] server response', JSON.stringify(data))
-    } catch (e) {
-      console.log('[login] api.login threw:', e.message)
-      throw e
-    }
-    if (data && data.token) {
-      console.log('[login] token received, setting authenticated')
-      setAuthenticated(true)
-      if (data.username) setUsername(data.username)
-      console.log('[login] state updates queued, returning')
-      return
-    }
-    console.log('[login] no token in response, throwing')
-    throw new Error(data ? data.error || 'Login failed' : 'Login failed')
-  }
-
   async function handleLogout() {
     console.log('[logout] called')
     await api.logout()
@@ -345,30 +323,6 @@ export default function App() {
     }
   }, [authenticated])
 
-  // ---- When authenticated, set up sessions ----
-  async function handleLoginWrapper(username, password) {
-    console.log('[loginWrapper] starting')
-    try {
-      await handleLogin(username, password)
-      console.log('[loginWrapper] after handleLogin, authenticated should be true')
-      console.log('[loginWrapper] loading sessions...')
-      const list = await loadSessions()
-      console.log('[loginWrapper] sessions loaded', list.length)
-      const lastSid = localStorage.getItem('last_sid')
-      if (lastSid && list.some(s => s.session_id === lastSid)) {
-        switchSession(lastSid)
-      } else if (list.length > 0) {
-        switchSession(list[0].session_id)
-      } else {
-        newChat()
-      }
-      console.log('[loginWrapper] done')
-    } catch (err) {
-      console.error('[loginWrapper] session load failed', err)
-      throw err
-    }
-  }
-
   function handleLocationAllow() {
     const tid = locationTaskId
     navigator.geolocation.getCurrentPosition(
@@ -411,9 +365,6 @@ export default function App() {
   return (
     <>
       {showLocationPrompt && <LocationPrompt onAllow={handleLocationAllow} onDeny={handleLocationDeny} error={locationError} />}
-      <div style={{ display: !authenticated ? '' : 'none' }}>
-        <LoginScreen onLogin={handleLoginWrapper} />
-      </div>
       <div style={{ display: authenticated ? '' : 'none' }}>
         <ModelBar
           modelStatus={modelStatus}

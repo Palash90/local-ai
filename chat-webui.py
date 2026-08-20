@@ -63,7 +63,6 @@ from server.config import (  # noqa: F401
     TOOLS,
     TOOLS_TOKEN_COST,
     UPLOADS_DIR,
-    USERS_FILE,
     VENV_PYTHON,
     VERIFY_FETCH_CHARS,
     VERIFY_MAX_CITES_PER_URL,
@@ -116,6 +115,8 @@ from server.features.state import (  # noqa: E402
     _task_queues,
     _tokens_lock,
     _tool_pools,
+    _user_last_seen,
+    _user_last_seen_lock,
     _users_cache,
     _users_cache_time,
     model_status,
@@ -147,10 +148,10 @@ from server.features.themes_db import (  # noqa: E402
 
 from server.features.users import (  # noqa: E402
     _safe_username,
+    active_users,
+    get_current_identity,
     get_current_user,
     get_user_context_path,
-    get_user_password,
-    load_users,
     read_user_context,
     write_user_context,
 )

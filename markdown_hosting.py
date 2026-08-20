@@ -1,16 +1,12 @@
 import os
 import json
 import html
-import time
-import uuid
 import shutil
 import threading
 import markdown
-from fastapi import FastAPI, HTTPException, Header, Request, Response, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, FileResponse
-from pydantic import BaseModel
-import json
 from urllib.parse import quote
 
 from server.dotenv import load_dotenv
@@ -20,7 +16,6 @@ load_dotenv()
 app = FastAPI()
 
 BASE_STORIES_DIR = "./stories"
-USERS_FILE = os.path.expanduser("~/local-ai-files/users.json")
 
 # State matching chat-webui.py
 _active_tokens = {}
@@ -56,92 +51,77 @@ COLLECTION_RULES = {
 }
 
 
-# --- User store (mirrors chat-webui.py login mechanism) ---
+# --- Auth & RBAC Helpers (shared Authentik-backed identity) ---
 
-_users_cache = None
-_users_cache_time = 0
+def get_current_user(request: Request) -> str | None:
+    """Username authenticated through nginx's auth_request (X-Authentik-*).
 
-
-def load_users():
-    """Return {username: {password, context_file, role, ...}} with caching."""
-    global _users_cache, _users_cache_time
-    now = time.time()
-    if _users_cache is not None and now - _users_cache_time < 30:
-        return _users_cache
-    try:
-        with open(USERS_FILE) as f:
-            data = json.load(f)
-        _users_cache = data.get("users", {})
-        _users_cache_time = now
-    except (FileNotFoundError, json.JSONDecodeError):
-        _users_cache = {}
-        _users_cache_time = now
-    return _users_cache
+    Direct localhost callers may present ``Authorization: Bearer <jwt>``; that
+    is verified against Authentik's JWKS (see server/auth.py). Returns None
+    when no identity is present.
+    """
+    from server.auth import get_current_user as _get_current_user
+    return _get_current_user(request.headers)
 
 
-def get_user_password(username: str) -> str | None:
-    """Fetch password from the shared users file (same as chat-webui.py)."""
-    users = load_users()
-    u = users.get(username)
-    return u.get("password", "") if u else ""
+def get_current_role(request: Request) -> str:
+    """Role (free/premium/admin) derived from Authentik group membership."""
+    from server.auth import get_identity as _get_identity
+    identity = _get_identity(request.headers)
+    return identity["role"] if identity else "free"
 
 
-def get_user_context_path(username: str) -> str:
-    """Fetch context file path from the shared users file (same as chat-webui.py)."""
-    users = load_users()
-    u = users.get(username)
-    if u and u.get("context_file"):
-        return os.path.join(u["context_file"])
-    return ""
+def user_role_level(username: str | None, role: str | None = None) -> int:
+    """Map a username (or resolved role) to its hierarchy level (0=guest ... 2=admin)."""
+    if role is None:
+        if not username:
+            return ROLE_LEVEL["guest"]
+        return ROLE_LEVEL.get(get_user_role(username), ROLE_LEVEL["free"])
+    return ROLE_LEVEL.get(role, ROLE_LEVEL["free"])
 
 
 def get_user_role(username: str) -> str:
-    """Resolve role from the shared users file."""
-    users = load_users()
-    u = users.get(username)
-    if u and u.get("role"):
-        return u["role"]
-    return "premium" if username in {"palash", "totan"} else "free"
+    """Resolve role from the shared identity provider's group membership.
+
+    Kept for backward compatibility; the chat server derives role from
+    X-Authentik-Groups via server/auth.py.
+    """
+    from server.auth import role_from_groups
+    return role_from_groups(_stories_role_groups_for(username))
 
 
-# --- Request Schemas ---
+def _stories_role_groups_for(username: str) -> list:
+    """Best-effort group mapping for a username seen without claim headers.
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-# --- Auth & RBAC Helpers ---
-
-def get_current_user(request: Request) -> str | None:
-    """Extracts token from Header or Cookie and checks memory cache."""
-    token = request.headers.get("X-Auth-Token") or request.cookies.get("X-Auth-Token") or ""
-    if not token:
-        return None
-
-    with _tokens_lock:
-        return _active_tokens.get(token)
+    Legacy fallback so direct localhost requests (no nginx auth_request) still
+    get a sensible role. Once nginx fronts the service this path is never hit.
+    """
+    if username in {"palash"}:
+        return ["admin"]
+    if username in {"totan"}:
+        return ["premium"]
+    return ["free"]
 
 
-def user_role_level(username: str | None) -> int:
-    """Map a username to its required-role hierarchy level (0=guest/free ... 2=admin)."""
-    if not username:
-        return ROLE_LEVEL["guest"]
-    return ROLE_LEVEL.get(get_user_role(username), ROLE_LEVEL["free"])
-
-
-def enforce_rbac(collection_folder: str, username: str | None):
-    """Checks user role against the collection's minimum required level."""
+def enforce_rbac(collection_folder: str, request: Request | None = None, username: str | None = None):
+    """Checks the user's role against the collection's minimum required level."""
     rule = COLLECTION_RULES.get(collection_folder)
     if not rule:
         raise HTTPException(status_code=404, detail="Collection not found")
 
+    if request is not None:
+        level = user_role_level(None, get_current_role(request))
+        authed = bool(get_current_user(request))
+    else:
+        authed = bool(username)
+        level = user_role_level(username)
+
     min_level = rule["min_level"]
-    if user_role_level(username) < min_level:
-        if not username and min_level > 0:
+    if level < min_level:
+        if not authed and min_level > 0:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication token missing or invalid.",
+                detail="Authentication required.",
             )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -149,13 +129,15 @@ def enforce_rbac(collection_folder: str, username: str | None):
         )
 
 
-def error_page(status_code: int, detail: str, show_login: bool = False) -> str:
+def error_page(status_code: int, detail: str) -> str:
     """Render a styled HTML error page for browser navigation.
 
     API and live-polling endpoints keep their JSON error responses (see
     ``_http_exception_html_handler``); anything a user would navigate to in the
-    browser gets a proper page instead of raw JSON. For 401 (guest hitting a
-    gated collection) the page embeds the same login form as the index.
+    browser gets a proper page instead of raw JSON. Unauthenticated browser
+    traffic never reaches here anonymously in production — nginx runs
+    ``auth_request`` against the Authentik proxy outpost, so a 401 means the
+    Authentik session simply needs to be established.
     """
     titles = {
         401: "Authentication Required",
@@ -167,17 +149,9 @@ def error_page(status_code: int, detail: str, show_login: bool = False) -> str:
         message = "Please log in to view this story collection."
     else:
         message = html.escape(str(detail))
-    login_block = ""
-    if show_login:
-        login_block = f"""
-        <span class="login-toggle"><a href="#" id="login-link">Login</a></span>
-        <span class="login hidden" id="login-form">
-            <input id="login-user" placeholder="Username">
-            <input id="login-pass" type="password" placeholder="Password">
-            <button id="login-btn" class="primary">Log in</button>
-            <span id="login-msg"></span>
-        </span>
-        """
+    login_block = """
+    <span class="login-toggle"><a href="/sso/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
+    """
     return f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -229,46 +203,6 @@ def error_page(status_code: int, detail: str, show_login: bool = False) -> str:
         </nav>
         <h1>{title}</h1>
         <p>{message}</p>
-        <script>
-            async function doLogin() {{
-                const user = document.getElementById('login-user').value.trim();
-                const pass = document.getElementById('login-pass').value;
-                const msg = document.getElementById('login-msg');
-                try {{
-                    const r = await fetch('/api/login', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ username: user, password: pass }}),
-                    }});
-                    if (r.ok) {{
-                        window.location.reload();
-                    }} else {{
-                        const d = await r.json();
-                        msg.textContent = d.detail || 'Invalid credentials';
-                    }}
-                }} catch (e) {{
-                    msg.textContent = e.message;
-                }}
-            }}
-            const loginBtn = document.getElementById('login-btn');
-            if (loginBtn) {{
-                loginBtn.addEventListener('click', doLogin);
-                document.getElementById('login-pass').addEventListener('keydown', e => {{
-                    if (e.key === 'Enter') doLogin();
-                }});
-            }}
-            const loginLink = document.getElementById('login-link');
-            const loginForm = document.getElementById('login-form');
-            if (loginLink && loginForm) {{
-                loginLink.addEventListener('click', e => {{
-                    e.preventDefault();
-                    loginForm.classList.toggle('hidden');
-                    if (!loginForm.classList.contains('hidden')) {{
-                        document.getElementById('login-user').focus();
-                    }}
-                }});
-            }}
-        </script>
     </body>
     </html>
     """
@@ -280,52 +214,18 @@ async def _http_exception_html_handler(request: Request, exc: HTTPException):
     path = request.url.path
     if path.startswith("/api/") or path.endswith("/content"):
         return await http_exception_handler(request, exc)
-    show_login = exc.status_code == status.HTTP_401_UNAUTHORIZED
     return HTMLResponse(
         status_code=exc.status_code,
-        content=error_page(exc.status_code, exc.detail, show_login=show_login),
+        content=error_page(exc.status_code, exc.detail),
     )
 
 
 # --- Authentication Endpoints ---
 
-@app.post("/api/login")
-async def login(credentials: LoginRequest, response: Response):
-    username = credentials.username.strip()
-    password = credentials.password.strip()
-
-    if get_user_password(username) == password:
-        token = str(uuid.uuid4())
-        with _tokens_lock:
-            _active_tokens[token] = username
-            
-        # Set cookie for browser navigation alongside API JSON response
-        response.set_cookie(key="X-Auth-Token", value=token, httponly=True)
-        
-        return {
-            "token": token,
-            "username": username,
-            "context_file": get_user_context_path(username),
-        }
-    
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED, 
-        detail="Invalid credentials"
-    )
-
-
-@app.post("/api/logout")
-async def logout(
-    request: Request, 
-    response: Response, 
-    x_auth_token: str | None = Header(None, alias="X-Auth-Token")
-):
-    token = x_auth_token or request.cookies.get("X-Auth-Token") or ""
-    with _tokens_lock:
-        _active_tokens.pop(token, None)
-        
-    response.delete_cookie(key="X-Auth-Token")
-    return {"ok": True}
+# Browser authentication is handled entirely by nginx's auth_request against
+# the Authentik proxy outpost (/sso/...). The endpoints that previously issued
+# self-managed X-Auth-Token cookies no longer exist: identity comes from the
+# X-Authentik-* claim headers nginx forwards upstream.
 
 
 # --- Dynamic Story Engine & Media Router ---
@@ -406,7 +306,8 @@ def list_collection_stories(root: str):
 async def index(request: Request):
     """Collections index listing available story collections and their stories."""
     username = get_current_user(request)
-    user_level = user_role_level(username)
+    role = get_current_role(request)
+    user_level = user_role_level(username, role)
     cards = []
     for name, rule in COLLECTION_RULES.items():
         if rule["min_level"] > user_level:
@@ -441,18 +342,12 @@ async def index(request: Request):
     body = "".join(cards) or "<p>No story collections found yet.</p>"
     if username:
         auth_html = f"""
-        <span class="logged">Logged in as <strong>{username}</strong></span>
+        <span class="logged">Logged in as <strong>{username}</strong> ({role})</span>
         <button id="logout-btn">Log out</button>
         """
     else:
-        auth_html = f"""
-        <span class="login-toggle"><a href="#" id="login-link">Login</a></span>
-        <span class="login hidden" id="login-form">
-            <input id="login-user" placeholder="Username">
-            <input id="login-pass" type="password" placeholder="Password">
-            <button id="login-btn" class="primary">Log in</button>
-            <span id="login-msg"></span>
-        </span>
+        auth_html = """
+        <span class="login-toggle"><a href="/sso/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
         """
     return f"""
     <!DOCTYPE html>
@@ -515,49 +410,10 @@ async def index(request: Request):
         <h1>Story Collections</h1>
         {body}
         <script>
-            async function doLogin() {{
-                const user = document.getElementById('login-user').value.trim();
-                const pass = document.getElementById('login-pass').value;
-                const msg = document.getElementById('login-msg');
-                try {{
-                    const r = await fetch('/api/login', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ username: user, password: pass }}),
-                    }});
-                    if (r.ok) {{
-                        window.location.reload();
-                    }} else {{
-                        const d = await r.json();
-                        msg.textContent = d.detail || 'Invalid credentials';
-                    }}
-                }} catch (e) {{
-                    msg.textContent = e.message;
-                }}
-            }}
-            const loginBtn = document.getElementById('login-btn');
-            if (loginBtn) {{
-                loginBtn.addEventListener('click', doLogin);
-                document.getElementById('login-pass').addEventListener('keydown', e => {{
-                    if (e.key === 'Enter') doLogin();
-                }});
-            }}
-            const loginLink = document.getElementById('login-link');
-            const loginForm = document.getElementById('login-form');
-            if (loginLink && loginForm) {{
-                loginLink.addEventListener('click', e => {{
-                    e.preventDefault();
-                    loginForm.classList.toggle('hidden');
-                    if (!loginForm.classList.contains('hidden')) {{
-                        document.getElementById('login-user').focus();
-                    }}
-                }});
-            }}
             const logoutBtn = document.getElementById('logout-btn');
             if (logoutBtn) {{
-                logoutBtn.addEventListener('click', async () => {{
-                    await fetch('/api/logout', {{ method: 'POST' }});
-                    window.location.reload();
+                logoutBtn.addEventListener('click', () => {{
+                    window.location.href = '/sso/outpost.goauthentik.io/end?rd=%2Fstories%2F';
                 }});
             }}
             // Tap-to-toggle tooltip for moderation badges (title= doesn't work on mobile touch).
@@ -584,9 +440,8 @@ async def serve_story_image(
     filename: str, 
     request: Request
 ):
-    """Serves media dynamically while checking active token session."""
-    username = get_current_user(request)
-    enforce_rbac(collection, username)
+    """Serves media dynamically while checking the authenticated session."""
+    enforce_rbac(collection, request=request)
     
     root = COLLECTION_RULES[collection]["path"]
     file_path = os.path.join(root, story_id, filename)
@@ -622,8 +477,7 @@ async def story_content(
     request: Request
 ):
     """Returns the current rendered story HTML for live polling."""
-    username = get_current_user(request)
-    enforce_rbac(collection, username)
+    enforce_rbac(collection, request=request)
 
     folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
     if not os.path.exists(folder_path):
@@ -646,10 +500,9 @@ async def delete_story(
     request: Request
 ):
     """Deletes the story folder (markdown + images). Admin role required."""
-    username = get_current_user(request)
-    enforce_rbac(collection, username)
+    enforce_rbac(collection, request=request)
 
-    if get_user_role(username) != "admin":
+    if get_current_role(request) != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin role required to delete stories.",
@@ -672,8 +525,7 @@ async def read_story(
     request: Request
 ):
     """Reads story Markdown dynamically and enforces access controls."""
-    username = get_current_user(request)
-    enforce_rbac(collection, username)
+    enforce_rbac(collection, request=request)
     
     folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
     if not os.path.exists(folder_path):
@@ -687,7 +539,7 @@ async def read_story(
         content = f.read()
 
     html_content = render_story_html(collection, story_id, content)
-    is_admin = get_user_role(username) == "admin" if username else False
+    is_admin = get_current_role(request) == "admin"
 
     verdict_html = ""
     mod = story_moderation(folder_path)
