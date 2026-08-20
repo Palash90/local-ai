@@ -2285,9 +2285,10 @@ services:
     ports:
       - "127.0.0.1:9010:9000"
     environment:
-      AUTHENTIK_HOST: "https://home.palashkantikundu.in/sso/"
+      AUTHENTIK_HOST: "http://authentik-server:9000/sso/"
+      AUTHENTIK_HOST_BROWSER: "https://home.palashkantikundu.in/sso/"
       AUTHENTIK_INSECURE: "true"
-      AUTHENTIK_TOKEN: "WE7FVZSVViz7VGkyTiM4IJ0GdSczZmbpG4n4g1OUSTlmpq3DHoMOgo8YDzrW"
+      AUTHENTIK_TOKEN: "${AUTHENTIK_OUTPOST_TOKEN:?set in .env}"
     depends_on:
       authentik-server:
         condition: service_started
@@ -4764,7 +4765,7 @@ async function authFetch(url, options = {}) {
 }
 
 export async function logout() {
-  window.location.assign('/sso/outpost.goauthentik.io/end?rd=/');
+  window.location.assign('/outpost.goauthentik.io/end?rd=/');
 }
 
 export async function checkAuth() {
