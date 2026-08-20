@@ -285,7 +285,7 @@ function render(s) {
     ).join('');
 }
 function refresh() {
-  fetch('/api/stats').then(r=>r.json()).then(render).catch(()=>{});
+  fetch('/track/api/stats').then(r=>r.json()).then(render).catch(()=>{});
 }
 refresh();
 setInterval(refresh, 5000);
