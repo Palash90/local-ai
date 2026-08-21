@@ -56,20 +56,33 @@ CPU_PARALLEL_SLOTS = 4  # Set to desired number of concurrent CPU agent slots
 # AUTHENTIK_BASE_URL must NOT have a trailing slash.
 # ─────────────────────────────────────────────────────────────────────────────
 AUTHENTIK_BASE_URL = os.environ.get("AUTHENTIK_BASE_URL", "https://home.palashkantikundu.in/sso").rstrip("/")
+# Interactive browser SSO application (humans via nginx auth_request).
 AUTH_CLIENT_ID = os.environ.get("AUTH_CLIENT_ID", "local-ai")
 AUTH_CLIENT_SECRET = os.environ.get("AUTH_CLIENT_SECRET", "")
 AUTH_SCOPE = os.environ.get("AUTH_SCOPE", "openid profile email groups")
-# OIDC token endpoint used by the machine-agent password grant.
-AUTH_TOKEN_URL = os.environ.get(
-    "AUTH_TOKEN_URL", f"{AUTHENTIK_BASE_URL}/application/o/token/"
+# Machine-agent OIDC client (self-chat). Separate application in Authentik so
+# agent credentials never mix with the human SSO client. The client_id must
+# equal the Authentik application slug — the token/jwks endpoints are routed
+# by slug, not by client_id.
+AUTH_AGENTS_CLIENT_ID = os.environ.get("AUTH_AGENTS_CLIENT_ID", "")
+AUTH_AGENTS_CLIENT_SECRET = os.environ.get("AUTH_AGENTS_CLIENT_SECRET", "")
+AUTH_AGENTS_APP_SLUG = os.environ.get("AUTH_AGENTS_APP_SLUG", AUTH_AGENTS_CLIENT_ID)
+# Token endpoint used by the machine-agent password grant. Authentik only
+# exposes a generic token endpoint (the client_id in the body selects the
+# provider); the per-slug routes exist for authorize/jwks but not token.
+AUTH_AGENTS_TOKEN_URL = os.environ.get(
+    "AUTH_AGENTS_TOKEN_URL",
+    f"{AUTHENTIK_BASE_URL}/application/o/token/",
 )
-# JWKS endpoint used to verify access tokens. Authentik exposes it at
-# /application/o/<client_id>/jwks/.
-AUTH_JWKS_URL = os.environ.get(
-    "AUTH_JWKS_URL", f"{AUTHENTIK_BASE_URL}/application/o/{AUTH_CLIENT_ID}/jwks/"
+# JWKS endpoint used to verify agent access tokens. Authentik exposes it at
+# /application/o/<application-slug>/jwks/.
+AUTH_AGENTS_JWKS_URL = os.environ.get(
+    "AUTH_AGENTS_JWKS_URL",
+    f"{AUTHENTIK_BASE_URL}/application/o/{AUTH_AGENTS_APP_SLUG}/jwks/",
 )
-AUTH_ISSUER = os.environ.get(
-    "AUTH_ISSUER", f"{AUTHENTIK_BASE_URL}/application/o/{AUTH_CLIENT_ID}/"
+AUTH_AGENTS_ISSUER = os.environ.get(
+    "AUTH_AGENTS_ISSUER",
+    f"{AUTHENTIK_BASE_URL}/application/o/{AUTH_AGENTS_APP_SLUG}/",
 )
 # Map Authentik group names → the role scale used by the story RBAC
 # (free < premium < admin). Users may be in multiple groups; the highest wins.

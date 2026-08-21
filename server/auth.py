@@ -30,16 +30,16 @@ import threading
 import time
 
 import jwt
+from jwt import PyJWK
 import requests
 
 from server.config import (
-    AUTH_CLIENT_ID,
-    AUTH_CLIENT_SECRET,
-    AUTH_ISSUER,
-    AUTH_JWKS_URL,
+    AUTH_AGENTS_CLIENT_ID,
+    AUTH_AGENTS_CLIENT_SECRET,
+    AUTH_AGENTS_ISSUER,
+    AUTH_AGENTS_JWKS_URL,
+    AUTH_AGENTS_TOKEN_URL,
     AUTH_ROLE_GROUPS,
-    AUTH_SCOPE,
-    AUTH_TOKEN_URL,
 )
 
 # Highest role wins when a user belongs to several groups.
@@ -115,10 +115,10 @@ def _fetch_jwks():
         now = time.time()
         if _jwks_cache is not None and now - _jwks_cache_at < _JWKS_TTL:
             return _jwks_cache
-        if not AUTH_JWKS_URL:
+        if not AUTH_AGENTS_JWKS_URL:
             return []
         try:
-            resp = requests.get(AUTH_JWKS_URL, timeout=5)
+            resp = requests.get(AUTH_AGENTS_JWKS_URL, timeout=5)
             resp.raise_for_status()
             _jwks_cache = resp.json().get("keys", [])
             _jwks_cache_at = now
@@ -148,11 +148,12 @@ def identity_from_bearer(authorization):
     decoded = None
     for key in keys:
         try:
+            crypto_key = PyJWK.from_dict(key).key
             decoded = jwt.decode(
                 token,
-                key,
+                crypto_key,
                 algorithms=[key.get("alg", "RS256")],
-                issuer=AUTH_ISSUER,
+                issuer=AUTH_AGENTS_ISSUER,
                 options={"verify_aud": False},
             )
             break
@@ -208,17 +209,19 @@ def oidc_password_grant(username, password):
     identity provider as humans. Returns the access token string. Raises on any
     failure so callers can surface a clear error.
     """
-    if not AUTH_TOKEN_URL or not AUTH_CLIENT_ID:
-        raise RuntimeError("Authentik OIDC not configured (AUTH_TOKEN_URL/AUTH_CLIENT_ID)")
+    if not AUTH_AGENTS_TOKEN_URL or not AUTH_AGENTS_CLIENT_ID:
+        raise RuntimeError(
+            "Authentik OIDC not configured (AUTH_AGENTS_TOKEN_URL/AUTH_AGENTS_CLIENT_ID)"
+        )
     resp = requests.post(
-        AUTH_TOKEN_URL,
+        AUTH_AGENTS_TOKEN_URL,
         data={
             "grant_type": "password",
             "username": username,
             "password": password,
-            "client_id": AUTH_CLIENT_ID,
-            "client_secret": AUTH_CLIENT_SECRET,
-            "scope": AUTH_SCOPE,
+            "client_id": AUTH_AGENTS_CLIENT_ID,
+            "client_secret": AUTH_AGENTS_CLIENT_SECRET,
+            "scope": "openid profile email groups",
         },
         timeout=15,
     )

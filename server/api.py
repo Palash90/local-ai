@@ -24,6 +24,7 @@ import requests
 
 from server.auth import (
     get_current_user,
+    get_identity,
     identity_from_headers,
 )
 from server.config import (
@@ -395,7 +396,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     user_tasks = task_list(user)
                     self.send_json({"tasks": user_tasks})
                 elif self.path.startswith("/api/themes"):
-                    identity = identity_from_headers(self.headers)
+                    identity = get_identity(self.headers)
                     if not identity:
                         self.send_json({"error": "Unauthorized"}, status=401)
                         return
@@ -909,7 +910,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             t = task_create(user, body.get("title", "Untitled"), body.get("description", ""), body.get("priority", "medium"), body.get("due_date"), body.get("session_id"), body.get("reminder_at"))
             self.send_json({"task": t})
         elif self.path == "/api/themes":
-            identity = identity_from_headers(self.headers)
+            identity = get_identity(self.headers)
             if not identity:
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
