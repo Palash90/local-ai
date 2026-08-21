@@ -1,0 +1,111 @@
+# Authentik — the single identity provider for every app (SSO).
+#
+# Run with:  docker compose -f authentik-compose.yaml up -d
+# Manager UI:  https://home.palashkantikundu.in/sso/if/admin/
+
+version: '3.8'
+
+services:
+  authentik-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-authentik}
+      POSTGRES_USER: ${POSTGRES_USER:-authentik}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  authentik-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2025.2.1}
+    restart: unless-stopped
+    command: server
+    ports:
+      - "127.0.0.1:9008:9000"
+      - "127.0.0.1:9443:9443"
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
+      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN:?set AUTHENTIK_TOKEN in .env}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-}
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN:-}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:-}
+      # FIXED: Points to external HTTPS domain so SSO redirects work properly
+      AUTHENTIK_URL: ${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}
+      AUTHENTIK_PORT: "9000"
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
+      AUTHENTIK_CORS__ALLOWED_ORIGINS: '*'
+      AUTHENTIK_WEB__PATH: /sso/
+      AUTHENTIK_COOKIE_DOMAIN: ${AUTHENTIK_COOKIE_DOMAIN:-home.palashkantikundu.in}
+      AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS: "127.0.0.1/32,10.66.66.0/8,172.16.0.0/12,192.168.0.0/16"
+    volumes:
+      - media:/media
+      - custom-templates:/templates
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2025.2.1}
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in .env}
+      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN:?set AUTHENTIK_TOKEN in .env}
+      AUTHENTIK_URL: ${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - media:/media
+      - custom-templates:/templates
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_healthy
+  
+  authentik-outpost:
+    image: ghcr.io/goauthentik/proxy:2025.2.1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9010:9000"
+    environment:
+      AUTHENTIK_HOST: "http://authentik-server:9000/sso/"
+      AUTHENTIK_HOST_BROWSER: "https://home.palashkantikundu.in/sso/"
+      AUTHENTIK_INSECURE: "true"
+      AUTHENTIK_TOKEN: "${AUTHENTIK_OUTPOST_TOKEN:?set in .env}"
+    depends_on:
+      authentik-server:
+        condition: service_started
+
+volumes:
+  pg_data:
+  redis_data:
+  media:
+  custom-templates:

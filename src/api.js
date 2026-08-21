@@ -1,42 +1,17 @@
-const TOKEN_KEY = 'auth_token';
-
-function authToken() {
-  return localStorage.getItem(TOKEN_KEY) || '';
-}
-
+// Authentication is handled by nginx + Authentik SSO (the X-Authentik-*
+// claim headers are injected upstream by nginx's auth_request). The browser
+// never holds a token; on 401 nginx redirects to the SSO portal.
 async function authFetch(url, options = {}) {
   options.headers = options.headers || {};
-  const token = authToken();
-  if (token) {
-    options.headers['X-Auth-Token'] = token;
-  }
   const r = await fetch(url, options);
   if (r.status === 401) {
-    localStorage.removeItem(TOKEN_KEY);
     window.dispatchEvent(new CustomEvent('auth:unauthorized'));
   }
   return r;
 }
 
-export async function login(username, password) {
-  console.log('[api.login] POST /api/login', username);
-  const r = await fetch('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  });
-  const data = await r.json();
-  console.log('[api.login] response', data);
-  if (data.token) {
-    localStorage.setItem(TOKEN_KEY, data.token);
-    console.log('[api.login] token stored in localStorage');
-  }
-  return data;
-}
-
 export async function logout() {
-  await authFetch('/api/logout', { method: 'POST' }).catch(() => {});
-  localStorage.removeItem(TOKEN_KEY);
+  window.location.assign('/outpost.goauthentik.io/sign_out?rd=/');
 }
 
 export async function checkAuth() {
@@ -109,10 +84,7 @@ export async function getTaskStatus(taskId) {
 }
 
 export async function getModelStatus() {
-  const token = authToken();
-  const r = await fetch('/api/model-status', {
-    headers: token ? { 'X-Auth-Token': token } : {},
-  });
+  const r = await fetch('/api/model-status');
   return r.json();
 }
 

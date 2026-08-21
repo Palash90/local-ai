@@ -61,9 +61,15 @@ _tokens_lock = threading.Lock()
 _agent_tokens = set()
 _agent_users = set()
 
+# Username → last-activity timestamp for SSO/header-authenticated clients.
+# With Authentik fronting the browser there is no per-request token anymore;
+# the browser's 2s model-status poll keeps touching this seat as the heartbeat.
+_user_last_seen = {}
+_user_last_seen_lock = threading.Lock()
+
 # A human user counts as "active" (blocking self-chat agents) while any of
-# their tokens has been seen within this window. The browser's 2s model-status
-# poll carries the auth token, acting as a heartbeat.
+# their requests has been seen within this window. The browser's 2s model-status
+# poll acts as the heartbeat.
 ACTIVE_WINDOW_SECONDS = 120
 
 _effective_contexts = {}

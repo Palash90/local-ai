@@ -1,16 +1,20 @@
-"""Authentication and per-user context files.
+"""Per-user context files and HTTP identity resolution.
 
-Mirrors the original chat-webui.py helpers: password lookup against the shared
-``users.json`` (with a short cache), context file path resolution, context
-read/append, and auth-token validation for the HTTP layer.
+Identity comes from :mod:`server.auth` — Authentik is the single identity
+provider (there is no users.json anymore). This module keeps the names the
+chat engine calls: password lookup is gone, context paths are derived from the
+username, and ``get_current_user``/``get_current_identity`` resolve the
+request's identity through the shared auth layer.
 """
 
-import json
 import os
 import re
 import time
 from datetime import datetime
 
+from server.auth import get_current_user as auth_get_current_user
+from server.auth import get_identity as auth_get_identity
+from server.config import CONTEXTS_DIR
 from server.features.state import M
 
 
@@ -19,33 +23,50 @@ def _safe_username(user):
     return safe or "unknown"
 
 
-def load_users():
+def _mark_seen(username):
+    """Record a username as recently active (heartbeat for active-user display)."""
+    if not username:
+        return
+    with M._user_last_seen_lock:
+        M._user_last_seen[username] = time.time()
+
+
+def get_current_user(headers):
+    username = auth_get_current_user(headers)
+    _mark_seen(username)
+    return username
+
+
+def get_current_identity(headers):
+    identity = auth_get_identity(headers)
+    if identity:
+        _mark_seen(identity["username"])
+    return identity
+
+
+def active_users(window_seconds=120, exclude_agents=True):
+    """Sorted usernames seen within the window, optionally excluding agents."""
     now = time.time()
-    if M._users_cache is not None and now - M._users_cache_time < 30:
-        return M._users_cache
-    try:
-        with open(M.USERS_FILE) as f:
-            data = json.load(f)
-        M._users_cache = data.get("users", {})
-        M._users_cache_time = now
-    except (FileNotFoundError, json.JSONDecodeError):
-        M._users_cache = {}
-        M._users_cache_time = now
-    return M._users_cache
-
-
-def get_user_password(username):
-    users = M.load_users()
-    u = users.get(username)
-    return u.get("password", "") if u else ""
+    with M._user_last_seen_lock:
+        users = sorted(
+            u for u, ts in M._user_last_seen.items()
+            if now - ts <= window_seconds
+        )
+    if exclude_agents:
+        with M._tokens_lock:
+            agent_users = set(M._agent_users)
+        return [u for u in users if u not in agent_users]
+    return users
 
 
 def get_user_context_path(username):
-    users = M.load_users()
-    u = users.get(username)
-    if u and u.get("context_file"):
-        return os.path.join(u["context_file"])
-    return ""
+    """Derive the context file path from the username.
+
+    users.json previously stored an arbitrary per-user ``context_file`` path;
+    with Authentik as the sole identity store that field no longer exists, so
+    every user's context lives at ``CONTEXTS_DIR/<username>.txt``.
+    """
+    return os.path.join(CONTEXTS_DIR, _safe_username(username) + ".txt")
 
 
 def read_user_context(username):
@@ -73,15 +94,3 @@ def write_user_context(username, content):
         new_content = (existing.strip() + "\n\n" + entry) if existing.strip() else entry
         with open(path, "w") as f:
             f.write(new_content)
-
-
-def get_current_user(headers):
-    token = headers.get("X-Auth-Token", "")
-    if not token:
-        return None
-    with M._tokens_lock:
-        entry = M._active_tokens.get(token)
-        if not entry:
-            return None
-        entry["last_seen"] = time.time()
-        return entry["user"]

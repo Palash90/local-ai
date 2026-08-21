@@ -59,7 +59,11 @@ ADMIN_STORIES_DIR = os.getenv("STORIES_ADMIN_DIR")
 BASE_URL = "http://localhost:3001"
 USERNAME_A = "kolpo"
 USERNAME_B = "kaya"
-PASSWORD = os.environ["SELF_CHAT_PASSWORD"]
+# Each agent is a real Authentik user with its own password. Use the shared
+# SELF_CHAT_PASSWORD as a fallback when the per-agent override is unset.
+_SHARED_PASSWORD = os.environ.get("SELF_CHAT_PASSWORD", "")
+PASSWORD_A = os.environ.get("SELF_CHAT_A_PASSWORD", _SHARED_PASSWORD)
+PASSWORD_B = os.environ.get("SELF_CHAT_B_PASSWORD", _SHARED_PASSWORD)
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 5.0
@@ -73,6 +77,8 @@ SLEEP_BETWEEN_ROUNDS = 900
 
 USERNAME_EDITOR = "editor"
 USERNAME_MODERATOR = "moderator"
+PASSWORD_EDITOR = os.environ.get("SELF_CHAT_EDITOR_PASSWORD", _SHARED_PASSWORD)
+PASSWORD_MODERATOR = os.environ.get("SELF_CHAT_MODERATOR_PASSWORD", _SHARED_PASSWORD)
 EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/editor.txt"
 MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/moderator.txt"
 CRITIQUE_PROMPT_FILE = "/home/palash/local-ai-files/contexts/critique.txt"
@@ -894,7 +900,7 @@ def build_theme_slug(task, mood, detail_fields, max_len=80):
 
 def theme_api(action, token, **payload):
     """Talk to the server's theme tracker (/api/themes). Returns parsed JSON."""
-    headers = {"X-Auth-Token": token}
+    headers = auth_headers(token)
     try:
         if action == "list":
             r = requests.get(
@@ -1293,14 +1299,18 @@ def is_duplicate(new_text, previous_text, threshold=0.8):
 
 
 def login(username, password):
-    resp = requests.post(
-        f"{BASE_URL}/api/login",
-        json={"username": username, "password": password},
-        timeout=15,
-    )
+    from server.auth import oidc_password_grant
 
-    resp.raise_for_status()
-    return resp.json()["token"]
+    try:
+        return oidc_password_grant(username, password)
+    except Exception as e:
+        print(f"[login] Authentik password grant failed for {username}: {e}")
+        raise
+
+
+def auth_headers(token):
+    """Headers carrying the Authentik access token as a Bearer credential."""
+    return {"Authorization": f"Bearer {token}"}
 
 
 def create_session(
@@ -1316,7 +1326,7 @@ def create_session(
     resp = requests.post(
         f"{BASE_URL}/api/sessions",
         json=body,
-        headers={"X-Auth-Token": token},
+        headers=auth_headers(token),
         timeout=15,
     )
     resp.raise_for_status()
@@ -1326,7 +1336,7 @@ def create_session(
 def delete_session(token, session_id):
     resp = requests.delete(
         f"{BASE_URL}/api/sessions/{session_id}",
-        headers={"X-Auth-Token": token},
+        headers=auth_headers(token),
         timeout=15,
     )
     if resp.status_code != 200:
@@ -1392,7 +1402,7 @@ def wait_for_user_to_leave():
 def call_llm(
     token, session_id, message, image_b64=None, no_tools=False, research=False
 ):
-    headers = {"X-Auth-Token": token}
+    headers = auth_headers(token)
 
     payload = {
         "session_id": session_id,
@@ -2581,7 +2591,7 @@ def run_editor(
 ):
     """Editor phase: review images + markdown, write story_rN_ts.edited.md."""
     try:
-        token = login(USERNAME_EDITOR, PASSWORD)
+        token = login(USERNAME_EDITOR, PASSWORD_EDITOR)
     except Exception as e:
         print(f"[editor] Could not log in {USERNAME_EDITOR}: {e}")
         return None
@@ -2666,7 +2676,7 @@ def run_moderator(
 ):
     """Moderator phase: GREEN/RED verdict, written to story_rN_ts.moderation.json."""
     try:
-        token = login(USERNAME_MODERATOR, PASSWORD)
+        token = login(USERNAME_MODERATOR, PASSWORD_MODERATOR)
     except Exception as e:
         print(f"[moderator] Could not log in {USERNAME_MODERATOR}: {e}")
         return None
@@ -2743,8 +2753,8 @@ def run_moderator(
 
 
 def run_forever():
-    token_a = login(USERNAME_A, PASSWORD)
-    token_b = login(USERNAME_B, PASSWORD)
+    token_a = login(USERNAME_A, PASSWORD_A)
+    token_b = login(USERNAME_B, PASSWORD_B)
     register_agent_tokens([token_a, token_b], [USERNAME_A, USERNAME_B])
     print("Logged In")
 

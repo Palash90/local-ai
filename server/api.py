@@ -22,6 +22,11 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from server.auth import (
+    get_current_user,
+    get_identity,
+    identity_from_headers,
+)
 from server.config import (
     COMFYUI_OUTPUT,
     FORCE_GPU_LANE,
@@ -77,6 +82,8 @@ SHARES_FILE = None
 _active_tokens = None
 _agent_tokens = None
 _agent_users = None
+_user_last_seen = None
+_user_last_seen_lock = None
 _data_lock = None
 _db_fetch = None
 _effective_contexts = None
@@ -88,12 +95,11 @@ _queue_conds = None
 _queue_locks = None
 _task_queues = None
 _tokens_lock = None
+active_users = None
 context_token_report = None
 create_share = None
-get_current_user = None
 get_share = None
 get_user_context_path = None
-get_user_password = None
 handle_theme_tool = None
 list_shares = None
 load_shares = None
@@ -121,6 +127,8 @@ APP_STATE_NAMES = [
     "_active_tokens",
     "_agent_tokens",
     "_agent_users",
+    "_user_last_seen",
+    "_user_last_seen_lock",
     "_data_lock",
     "_db_fetch",
     "_effective_contexts",
@@ -132,12 +140,11 @@ APP_STATE_NAMES = [
     "_queue_locks",
     "_task_queues",
     "_tokens_lock",
+    "active_users",
     "context_token_report",
     "create_share",
-    "get_current_user",
     "get_share",
     "get_user_context_path",
-    "get_user_password",
     "handle_theme_tool",
     "list_shares",
     "load_shares",
@@ -184,7 +191,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header(
             "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"
         )
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Auth-Token")
         self.end_headers()
 
     def do_GET(self):
@@ -202,21 +209,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 }
             )
         elif self.path == "/api/check-auth":
-            user = get_current_user(self.headers)
-            if user:
-                self.send_json({"authenticated": True, "username": user})
+            identity = identity_from_headers(self.headers)
+            if identity:
+                self.send_json(
+                    {
+                        "authenticated": True,
+                        "username": identity["username"],
+                        "role": identity["role"] or "free",
+                        "email": identity.get("email", ""),
+                    }
+                )
             else:
                 self.send_json({"authenticated": False})
         elif self.path == "/api/active-users":
+            now = time.time()
+            with _user_last_seen_lock:
+                raw = dict(_user_last_seen or {})
             with _tokens_lock:
-                now = time.time()
-                active_users = set()
-                for token, entry in _active_tokens.items():
-                    if token in _agent_tokens or entry["user"] in _agent_users:
-                        continue
-                    if now - entry["last_seen"] <= ACTIVE_WINDOW_SECONDS:
-                        active_users.add(entry["user"])
-                active = sorted(active_users)
+                agent_users = set(_agent_users)
+            active = sorted(
+                u for u, last in raw.items()
+                if u not in agent_users and now - last <= ACTIVE_WINDOW_SECONDS
+            )
             self.send_json({"users": active})
         elif self.path == "/api/model-status":
             snap = model_status_snapshot()
@@ -382,18 +396,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     user_tasks = task_list(user)
                     self.send_json({"tasks": user_tasks})
                 elif self.path.startswith("/api/themes"):
-                    user = get_current_user(self.headers)
-                    if not user:
+                    identity = get_identity(self.headers)
+                    if not identity:
                         self.send_json({"error": "Unauthorized"}, status=401)
                         return
                     qs = parse_qs(urlparse(self.path).query)
                     scope = qs.get("scope", [""])[0] or None
+                    is_global = qs.get("global", ["0"])[0] in ("1", "true", "True", "yes")
+                    if is_global and identity["role"] != "admin":
+                        self.send_json({"error": "Admin role required"}, status=403)
+                        return
                     result = handle_theme_tool(
-                        user,
+                        identity["username"],
                         {
                             "operation": "list",
                             "scope": scope,
-                            "global": qs.get("global", ["0"])[0] in ("1", "true", "True", "yes"),
+                            "global": is_global,
                             "status": qs.get("status", [""])[0] or None,
                             "limit": qs.get("limit", ["50"])[0] or 50,
                         },
@@ -578,51 +596,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 for u in usernames:
                     _agent_users.add(u)
             self.send_json({"ok": True})
-        elif self.path == "/api/login":
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            username = body.get("username", "").strip()
-            password = body.get("password", "").strip()
-            if get_user_password(username) == password:
-                token = str(uuid.uuid4())
-                with _tokens_lock:
-                    _active_tokens[token] = {"user": username, "last_seen": time.time()}
-                self.send_json(
-                    {
-                        "token": token,
-                        "username": username,
-                        "context_file": get_user_context_path(username),
-                    }
-                )
-            else:
-                self.send_json({"error": "Invalid credentials"}, status=401)
         elif self.path == "/api/leaving":
-            # Fired via navigator.sendBeacon on pagehide — beacons can't set
-            # custom headers, so the token travels in the body instead of
-            # X-Auth-Token. This does NOT invalidate the token (unlike
-            # /api/logout) — it just marks the heartbeat stale so
-            # _human_priority_active() sees this user as gone right away,
-            # instead of waiting out the full ACTIVE_WINDOW_SECONDS timeout.
-            # The timeout stays in place as a fallback for crashes/force-quits
-            # where pagehide never fires.
-            token = self.headers.get("X-Auth-Token", "")
-            if not token:
-                length = int(self.headers.get("Content-Length", 0))
-                if length:
-                    try:
-                        body = json.loads(self.rfile.read(length))
-                        token = body.get("token", "")
-                    except Exception:
-                        token = ""
+            # Fired via navigator.sendBeacon on pagehide. With SSO the browser
+            # sends no custom header, so the username travels in the body;
+            # mark this user's heartbeat stale immediately instead of waiting
+            # out ACTIVE_WINDOW_SECONDS (which stays as a crash-fallback).
+            username = ""
+            length = int(self.headers.get("Content-Length", 0))
+            if length:
+                try:
+                    body = json.loads(self.rfile.read(length))
+                    username = body.get("username", "")
+                except Exception:
+                    username = ""
+            if not username:
+                identity = identity_from_headers(self.headers)
+                username = (identity or {}).get("username", "")
             with _tokens_lock:
-                entry = _active_tokens.get(token)
-                if entry:
-                    entry["last_seen"] = 0
+                if username and _user_last_seen:
+                    _user_last_seen.pop(username, None)
             self.send_json({"ok": True})
         elif self.path == "/api/logout":
-            token = self.headers.get("X-Auth-Token", "")
-            with _tokens_lock:
-                _active_tokens.pop(token, None)
+            # Logout is handled at the nginx/Authentik layer (SSO session
+            # cookie). Nothing server-side to invalidate here.
             self.send_json({"ok": True})
         elif self.path == "/api/user-context":
             user = get_current_user(self.headers)
@@ -637,6 +633,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 write_user_context(user, content)
                 self.send_json({"status": "ok", "username": user})
             elif action == "overwrite":
+                identity = identity_from_headers(self.headers)
+                if not identity or identity["role"] != "admin":
+                    self.send_json({"error": "Admin role required to overwrite context"}, status=403)
+                    return
                 content = body.get("context", "")
                 path = get_user_context_path(user)
                 if path:
@@ -910,13 +910,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             t = task_create(user, body.get("title", "Untitled"), body.get("description", ""), body.get("priority", "medium"), body.get("due_date"), body.get("session_id"), body.get("reminder_at"))
             self.send_json({"task": t})
         elif self.path == "/api/themes":
-            user = get_current_user(self.headers)
-            if not user:
+            identity = get_identity(self.headers)
+            if not identity:
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
-            result = handle_theme_tool(user, body)
+            if body.get("global") and identity["role"] != "admin":
+                self.send_json({"error": "Admin role required"}, status=403)
+                return
+            result = handle_theme_tool(identity["username"], body)
             self.send_json(json.loads(result))
         else:
             self.send_error(404)
