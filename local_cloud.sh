@@ -410,15 +410,7 @@ if [ -n "$NC_CONTAINER" ]; then
     docker exec --user www-data "$NC_CONTAINER" php occ config:system:set files_external_allow_create_new_local --value="true" --type=boolean
     docker exec --user www-data "$NC_CONTAINER" php occ app:enable files_external
 
-    echo "--- Configuring Nextcloud SSO via authentik (oidc_login) ---"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_provider_url --value="${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}/application/o/${AUTH_NC_CLIENT_ID:-nextcloud}/"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_client_id --value="${AUTH_NC_CLIENT_ID}"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_client_secret --value="${AUTH_NC_CLIENT_SECRET}"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_scope --value="openid profile email groups"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_auto_redirect --value="true" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_disable_registration --value="false" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_create_group_membership --value="true" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_group_mapping --value='{"admin":"admin","premium":"premium","free":"free"}' --type=json echo "Restarting Nextcloud container..."
+    echo "Restarting Nextcloud container..."
     docker restart "$NC_CONTAINER"
 else
     echo "Error: Nextcloud container not found!"

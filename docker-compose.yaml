@@ -34,6 +34,10 @@ services:
     container_name: cloud-app
     image: nextcloud
     restart: always
+    # Pin the public hostname to the host so server-side OIDC calls (discovery,
+    # logout) hit local nginx directly instead of round-tripping via GCP/DNS.
+    extra_hosts:
+      - "home.palashkantikundu.in:host-gateway"
     networks:
       - external-net
       - internal-net

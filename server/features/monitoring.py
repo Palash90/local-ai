@@ -14,7 +14,6 @@ import os
 import subprocess
 import time
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -344,13 +343,72 @@ def _thermal_monitor():
                 M._evacuate_ram()
 
 
-TARGET_HOSTS = ["10.66.66.1"]
+def _get_current_ipv6():
+    """Get this machine's stable global IPv6 address."""
+    try:
+        iface = subprocess.check_output(
+            "ip -6 route show default | awk '{print $5; exit}'", shell=True, text=True
+        ).strip()
+        output = subprocess.check_output(
+            f"ip -6 addr show {iface} scope global", shell=True, text=True
+        )
+        for line in output.splitlines():
+            if "inet6" in line and "temporary" not in line:
+                return line.split()[1].split("/")[0]
+    except Exception as e:
+        print(f"[ddns] Failed to get IPv6: {e}")
+    return None
 
-def _ping_host(host):
-    # -c 1: send 1 packet, -W 2: wait up to 2 seconds for a response
-    cmd = ["ping", "-c", "1", "-W", "2", host]
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return host, result.returncode == 0
+
+def _get_wifi_ipv4():
+    """This machine's LAN IPv4 on the default (WiFi) interface."""
+    try:
+        iface = subprocess.check_output(
+            "ip -4 route show default | awk '{print $5; exit}'", shell=True, text=True
+        ).strip()
+        output = subprocess.check_output(
+            f"ip -4 addr show {iface} scope global", shell=True, text=True
+        )
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("inet ") and "secondary" not in line:
+                return line.split()[1].split("/")[0]
+    except Exception as e:
+        print(f"[heartbeat] Failed to get WiFi IPv4: {e}")
+    return None
+
+
+_public_ipv4_cache = {"ip": None, "ts": 0.0}
+
+
+def _get_public_ipv4():
+    """Public WAN IPv4 as seen from the internet, cached for 5 minutes."""
+    now = time.time()
+    if _public_ipv4_cache["ip"] and now - _public_ipv4_cache["ts"] < 300:
+        return _public_ipv4_cache["ip"]
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            r = requests.get(url, timeout=5)
+            ip = r.text.strip()
+            if r.status_code == 200 and ip.count(".") == 3:
+                _public_ipv4_cache.update(ip=ip, ts=now)
+                return ip
+        except Exception:
+            pass
+    print("[heartbeat] Could not determine public IPv4")
+    return _public_ipv4_cache["ip"]
+
+
+def _send_heartbeat():
+    """POST this machine's addresses to the GCP receiver over the tunnel."""
+    payload = {
+        "ipv6": _get_current_ipv6(),
+        "public_ipv4": _get_public_ipv4(),
+        "wifi_ipv4": _get_wifi_ipv4(),
+    }
+    r = requests.post(M.HEARTBEAT_URL, json=payload, timeout=5)
+    r.raise_for_status()
+    return payload
 
 
 def _ddns_enabled():
@@ -413,20 +471,14 @@ def maybe_update_dns():
 
 
 def _connection_manager():
-    # Adjust max_workers to match the number of hosts or system resources
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        while True:
-            # Ping all machines concurrently
-            results = executor.map(_ping_host, TARGET_HOSTS)
+    while True:
+        try:
+            payload = _send_heartbeat()
+            print(f"[+] heartbeat sent: {payload}")
+        except Exception as e:
+            print(f"[-] GCP unreachable ({M.HEARTBEAT_URL}): {e}")
 
-            # Process results
-            for host, is_alive in results:
-                if is_alive:
-                    print(f"[+] {host} is reachable")
-                else:
-                    print(f"[-] {host} is down/unreachable")
+        # Keep the GoDaddy AAAA record pointed at this machine's IPv6.
+        maybe_update_dns()
 
-            # Keep the GoDaddy AAAA record pointed at this machine's IPv6.
-            maybe_update_dns()
-
-            time.sleep(10)
+        time.sleep(10)

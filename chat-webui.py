@@ -32,6 +32,7 @@ from server.config import (  # noqa: F401
     FORCE_GPU_LANE,
     GODADDY_API_KEY,
     GODADDY_API_SECRET,
+    HEARTBEAT_URL,
     HOST,
     IMG_PATH,
     IMAGE_MODELS,

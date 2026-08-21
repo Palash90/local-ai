@@ -34,6 +34,11 @@ DDNS_DOMAIN = os.environ.get("DDNS_DOMAIN", "palashkantikundu.in")
 DDNS_SUBDOMAIN = os.environ.get("DDNS_SUBDOMAIN", "home")
 DDNS_CHECK_INTERVAL = int(os.environ.get("DDNS_CHECK_INTERVAL", "300"))
 
+# GCP heartbeat — the ConnectionManager thread POSTs this machine's addresses
+# to the receiver running on the GCP VM (scripts/gcp_heartbeat_server.py)
+# over the WireGuard tunnel every 10s.
+HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "http://10.66.66.1:9863/heartbeat")
+
 # External origin used to build public share links. Set this to a portless URL
 # (e.g. http://192.168.1.10 or https://chat.example.com) when the server is also
 # reachable on port 80/443, because WhatsApp and several other messengers stop
