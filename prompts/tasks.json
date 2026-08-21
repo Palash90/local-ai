@@ -1,10 +1,345 @@
 {
   "tasks": [
     {
-      "task": "Satire column on different office cultures",
-      "inactive": true,
-      "turns": 3,
+      "task": "Flash News Daily Briefing",
+      "inactive": false,
+      "research": true,
+      "turns": 2,
       "details": [
+        {
+          "name": "research",
+          "value": "Perform a web search for top daily news updates. Provide a concise, neutral summary covering multiple distinct items with explicit citations."
+        },
+        {
+          "name": "date",
+          "selector": "date"
+        },
+        {
+          "name": "research level",
+          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+        },
+        {
+          "name": "topic",
+          "ref": "news_topics"
+        }
+      ],
+      "genre": "News Bytes",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "text"
+      ]
+    },
+    {
+      "task": "A science article for kids",
+      "inactive": false,
+      "research": true,
+      "turns": 6,
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a research for a fascinating, real-world science update or curious fact, then write the research report in an engaging kids story format."
+        },
+        {
+          "name": "topic",
+          "selector": "roundrobin",
+          "values": [
+            "animals and wildlife",
+            "space and astronomy",
+            "oceans and climate",
+            "the human body",
+            "technology and robots",
+            "fun with science"
+          ]
+        },
+        {
+          "name": "research level",
+          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+        },
+        {
+          "name": "angle",
+          "selector": "random",
+          "values": [
+            "a surprising 'did you know' fact",
+            "a mystery scientists are still solving",
+            "a recent breakthrough explained simply",
+            "a myth that turned out to be true"
+          ]
+        }
+      ],
+      "genre": "Education",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "task": "Exotic Recipe & Cultural Story",
+      "inactive": false,
+      "research": true,
+      "turns": 5,
+      "details": [
+        {
+          "name": "research on",
+          "value": "exotic dishes around world"
+        },
+        {
+          "name": "structure",
+          "value": "Draft a detailed recipe guide for a real exotic dish: exact ingredient list with clear measurements, numbered step-by-step preparation instructions, and brief cultural context about its significance. Embed an image matching the finished dish."
+        },
+        {
+          "name": "research level",
+          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+        },
+        {
+          "name": "festival",
+          "selector": "roundrobin",
+          "values": [
+            "Diwali",
+            "Eid",
+            "Durga Puja",
+            "Pongal",
+            "Christmas",
+            "Bengali New Year"
+          ]
+        },
+        {
+          "name": "sweet",
+          "selector": "random",
+          "values": [
+            "gulab jamun",
+            "sandesh",
+            "rasgulla",
+            "payesh",
+            "barfi",
+            "gujia",
+            "halwa"
+          ]
+        }
+      ],
+      "genre": "Food & Recipes",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "task": "Bone-Chilling Real-World Adventure",
+      "inactive": false,
+      "research": true,
+      "turns": 7,
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a deep research for a real historical survival, exploration, or wilderness incident. Write a suspenseful, realistic narrative capturing the psychological dread and physical struggle. All core events must remain grounded in verified real-world facts."
+        },
+        {
+          "name": "setting",
+          "ref": "setting_adventure"
+        },
+        {
+          "name": "tone",
+          "ref": "mood_horror"
+        }
+      ],
+      "genre": "Adventure & Horror",
+      "roles": [
+        "premium"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "text"
+      ]
+    },
+    {
+      "task": "Psychological Horror Short Story",
+      "inactive": false,
+      "research": true,
+      "turns": 6,
+      "details": [
+        {
+          "name": "research",
+          "value": "Extensive research on contemporary events around psychological horror, nerotic behaviours"
+        },
+        {
+          "name": "style",
+          "value": "Craft an atmospheric horror tale centered on psychological tension, isolation, or supernatural uncanny elements. Focus on sensory horror, pacing, and creeping dread rather than shock value. Ensure the narrative resolves with an unsettling climax."
+        },
+        {
+          "name": "setting",
+          "ref": "setting_horror"
+        },
+        {
+          "name": "trope",
+          "ref": "trope_horror"
+        }
+      ],
+      "genre": "Adventure & Horror",
+      "roles": [
+        "premium"
+      ],
+      "languages": [
+        "English",
+        "bengali"
+      ],
+      "mediums": [
+        "image",
+        "text"
+      ]
+    },
+    {
+      "task": "Historical Mystery & Unsolved Legend",
+      "inactive": false,
+      "research": true,
+      "turns": 6,
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a web search for a famous unsolved historical mystery or local folklore. Draft an intriguing narrative exploration around the event that balances historical facts with atmospheric storytelling."
+        },
+        {
+          "name": "mystery",
+          "selector": "roundrobin",
+          "values": [
+            "a vanished civilization",
+            "an unsolved disappearance",
+            "a cursed artifact",
+            "a sea or lake legend",
+            "a lost treasure"
+          ]
+        },
+        {
+          "name": "frame",
+          "selector": "random",
+          "values": [
+            "a detective's cold-case notes",
+            "a traveler's journal",
+            "an oral retelling by a village elder",
+            "a researcher's investigation"
+          ]
+        }
+      ],
+      "genre": "Adventure & Horror",
+      "roles": [
+        "premium"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "text"
+      ]
+    },
+    {
+      "task": "Cybernetic Breakthrough Investigation",
+      "inactive": false,
+      "research": true,
+      "turns": 4,
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a web search on recent cybernetic breakthroughs, ensuring all core facts trace directly to search results."
+        },
+        {
+          "name": "domain",
+          "ref": "scifi_domain"
+        },
+        {
+          "name": "research level",
+          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+        },
+        {
+          "name": "format",
+          "selector": "random",
+          "values": [
+            "an investigative reporter's log",
+            "a sci-fi thriller chapter",
+            "a confidential lab report breakdown"
+          ]
+        }
+      ],
+      "genre": "Sci-Fi",
+      "roles": [
+        "free"
+      ],
+      "languages": [
+        "English",
+        "bengali"
+      ],
+      "mediums": [
+        "text"
+      ]
+    },
+    {
+      "task": "Extreme Wilderness Rescue Expedition",
+      "inactive": false,
+      "research": true,
+      "turns": 4,
+      "details": [
+        {
+          "name": "research",
+          "value": "Perform a web search to research a real historical survival or wilderness incident. Ground the physical struggle and atmospheric danger in verified facts."
+        },
+        {
+          "name": "setting",
+          "ref": "setting_adventure"
+        },
+        {
+          "name": "tone",
+          "ref": "mood_horror"
+        }
+      ],
+      "genre": "Adventure",
+      "roles": [
+        "premium"
+      ],
+      "languages": [
+        "English",
+        "bengali",
+        "Hindi"
+      ],
+      "mediums": [
+        "text"
+      ]
+    },
+    {
+      "task": "Satire column on different office cultures",
+      "inactive": false,
+      "turns": 3,
+      "research": true,
+      "details": [
+        {
+          "name": "research",
+          "value": "Find currently active themes which can present some witty humor across different office cultures"
+        },
         {
           "name": "style",
           "value": "Draft a witty, humorous satirical piece focusing strictly on institutional work culture as a whole — do not name, reference, or caricature any real company, brand, or individual."
@@ -64,12 +399,17 @@
     },
     {
       "task": "A bedtime story for kids",
-      "inactive": true,
+      "inactive": false,
+      "research": true,
       "turns": 5,
       "details": [
         {
           "name": "research",
           "value": "Perform a web search to find one recent, real, lighthearted news event appropriate for children aged 5 to 12. Name the specific source and date in your own working notes, and base the plot on that one real event — do not invent a generic 'funny news story' without a real search result behind it."
+        },
+        {
+          "name": "research level",
+          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
         },
         {
           "name": "audience age",
@@ -149,12 +489,13 @@
     },
     {
       "task": "A day at the farm",
-      "inactive": true,
+      "inactive": false,
       "turns": 4,
+      "research": true,
       "details": [
         {
           "name": "research",
-          "value": "No web search needed. Describe an ordinary, warm day on a small countryside farm through the eyes of a child visitor."
+          "value": "Perform research on different farms across world. Describe an ordinary, warm day on a small countryside farm through the eyes of a child visitor."
         },
         {
           "name": "animals",
@@ -199,416 +540,22 @@
       ]
     },
     {
-      "task": "A science article for kids",
+      "task": "Headline Adapted Human Interest Narrative",
       "inactive": false,
       "research": true,
-      "turns": 6,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a research for a fascinating, real-world science update or curious fact, then write the research report in an engaging kids story format."
-        },
-        {
-          "name": "topic",
-          "selector": "roundrobin",
-          "values": [
-            "animals and wildlife",
-            "space and astronomy",
-            "oceans and climate",
-            "the human body",
-            "technology and robots"
-          ]
-        },
-        {
-          "name": "angle",
-          "selector": "random",
-          "values": [
-            "a surprising 'did you know' fact",
-            "a mystery scientists are still solving",
-            "a recent breakthrough explained simply",
-            "a myth that turned out to be true"
-          ]
-        }
-      ],
-      "genre": "Education",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text",
-        "image"
-      ]
-    },
-    {
-      "task": "Traditional Festival Sweet Recipe & Cultural Story",
-      "inactive": true,
-      "turns": 5,
-      "details": [
-        {
-          "name": "structure",
-          "value": "Draft a detailed recipe guide for a real, traditional festival sweet: exact ingredient list with clear measurements, numbered step-by-step preparation instructions, and brief cultural context about its festive significance. Embed an image matching the finished dish."
-        },
-        {
-          "name": "festival",
-          "selector": "roundrobin",
-          "values": [
-            "Diwali",
-            "Eid",
-            "Durga Puja",
-            "Pongal",
-            "Christmas",
-            "Bengali New Year"
-          ]
-        },
-        {
-          "name": "sweet",
-          "selector": "random",
-          "values": [
-            "gulab jamun",
-            "sandesh",
-            "rasgulla",
-            "payesh",
-            "barfi",
-            "gujia",
-            "halwa"
-          ]
-        }
-      ],
-      "genre": "Food & Recipes",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "image",
-        "text"
-      ]
-    },
-    {
-      "task": "Futuristic Invention Pitch & Conceptual Breakdown",
-      "inactive": true,
-      "turns": 5,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search on emerging technology trends, then conceptualize an innovative, futuristic product or invention. Provide a detailed breakdown covering its core mechanism, real-world application, and potential impact."
-        },
-        {
-          "name": "domain",
-          "selector": "roundrobin",
-          "values": [
-            "sustainable energy",
-            "smart urban living",
-            "productivity tools",
-            "health and medicine",
-            "transportation"
-          ]
-        },
-        {
-          "name": "format",
-          "selector": "random",
-          "values": [
-            "an elevator pitch",
-            "a shark-tank style pitch script",
-            "a formal proposal",
-            "a journalist's feature story"
-          ]
-        }
-      ],
-      "genre": "News",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali"
-      ],
-      "mediums": [
-        "text"
-      ]
-    },
-    {
-      "task": "Bone-Chilling Real-World Adventure",
-      "inactive": true,
-      "turns": 7,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search to research a real historical survival, exploration, or wilderness incident. Write a suspenseful, realistic narrative capturing the psychological dread and physical struggle. All core events must remain grounded in verified real-world facts."
-        },
-        {
-          "name": "setting",
-          "ref": "setting_adventure"
-        },
-        {
-          "name": "tone",
-          "ref": "mood_horror"
-        }
-      ],
-      "genre": "Adventure & Horror",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text"
-      ]
-    },
-    {
-      "task": "Psychological Horror Short Story",
-      "inactive": true,
-      "turns": 6,
-      "details": [
-        {
-          "name": "style",
-          "value": "Craft an atmospheric horror tale centered on psychological tension, isolation, or supernatural uncanny elements. Focus on sensory horror, pacing, and creeping dread rather than shock value. Ensure the narrative resolves with an unsettling climax."
-        },
-        {
-          "name": "setting",
-          "ref": "setting_horror"
-        },
-        {
-          "name": "trope",
-          "ref": "trope_horror"
-        }
-      ],
-      "genre": "Adventure & Horror",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali"
-      ],
-      "mediums": [
-        "image",
-        "text"
-      ]
-    },
-    {
-      "task": "Historical Mystery & Unsolved Legend",
-      "inactive": true,
-      "turns": 6,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search for a famous unsolved historical mystery or local folklore. Draft an intriguing narrative exploration around the event that balances historical facts with atmospheric storytelling."
-        },
-        {
-          "name": "mystery",
-          "selector": "roundrobin",
-          "values": [
-            "a vanished civilization",
-            "an unsolved disappearance",
-            "a cursed artifact",
-            "a sea or lake legend",
-            "a lost treasure"
-          ]
-        },
-        {
-          "name": "frame",
-          "selector": "random",
-          "values": [
-            "a detective's cold-case notes",
-            "a traveler's journal",
-            "an oral retelling by a village elder",
-            "a researcher's investigation"
-          ]
-        }
-      ],
-      "genre": "Adventure & Horror",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text"
-      ]
-    },
-    {
-      "task": "Cybernetic Breakthrough Investigation",
-      "inactive": true,
       "turns": 4,
       "details": [
         {
-          "name": "research",
-          "value": "Perform a web search on recent cybernetic breakthroughs, ensuring all core facts trace directly to search results."
+          "name": "date",
+          "selector": "date"
         },
-        {
-          "name": "domain",
-          "ref": "scifi_domain"
-        },
-        {
-          "name": "format",
-          "selector": "random",
-          "values": [
-            "an investigative reporter's log",
-            "a sci-fi thriller chapter",
-            "a confidential lab report breakdown"
-          ]
-        }
-      ],
-      "genre": "Sci-Fi",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali"
-      ],
-      "mediums": [
-        "text"
-      ]
-    },
-    {
-      "task": "High-Stakes Surveillance Intercept",
-      "inactive": true,
-      "turns": 4,
-      "details": [
-        {
-          "name": "style",
-          "value": "Craft a high-pacing thriller narrative around intercepted classified data, maintaining constant suspense and claustrophobic tension."
-        },
-        {
-          "name": "setting",
-          "ref": "setting_horror"
-        },
-        {
-          "name": "threat",
-          "ref": "thriller_threat"
-        }
-      ],
-      "genre": "Thriller",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text"
-      ]
-    },
-    {
-      "task": "The Locked-Vault Disappearance",
-      "inactive": true,
-      "turns": 5,
-      "details": [
-        {
-          "name": "style",
-          "value": "Draft an atmospheric detective mystery where all critical clues are introduced before the final reveal. Ensure logical steps lead to the resolution."
-        },
-        {
-          "name": "mystery",
-          "ref": "detective_mystery"
-        },
-        {
-          "name": "frame",
-          "selector": "random",
-          "values": [
-            "a detective's cold-case notes",
-            "a private investigator's interrogation transcript",
-            "a lead researcher's journal"
-          ]
-        }
-      ],
-      "genre": "Detective",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali"
-      ],
-      "mediums": [
-        "text"
-      ]
-    },
-    {
-      "task": "Extreme Wilderness Rescue Expedition",
-      "inactive": true,
-      "turns": 4,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search to research a real historical survival or wilderness incident. Ground the physical struggle and atmospheric danger in verified facts."
-        },
-        {
-          "name": "setting",
-          "ref": "setting_adventure"
-        },
-        {
-          "name": "tone",
-          "ref": "mood_horror"
-        }
-      ],
-      "genre": "Adventure",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text"
-      ]
-    },
-    {
-      "task": "Flash News Daily Briefing",
-      "inactive": true,
-      "turns": 2,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search for top daily news updates. Provide a concise, neutral summary covering multiple distinct items with explicit citations."
-        },
-        {
-          "name": "topic",
-          "ref": "news_topics"
-        }
-      ],
-      "genre": "News Bytes",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text"
-      ]
-    },
-    {
-      "task": "Headline Adapted Human Interest Narrative",
-      "inactive": true,
-      "turns": 4,
-      "details": [
         {
           "name": "research",
           "value": "Perform a web search to find a recent lighthearted or remarkable real-world news story, then adapt it into an engaging character-driven narrative."
+        },
+        {
+          "name": "research level",
+          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
         },
         {
           "name": "angle",

@@ -339,6 +339,9 @@ def _pick_detail_value(task, name, spec):
             return [values[(start + i) % n] for i in range(min(count, n))]
         return random.sample(values, min(count, len(values)))
 
+    if selector == "date":
+        return datetime.today().strftime('%Y-%m-%d')
+    
     if selector == "random":
         return random.choice(values)
 
@@ -1660,7 +1663,6 @@ def run_single_conversation(
     s = s.replace("%kolpo_role%", kolpo_info.get("role", "Partner"))
     s = s.replace("%kolpo_persona%", kolpo_info.get("persona", "Methodical"))
 
-    print(s)
     session_a = create_session(
         token_a,
         f"{AGENT_NAMES['A']} round {round_number}",
