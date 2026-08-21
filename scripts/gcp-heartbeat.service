@@ -1,0 +1,24 @@
+# /etc/systemd/system/gcp-heartbeat.service
+
+[Service]
+Type=simple
+User=heartbeat
+Group=heartbeat
+WorkingDirectory=/opt/heartbeat
+ExecStart=/usr/bin/python3 /opt/heartbeat/gcp_heartbeat_server.py --dns-port 0 --log /opt/heartbeat/logs/heartbeat.log
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/heartbeat/logs
+
+[Install]
+WantedBy=multi-user.target

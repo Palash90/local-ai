@@ -35,6 +35,7 @@ import argparse
 import ipaddress
 import json
 import os
+import struct
 import threading
 import urllib.request
 from datetime import datetime, timezone
@@ -98,6 +99,58 @@ def _detect_gcp_ip():
         return None
 
 
+def _parse_ecs(data):
+    """Parse one ECS option payload -> ip_network, or None."""
+    if len(data) < 4:
+        return None
+    family, src_bits, _scope = struct.unpack("!HBB", data[:4])
+    nbytes = (src_bits + 7) // 8
+    alen = 4 if family == 1 else 16
+    try:
+        # RFC 7871: address bytes are truncated to src_bits — pad back out to
+        # the full address length before parsing.
+        raw = data[4:4 + nbytes].ljust(alen, b"\x00")
+        if family == 1:
+            return ipaddress.ip_network(
+                f"{ipaddress.IPv4Address(raw)}/{src_bits}", strict=False)
+        if family == 2:
+            return ipaddress.ip_network(
+                f"{ipaddress.IPv6Address(raw)}/{src_bits}", strict=False)
+    except ValueError:
+        pass
+    return None
+
+
+def _ecs_networks(request):
+    """Client subnets advertised via EDNS Client Subnet (option 8).
+
+    When this server is queried through third-party resolvers (Google,
+    AdGuard, ...) the UDP source is the resolver, not the end client — the
+    real client network arrives as an ECS option instead.
+    """
+    nets = []
+    for ar in getattr(request, "ar", []) or []:
+        if getattr(ar, "rtype", None) != 41:          # OPT RR only
+            continue
+        rd = getattr(ar, "rdata", None)
+        options = rd if isinstance(rd, (list, tuple)) else ()
+        for opt in options:                           # parsed EDNSOption objects
+            if getattr(opt, "code", None) == 8:
+                net = _parse_ecs(opt.data)
+                if net:
+                    nets.append(net)
+        if isinstance(rd, (bytes, bytearray)):        # unparsed TLV blob
+            i = 0
+            while i + 4 <= len(rd):
+                code, dlen = struct.unpack("!HH", rd[i:i + 4])
+                if code == 8:
+                    net = _parse_ecs(rd[i + 4:i + 4 + dlen])
+                    if net:
+                        nets.append(net)
+                i += 4 + dlen
+    return nets
+
+
 class HomeResolver(BaseResolver):
     """Zone answers driven by heartbeat state; everything else forwarded."""
 
@@ -119,14 +172,32 @@ class HomeResolver(BaseResolver):
             ttl=ZONE_TTL,
         ))
 
+    def _is_local_client(self, client, request):
+        """True when the query originates from the homeserver's own network.
+
+        Matches either the UDP source IP directly (clients using this server
+        as their resolver) or an EDNS Client Subnet covering one of the
+        homeserver's recent WAN IPs (queries relayed through public
+        resolvers once this server is authoritative via GoDaddy NS
+        delegation).
+        """
+        local_ips, _, _ = self._snapshot()
+        if client in local_ips:
+            return True
+        for net in _ecs_networks(request):
+            for rip in local_ips:
+                if ipaddress.ip_address(rip) in net:
+                    return True
+        return False
+
     def resolve(self, request, handler):
         client = handler.client_address[0]
         reply = request.reply()
         name = str(request.q.qname).rstrip(".").lower()
         qtype = QTYPE[request.q.qtype]
 
-        local_ips, wifi_ip, server_v6 = self._snapshot()
-        is_local_client = client in local_ips
+        _local_ips, wifi_ip, server_v6 = self._snapshot()
+        is_local_client = self._is_local_client(client, request)
 
         if name == ZONE:
             if qtype == "A":
@@ -223,7 +294,7 @@ def main():
     parser.add_argument("--bind", default="10.66.66.1",
                         help="heartbeat listener address (default: WireGuard IP)")
     parser.add_argument("--port", type=int, default=9863)
-    parser.add_argument("--log", default=os.path.expanduser("~/heartbeat.log"),
+    parser.add_argument("--log", default=os.path.expanduser("heartbeat.log"),
                         help="append received heartbeats to this file")
     parser.add_argument("--dns-bind", default="0.0.0.0",
                         help="DNS listener address (default: all interfaces)")
