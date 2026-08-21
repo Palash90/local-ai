@@ -1304,18 +1304,30 @@ def is_duplicate(new_text, previous_text, threshold=0.8):
 
 
 # Authentik access tokens are short-lived (currently 5 minutes), but agents
-# log in once per run and keep working for hours. _TOKEN_META remembers the
-# credentials behind every issued token so auth_headers() can transparently
-# re-grant a fresh one whenever the current bearer is about to expire.
-_TOKEN_META = {}
+# log in once per run and keep working for hours. The cache below keeps ONE
+# current token per agent USERNAME: auth_headers() may be handed any stale
+# alias of that agent and always resolves it to the latest token, refreshing
+# at most once per expiry window. Callers keep their original "fixed" token
+# variables for the whole run — healing happens transparently here.
+#
+# (Keying by token instead — as an earlier revision did — minted a fresh
+# password grant on EVERY poll: the healed token was used for one request and
+# discarded, so the next poll saw the stale token again and re-authenticated,
+# looping indefinitely.)
+_TOKEN_META = {}   # username -> {"password", "token", "exp", "granted_at"}
+_TOKEN_OWNER = {}  # every issued token -> owning username (stale aliases included)
 _TOKEN_LOCK = threading.RLock()
 TOKEN_REFRESH_MARGIN = 60
 
 
 def _decode_exp(token):
-    payload = token.split(".")[1]
-    data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    return int(data.get("exp", 0))
+    """Expiry timestamp of a JWT access token, or 0 if unreadable."""
+    try:
+        payload = token.split(".")[1]
+        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return int(data.get("exp", 0))
+    except Exception:
+        return 0
 
 
 def login(username, password):
@@ -1327,20 +1339,41 @@ def login(username, password):
         print(f"[login] Authentik password grant failed for {username}: {e}")
         raise
     with _TOKEN_LOCK:
-        _TOKEN_META[token] = (username, password, _decode_exp(token))
+        _TOKEN_META[username] = {
+            "password": password,
+            "token": token,
+            "exp": _decode_exp(token),
+            "granted_at": time.time(),
+        }
+        _TOKEN_OWNER[token] = username
     return token
 
 
 def _fresh_token(token):
-    """Return ``token`` unless it is missing or near expiry; re-login then."""
-    username, password, exp = _TOKEN_META.get(token, (None, None, 0))
-    if exp and time.time() < exp - TOKEN_REFRESH_MARGIN:
-        return token
-    if username is None:
-        # Token we did not issue ourselves — nothing to re-authenticate with.
-        return token
-    print(f"[auth] {username}'s access token expired — re-authenticating")
-    return login(username, password)
+    """Return the CURRENT token owned by whoever issued ``token``.
+
+    Re-grants only when that token is at ``TOKEN_REFRESH_MARGIN`` seconds from
+    expiry (or when its expiry is unknown and it is older than the margin).
+    Unknown tokens pass through untouched.
+    """
+    with _TOKEN_LOCK:
+        username = _TOKEN_OWNER.get(token)
+        if username is None:
+            # Token we did not issue ourselves — nothing to heal with.
+            return token
+        entry = _TOKEN_META[username]
+        now = time.time()
+        exp = entry["exp"]
+        expired = (
+            (exp and now >= exp - TOKEN_REFRESH_MARGIN)
+            or (not exp and now - entry["granted_at"] >= TOKEN_REFRESH_MARGIN)
+        )
+        if not expired:
+            # Resolve stale aliases to the agent's current token without
+            # re-authenticating — this is what breaks the reauth loop.
+            return entry["token"]
+        print(f"[auth] {username}'s access token expired — re-authenticating")
+        return login(username, entry["password"])
 
 
 def auth_headers(token):

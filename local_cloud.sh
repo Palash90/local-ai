@@ -181,7 +181,13 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;top:8px;right:80px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+        # Global nav pill injected into the Local AI page. Styling lives in a
+        # <style> block (not inline) so it can go responsive: on desktop it
+        # floats at the top-right as before; on phones (<=600px) that spot is
+        # ON TOP of the Local AI busy/model header (#model-bar is fixed,
+        # 48px tall, full-width there), so it drops to just BELOW the header
+        # band instead and shrinks/scrolls horizontally.
+        sub_filter '</body>' '$gcp_overlay<style>#global-nav-bar{position:absolute;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px)}#global-nav-bar a{white-space:nowrap}@media(min-width:601px){#global-nav-bar{top:8px;right:80px}}@media(max-width:600px){#global-nav-bar{top:56px;right:8px;padding:4px 10px;font-size:11px;gap:6px;max-width:calc(100vw - 16px);overflow-x:auto}}</style><div id="global-nav-bar"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
     }
 
     location ^~ /api/public/ {

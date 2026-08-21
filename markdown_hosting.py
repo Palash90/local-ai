@@ -19,9 +19,9 @@ BASE_STORIES_DIR = "./stories"
 # Directory roots resolved from environment variables.
 # Hierarchy: everyone -> free dir, premium +1 dir, admin +1 more dir.
 # PREMIUM and ADMIN dirs are REQUIRED — markdown hosting fails fast if missing.
-_FREE_DIR = os.getenv("STORIES_FREE_DIR", os.path.expanduser("~/local-ai-files/stories"))
-_PREMIUM_DIR = os.getenv("STORIES_PREMIUM_DIR", "")
-_ADMIN_DIR = os.getenv("STORIES_ADMIN_DIR", "")
+_FREE_DIR = os.path.expanduser(os.getenv("STORIES_FREE_DIR", os.path.expanduser("~/local-ai-files/stories")))
+_PREMIUM_DIR = os.path.expanduser(os.getenv("STORIES_PREMIUM_DIR", ""))
+_ADMIN_DIR = os.path.expanduser(os.getenv("STORIES_ADMIN_DIR", ""))
 
 for _var, _val in (("STORIES_PREMIUM_DIR", _PREMIUM_DIR), ("STORIES_ADMIN_DIR", _ADMIN_DIR)):
     if not _val:
