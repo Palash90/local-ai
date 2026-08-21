@@ -106,6 +106,7 @@ markdown_hosting.py
 package.json
 README.md
 requirements.txt
+restart_services.sh
 self-chat.py
 server_startup_commands.md
 setup.sh
@@ -418,6 +419,86 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+</file>
+
+<file path="restart_services.sh">
+#!/usr/bin/env bash
+# Restart the top-level local-ai services.
+#
+#   chat-webui          python3 ./chat-webui.py                    (port 3001)
+#   markdown hosting    uvicorn markdown_hosting:app               (port 3002)
+#   code hosting        python3 code_host.py .                     (port 9000)
+#   request tracker     sudo python3 server/track_dashboard.py     (port 8093)
+#
+# Every service runs under nohup and appends to its own log in logs/.
+# The tracker reads /var/log/nginx/track.log, so it runs under sudo —
+# you may be prompted for your password once.
+set -u
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GIT_DIR="$(dirname "$REPO_DIR")"
+LOG_DIR="$REPO_DIR/logs"
+mkdir -p "$LOG_DIR"
+
+stop_all() {
+    local pattern="$1" name="$2"
+    if pgrep -f "$pattern" >/dev/null 2>&1; then
+        pkill -TERM -f "$pattern" 2>/dev/null
+        for _ in $(seq 1 20); do
+            pgrep -f "$pattern" >/dev/null 2>&1 || break
+            sleep 0.5
+        done
+        pkill -KILL -f "$pattern" 2>/dev/null
+        echo "  stopped: $name"
+    else
+        echo "  not running: $name"
+    fi
+}
+
+start_one() {
+    local name="$1" logfile="$2" dir="$3"
+    shift 3
+    (
+        cd "$dir" || exit 1
+        nohup "$@" >>"$logfile" 2>&1 &
+        echo "  started: $name (pid $!, log $logfile)"
+    )
+}
+
+echo "== Stopping =="
+stop_all 'chat-webui\.py'      "chat web ui"
+stop_all 'markdown_hosting'    "markdown hosting"
+stop_all 'code_host\.py'       "code hosting"
+stop_all 'track_dashboard'     "request tracker"
+
+# Tracker log must exist and be readable (same prep as local_cloud.sh).
+sudo touch /var/log/nginx/track.log
+sudo chmod 640 /var/log/nginx/track.log
+
+echo "== Starting =="
+start_one "chat web ui"     "$LOG_DIR/chat-webui.log"       "$REPO_DIR" python3 ./chat-webui.py
+start_one "markdown hosting" "$LOG_DIR/markdown-hosting.log" "$REPO_DIR" python3 -m uvicorn markdown_hosting:app --host 127.0.0.1 --port 3002
+start_one "code hosting"    "$LOG_DIR/code-host.log"        "$GIT_DIR"  python3 code_host.py .
+start_one "request tracker" "$LOG_DIR/track-dashboard.log"  "$REPO_DIR" sudo python3 server/track_dashboard.py --port 8093 --log /var/log/nginx/track.log
+
+sleep 3
+echo "== Health =="
+check() {
+    local name="$1" url="$2"
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null)
+    if [ "$code" != "000" ]; then
+        echo "  UP   $name ($url -> HTTP $code)"
+    else
+        echo "  DOWN $name ($url) — check its log in $LOG_DIR/"
+        [ "$name" = "request tracker" ] && \
+            echo "       (tracker needs sudo; run this script from a terminal so the password can be prompted)"
+    fi
+}
+check "chat web ui"      http://127.0.0.1:3001/
+check "markdown hosting" http://127.0.0.1:3002/
+check "code hosting"     http://127.0.0.1:9000/
+check "request tracker"  http://127.0.0.1:8093/
 </file>
 
 <file path="server_startup_commands.md">
@@ -1354,6 +1435,98 @@ def load_dotenv(path=None):
 
 
 load_dotenv()
+</file>
+
+<file path="src/components/ChatArea.jsx">
+import { useEffect, useRef } from 'react'
+import Message from './Message'
+
+export default function ChatArea({ messages, pendingMessages, currentSessionId, onImageOpen, selectingRef, onPendingResolved, onLocationNeeded }) {
+  const bottomRef = useRef(null)
+  const chatRef = useRef(null)
+  const userScrolledUp = useRef(false)
+
+  const currentPending = pendingMessages
+    ? Object.values(pendingMessages).filter(p => p.sessionId === currentSessionId)
+    : []
+
+  const allMessages = [...messages, ...currentPending.map(p => ({ _pending: true, ...p }))]
+
+  useEffect(() => {
+    const el = chatRef.current
+    if (!el) return
+    const handler = () => {
+      const threshold = 100
+      userScrolledUp.current = el.scrollHeight - el.scrollTop - el.clientHeight > threshold
+    }
+    el.addEventListener('scroll', handler, { passive: true })
+    return () => el.removeEventListener('scroll', handler)
+  }, [])
+
+  useEffect(() => {
+    const el = chatRef.current
+    if (!el || !selectingRef) return
+    const down = () => { selectingRef.current = true }
+    const up = () => { selectingRef.current = false }
+    el.addEventListener('pointerdown', down)
+    el.addEventListener('pointerup', up)
+    el.addEventListener('pointercancel', up)
+    el.addEventListener('touchend', up)
+    window.addEventListener('mouseup', up)
+    return () => {
+      el.removeEventListener('pointerdown', down)
+      el.removeEventListener('pointerup', up)
+      el.removeEventListener('pointercancel', up)
+      el.removeEventListener('touchend', up)
+      window.removeEventListener('mouseup', up)
+    }
+  }, [selectingRef])
+
+  useEffect(() => {
+    if (!selectingRef) return
+    const onSelChange = () => {
+      let active = false
+      try { active = !!document.getSelection() && !document.getSelection().isCollapsed } catch { }
+      selectingRef.current = active
+    }
+    document.addEventListener('selectionchange', onSelChange)
+    return () => document.removeEventListener('selectionchange', onSelChange)
+  }, [selectingRef])
+
+  useEffect(() => {
+    if (bottomRef.current && !userScrolledUp.current) {
+      bottomRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages.length, currentPending.length])
+
+  return (
+    <div id="chat" ref={chatRef}>
+      {messages.map((msg, i) => (
+        <Message
+          key={i}
+          msg={msg}
+          sessionId={currentSessionId}
+          msgIndex={i}
+          onImageOpen={onImageOpen}
+          selectingRef={selectingRef}
+          onResolved={onPendingResolved}
+          onLocationNeeded={onLocationNeeded}
+        />
+      ))}
+      {currentPending.map((p, i) => (
+        <Message
+          key={'p-' + (p.taskId || i)}
+          pending={p}
+          onImageOpen={onImageOpen}
+          selectingRef={selectingRef}
+          onResolved={onPendingResolved}
+          onLocationNeeded={onLocationNeeded}
+        />
+      ))}
+      <div ref={bottomRef} />
+    </div>
+  )
+}
 </file>
 
 <file path="src/components/ImageLightbox.jsx">
@@ -3159,242 +3332,6 @@ def write_user_context(username, content):
             f.write(new_content)
 </file>
 
-<file path="server/auth.py">
-"""Unified RBAC / SSO identity layer backed by Authentik.
-
-This is the SINGLE identity provider for every app on the box. There is no
-more ``users.json``; users, passwords and roles live in Authentik.
-
-Two identity paths converge here:
-
-1. Browser users — nginx runs ``auth_request`` against the Authentik proxy
-   outpost and forwards the ``X-Authentik-*`` claim headers upstream. Backends
-   trust those headers (only nginx can reach the app ports).
-
-2. Machine agents (self-chat.py) — obtain an OIDC access token via Authentik's
-   OAuth2 password grant and send it as ``Authorization: Bearer <jwt>``.
-   Backends verify the JWT signature against Authentik's JWKS.
-
-The resolved identity is always a dict::
-
-    {
-        "username": str,
-        "email": str,
-        "name": str,
-        "groups": [str, ...],   # raw Authentik group names
-        "role": "admin" | "premium" | "free",
-        "uid": str,             # Authentik user UUID (unique id across renames)
-    }
-"""
-
-import re
-import threading
-import time
-
-import jwt
-from jwt import PyJWK
-import requests
-
-from server.config import (
-    AUTH_AGENTS_CLIENT_ID,
-    AUTH_AGENTS_CLIENT_SECRET,
-    AUTH_AGENTS_ISSUER,
-    AUTH_AGENTS_JWKS_URL,
-    AUTH_AGENTS_TOKEN_URL,
-    AUTH_ROLE_GROUPS,
-)
-
-# Highest role wins when a user belongs to several groups.
-_ROLE_LEVEL = {"free": 0, "premium": 1, "admin": 2}
-
-_jwks_cache = None
-_jwks_cache_at = 0.0
-_jwks_lock = threading.Lock()
-_JWKS_TTL = 300
-
-
-def _first(seq):
-    for item in seq or ():
-        if item:
-            return item
-    return None
-
-
-def role_from_groups(groups):
-    """Map Authentik group names to the app role scale (free/premium/admin)."""
-    best = "free"
-    best_level = -1
-    for g in groups or ():
-        role = AUTH_ROLE_GROUPS.get(g.lower().strip())
-        if role and _ROLE_LEVEL.get(role, -1) > best_level:
-            best = role
-            best_level = _ROLE_LEVEL[role]
-    return best
-
-
-def _split_groups(raw):
-    if not raw:
-        return []
-    if isinstance(raw, (list, tuple, set)):
-        return [str(g).strip() for g in raw if str(g).strip()]
-    return [g.strip() for g in re.split(r"[|,\s]+", str(raw)) if g.strip()]
-
-
-def identity_from_headers(headers):
-    """Resolve identity from the nginx-injected X-Authentik-* claim headers.
-
-    These headers are set by nginx's auth_request subrequest against the
-    Authentik proxy outpost and are only present on nginx-fronted traffic.
-    Returns None when absent (e.g. direct localhost calls or agents).
-    """
-    username = _first(
-        [headers.get("X-Authentik-Username"), headers.get("X-Authentik-User")]
-    )
-    if not username:
-        return None
-    groups = _split_groups(
-        _first(
-            [
-                headers.get("X-Authentik-Groups"),
-                headers.get("X-Authentik-Group"),
-            ]
-        )
-    )
-    return {
-        "username": username,
-        "email": headers.get("X-Authentik-Email", ""),
-        "name": headers.get("X-Authentik-Name", ""),
-        "groups": groups,
-        "role": role_from_groups(groups),
-        "uid": headers.get("X-Authentik-UID", ""),
-    }
-
-
-def _fetch_jwks():
-    """Return the Authentik JWKS key set (cached for _JWKS_TTL seconds)."""
-    global _jwks_cache, _jwks_cache_at
-    with _jwks_lock:
-        now = time.time()
-        if _jwks_cache is not None and now - _jwks_cache_at < _JWKS_TTL:
-            return _jwks_cache
-        if not AUTH_AGENTS_JWKS_URL:
-            return []
-        try:
-            resp = requests.get(AUTH_AGENTS_JWKS_URL, timeout=5)
-            resp.raise_for_status()
-            _jwks_cache = resp.json().get("keys", [])
-            _jwks_cache_at = now
-        except (requests.RequestException, ValueError):
-            _jwks_cache = _jwks_cache or []
-            _jwks_cache_at = now
-        return _jwks_cache
-
-
-def identity_from_bearer(authorization):
-    """Verify an ``Authorization: Bearer <jwt>`` token and resolve its identity.
-
-    Verifies the token signature against Authentik's JWKS and enforces the
-    issuer (the Authentik OIDC provider URL). Returns None for expired, bogus
-    or missing tokens. Raises on transient network failures (so callers can
-    treat those distinctly from a plain "no identity").
-    """
-    if not authorization or not authorization.lower().startswith("bearer "):
-        return None
-    token = authorization.split(" ", 1)[1].strip()
-    if not token:
-        return None
-    keys = _fetch_jwks()
-    if not keys:
-        raise RuntimeError("Authentik JWKS unavailable — cannot verify access token")
-
-    decoded = None
-    for key in keys:
-        try:
-            crypto_key = PyJWK.from_dict(key).key
-            decoded = jwt.decode(
-                token,
-                crypto_key,
-                algorithms=[key.get("alg", "RS256")],
-                issuer=AUTH_AGENTS_ISSUER,
-                options={"verify_aud": False},
-            )
-            break
-        except jwt.InvalidTokenError:
-            continue
-    if not decoded:
-        return None
-
-    username = _first(
-        [
-            decoded.get("preferred_username"),
-            decoded.get("username"),
-            decoded.get("email"),
-            decoded.get("sub"),
-        ]
-    )
-    groups = _split_groups(
-        _first([decoded.get("groups"), decoded.get("ak_groups")])
-    )
-    return {
-        "username": username,
-        "email": decoded.get("email", ""),
-        "name": decoded.get("name", ""),
-        "groups": groups,
-        "role": role_from_groups(groups),
-        "uid": decoded.get("sub", ""),
-    }
-
-
-def get_identity(headers):
-    """Resolve identity from request headers (browser path + agent path)."""
-    identity = identity_from_headers(headers)
-    if identity:
-        return identity
-    return identity_from_bearer(headers.get("Authorization", ""))
-
-
-def get_current_user(headers):
-    """Return just the authenticated username (or None)."""
-    identity = get_identity(headers)
-    return identity["username"] if identity else None
-
-
-def required_role_level(role):
-    """Level for the given role name (free=0, premium=1, admin=2)."""
-    return _ROLE_LEVEL.get(role, 0)
-
-
-def oidc_password_grant(username, password):
-    """Exchange agent credentials for an Authentik OIDC access token.
-
-    Used by self-chat.py so the automated agents authenticate through the same
-    identity provider as humans. Returns the access token string. Raises on any
-    failure so callers can surface a clear error.
-    """
-    if not AUTH_AGENTS_TOKEN_URL or not AUTH_AGENTS_CLIENT_ID:
-        raise RuntimeError(
-            "Authentik OIDC not configured (AUTH_AGENTS_TOKEN_URL/AUTH_AGENTS_CLIENT_ID)"
-        )
-    resp = requests.post(
-        AUTH_AGENTS_TOKEN_URL,
-        data={
-            "grant_type": "password",
-            "username": username,
-            "password": password,
-            "client_id": AUTH_AGENTS_CLIENT_ID,
-            "client_secret": AUTH_AGENTS_CLIENT_SECRET,
-            "scope": "openid profile email groups",
-        },
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    access_token = data.get("access_token")
-    if not access_token:
-        raise RuntimeError(f"Authentik password grant returned no access token: {data}")
-    return access_token
-</file>
-
 <file path="server/track_dashboard.py">
 #!/usr/bin/env python3
 """Request tracking dashboard for the local nginx.
@@ -3718,98 +3655,6 @@ if __name__ == "__main__":
     main()
 </file>
 
-<file path="src/components/ChatArea.jsx">
-import { useEffect, useRef } from 'react'
-import Message from './Message'
-
-export default function ChatArea({ messages, pendingMessages, currentSessionId, onImageOpen, selectingRef, onPendingResolved, onLocationNeeded }) {
-  const bottomRef = useRef(null)
-  const chatRef = useRef(null)
-  const userScrolledUp = useRef(false)
-
-  const currentPending = pendingMessages
-    ? Object.values(pendingMessages).filter(p => p.sessionId === currentSessionId)
-    : []
-
-  const allMessages = [...messages, ...currentPending.map(p => ({ _pending: true, ...p }))]
-
-  useEffect(() => {
-    const el = chatRef.current
-    if (!el) return
-    const handler = () => {
-      const threshold = 100
-      userScrolledUp.current = el.scrollHeight - el.scrollTop - el.clientHeight > threshold
-    }
-    el.addEventListener('scroll', handler, { passive: true })
-    return () => el.removeEventListener('scroll', handler)
-  }, [])
-
-  useEffect(() => {
-    const el = chatRef.current
-    if (!el || !selectingRef) return
-    const down = () => { selectingRef.current = true }
-    const up = () => { selectingRef.current = false }
-    el.addEventListener('pointerdown', down)
-    el.addEventListener('pointerup', up)
-    el.addEventListener('pointercancel', up)
-    el.addEventListener('touchend', up)
-    window.addEventListener('mouseup', up)
-    return () => {
-      el.removeEventListener('pointerdown', down)
-      el.removeEventListener('pointerup', up)
-      el.removeEventListener('pointercancel', up)
-      el.removeEventListener('touchend', up)
-      window.removeEventListener('mouseup', up)
-    }
-  }, [selectingRef])
-
-  useEffect(() => {
-    if (!selectingRef) return
-    const onSelChange = () => {
-      let active = false
-      try { active = !!document.getSelection() && !document.getSelection().isCollapsed } catch { }
-      selectingRef.current = active
-    }
-    document.addEventListener('selectionchange', onSelChange)
-    return () => document.removeEventListener('selectionchange', onSelChange)
-  }, [selectingRef])
-
-  useEffect(() => {
-    if (bottomRef.current && !userScrolledUp.current) {
-      bottomRef.current.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [messages.length, currentPending.length])
-
-  return (
-    <div id="chat" ref={chatRef}>
-      {messages.map((msg, i) => (
-        <Message
-          key={i}
-          msg={msg}
-          sessionId={currentSessionId}
-          msgIndex={i}
-          onImageOpen={onImageOpen}
-          selectingRef={selectingRef}
-          onResolved={onPendingResolved}
-          onLocationNeeded={onLocationNeeded}
-        />
-      ))}
-      {currentPending.map((p, i) => (
-        <Message
-          key={'p-' + (p.taskId || i)}
-          pending={p}
-          onImageOpen={onImageOpen}
-          selectingRef={selectingRef}
-          onResolved={onPendingResolved}
-          onLocationNeeded={onLocationNeeded}
-        />
-      ))}
-      <div ref={bottomRef} />
-    </div>
-  )
-}
-</file>
-
 <file path="authentik-compose.yaml">
 # Authentik — the single identity provider for every app (SSO).
 #
@@ -3963,6 +3808,242 @@ REASONS: <short reasons, citing the specific checklist item(s) that failed if RE
 
 ## Evaluation Principle
 Exercise reasonable editorial judgment. Do not flag creative artistic choices, stylistic fragments, or open endings as failures unless they represent genuine errors, broken text, or incomplete content. If the work fulfills the core prompt and respects all hard constraints, default to GREEN.
+</file>
+
+<file path="server/auth.py">
+"""Unified RBAC / SSO identity layer backed by Authentik.
+
+This is the SINGLE identity provider for every app on the box. There is no
+more ``users.json``; users, passwords and roles live in Authentik.
+
+Two identity paths converge here:
+
+1. Browser users — nginx runs ``auth_request`` against the Authentik proxy
+   outpost and forwards the ``X-Authentik-*`` claim headers upstream. Backends
+   trust those headers (only nginx can reach the app ports).
+
+2. Machine agents (self-chat.py) — obtain an OIDC access token via Authentik's
+   OAuth2 password grant and send it as ``Authorization: Bearer <jwt>``.
+   Backends verify the JWT signature against Authentik's JWKS.
+
+The resolved identity is always a dict::
+
+    {
+        "username": str,
+        "email": str,
+        "name": str,
+        "groups": [str, ...],   # raw Authentik group names
+        "role": "admin" | "premium" | "free",
+        "uid": str,             # Authentik user UUID (unique id across renames)
+    }
+"""
+
+import re
+import threading
+import time
+
+import jwt
+from jwt import PyJWK
+import requests
+
+from server.config import (
+    AUTH_AGENTS_CLIENT_ID,
+    AUTH_AGENTS_CLIENT_SECRET,
+    AUTH_AGENTS_ISSUER,
+    AUTH_AGENTS_JWKS_URL,
+    AUTH_AGENTS_TOKEN_URL,
+    AUTH_ROLE_GROUPS,
+)
+
+# Highest role wins when a user belongs to several groups.
+_ROLE_LEVEL = {"free": 0, "premium": 1, "admin": 2}
+
+_jwks_cache = None
+_jwks_cache_at = 0.0
+_jwks_lock = threading.Lock()
+_JWKS_TTL = 300
+
+
+def _first(seq):
+    for item in seq or ():
+        if item:
+            return item
+    return None
+
+
+def role_from_groups(groups):
+    """Map Authentik group names to the app role scale (free/premium/admin)."""
+    best = "free"
+    best_level = -1
+    for g in groups or ():
+        role = AUTH_ROLE_GROUPS.get(g.lower().strip())
+        if role and _ROLE_LEVEL.get(role, -1) > best_level:
+            best = role
+            best_level = _ROLE_LEVEL[role]
+    return best
+
+
+def _split_groups(raw):
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        return [str(g).strip() for g in raw if str(g).strip()]
+    return [g.strip() for g in re.split(r"[|,\s]+", str(raw)) if g.strip()]
+
+
+def identity_from_headers(headers):
+    """Resolve identity from the nginx-injected X-Authentik-* claim headers.
+
+    These headers are set by nginx's auth_request subrequest against the
+    Authentik proxy outpost and are only present on nginx-fronted traffic.
+    Returns None when absent (e.g. direct localhost calls or agents).
+    """
+    username = _first(
+        [headers.get("X-Authentik-Username"), headers.get("X-Authentik-User")]
+    )
+    if not username:
+        return None
+    groups = _split_groups(
+        _first(
+            [
+                headers.get("X-Authentik-Groups"),
+                headers.get("X-Authentik-Group"),
+            ]
+        )
+    )
+    return {
+        "username": username,
+        "email": headers.get("X-Authentik-Email", ""),
+        "name": headers.get("X-Authentik-Name", ""),
+        "groups": groups,
+        "role": role_from_groups(groups),
+        "uid": headers.get("X-Authentik-UID", ""),
+    }
+
+
+def _fetch_jwks():
+    """Return the Authentik JWKS key set (cached for _JWKS_TTL seconds)."""
+    global _jwks_cache, _jwks_cache_at
+    with _jwks_lock:
+        now = time.time()
+        if _jwks_cache is not None and now - _jwks_cache_at < _JWKS_TTL:
+            return _jwks_cache
+        if not AUTH_AGENTS_JWKS_URL:
+            return []
+        try:
+            resp = requests.get(AUTH_AGENTS_JWKS_URL, timeout=5)
+            resp.raise_for_status()
+            _jwks_cache = resp.json().get("keys", [])
+            _jwks_cache_at = now
+        except (requests.RequestException, ValueError):
+            _jwks_cache = _jwks_cache or []
+            _jwks_cache_at = now
+        return _jwks_cache
+
+
+def identity_from_bearer(authorization):
+    """Verify an ``Authorization: Bearer <jwt>`` token and resolve its identity.
+
+    Verifies the token signature against Authentik's JWKS and enforces the
+    issuer (the Authentik OIDC provider URL). Returns None for expired, bogus
+    or missing tokens. Raises on transient network failures (so callers can
+    treat those distinctly from a plain "no identity").
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    if not token:
+        return None
+    keys = _fetch_jwks()
+    if not keys:
+        raise RuntimeError("Authentik JWKS unavailable — cannot verify access token")
+
+    decoded = None
+    for key in keys:
+        try:
+            crypto_key = PyJWK.from_dict(key).key
+            decoded = jwt.decode(
+                token,
+                crypto_key,
+                algorithms=[key.get("alg", "RS256")],
+                issuer=AUTH_AGENTS_ISSUER,
+                options={"verify_aud": False},
+            )
+            break
+        except jwt.InvalidTokenError:
+            continue
+    if not decoded:
+        return None
+
+    username = _first(
+        [
+            decoded.get("preferred_username"),
+            decoded.get("username"),
+            decoded.get("email"),
+            decoded.get("sub"),
+        ]
+    )
+    groups = _split_groups(
+        _first([decoded.get("groups"), decoded.get("ak_groups")])
+    )
+    return {
+        "username": username,
+        "email": decoded.get("email", ""),
+        "name": decoded.get("name", ""),
+        "groups": groups,
+        "role": role_from_groups(groups),
+        "uid": decoded.get("sub", ""),
+    }
+
+
+def get_identity(headers):
+    """Resolve identity from request headers (browser path + agent path)."""
+    identity = identity_from_headers(headers)
+    if identity:
+        return identity
+    return identity_from_bearer(headers.get("Authorization", ""))
+
+
+def get_current_user(headers):
+    """Return just the authenticated username (or None)."""
+    identity = get_identity(headers)
+    return identity["username"] if identity else None
+
+
+def required_role_level(role):
+    """Level for the given role name (free=0, premium=1, admin=2)."""
+    return _ROLE_LEVEL.get(role, 0)
+
+
+def oidc_password_grant(username, password):
+    """Exchange agent credentials for an Authentik OIDC access token.
+
+    Used by self-chat.py so the automated agents authenticate through the same
+    identity provider as humans. Returns the access token string. Raises on any
+    failure so callers can surface a clear error.
+    """
+    if not AUTH_AGENTS_TOKEN_URL or not AUTH_AGENTS_CLIENT_ID:
+        raise RuntimeError(
+            "Authentik OIDC not configured (AUTH_AGENTS_TOKEN_URL/AUTH_AGENTS_CLIENT_ID)"
+        )
+    resp = requests.post(
+        AUTH_AGENTS_TOKEN_URL,
+        data={
+            "grant_type": "password",
+            "username": username,
+            "password": password,
+            "client_id": AUTH_AGENTS_CLIENT_ID,
+            "client_secret": AUTH_AGENTS_CLIENT_SECRET,
+            "scope": "openid profile email groups",
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    access_token = data.get("access_token")
+    if not access_token:
+        raise RuntimeError(f"Authentik password grant returned no access token: {data}")
+    return access_token
 </file>
 
 <file path="server/read_file.py">
@@ -5391,15 +5472,6 @@ graph TD
 ```
 </file>
 
-<file path=".gitignore">
-node_modules
-dist
-*.pyc
-*.log
-# Environment / secrets (fill in your real values; never commit these)
-.env
-</file>
-
 <file path="src/components/InputBar.jsx">
 import { useState, useRef, useCallback } from 'react'
 import { extractFile, uploadImage } from '../api'
@@ -5618,6 +5690,775 @@ export default function InputBar({ onSend, hasPending }) {
     </div>
   )
 }
+</file>
+
+<file path=".gitignore">
+node_modules
+dist
+*.pyc
+*.log
+# Environment / secrets (fill in your real values; never commit these)
+.env
+</file>
+
+<file path="src/components/Message.jsx">
+import { useMemo, useRef, useState, useCallback, useEffect, memo } from 'react'
+import { marked } from 'marked'
+import markedKatex from 'marked-katex-extension'
+import DOMPurify from 'dompurify'
+import { speak as apiSpeak, getTaskStatus as apiGetTaskStatus, shareMessage as apiShareMessage } from '../api'
+import { downloadFile, toApiImage } from '../utils'
+import StatusBox from './StatusBox'
+
+marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
+
+// Research-mode citations are stored as `(Author, Venue, Year) [https://url]`
+// (the critic parses the square-bracketed URL), but marked would swallow the
+// trailing `]` into the link href. Turn `[https://url]` into a proper markdown
+// link at render time so no stray bracket shows. Fenced code blocks are
+// skipped to avoid corrupting their contents.
+const normalizeCitationLinks = (text) => {
+  if (!text) return text
+  const RE = /\[(https?:\/\/[^\s\]<>]+)\](?!\s*\()/g
+  return text
+    .split(/(```[\s\S]*?```)/g)
+    .map((seg, i) => (i % 2 === 1 ? seg : seg.replace(RE, '[$1]($1)')))
+    .join('')
+}
+
+const fileLinkExt = {
+  name: 'fileLink',
+  level: 'inline',
+  start(src) {
+    const i = src.indexOf('[FILE:')
+    return i === -1 ? undefined : i
+  },
+  tokenizer(src) {
+    const match = /^\[FILE:\s*(\S+)\]\(([^)]+)\)/.exec(src)
+    if (!match) return undefined
+    return { type: 'fileLink', raw: match[0], url: match[1], name: match[2] }
+  },
+  renderer(token) {
+    const url = token.url.replace(/"/g, '&quot;')
+    const name = token.name.replace(/"/g, '&quot;')
+    return (
+      '<a class="file-chip" href="' + url + '" download="' + name + '" title="' + name + '">' +
+      '<svg class="file-chip-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">' +
+      '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>' +
+      '<polyline points="14 2 14 8 20 8"></polyline>' +
+      '</svg>' +
+      '<span class="file-chip-name">' + name + '</span>' +
+      '</a>'
+    )
+  },
+}
+
+marked.use({ extensions: [fileLinkExt] })
+
+function escHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function hostnameFromUrl(u) {
+  try {
+    return new URL(u).hostname
+  } catch {
+    return u || ''
+  }
+}
+
+function formatElapsed(ms) {
+  if (ms == null) return ''
+  const s = ms / 1000
+  if (s < 60) return s.toFixed(1) + 's'
+  const m = Math.floor(s / 60)
+  const rs = Math.round(s % 60)
+  return m + 'm ' + rs + 's'
+}
+
+function execCopy(text) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch { }
+  document.body.removeChild(ta)
+  return ok
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(text)
+    return true
+  }
+  return execCopy(text)
+}
+
+function ShareButton({ sessionId, msgIndex, forceShow }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [share, setShare] = useState(null)
+
+  async function handleShare(e) {
+    e.preventDefault()
+    e.stopPropagation()
+    if (busy || !sessionId || msgIndex == null) return
+    setBusy(true)
+    setError('')
+    try {
+      const data = await apiShareMessage(sessionId, msgIndex)
+      if (data && data.token) {
+        setShare({ url: data.url })
+      } else {
+        setError((data && data.error) || 'Sharing failed')
+      }
+    } catch (err) {
+      setError(err.message || 'Sharing failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function copyLink() {
+    if (!share) return
+    const url = share.url.startsWith('http') ? share.url : window.location.origin + share.url
+    await writeClipboard(url)
+  }
+
+  return (
+    <>
+      <button
+        className={'share-btn' + (forceShow ? ' force-show' : '')}
+        onClick={handleShare}
+        title="Share this message"
+        aria-label="Share this message"
+        disabled={busy}
+      >
+        {busy ? 'Sharing…' : (
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <circle cx="18" cy="5" r="3" />
+            <circle cx="6" cy="12" r="3" />
+            <circle cx="18" cy="19" r="3" />
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+          </svg>
+        )}
+      </button>
+      {share && (
+        <div className="share-modal-overlay" onClick={() => setShare(null)}>
+          <div className="share-modal" onClick={e => e.stopPropagation()}>
+            <div className="share-modal-header">
+              <span>Message shared</span>
+              <button type="button" className="share-modal-close" onClick={() => setShare(null)}>&#10005;</button>
+            </div>
+            <p className="share-modal-hint">Anyone on this network with the link can view this message without logging in.</p>
+            <input
+              readOnly
+              className="share-modal-url"
+              value={share.url.startsWith('http') ? share.url : window.location.origin + share.url}
+              onFocus={e => e.target.select()}
+              onKeyDown={e => e.key === 'Enter' && e.target.select()}
+            />
+            <div className="share-modal-actions">
+              <button type="button" className="share-copy-btn" onClick={copyLink}>Copy link</button>
+              <a className="share-open-link" href={share.url} target="_blank" rel="noreferrer">Open</a>
+            </div>
+          </div>
+        </div>
+      )}
+      {error && <span className="share-error" role="alert">{error}</span>}
+    </>
+  )
+}
+
+function SearchPopup({ details }) {
+  return (
+    <div className="search-popup">
+      <div style={{ marginBottom: 6 }}>
+        <span style={{ color: '#888', fontSize: 11 }}>Query:</span>{' '}
+        <span style={{ color: '#e0e0e0' }}>
+          {details.map(sd => sd.query).join('; ')}
+        </span>
+      </div>
+      {details.map((sd, i) => (
+        <div key={i}>
+          {sd.search_url && (
+            <div style={{ marginBottom: 6, fontSize: 11, wordBreak: 'break-all' }}>
+              <span style={{ color: '#888' }}>SearXNG:</span>{' '}
+              <a href={sd.search_url} target="_blank" rel="noreferrer" style={{ color: '#60a5fa' }}>
+                {sd.search_url}
+              </a>
+            </div>
+          )}
+          {sd.results && sd.results.map((r, j) => (
+            <a
+              key={j}
+              href={r.url}
+              target="_blank"
+              rel="noreferrer"
+              style={{ display: 'block', color: '#60a5fa', fontSize: 12, padding: '2px 0', textDecoration: 'none' }}
+              title={r.url}
+            >
+              {r.title || r.url}
+            </a>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function CopyButton({ text, genPrompt, imageUrl, forceShow }) {
+  const [label, setLabel] = useState('Copy')
+
+  async function handleCopy() {
+    setLabel('Copying...')
+    try {
+      await copyWithImage()
+    } catch {
+      copyTextOnly()
+    }
+  }
+
+  async function copyWithImage() {
+    let textContent = text || ''
+    if (genPrompt) textContent = 'Prompt: ' + genPrompt + '\n\n' + textContent
+
+    if (imageUrl && navigator.clipboard && navigator.clipboard.write) {
+      const url = imageUrl.startsWith('http') ? imageUrl : window.location.origin + imageUrl
+      try {
+        const res = await fetch(url)
+        const blob = await res.blob()
+        const b64 = await blobToBase64(blob)
+        const escaped = textContent.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        const cleanHtml = '<html><body>' + escaped.replace(/\n/g, '<br>') + '<br><br><img src="' + b64 + '"></body></html>'
+
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            'text/html': new Blob([cleanHtml], { type: 'text/html' }),
+            'text/plain': new Blob([escaped + '\n\n' + url], { type: 'text/plain' }),
+          }),
+          new ClipboardItem({ [blob.type]: blob }),
+        ])
+        setLabel('Copied!')
+        setTimeout(() => setLabel('Copy'), 2000)
+        return
+      } catch { }
+    }
+
+    let copyText = textContent
+    if (imageUrl) {
+      const url = imageUrl.startsWith('http') ? imageUrl : window.location.origin + imageUrl
+      copyText = (copyText ? copyText + '\n\n' : '') + url
+    }
+
+    if (copyText && navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(copyText)
+      setLabel('Copied!')
+      setTimeout(() => setLabel('Copy'), 2000)
+      return
+    }
+
+    throw new Error('no clipboard method available')
+  }
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve(reader.result)
+      reader.onerror = reject
+      reader.readAsDataURL(blob)
+    })
+  }
+
+  function copyTextOnly() {
+    let copyText = text || ''
+    if (imageUrl) {
+      const url = imageUrl.startsWith('http') ? imageUrl : window.location.origin + imageUrl
+      copyText = (copyText ? copyText + '\n\n' : '') + url
+    }
+    if (genPrompt) copyText = 'Prompt: ' + genPrompt + '\n\n' + copyText
+
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(copyText).then(() => {
+          setLabel('Copied!')
+          setTimeout(() => setLabel('Copy'), 2000)
+        }).catch(() => fallbackExecCopy(copyText))
+      } else {
+        fallbackExecCopy(copyText)
+      }
+    } catch {
+      fallbackExecCopy(copyText)
+    }
+  }
+
+  function fallbackExecCopy(text) {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    try {
+      document.execCommand('copy')
+      setLabel('Copied!')
+      setTimeout(() => setLabel('Copy'), 2000)
+    } catch {
+      setLabel('Failed')
+      setTimeout(() => setLabel('Copy'), 2000)
+    }
+    document.body.removeChild(ta)
+  }
+
+  return <button className={'copy-btn' + (forceShow ? ' force-show' : '')} onClick={handleCopy}>{label}</button>
+}
+
+let _activeAudio = null
+
+function SpeakButton({ text }) {
+  const [speaking, setSpeaking] = useState(false)
+  const idRef = useRef(null)
+
+  async function handleClick() {
+    const myId = (idRef.current = {})
+    if (_activeAudio && _activeAudio._speakId === myId) {
+      _activeAudio.pause()
+      _activeAudio.currentTime = 0
+      _activeAudio = null
+      setSpeaking(false)
+      return
+    }
+    if (_activeAudio) {
+      _activeAudio.pause()
+      _activeAudio.currentTime = 0
+      _activeAudio = null
+      setSpeaking(false)
+    }
+    setSpeaking(true)
+    try {
+      const data = await apiSpeak(text)
+      if (idRef.current !== myId) return
+      const mime = data.type || 'audio/mpeg'
+      const audio = new Audio('data:' + mime + ';base64,' + data.audio)
+      audio._speakId = myId
+      audio.onended = () => {
+        if (_activeAudio === audio) {
+          _activeAudio = null
+          setSpeaking(false)
+        }
+      }
+      audio.onerror = () => { setSpeaking(false); _activeAudio = null }
+      _activeAudio = audio
+      audio.play()
+    } catch (e) {
+      console.warn('TTS error:', e)
+      setSpeaking(false)
+    }
+  }
+
+  return (
+    <button
+      className={'speak-btn' + (speaking ? ' speaking' : '')}
+      onClick={handleClick}
+      title={speaking ? 'Stop' : 'Read aloud'}
+      aria-label={speaking ? 'Stop' : 'Read aloud'}
+    >
+      {speaking ? (
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
+          <rect x="6" y="5" width="4" height="14" rx="1" />
+          <rect x="14" y="5" width="4" height="14" rx="1" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+          <path d="M8 5v14l11-7z" />
+        </svg>
+      )}
+    </button>
+  )
+}
+
+function ReasoningBlock({ text, open, onToggle }) {
+  const preRef = useRef(null)
+  const prevLenRef = useRef(0)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!preRef.current || !text) return
+    if (text.length > prevLenRef.current) {
+      const el = preRef.current
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+      if (atBottom) el.scrollTop = el.scrollHeight
+    }
+    prevLenRef.current = text.length
+  }, [text])
+
+  if (!text) return null
+  const capped = text
+
+  let html
+  try {
+    html = DOMPurify.sanitize(marked.parse(capped))
+  } catch {
+    html = escHtml(capped)
+  }
+
+  function handleCopy(e) {
+    e.preventDefault()
+    e.stopPropagation()
+    writeClipboard(text).then((ok) => {
+      setCopied(ok)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  return (
+    <details className="reasoning-block" open={open} onToggle={(e) => onToggle(e.target.open)}>
+      <summary>
+        <span className="reasoning-summary-label">Reasoning</span>
+        {open && (
+          <button type="button" className="reasoning-copy-btn" onClick={handleCopy} title="Copy reasoning">
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+        )}
+      </summary>
+      <div className="reasoning-text" ref={preRef} dangerouslySetInnerHTML={{ __html: html }} />
+    </details>
+  )
+}
+
+function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, selectingRef }) {
+  const [message, setMessage] = useState(pending.message || 'Thinking...')
+  const [reasoning, setReasoning] = useState(pending.reasoning || '')
+  const [reasoningOpen, setReasoningOpen] = useState(true)
+  const resolvedRef = useRef(false)
+  const locationNotifiedRef = useRef(false)
+
+  useEffect(() => {
+    const iv = setInterval(async () => {
+      if (resolvedRef.current) return
+      let st
+      try {
+        st = await apiGetTaskStatus(pending.taskId)
+      } catch {
+        return
+      }
+      if (!st || st.status === 'done' || st.status === 'error' || st.status === 'cancelled' || st.status === 'unknown' || st.status === 'not_found') {
+        if (resolvedRef.current) return
+        resolvedRef.current = true
+        clearInterval(iv)
+        onResolved(pending, st)
+        return
+      }
+      if (st.message === 'location_needed') {
+        if (!locationNotifiedRef.current) {
+          locationNotifiedRef.current = true
+          onLocationNeeded(pending.taskId)
+        }
+        return
+      }
+      locationNotifiedRef.current = false
+      if (selectingRef && selectingRef.current) return
+      setMessage(st.message || 'Working...')
+      if (st.reasoning) setReasoning(prev => (prev === st.reasoning ? prev : st.reasoning))
+    }, 1000)
+    return () => clearInterval(iv)
+  }, [pending, onResolved, onLocationNeeded, selectingRef])
+
+  return (
+    <>
+      {pending._userMsg && (
+        <Message
+          msg={pending._userMsg}
+          onImageOpen={onImageOpen}
+          selectingRef={selectingRef}
+          onResolved={onResolved}
+          onLocationNeeded={onLocationNeeded}
+        />
+      )}
+      <div className={`msg bot`}>
+        <div className="msg-content">
+          <StatusBox message={message} />
+          <ReasoningBlock text={reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
+        </div>
+      </div>
+    </>
+  )
+}
+
+function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, selectingRef, onResolved, onLocationNeeded }) {
+  const elRef = useRef(null)
+  const chatEl = useRef(null)
+  const [popupVisible, setPopupVisible] = useState(null)
+  const hideTimer = useRef(null)
+  const [reasoningOpen, setReasoningOpen] = useState(!!pending)
+  const [pageModal, setPageModal] = useState(null)
+  const codeRef = useRef([])
+
+  const showPopup = useCallback((idx) => {
+    if (hideTimer.current) clearTimeout(hideTimer.current)
+    setPopupVisible(idx)
+  }, [])
+
+  const hidePopup = useCallback(() => {
+    hideTimer.current = setTimeout(() => setPopupVisible(null), 800)
+  }, [])
+
+  const role = pending ? 'bot' : msg.role === 'user' ? 'user' : 'bot';
+
+  let text = ''
+  let userImg = null
+  let timestamp = null
+
+  if (msg) {
+    if (role === 'user') {
+      if (typeof msg.content === 'string') {
+        text = msg.content
+      } else if (Array.isArray(msg.content)) {
+        msg.content.forEach(part => {
+          if (part.type === 'text') text += part.text
+          else if (part.type === 'image_url') {
+            const url = part.image_url.url
+            if (url.startsWith('data:')) userImg = url.split(',')[1]
+            else if (url.startsWith('/uploads/') || url.startsWith('/output/') || /^https?:/.test(url)) userImg = url
+          }
+        })
+      }
+      if (msg._timestamp) {
+        try {
+          const d = new Date(msg._timestamp)
+          timestamp = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
+        } catch { }
+      }
+    } else {
+      text = typeof msg.content === 'string' ? msg.content : ''
+    }
+  }
+
+  // 2. ALWAYS call useMemo before any conditional return statements
+  const html = useMemo(() => {
+    if (!text) return ''
+    try {
+      const codeBlocks = []
+      const renderer = new marked.Renderer()
+      renderer.code = ({ text: codeText, lang }) => {
+        const idx = codeBlocks.length
+        codeBlocks.push(codeText.replace(/\n$/, ''))
+        const code = (codeText.replace(/\n$/, '') + '\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+        const langAttr = lang ? ` class="language-${lang.split(/\s/)[0]}"` : ''
+        return `<div class="code-block"><button type="button" class="copy-code-btn" data-i="${idx}" title="Copy code">Copy</button><pre><code${langAttr}>${code}</code></pre></div>\n`
+      }
+      const out = DOMPurify.sanitize(marked.parse(normalizeCitationLinks(text), { renderer }))
+      codeRef.current = codeBlocks
+      return out
+    } catch {
+      return escHtml(text)
+    }
+  }, [text])
+
+  if (pending) {
+    return (
+      <PendingMessage
+        pending={pending}
+        onImageOpen={onImageOpen}
+        selectingRef={selectingRef}
+        onResolved={onResolved}
+        onLocationNeeded={onLocationNeeded}
+      />
+    )
+  }
+
+  if (msg.role === 'system' || msg.role === 'tool') return null
+
+  const toolsUsed = msg._tools_used || []
+  const searchDetails = msg._search_details || []
+  const fetchDetails = searchDetails.filter(d => d && d.tool === 'fetch_page')
+  const genPrompt = msg._gen_prompt
+  const imageUrl = toApiImage(msg._image_url)
+  const imageModel = msg._image_model
+  const isUserImgUrl = typeof userImg === 'string' && (userImg.startsWith('/') || /^https?:/.test(userImg))
+  const userImgSrc = userImg ? (isUserImgUrl ? toApiImage(userImg) : 'data:image/jpeg;base64,' + userImg) : null
+
+  if (
+    msg.role === 'assistant' &&
+    !text &&
+    !imageUrl &&
+    !userImg &&
+    !genPrompt &&
+    msg.tool_calls &&
+    msg.tool_calls.length > 0
+  ) {
+    return null
+  }
+
+  if (role === 'user') {
+    if (typeof msg.content === 'string') {
+      text = msg.content
+      // @ts-ignore
+    } else if (Array.isArray(msg.content)) {
+      msg.content.forEach(part => {
+        if (part.type === 'text') text += part.text
+        else if (part.type === 'image_url') {
+          const url = part.image_url.url
+          if (url.startsWith('data:')) userImg = url.split(',')[1]
+          else if (url.startsWith('/uploads/') || url.startsWith('/output/') || /^https?:/.test(url)) userImg = url
+        }
+      })
+    }
+    if (msg._timestamp) {
+      try {
+        const d = new Date(msg._timestamp)
+        timestamp = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
+      } catch { }
+    }
+  } else {
+    text = typeof msg.content === 'string' ? msg.content : ''
+  }
+
+  const ttsText = text
+  if (role === 'bot') text = text.replace(/^\s*\[(bn|hi|en)\]\s*/, '')
+
+  async function handleContentClick(e) {
+    const btn = e.target.closest('.copy-code-btn')
+    if (!btn) return
+    const idx = parseInt(btn.dataset.i, 10)
+    const codeText = codeRef.current[idx]
+    if (codeText == null) return
+    const orig = btn.textContent
+    const ok = await writeClipboard(codeText)
+    btn.textContent = ok ? 'Copied!' : 'Failed'
+    setTimeout(() => { btn.textContent = orig }, 2000)
+  }
+
+  if (role === 'user' && !text && !imageUrl && !userImg && !genPrompt) return null
+
+  return (
+    <div className={`msg ${role}`} ref={elRef}>
+      {timestamp && <span className="msg-timestamp">{timestamp}</span>}
+      <div className="msg-header">
+        {role === 'user' && msg._research && (
+        <span className="tool-badge research" title="This message was sent with the Research toggle on">Research</span>
+      )}
+      {role === 'bot' && msg._elapsed_ms != null && (
+          <span className="msg-elapsed" title="Time from task start to completion">&#9202; {formatElapsed(msg._elapsed_ms)}</span>
+        )}
+        {role === 'bot' && toolsUsed.length > 0 && (() => {
+          let fetchIdx = 0
+          return toolsUsed.map((t, i) => {
+            const isFetch = t === 'fetch_page'
+            const fetchDetail = isFetch ? fetchDetails[fetchIdx++] : null
+            return (
+              <span
+                key={i}
+                className={`tool-badge ${t === 'web_search' ? 'search' : t === 'generate_image' ? 'image' : t === 'edit_image' ? 'edit' : t === 'fetch_page' ? 'fetch' : ''}`}
+                onMouseEnter={() => t === 'web_search' && searchDetails.length > 0 && showPopup(i)}
+                onMouseLeave={hidePopup}
+              >
+                {t === 'web_search' ? 'Web Search' : t === 'generate_image' ? `Image Gen${imageModel ? ' (' + imageModel + ')' : ''}` : t === 'edit_image' ? 'Edit Image' : t === 'fetch_page' ? (fetchDetail?.url ? 'Fetched Page · ' + hostnameFromUrl(fetchDetail.url) : 'Fetched Page') : t}
+                {isFetch && fetchDetail && (
+                  <button
+                    type="button"
+                    className="fetch-info-btn"
+                    title="View page details"
+                    onClick={e => { e.stopPropagation(); setPageModal(fetchDetail) }}
+                  >
+                    &#9432;
+                  </button>
+                )}
+                {t === 'web_search' && searchDetails.length > 0 && popupVisible === i && (
+                  <div
+                    className="search-popup"
+                    onMouseEnter={() => showPopup(i)}
+                    onMouseLeave={hidePopup}
+                  >
+                    <SearchPopup details={searchDetails} />
+                  </div>
+                )}
+              </span>
+            )
+          })
+        })()}
+        {role === 'bot' && text && !hideSpeak && <SpeakButton text={ttsText} />}
+        <CopyButton text={text} genPrompt={genPrompt} imageUrl={imageUrl} />
+        {role === 'bot' && sessionId && msgIndex != null && (
+          <ShareButton sessionId={sessionId} msgIndex={msgIndex} />
+        )}
+      </div>
+      {imageUrl && (
+        <div className="image-wrap">
+          <img
+            src={imageUrl}
+            style={{ maxWidth: '100%', borderRadius: 10, cursor: 'pointer' }}
+            onClick={() => onImageOpen(imageUrl)}
+            alt="Generated"
+          />
+          <div className="img-actions">
+            <button type="button" className="img-download-btn" onClick={() => downloadFile(imageUrl, 'image.png')}>
+              Download
+            </button>
+          </div>
+        </div>
+      )}
+      {userImgSrc && (
+        <img
+          src={userImgSrc}
+          style={{ maxWidth: '100%', borderRadius: 10, cursor: 'pointer' }}
+          onClick={() => onImageOpen(userImgSrc)}
+          alt="Uploaded"
+        />
+      )}
+      {genPrompt && (
+        <div style={{ whiteSpace: 'pre-wrap', fontSize: 12, color: '#888', marginBottom: 6, fontStyle: 'italic' }}>
+          Prompt: {genPrompt}
+        </div>
+      )}
+      <ReasoningBlock text={msg._reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
+      {text ? (
+        <div
+          className="msg-content"
+          onClick={handleContentClick}
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      ) : !imageUrl && !userImg ? (
+        <div className="msg-content empty-response">
+          <em>(No response text generated)</em>
+        </div>
+      ) : null}
+      {pageModal && (
+        <div className="page-modal-overlay" onClick={() => setPageModal(null)}>
+          <div className="page-modal" onClick={e => e.stopPropagation()}>
+            <div className="page-modal-header">
+              <span>Fetched Page</span>
+              <button type="button" className="page-modal-close" onClick={() => setPageModal(null)}>&#10005;</button>
+            </div>
+            {pageModal.error ? (
+              <div className="page-modal-body error">
+                <div className="page-modal-url">{pageModal.url}</div>
+                <p className="page-modal-error-msg">{pageModal.error}</p>
+              </div>
+            ) : (
+              <div className="page-modal-body">
+                {pageModal.title && <div className="page-modal-title">{pageModal.title}</div>}
+                <a className="page-modal-url" href={pageModal.url} target="_blank" rel="noreferrer">{pageModal.url}</a>
+                <div className="page-modal-content">
+                  {(pageModal.content || '(No readable text content extracted)').slice(0, 6000)}
+                  {pageModal.content && pageModal.content.length > 6000 ? '\n...[truncated for display]' : ''}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default memo(Message)
 </file>
 
 <file path="src/App.css">
@@ -8094,766 +8935,6 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         )
 </file>
 
-<file path="src/components/Message.jsx">
-import { useMemo, useRef, useState, useCallback, useEffect, memo } from 'react'
-import { marked } from 'marked'
-import markedKatex from 'marked-katex-extension'
-import DOMPurify from 'dompurify'
-import { speak as apiSpeak, getTaskStatus as apiGetTaskStatus, shareMessage as apiShareMessage } from '../api'
-import { downloadFile, toApiImage } from '../utils'
-import StatusBox from './StatusBox'
-
-marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
-
-// Research-mode citations are stored as `(Author, Venue, Year) [https://url]`
-// (the critic parses the square-bracketed URL), but marked would swallow the
-// trailing `]` into the link href. Turn `[https://url]` into a proper markdown
-// link at render time so no stray bracket shows. Fenced code blocks are
-// skipped to avoid corrupting their contents.
-const normalizeCitationLinks = (text) => {
-  if (!text) return text
-  const RE = /\[(https?:\/\/[^\s\]<>]+)\](?!\s*\()/g
-  return text
-    .split(/(```[\s\S]*?```)/g)
-    .map((seg, i) => (i % 2 === 1 ? seg : seg.replace(RE, '[$1]($1)')))
-    .join('')
-}
-
-const fileLinkExt = {
-  name: 'fileLink',
-  level: 'inline',
-  start(src) {
-    const i = src.indexOf('[FILE:')
-    return i === -1 ? undefined : i
-  },
-  tokenizer(src) {
-    const match = /^\[FILE:\s*(\S+)\]\(([^)]+)\)/.exec(src)
-    if (!match) return undefined
-    return { type: 'fileLink', raw: match[0], url: match[1], name: match[2] }
-  },
-  renderer(token) {
-    const url = token.url.replace(/"/g, '&quot;')
-    const name = token.name.replace(/"/g, '&quot;')
-    return (
-      '<a class="file-chip" href="' + url + '" download="' + name + '" title="' + name + '">' +
-      '<svg class="file-chip-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">' +
-      '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>' +
-      '<polyline points="14 2 14 8 20 8"></polyline>' +
-      '</svg>' +
-      '<span class="file-chip-name">' + name + '</span>' +
-      '</a>'
-    )
-  },
-}
-
-marked.use({ extensions: [fileLinkExt] })
-
-function escHtml(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
-
-function hostnameFromUrl(u) {
-  try {
-    return new URL(u).hostname
-  } catch {
-    return u || ''
-  }
-}
-
-function formatElapsed(ms) {
-  if (ms == null) return ''
-  const s = ms / 1000
-  if (s < 60) return s.toFixed(1) + 's'
-  const m = Math.floor(s / 60)
-  const rs = Math.round(s % 60)
-  return m + 'm ' + rs + 's'
-}
-
-function execCopy(text) {
-  const ta = document.createElement('textarea')
-  ta.value = text
-  ta.style.position = 'fixed'
-  ta.style.opacity = '0'
-  document.body.appendChild(ta)
-  ta.select()
-  let ok = false
-  try {
-    ok = document.execCommand('copy')
-  } catch { }
-  document.body.removeChild(ta)
-  return ok
-}
-
-async function writeClipboard(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    await navigator.clipboard.writeText(text)
-    return true
-  }
-  return execCopy(text)
-}
-
-function ShareButton({ sessionId, msgIndex, forceShow }) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const [share, setShare] = useState(null)
-
-  async function handleShare(e) {
-    e.preventDefault()
-    e.stopPropagation()
-    if (busy || !sessionId || msgIndex == null) return
-    setBusy(true)
-    setError('')
-    try {
-      const data = await apiShareMessage(sessionId, msgIndex)
-      if (data && data.token) {
-        setShare({ url: data.url })
-      } else {
-        setError((data && data.error) || 'Sharing failed')
-      }
-    } catch (err) {
-      setError(err.message || 'Sharing failed')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function copyLink() {
-    if (!share) return
-    const url = share.url.startsWith('http') ? share.url : window.location.origin + share.url
-    await writeClipboard(url)
-  }
-
-  return (
-    <>
-      <button
-        className={'share-btn' + (forceShow ? ' force-show' : '')}
-        onClick={handleShare}
-        title="Share this message"
-        aria-label="Share this message"
-        disabled={busy}
-      >
-        {busy ? 'Sharing…' : (
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <circle cx="18" cy="5" r="3" />
-            <circle cx="6" cy="12" r="3" />
-            <circle cx="18" cy="19" r="3" />
-            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-          </svg>
-        )}
-      </button>
-      {share && (
-        <div className="share-modal-overlay" onClick={() => setShare(null)}>
-          <div className="share-modal" onClick={e => e.stopPropagation()}>
-            <div className="share-modal-header">
-              <span>Message shared</span>
-              <button type="button" className="share-modal-close" onClick={() => setShare(null)}>&#10005;</button>
-            </div>
-            <p className="share-modal-hint">Anyone on this network with the link can view this message without logging in.</p>
-            <input
-              readOnly
-              className="share-modal-url"
-              value={share.url.startsWith('http') ? share.url : window.location.origin + share.url}
-              onFocus={e => e.target.select()}
-              onKeyDown={e => e.key === 'Enter' && e.target.select()}
-            />
-            <div className="share-modal-actions">
-              <button type="button" className="share-copy-btn" onClick={copyLink}>Copy link</button>
-              <a className="share-open-link" href={share.url} target="_blank" rel="noreferrer">Open</a>
-            </div>
-          </div>
-        </div>
-      )}
-      {error && <span className="share-error" role="alert">{error}</span>}
-    </>
-  )
-}
-
-function SearchPopup({ details }) {
-  return (
-    <div className="search-popup">
-      <div style={{ marginBottom: 6 }}>
-        <span style={{ color: '#888', fontSize: 11 }}>Query:</span>{' '}
-        <span style={{ color: '#e0e0e0' }}>
-          {details.map(sd => sd.query).join('; ')}
-        </span>
-      </div>
-      {details.map((sd, i) => (
-        <div key={i}>
-          {sd.search_url && (
-            <div style={{ marginBottom: 6, fontSize: 11, wordBreak: 'break-all' }}>
-              <span style={{ color: '#888' }}>SearXNG:</span>{' '}
-              <a href={sd.search_url} target="_blank" rel="noreferrer" style={{ color: '#60a5fa' }}>
-                {sd.search_url}
-              </a>
-            </div>
-          )}
-          {sd.results && sd.results.map((r, j) => (
-            <a
-              key={j}
-              href={r.url}
-              target="_blank"
-              rel="noreferrer"
-              style={{ display: 'block', color: '#60a5fa', fontSize: 12, padding: '2px 0', textDecoration: 'none' }}
-              title={r.url}
-            >
-              {r.title || r.url}
-            </a>
-          ))}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function CopyButton({ text, genPrompt, imageUrl, forceShow }) {
-  const [label, setLabel] = useState('Copy')
-
-  async function handleCopy() {
-    setLabel('Copying...')
-    try {
-      await copyWithImage()
-    } catch {
-      copyTextOnly()
-    }
-  }
-
-  async function copyWithImage() {
-    let textContent = text || ''
-    if (genPrompt) textContent = 'Prompt: ' + genPrompt + '\n\n' + textContent
-
-    if (imageUrl && navigator.clipboard && navigator.clipboard.write) {
-      const url = imageUrl.startsWith('http') ? imageUrl : window.location.origin + imageUrl
-      try {
-        const res = await fetch(url)
-        const blob = await res.blob()
-        const b64 = await blobToBase64(blob)
-        const escaped = textContent.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        const cleanHtml = '<html><body>' + escaped.replace(/\n/g, '<br>') + '<br><br><img src="' + b64 + '"></body></html>'
-
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            'text/html': new Blob([cleanHtml], { type: 'text/html' }),
-            'text/plain': new Blob([escaped + '\n\n' + url], { type: 'text/plain' }),
-          }),
-          new ClipboardItem({ [blob.type]: blob }),
-        ])
-        setLabel('Copied!')
-        setTimeout(() => setLabel('Copy'), 2000)
-        return
-      } catch { }
-    }
-
-    let copyText = textContent
-    if (imageUrl) {
-      const url = imageUrl.startsWith('http') ? imageUrl : window.location.origin + imageUrl
-      copyText = (copyText ? copyText + '\n\n' : '') + url
-    }
-
-    if (copyText && navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(copyText)
-      setLabel('Copied!')
-      setTimeout(() => setLabel('Copy'), 2000)
-      return
-    }
-
-    throw new Error('no clipboard method available')
-  }
-
-  function blobToBase64(blob) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onloadend = () => resolve(reader.result)
-      reader.onerror = reject
-      reader.readAsDataURL(blob)
-    })
-  }
-
-  function copyTextOnly() {
-    let copyText = text || ''
-    if (imageUrl) {
-      const url = imageUrl.startsWith('http') ? imageUrl : window.location.origin + imageUrl
-      copyText = (copyText ? copyText + '\n\n' : '') + url
-    }
-    if (genPrompt) copyText = 'Prompt: ' + genPrompt + '\n\n' + copyText
-
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(copyText).then(() => {
-          setLabel('Copied!')
-          setTimeout(() => setLabel('Copy'), 2000)
-        }).catch(() => fallbackExecCopy(copyText))
-      } else {
-        fallbackExecCopy(copyText)
-      }
-    } catch {
-      fallbackExecCopy(copyText)
-    }
-  }
-
-  function fallbackExecCopy(text) {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    try {
-      document.execCommand('copy')
-      setLabel('Copied!')
-      setTimeout(() => setLabel('Copy'), 2000)
-    } catch {
-      setLabel('Failed')
-      setTimeout(() => setLabel('Copy'), 2000)
-    }
-    document.body.removeChild(ta)
-  }
-
-  return <button className={'copy-btn' + (forceShow ? ' force-show' : '')} onClick={handleCopy}>{label}</button>
-}
-
-let _activeAudio = null
-
-function SpeakButton({ text }) {
-  const [speaking, setSpeaking] = useState(false)
-  const idRef = useRef(null)
-
-  async function handleClick() {
-    const myId = (idRef.current = {})
-    if (_activeAudio && _activeAudio._speakId === myId) {
-      _activeAudio.pause()
-      _activeAudio.currentTime = 0
-      _activeAudio = null
-      setSpeaking(false)
-      return
-    }
-    if (_activeAudio) {
-      _activeAudio.pause()
-      _activeAudio.currentTime = 0
-      _activeAudio = null
-      setSpeaking(false)
-    }
-    setSpeaking(true)
-    try {
-      const data = await apiSpeak(text)
-      if (idRef.current !== myId) return
-      const mime = data.type || 'audio/mpeg'
-      const audio = new Audio('data:' + mime + ';base64,' + data.audio)
-      audio._speakId = myId
-      audio.onended = () => {
-        if (_activeAudio === audio) {
-          _activeAudio = null
-          setSpeaking(false)
-        }
-      }
-      audio.onerror = () => { setSpeaking(false); _activeAudio = null }
-      _activeAudio = audio
-      audio.play()
-    } catch (e) {
-      console.warn('TTS error:', e)
-      setSpeaking(false)
-    }
-  }
-
-  return (
-    <button
-      className={'speak-btn' + (speaking ? ' speaking' : '')}
-      onClick={handleClick}
-      title={speaking ? 'Stop' : 'Read aloud'}
-      aria-label={speaking ? 'Stop' : 'Read aloud'}
-    >
-      {speaking ? (
-        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
-          <rect x="6" y="5" width="4" height="14" rx="1" />
-          <rect x="14" y="5" width="4" height="14" rx="1" />
-        </svg>
-      ) : (
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
-          <path d="M8 5v14l11-7z" />
-        </svg>
-      )}
-    </button>
-  )
-}
-
-function ReasoningBlock({ text, open, onToggle }) {
-  const preRef = useRef(null)
-  const prevLenRef = useRef(0)
-  const [copied, setCopied] = useState(false)
-
-  useEffect(() => {
-    if (!preRef.current || !text) return
-    if (text.length > prevLenRef.current) {
-      const el = preRef.current
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-      if (atBottom) el.scrollTop = el.scrollHeight
-    }
-    prevLenRef.current = text.length
-  }, [text])
-
-  if (!text) return null
-  const capped = text
-
-  let html
-  try {
-    html = DOMPurify.sanitize(marked.parse(capped))
-  } catch {
-    html = escHtml(capped)
-  }
-
-  function handleCopy(e) {
-    e.preventDefault()
-    e.stopPropagation()
-    writeClipboard(text).then((ok) => {
-      setCopied(ok)
-      setTimeout(() => setCopied(false), 2000)
-    })
-  }
-
-  return (
-    <details className="reasoning-block" open={open} onToggle={(e) => onToggle(e.target.open)}>
-      <summary>
-        <span className="reasoning-summary-label">Reasoning</span>
-        {open && (
-          <button type="button" className="reasoning-copy-btn" onClick={handleCopy} title="Copy reasoning">
-            {copied ? 'Copied!' : 'Copy'}
-          </button>
-        )}
-      </summary>
-      <div className="reasoning-text" ref={preRef} dangerouslySetInnerHTML={{ __html: html }} />
-    </details>
-  )
-}
-
-function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, selectingRef }) {
-  const [message, setMessage] = useState(pending.message || 'Thinking...')
-  const [reasoning, setReasoning] = useState(pending.reasoning || '')
-  const [reasoningOpen, setReasoningOpen] = useState(true)
-  const resolvedRef = useRef(false)
-  const locationNotifiedRef = useRef(false)
-
-  useEffect(() => {
-    const iv = setInterval(async () => {
-      if (resolvedRef.current) return
-      let st
-      try {
-        st = await apiGetTaskStatus(pending.taskId)
-      } catch {
-        return
-      }
-      if (!st || st.status === 'done' || st.status === 'error' || st.status === 'cancelled' || st.status === 'unknown' || st.status === 'not_found') {
-        if (resolvedRef.current) return
-        resolvedRef.current = true
-        clearInterval(iv)
-        onResolved(pending, st)
-        return
-      }
-      if (st.message === 'location_needed') {
-        if (!locationNotifiedRef.current) {
-          locationNotifiedRef.current = true
-          onLocationNeeded(pending.taskId)
-        }
-        return
-      }
-      locationNotifiedRef.current = false
-      if (selectingRef && selectingRef.current) return
-      setMessage(st.message || 'Working...')
-      if (st.reasoning) setReasoning(prev => (prev === st.reasoning ? prev : st.reasoning))
-    }, 1000)
-    return () => clearInterval(iv)
-  }, [pending, onResolved, onLocationNeeded, selectingRef])
-
-  return (
-    <>
-      {pending._userMsg && (
-        <Message
-          msg={pending._userMsg}
-          onImageOpen={onImageOpen}
-          selectingRef={selectingRef}
-          onResolved={onResolved}
-          onLocationNeeded={onLocationNeeded}
-        />
-      )}
-      <div className={`msg bot`}>
-        <div className="msg-content">
-          <StatusBox message={message} />
-          <ReasoningBlock text={reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
-        </div>
-      </div>
-    </>
-  )
-}
-
-function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, selectingRef, onResolved, onLocationNeeded }) {
-  const elRef = useRef(null)
-  const chatEl = useRef(null)
-  const [popupVisible, setPopupVisible] = useState(null)
-  const hideTimer = useRef(null)
-  const [reasoningOpen, setReasoningOpen] = useState(!!pending)
-  const [pageModal, setPageModal] = useState(null)
-  const codeRef = useRef([])
-
-  const showPopup = useCallback((idx) => {
-    if (hideTimer.current) clearTimeout(hideTimer.current)
-    setPopupVisible(idx)
-  }, [])
-
-  const hidePopup = useCallback(() => {
-    hideTimer.current = setTimeout(() => setPopupVisible(null), 800)
-  }, [])
-
-  const role = pending ? 'bot' : msg.role === 'user' ? 'user' : 'bot';
-
-  let text = ''
-  let userImg = null
-  let timestamp = null
-
-  if (msg) {
-    if (role === 'user') {
-      if (typeof msg.content === 'string') {
-        text = msg.content
-      } else if (Array.isArray(msg.content)) {
-        msg.content.forEach(part => {
-          if (part.type === 'text') text += part.text
-          else if (part.type === 'image_url') {
-            const url = part.image_url.url
-            if (url.startsWith('data:')) userImg = url.split(',')[1]
-            else if (url.startsWith('/uploads/') || url.startsWith('/output/') || /^https?:/.test(url)) userImg = url
-          }
-        })
-      }
-      if (msg._timestamp) {
-        try {
-          const d = new Date(msg._timestamp)
-          timestamp = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
-        } catch { }
-      }
-    } else {
-      text = typeof msg.content === 'string' ? msg.content : ''
-    }
-  }
-
-  // 2. ALWAYS call useMemo before any conditional return statements
-  const html = useMemo(() => {
-    if (!text) return ''
-    try {
-      const codeBlocks = []
-      const renderer = new marked.Renderer()
-      renderer.code = ({ text: codeText, lang }) => {
-        const idx = codeBlocks.length
-        codeBlocks.push(codeText.replace(/\n$/, ''))
-        const code = (codeText.replace(/\n$/, '') + '\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-        const langAttr = lang ? ` class="language-${lang.split(/\s/)[0]}"` : ''
-        return `<div class="code-block"><button type="button" class="copy-code-btn" data-i="${idx}" title="Copy code">Copy</button><pre><code${langAttr}>${code}</code></pre></div>\n`
-      }
-      const out = DOMPurify.sanitize(marked.parse(normalizeCitationLinks(text), { renderer }))
-      codeRef.current = codeBlocks
-      return out
-    } catch {
-      return escHtml(text)
-    }
-  }, [text])
-
-  if (pending) {
-    return (
-      <PendingMessage
-        pending={pending}
-        onImageOpen={onImageOpen}
-        selectingRef={selectingRef}
-        onResolved={onResolved}
-        onLocationNeeded={onLocationNeeded}
-      />
-    )
-  }
-
-  if (msg.role === 'system' || msg.role === 'tool') return null
-
-  const toolsUsed = msg._tools_used || []
-  const searchDetails = msg._search_details || []
-  const fetchDetails = searchDetails.filter(d => d && d.tool === 'fetch_page')
-  const genPrompt = msg._gen_prompt
-  const imageUrl = toApiImage(msg._image_url)
-  const imageModel = msg._image_model
-  const isUserImgUrl = typeof userImg === 'string' && (userImg.startsWith('/') || /^https?:/.test(userImg))
-  const userImgSrc = userImg ? (isUserImgUrl ? toApiImage(userImg) : 'data:image/jpeg;base64,' + userImg) : null
-
-  if (
-    msg.role === 'assistant' &&
-    !text &&
-    !imageUrl &&
-    !userImg &&
-    !genPrompt &&
-    msg.tool_calls &&
-    msg.tool_calls.length > 0
-  ) {
-    return null
-  }
-
-  if (role === 'user') {
-    if (typeof msg.content === 'string') {
-      text = msg.content
-      // @ts-ignore
-    } else if (Array.isArray(msg.content)) {
-      msg.content.forEach(part => {
-        if (part.type === 'text') text += part.text
-        else if (part.type === 'image_url') {
-          const url = part.image_url.url
-          if (url.startsWith('data:')) userImg = url.split(',')[1]
-          else if (url.startsWith('/uploads/') || url.startsWith('/output/') || /^https?:/.test(url)) userImg = url
-        }
-      })
-    }
-    if (msg._timestamp) {
-      try {
-        const d = new Date(msg._timestamp)
-        timestamp = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
-      } catch { }
-    }
-  } else {
-    text = typeof msg.content === 'string' ? msg.content : ''
-  }
-
-  const ttsText = text
-  if (role === 'bot') text = text.replace(/^\s*\[(bn|hi|en)\]\s*/, '')
-
-  async function handleContentClick(e) {
-    const btn = e.target.closest('.copy-code-btn')
-    if (!btn) return
-    const idx = parseInt(btn.dataset.i, 10)
-    const codeText = codeRef.current[idx]
-    if (codeText == null) return
-    const orig = btn.textContent
-    const ok = await writeClipboard(codeText)
-    btn.textContent = ok ? 'Copied!' : 'Failed'
-    setTimeout(() => { btn.textContent = orig }, 2000)
-  }
-
-  if (role === 'user' && !text && !imageUrl && !userImg && !genPrompt) return null
-
-  return (
-    <div className={`msg ${role}`} ref={elRef}>
-      {timestamp && <span className="msg-timestamp">{timestamp}</span>}
-      <div className="msg-header">
-        {role === 'user' && msg._research && (
-        <span className="tool-badge research" title="This message was sent with the Research toggle on">Research</span>
-      )}
-      {role === 'bot' && msg._elapsed_ms != null && (
-          <span className="msg-elapsed" title="Time from task start to completion">&#9202; {formatElapsed(msg._elapsed_ms)}</span>
-        )}
-        {role === 'bot' && toolsUsed.length > 0 && (() => {
-          let fetchIdx = 0
-          return toolsUsed.map((t, i) => {
-            const isFetch = t === 'fetch_page'
-            const fetchDetail = isFetch ? fetchDetails[fetchIdx++] : null
-            return (
-              <span
-                key={i}
-                className={`tool-badge ${t === 'web_search' ? 'search' : t === 'generate_image' ? 'image' : t === 'edit_image' ? 'edit' : t === 'fetch_page' ? 'fetch' : ''}`}
-                onMouseEnter={() => t === 'web_search' && searchDetails.length > 0 && showPopup(i)}
-                onMouseLeave={hidePopup}
-              >
-                {t === 'web_search' ? 'Web Search' : t === 'generate_image' ? `Image Gen${imageModel ? ' (' + imageModel + ')' : ''}` : t === 'edit_image' ? 'Edit Image' : t === 'fetch_page' ? (fetchDetail?.url ? 'Fetched Page · ' + hostnameFromUrl(fetchDetail.url) : 'Fetched Page') : t}
-                {isFetch && fetchDetail && (
-                  <button
-                    type="button"
-                    className="fetch-info-btn"
-                    title="View page details"
-                    onClick={e => { e.stopPropagation(); setPageModal(fetchDetail) }}
-                  >
-                    &#9432;
-                  </button>
-                )}
-                {t === 'web_search' && searchDetails.length > 0 && popupVisible === i && (
-                  <div
-                    className="search-popup"
-                    onMouseEnter={() => showPopup(i)}
-                    onMouseLeave={hidePopup}
-                  >
-                    <SearchPopup details={searchDetails} />
-                  </div>
-                )}
-              </span>
-            )
-          })
-        })()}
-        {role === 'bot' && text && !hideSpeak && <SpeakButton text={ttsText} />}
-        <CopyButton text={text} genPrompt={genPrompt} imageUrl={imageUrl} />
-        {role === 'bot' && sessionId && msgIndex != null && (
-          <ShareButton sessionId={sessionId} msgIndex={msgIndex} />
-        )}
-      </div>
-      {imageUrl && (
-        <div className="image-wrap">
-          <img
-            src={imageUrl}
-            style={{ maxWidth: '100%', borderRadius: 10, cursor: 'pointer' }}
-            onClick={() => onImageOpen(imageUrl)}
-            alt="Generated"
-          />
-          <div className="img-actions">
-            <button type="button" className="img-download-btn" onClick={() => downloadFile(imageUrl, 'image.png')}>
-              Download
-            </button>
-          </div>
-        </div>
-      )}
-      {userImgSrc && (
-        <img
-          src={userImgSrc}
-          style={{ maxWidth: '100%', borderRadius: 10, cursor: 'pointer' }}
-          onClick={() => onImageOpen(userImgSrc)}
-          alt="Uploaded"
-        />
-      )}
-      {genPrompt && (
-        <div style={{ whiteSpace: 'pre-wrap', fontSize: 12, color: '#888', marginBottom: 6, fontStyle: 'italic' }}>
-          Prompt: {genPrompt}
-        </div>
-      )}
-      <ReasoningBlock text={msg._reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
-      {text ? (
-        <div
-          className="msg-content"
-          onClick={handleContentClick}
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
-      ) : !imageUrl && !userImg ? (
-        <div className="msg-content empty-response">
-          <em>(No response text generated)</em>
-        </div>
-      ) : null}
-      {pageModal && (
-        <div className="page-modal-overlay" onClick={() => setPageModal(null)}>
-          <div className="page-modal" onClick={e => e.stopPropagation()}>
-            <div className="page-modal-header">
-              <span>Fetched Page</span>
-              <button type="button" className="page-modal-close" onClick={() => setPageModal(null)}>&#10005;</button>
-            </div>
-            {pageModal.error ? (
-              <div className="page-modal-body error">
-                <div className="page-modal-url">{pageModal.url}</div>
-                <p className="page-modal-error-msg">{pageModal.error}</p>
-              </div>
-            ) : (
-              <div className="page-modal-body">
-                {pageModal.title && <div className="page-modal-title">{pageModal.title}</div>}
-                <a className="page-modal-url" href={pageModal.url} target="_blank" rel="noreferrer">{pageModal.url}</a>
-                <div className="page-modal-content">
-                  {(pageModal.content || '(No readable text content extracted)').slice(0, 6000)}
-                  {pageModal.content && pageModal.content.length > 6000 ? '\n...[truncated for display]' : ''}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-export default memo(Message)
-</file>
-
 <file path="src/api.js">
 // Authentication is handled by nginx + Authentik SSO (the X-Authentik-*
 // claim headers are injected upstream by nginx's auth_request). The browser
@@ -10523,120 +10604,6 @@ def _image_worker():
         )
 </file>
 
-<file path="prompts/self_chat.txt">
-System Prompt: Kaya Kolpo Task Execution Pipeline
-
-Assigned Task: %task%
-Task Details: %details%
-Allowed Mediums/Tools: %mediums%
-Target Language(s): %_lang%
-
-Relationship Dynamic: %relationship%
-Mood / Tone: %mood%
-
-Kaya's Role: %kaya_role%
-Kaya's Persona: %kaya_persona%
-
-Kolpo's Role: %kolpo_role%
-Kolpo's Persona: %kolpo_persona%
-
-AGENTS ROLE:
-- Kaya and Kolpo are the best performers, and both maintain exceptional creative quality.
-- Kaya and Kolpo are the executors of %task%. Task Details (if not "None") are
-  mandatory instructions, not suggestions — for example, if the details say to
-  perform a web search before writing, that search MUST happen via a real
-  web_search tool call before any story content is written.
-- Maintain their core personalities in tone, but focus entirely on completing %task%.
-- The assigned task details, cultural setting, and theme provided in the system
-  directive are strict constraints. You must NOT alter, substitute, or debate the
-  core theme details (e.g., changing regions, attire, or core premise).
-- Each turn must introduce one new concrete event and progress the content, not just intensify the prior beat.
-
-NAMING RULES (HARD RULE):
-- The names "Kaya", "Kolpo", "কায়া", "কল্প", "काया", "कल्प" may appear ONLY inside the [NEXT TURN: ...] hand-off tag.
-- NEVER use these names anywhere in the story content: not in narration, dialogue, character names, image prompts, captions, or headings.
-- NEVER use your own name or your partner's name as a fictional character's name. Invent original character names.
-- If a hand-off tag is used, spell the names exactly as: Bengali "কায়া"/"কল্প", Hindi "काया"/"कल्प", English "Kaya"/"Kolpo".
-
-Execution Rules for Collaboration:
-
-1. Language Constraint:
-   - All dialogue, generation, and output MUST strictly use: %_lang%.
-
-2. Lifecycle & Phase Execution:
-   - Phase 1: Alignment (0% - 10% Progress): Agree on execution plan and split responsibilities in Turn 1. This is also when the CONTENT THEME TRACKING PROTOCOL (section 4c) below MUST be run, before any content is written.
-   - Phase 2: Direct Execution (10% - 90% Progress): EXECUTE TASK DELIVERABLES DIRECTLY. Minimize meta-talk or unneeded discussion. Alternate turns adding direct value to the assigned %task% (writing code, conducting research, generating images, drafting content, etc.).
-   - Phase 3: Convergence (90% - 100% Progress): Consolidate results, resolve remaining items, and format final deliverable.
-
-2a. Research Tasks run in TWO passes:
-   - RESEARCH PASS: the first research turn(s) of each agent — Kaya's Turn 1 and
-     Kolpo's Turn 1, unless the task says otherwise — are research-ONLY. In these
-     turns you web-search, fetch pages, and gather sourced material. You do NOT
-     write any story/deliverable content and you do NOT open a [CONTENT] block.
-     Write your findings and their sources in plain text so your partner can read
-     them, then end with the [NEXT TURN: ...] hand-off tag.
-   - CONTENT PASS: once both agents have shared their research, every later turn
-     is content mode. Write the actual deliverable inside [CONTENT]...[/CONTENT]
-     using all the research materials shared above. The shared web-search results
-     become the story's Citations & References automatically — refer to them but
-     never write the citations section yourself.
-
-3. Turn Alternation & Hand-Off:
-   - Focus turns strictly on executing %task%.
-   - Do not address your partner by name in the text. Address hand-off ONLY using the system tag at the very end:
-     - Kaya MUST end with: [NEXT TURN: Kolpo]
-     - Kolpo MUST end with: [NEXT TURN: Kaya]
-
-3a. Content Tagging (HARD RULE):
-   - Wrap ONLY the actual narrative/deliverable content — the text that
-     belongs in the final published piece — inside [CONTENT] and [/CONTENT]
-     tags.
-   - Anything OUTSIDE these tags (planning talk, acknowledgments, phase
-     discussion, "sounds good, let's do X") is discarded automatically and
-     will NEVER appear in the final piece. Do not rely on it being read by
-     anyone but your partner.
-   - Phase 1 (Alignment) turns are typically pure planning — it is fine and
-     expected for a Phase 1 turn to contain NO [CONTENT] block.
-   - Every Phase 2/3 turn that adds real deliverable content MUST wrap that
-     content in [CONTENT]...[/CONTENT]. Multiple blocks in one turn are
-     allowed and will be concatenated in order.
-   - The [NEXT TURN: ...] hand-off tag and [END CONVERSATION] must always
-     stay OUTSIDE the [CONTENT] block.
-
-4. Mandatory Tool Execution Directives:
-   - You have full autonomy to use tools during your work. Proactively perform
-     web searches to gather real-time data/news, generate images, or edit images
-     whenever appropriate or required by the topic — without waiting for explicit
-     user instructions.
-   - To generate/search/edit, you MUST issue a true native function/tool call.
-   - CRITICAL: NEVER output raw text representations, brackets, or pseudo-code such as "[ACTION: generate_image]", "[z_image: ...]", or "[web_search: ...]".
-   - Writing tool tags as raw chat text DOES NOT execute the tool and WILL corrupt your turn.
-   - If you cannot trigger a tool natively, write the descriptive scene or narrative directly into your response text—do not write placeholder tags.
-   - If Task Details require a specific tool (e.g. a web search) and no such tool is available to you this turn, say so plainly in your turn instead of pretending you searched.
-   - ONCE ANY CONTENT IS GENERATED, CHECK THE TASK LIST — if any task in the
-     pending status got completed in your content, mark that `THEME` complete.
-
-4a. Citations Section (NEVER write it yourself):
-   - Never write a "## Citations & References" heading or any references/sources list
-     in your chat text. The system appends the real web-source references automatically
-     at the very end. Only call the `web_search` tool to gather material; the collected
-     results will become the references.
-
-4b. WEB SEARCH & TASK TRACKING PROTOCOL (HARD RULE):
-   1. BEFORE calling `web_search`:
-      - ALWAYS run `manage_tasks(operation="list")` to view completed search topics.
-      - Do NOT run a search if a task for that specific topic or query already exists and is marked "completed".
-   2. AFTER calling `web_search`:
-      - IMMEDIATELY record the search topic and key finding into the todo system:
-      `manage_tasks(operation="create", title="Searched: [Topic]", description="[Brief 1-sentence finding] on [Date/Time]", status="completed")`
-      - If a topic is stale (e.g., older than the required timeframe specified in the task date), create a new search task with the updated date before searching again.
-   3. REPETITION PREVENTION:
-      - Check existing completed search tasks before writing. Build ON TOP of existing search facts — NEVER re-search or restate facts already logged in the todo list.
-
-5. Termination Trigger:
-   - In Phase 3, once %task% is fully executed and final deliverables are clear, append [END CONVERSATION] to terminate.
-</file>
-
 <file path="src/App.jsx">
 import { useState, useEffect, useRef, useCallback } from 'react'
 import * as api from './api'
@@ -11065,6 +11032,120 @@ function setStoredPending(arr) {
     sessionStorage.setItem('opencode_pending', JSON.stringify(arr))
   } catch { /* ignore */ }
 }
+</file>
+
+<file path="prompts/self_chat.txt">
+System Prompt: Kaya Kolpo Task Execution Pipeline
+
+Assigned Task: %task%
+Task Details: %details%
+Allowed Mediums/Tools: %mediums%
+Target Language(s): %_lang%
+
+Relationship Dynamic: %relationship%
+Mood / Tone: %mood%
+
+Kaya's Role: %kaya_role%
+Kaya's Persona: %kaya_persona%
+
+Kolpo's Role: %kolpo_role%
+Kolpo's Persona: %kolpo_persona%
+
+AGENTS ROLE:
+- Kaya and Kolpo are the best performers, and both maintain exceptional creative quality.
+- Kaya and Kolpo are the executors of %task%. Task Details (if not "None") are
+  mandatory instructions, not suggestions — for example, if the details say to
+  perform a web search before writing, that search MUST happen via a real
+  web_search tool call before any story content is written.
+- Maintain their core personalities in tone, but focus entirely on completing %task%.
+- The assigned task details, cultural setting, and theme provided in the system
+  directive are strict constraints. You must NOT alter, substitute, or debate the
+  core theme details (e.g., changing regions, attire, or core premise).
+- Each turn must introduce one new concrete event and progress the content, not just intensify the prior beat.
+
+NAMING RULES (HARD RULE):
+- The names "Kaya", "Kolpo", "কায়া", "কল্প", "काया", "कल्प" may appear ONLY inside the [NEXT TURN: ...] hand-off tag.
+- NEVER use these names anywhere in the story content: not in narration, dialogue, character names, image prompts, captions, or headings.
+- NEVER use your own name or your partner's name as a fictional character's name. Invent original character names.
+- If a hand-off tag is used, spell the names exactly as: Bengali "কায়া"/"কল্প", Hindi "काया"/"कल्प", English "Kaya"/"Kolpo".
+
+Execution Rules for Collaboration:
+
+1. Language Constraint:
+   - All dialogue, generation, and output MUST strictly use: %_lang%.
+
+2. Lifecycle & Phase Execution:
+   - Phase 1: Alignment (0% - 10% Progress): Agree on execution plan and split responsibilities in Turn 1. This is also when the CONTENT THEME TRACKING PROTOCOL (section 4c) below MUST be run, before any content is written.
+   - Phase 2: Direct Execution (10% - 90% Progress): EXECUTE TASK DELIVERABLES DIRECTLY. Minimize meta-talk or unneeded discussion. Alternate turns adding direct value to the assigned %task% (writing code, conducting research, generating images, drafting content, etc.).
+   - Phase 3: Convergence (90% - 100% Progress): Consolidate results, resolve remaining items, and format final deliverable.
+
+2a. Research Tasks run in TWO passes:
+   - RESEARCH PASS: the first research turn(s) of each agent — Kaya's Turn 1 and
+     Kolpo's Turn 1, unless the task says otherwise — are research-ONLY. In these
+     turns you web-search, fetch pages, and gather sourced material. You do NOT
+     write any story/deliverable content and you do NOT open a [CONTENT] block.
+     Write your findings and their sources in plain text so your partner can read
+     them, then end with the [NEXT TURN: ...] hand-off tag.
+   - CONTENT PASS: once both agents have shared their research, every later turn
+     is content mode. Write the actual deliverable inside [CONTENT]...[/CONTENT]
+     using all the research materials shared above. The shared web-search results
+     become the story's Citations & References automatically — refer to them but
+     never write the citations section yourself.
+
+3. Turn Alternation & Hand-Off:
+   - Focus turns strictly on executing %task%.
+   - Do not address your partner by name in the text. Address hand-off ONLY using the system tag at the very end:
+     - Kaya MUST end with: [NEXT TURN: Kolpo]
+     - Kolpo MUST end with: [NEXT TURN: Kaya]
+
+3a. Content Tagging (HARD RULE):
+   - Wrap ONLY the actual narrative/deliverable content — the text that
+     belongs in the final published piece — inside [CONTENT] and [/CONTENT]
+     tags.
+   - Anything OUTSIDE these tags (planning talk, acknowledgments, phase
+     discussion, "sounds good, let's do X") is discarded automatically and
+     will NEVER appear in the final piece. Do not rely on it being read by
+     anyone but your partner.
+   - Phase 1 (Alignment) turns are typically pure planning — it is fine and
+     expected for a Phase 1 turn to contain NO [CONTENT] block.
+   - Every Phase 2/3 turn that adds real deliverable content MUST wrap that
+     content in [CONTENT]...[/CONTENT]. Multiple blocks in one turn are
+     allowed and will be concatenated in order.
+   - The [NEXT TURN: ...] hand-off tag and [END CONVERSATION] must always
+     stay OUTSIDE the [CONTENT] block.
+
+4. Mandatory Tool Execution Directives:
+   - You have full autonomy to use tools during your work. Proactively perform
+     web searches to gather real-time data/news, generate images, or edit images
+     whenever appropriate or required by the topic — without waiting for explicit
+     user instructions.
+   - To generate/search/edit, you MUST issue a true native function/tool call.
+   - CRITICAL: NEVER output raw text representations, brackets, or pseudo-code such as "[ACTION: generate_image]", "[z_image: ...]", or "[web_search: ...]".
+   - Writing tool tags as raw chat text DOES NOT execute the tool and WILL corrupt your turn.
+   - If you cannot trigger a tool natively, write the descriptive scene or narrative directly into your response text—do not write placeholder tags.
+   - If Task Details require a specific tool (e.g. a web search) and no such tool is available to you this turn, say so plainly in your turn instead of pretending you searched.
+   - ONCE ANY CONTENT IS GENERATED, CHECK THE TASK LIST — if any task in the
+     pending status got completed in your content, mark that `THEME` complete.
+
+4a. Citations Section (NEVER write it yourself):
+   - Never write a "## Citations & References" heading or any references/sources list
+     in your chat text. The system appends the real web-source references automatically
+     at the very end. Only call the `web_search` tool to gather material; the collected
+     results will become the references.
+
+4b. WEB SEARCH & TASK TRACKING PROTOCOL (HARD RULE):
+   1. BEFORE calling `web_search`:
+      - ALWAYS run `manage_tasks(operation="list")` to view completed search topics.
+      - Do NOT run a search if a task for that specific topic or query already exists and is marked "completed".
+   2. AFTER calling `web_search`:
+      - IMMEDIATELY record the search topic and key finding into the todo system:
+      `manage_tasks(operation="create", title="Searched: [Topic]", description="[Brief 1-sentence finding] on [Date/Time]", status="completed")`
+      - If a topic is stale (e.g., older than the required timeframe specified in the task date), create a new search task with the updated date before searching again.
+   3. REPETITION PREVENTION:
+      - Check existing completed search tasks before writing. Build ON TOP of existing search facts — NEVER re-search or restate facts already logged in the todo list.
+
+5. Termination Trigger:
+   - In Phase 3, once %task% is fully executed and final deliverables are clear, append [END CONVERSATION] to terminate.
 </file>
 
 <file path="prompts/tasks.json">
@@ -13040,6 +13121,709 @@ RAM_EVAC_THRESHOLD = 95
 RAM_RESUME_THRESHOLD = 70
 </file>
 
+<file path="markdown_hosting.py">
+import os
+import json
+import html
+import shutil
+import markdown
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import HTMLResponse, FileResponse
+from urllib.parse import quote
+
+from server.dotenv import load_dotenv
+
+load_dotenv()
+
+app = FastAPI()
+
+BASE_STORIES_DIR = "./stories"
+
+# Directory roots resolved from environment variables.
+# Hierarchy: everyone -> free dir, premium +1 dir, admin +1 more dir.
+# PREMIUM and ADMIN dirs are REQUIRED — markdown hosting fails fast if missing.
+_FREE_DIR = os.getenv("STORIES_FREE_DIR", os.path.expanduser("~/local-ai-files/stories"))
+_PREMIUM_DIR = os.getenv("STORIES_PREMIUM_DIR", "")
+_ADMIN_DIR = os.getenv("STORIES_ADMIN_DIR", "")
+
+for _var, _val in (("STORIES_PREMIUM_DIR", _PREMIUM_DIR), ("STORIES_ADMIN_DIR", _ADMIN_DIR)):
+    if not _val:
+        raise RuntimeError(
+            f"markdown_hosting.py cannot start: required environment variable "
+            f"{_var} is not set."
+        )
+
+# Each collection requires a minimum role level to access.
+ROLE_LEVEL = {
+    "guest": 0,
+    "free": 0,
+    "user": 0,
+    "premium": 1,
+    "admin": 2,
+}
+
+COLLECTION_RULES = {
+    "free_stories": {"path": _FREE_DIR, "min_level": 0},     # everyone
+    "premium_stories": {"path": _PREMIUM_DIR, "min_level": 1},  # free + premium
+    "admin_stories": {"path": _ADMIN_DIR, "min_level": 2},    # free + premium + admin
+}
+
+
+# --- Auth & RBAC Helpers (shared Authentik-backed identity) ---
+
+def get_current_user(request: Request) -> str | None:
+    """Username authenticated through nginx's auth_request (X-Authentik-*).
+
+    Direct localhost callers may present ``Authorization: Bearer <jwt>``; that
+    is verified against Authentik's JWKS (see server/auth.py). Returns None
+    when no identity is present.
+    """
+    from server.auth import get_current_user as _get_current_user
+    return _get_current_user(request.headers)
+
+
+def get_current_role(request: Request) -> str:
+    """Role (free/premium/admin) derived from Authentik group membership."""
+    from server.auth import get_identity as _get_identity
+    identity = _get_identity(request.headers)
+    return identity["role"] if identity else "free"
+
+
+def user_role_level(username: str | None, role: str | None = None) -> int:
+    """Map a username (or resolved role) to its hierarchy level (0=guest ... 2=admin)."""
+    if role is None:
+        if not username:
+            return ROLE_LEVEL["guest"]
+        return ROLE_LEVEL.get(get_user_role(username), ROLE_LEVEL["free"])
+    return ROLE_LEVEL.get(role, ROLE_LEVEL["free"])
+
+
+def get_user_role(username: str) -> str:
+    """Resolve role from the shared identity provider's group membership.
+
+    Kept for backward compatibility; the chat server derives role from
+    X-Authentik-Groups via server/auth.py.
+    """
+    from server.auth import role_from_groups
+    return role_from_groups(_stories_role_groups_for(username))
+
+
+def _stories_role_groups_for(username: str) -> list:
+    """Best-effort group mapping for a username seen without claim headers.
+
+    Legacy fallback so direct localhost requests (no nginx auth_request) still
+    get a sensible role. Once nginx fronts the service this path is never hit.
+    """
+    if username in {"palash"}:
+        return ["admin"]
+    if username in {"totan"}:
+        return ["premium"]
+    return ["free"]
+
+
+def enforce_rbac(collection_folder: str, request: Request | None = None, username: str | None = None):
+    """Checks the user's role against the collection's minimum required level."""
+    rule = COLLECTION_RULES.get(collection_folder)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    if request is not None:
+        level = user_role_level(None, get_current_role(request))
+        authed = bool(get_current_user(request))
+    else:
+        authed = bool(username)
+        level = user_role_level(username)
+
+    min_level = rule["min_level"]
+    if level < min_level:
+        if not authed and min_level > 0:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: higher subscription/role required for this story collection.",
+        )
+
+
+def error_page(status_code: int, detail: str) -> str:
+    """Render a styled HTML error page for browser navigation.
+
+    API and live-polling endpoints keep their JSON error responses (see
+    ``_http_exception_html_handler``); anything a user would navigate to in the
+    browser gets a proper page instead of raw JSON. Unauthenticated browser
+    traffic never reaches here anonymously in production — nginx runs
+    ``auth_request`` against the Authentik proxy outpost, so a 401 means the
+    Authentik session simply needs to be established.
+    """
+    titles = {
+        401: "Authentication Required",
+        403: "Access Denied",
+        404: "Not Found",
+    }
+    title = titles.get(status_code, f"Error {status_code}")
+    if status_code == 401:
+        message = "Please log in to view this story collection."
+    else:
+        message = html.escape(str(detail))
+    login_block = """
+    <span class="login-toggle"><a href="/sso/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
+    """
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{title}</title>
+        <style>
+            * {{ box-sizing: border-box; }}
+            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
+            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
+            h1 {{ color: #c44; }}
+            a.back {{ color: #666; text-decoration: none; }}
+            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
+            .topbar .login {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
+            .topbar .login.hidden {{ display: none; }}
+            .topbar .login-toggle a {{ color: #06c; font-weight: bold; }}
+            .topbar input {{ padding: 6px 8px; border: 1px solid #aaa; border-radius: 6px; font-size: 14px; background: #fff; color: #111; }}
+            .topbar button {{ background: none; border: 1px solid #888; color: #888; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-family: sans-serif; font-size: 13px; }}
+            .topbar button:hover {{ background: #eee; }}
+            .topbar button.primary {{ background: #06c; color: #fff; border-color: #06c; }}
+            .topbar button.primary:hover {{ background: #0577e6; }}
+            .topbar #login-msg {{ color: #c44; font-size: 12px; width: 100%; }}
+            @media (max-width: 600px) {{
+                body {{ padding: 12px; font-size: 19px; }}
+                .topbar {{ flex-direction: column; align-items: stretch; }}
+                .topbar .login {{ flex-direction: column; align-items: stretch; }}
+                .topbar input {{ width: 100%; }}
+            }}
+            @media (prefers-color-scheme: dark) {{
+                body {{ background: #16181d; color: #e6e6e6; }}
+                h1 {{ color: #ff8080; }}
+                a.back {{ color: #999; }}
+                .topbar .login-toggle a {{ color: #7ab8ff; }}
+                .topbar input {{ background: #1f232b; border-color: #3a3f4a; color: #e6e6e6; }}
+                .topbar input::placeholder {{ color: #888; }}
+                .topbar button {{ background: #1f232b; border-color: #555; color: #cfcfcf; }}
+                .topbar button:hover {{ background: #262b34; }}
+                .topbar button.primary {{ background: #3a7ee0; border-color: #3a7ee0; color: #fff; }}
+                .topbar button.primary:hover {{ background: #4a8cec; }}
+                .topbar #login-msg {{ color: #ff8080; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <nav class="topbar">
+            <a href="/" class="back">← Back to Collections</a>
+            {login_block}
+        </nav>
+        <h1>{title}</h1>
+        <p>{message}</p>
+    </body>
+    </html>
+    """
+
+
+@app.exception_handler(HTTPException)
+async def _http_exception_html_handler(request: Request, exc: HTTPException):
+    """JSON errors for API/live-poll endpoints, HTML pages for browser routes."""
+    path = request.url.path
+    if path.startswith("/api/") or path.endswith("/content"):
+        return await http_exception_handler(request, exc)
+    return HTMLResponse(
+        status_code=exc.status_code,
+        content=error_page(exc.status_code, exc.detail),
+    )
+
+
+# --- Authentication Endpoints ---
+
+# Browser authentication is handled entirely by nginx's auth_request against
+# the Authentik proxy outpost (/sso/...). The endpoints that previously issued
+# self-managed X-Auth-Token cookies no longer exist: identity comes from the
+# X-Authentik-* claim headers nginx forwards upstream.
+
+
+# --- Dynamic Story Engine & Media Router ---
+
+def pick_story_md(folder_path):
+    """Prefer the editor's revised file (story_rN_ts.edited.md) over the original."""
+    mds = [f for f in os.listdir(folder_path) if f.endswith(".md")]
+    if not mds:
+        return None
+    edited = [f for f in mds if f.endswith(".edited.md")]
+    return os.path.join(folder_path, (edited or mds)[0])
+
+
+def story_moderation(folder_path):
+    """Return the moderator verdict dict for a story, or None."""
+    for f in os.listdir(folder_path):
+        if f.endswith(".moderation.json"):
+            try:
+                with open(os.path.join(folder_path, f), encoding="utf-8") as fh:
+                    return json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                return None
+    return None
+
+
+def moderation_badge(mod):
+    """HTML snippet showing the GREEN/RED verdict, or empty string.
+
+    For RED verdicts, includes the moderator's reason as a tap/hover tooltip
+    (see .mod-badge CSS/JS shared by both pages).
+    """
+    if not mod:
+        return ""
+    v = mod.get("verdict", "")
+    color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
+    if v == "RED":
+        reason = html.escape(mod.get("reasons") or mod.get("reason") or "No reason provided.")
+        return (
+            f' <span class="mod-badge" tabindex="0" data-reason="{reason}" '
+            f'style="color:{color}; font-size:11px; font-family:sans-serif; '
+            f'cursor:pointer; border-bottom:1px dotted {color};">({v})</span>'
+        )
+    return (
+        f' <span style="color:{color}; font-size:11px; font-family:sans-serif;">'
+        f"({v})</span>"
+    )
+
+
+def list_collection_stories(root: str):
+    """Return [(genre_label | None, story_id)] for a collection root.
+
+    Legacy flat story folders (md directly inside root) are reported with
+    genre None; genre folders contain story subdirectories.
+    """
+    entries = sorted(
+        os.listdir(root),
+        key=lambda e: os.path.getmtime(os.path.join(root, e)),
+        reverse=True,
+    )
+    items = []
+    for entry in entries:
+        full = os.path.join(root, entry)
+        if not os.path.isdir(full):
+            continue
+        if any(f.endswith(".md") for f in os.listdir(full)):
+            items.append((None, entry))
+            continue
+        for sub in sorted(os.listdir(full), reverse=True):
+            subfull = os.path.join(full, sub)
+            if os.path.isdir(subfull) and any(
+                f.endswith(".md") for f in os.listdir(subfull)
+            ):
+                items.append((entry, os.path.join(entry, sub)))
+    return items
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    """Collections index listing available story collections and their stories."""
+    username = get_current_user(request)
+    role = get_current_role(request)
+    user_level = user_role_level(username, role)
+    cards = []
+    for name, rule in COLLECTION_RULES.items():
+        if rule["min_level"] > user_level:
+            continue
+        root = rule["path"]
+        if not os.path.isdir(root):
+            continue
+        items = list_collection_stories(root)
+        if not items:
+            continue
+        grouped = {}
+        for genre, sid in items:
+            grouped.setdefault(genre, []).append(sid)
+        sections = []
+        for genre, sids in grouped.items():
+            heading = f"<h3>{genre.replace('_', ' ').title()}</h3>" if genre else ""
+            lis = []
+            for sid in sids:
+                badge = moderation_badge(story_moderation(os.path.join(root, sid)))
+                
+                # Safely quote path segments for URLs and escape HTML text display
+                encoded_sid = "/".join(quote(part) for part in sid.split("/"))
+                display_name = html.escape(sid.split("/")[-1])
+                
+                lis.append(
+                    f'<li><a href="/story/{name}/{encoded_sid}">{display_name}</a>{badge}</li>'
+                )
+            sections.append(heading + "<ul>" + "".join(lis) + "</ul>")
+        cards.append(
+            f"<h2>{name.replace('_', ' ').title()}</h2>" + "".join(sections)
+        )
+    body = "".join(cards) or "<p>No story collections found yet.</p>"
+    if username:
+        auth_html = f"""
+        <span class="logged">Logged in as <strong>{username}</strong> ({role})</span>
+        <button id="logout-btn">Log out</button>
+        """
+    else:
+        auth_html = """
+        <span class="login-toggle"><a href="/sso/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
+        """
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Story Collections</title>
+        <style>
+            * {{ box-sizing: border-box; }}
+            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
+            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
+            h1, h2, h3 {{ color: #333; line-height: 1.3; }}
+            ul {{ margin: 0 0 1.2em; padding-left: 1.4em; }}
+            li {{ margin-bottom: 0.6em; }}
+            a {{ color: #06c; text-decoration: none; }}
+            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; font-family: sans-serif; font-size: 14px; }}
+            .topbar .logged {{ margin: 0; color: #555; }}
+            .topbar .login {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
+            .topbar .login.hidden {{ display: none; }}
+            .topbar .login-toggle a {{ color: #06c; font-weight: bold; }}
+            .topbar input {{ padding: 6px 8px; border: 1px solid #aaa; border-radius: 6px; font-size: 14px; background: #fff; color: #111; }}
+            .topbar button {{ background: none; border: 1px solid #888; color: #888; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-family: sans-serif; font-size: 13px; }}
+            .topbar button:hover {{ background: #eee; }}
+            .topbar button.primary {{ background: #06c; color: #fff; border-color: #06c; }}
+            .topbar button.primary:hover {{ background: #0577e6; }}
+            .topbar #login-msg {{ color: #c44; font-size: 12px; width: 100%; }}
+            .mod-badge {{ position: relative; }}
+            .mod-badge:hover::after, .mod-badge.show-tip::after {{
+                content: attr(data-reason);
+                position: absolute; left: 0; top: 100%; margin-top: 4px;
+                background: #222; color: #fff; padding: 6px 10px; border-radius: 6px;
+                font-size: 12px; line-height: 1.4; white-space: normal;
+                width: max-content; max-width: 240px; z-index: 10;
+            }}
+            @media (max-width: 600px) {{
+                body {{ padding: 12px; font-size: 19px; }}
+                .topbar {{ flex-direction: column; align-items: stretch; }}
+                .topbar .login {{ flex-direction: column; align-items: stretch; }}
+                .topbar input {{ width: 100%; }}
+            }}
+            @media (prefers-color-scheme: dark) {{
+                body {{ background: #16181d; color: #e6e6e6; }}
+                h1, h2, h3 {{ color: #f0f0f0; }}
+                a {{ color: #7ab8ff; }}
+                .topbar .logged {{ color: #aaa; }}
+                .topbar .login-toggle a {{ color: #7ab8ff; }}
+                .topbar input {{ background: #1f232b; border-color: #3a3f4a; color: #e6e6e6; }}
+                .topbar input::placeholder {{ color: #888; }}
+                .topbar button {{ background: #1f232b; border-color: #555; color: #cfcfcf; }}
+                .topbar button:hover {{ background: #262b34; }}
+                .topbar button.primary {{ background: #3a7ee0; border-color: #3a7ee0; color: #fff; }}
+                .topbar button.primary:hover {{ background: #4a8cec; }}
+                .topbar #login-msg {{ color: #ff8080; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <nav class="topbar">{auth_html}</nav>
+        <h1>Story Collections</h1>
+        {body}
+        <script>
+            const logoutBtn = document.getElementById('logout-btn');
+            if (logoutBtn) {{
+                logoutBtn.addEventListener('click', () => {{
+                    window.location.href = '/outpost.goauthentik.io/sign_out?rd=%2Fstories%2F';
+                }});
+            }}
+            // Tap-to-toggle tooltip for moderation badges (title= doesn't work on mobile touch).
+            document.querySelectorAll('.mod-badge').forEach(el => {{
+                el.addEventListener('click', e => {{
+                    e.stopPropagation();
+                    document.querySelectorAll('.mod-badge.show-tip').forEach(o => {{
+                        if (o !== el) o.classList.remove('show-tip');
+                    }});
+                    el.classList.toggle('show-tip');
+                }});
+            }});
+            document.addEventListener('click', () => {{
+                document.querySelectorAll('.mod-badge.show-tip').forEach(o => o.classList.remove('show-tip'));
+            }});
+        </script>
+    </body>
+    </html>
+    """
+@app.get("/media/{collection}/{story_id:path}/{filename}")
+async def serve_story_image(
+    collection: str, 
+    story_id: str, 
+    filename: str, 
+    request: Request
+):
+    """Serves media dynamically while checking the authenticated session."""
+    enforce_rbac(collection, request=request)
+    
+    root = COLLECTION_RULES[collection]["path"]
+    file_path = os.path.join(root, story_id, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Image not found")
+        
+    return FileResponse(file_path)
+
+
+def render_story_html(collection: str, story_id: str, content: str) -> str:
+    """Render story markdown and rewrite image srcs to the authenticated media route.
+
+    pymdownx.arithmatex (generic mode) leaves $...$ / $$...$$ math untouched
+    but wraps it in <span class="arithmatex"> / <div class="arithmatex">
+    so the KaTeX auto-render script loaded on the story page can find and
+    typeset it client-side.
+    """
+    html_content = markdown.markdown(
+        content,
+        extensions=['extra', 'tables', 'fenced_code', 'pymdownx.arithmatex'],
+        extension_configs={'pymdownx.arithmatex': {'generic': True}},
+    )
+    html_content = html_content.replace(
+        '<table>', '<div class="table-wrap"><table>'
+    ).replace('</table>', '</table></div>')
+    return html_content.replace('src="', f'src="/media/{collection}/{story_id}/')
+
+
+@app.get("/story/{collection}/{story_id:path}/content")
+async def story_content(
+    collection: str, 
+    story_id: str, 
+    request: Request
+):
+    """Returns the current rendered story HTML for live polling."""
+    enforce_rbac(collection, request=request)
+
+    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    if not os.path.exists(folder_path):
+        raise HTTPException(status_code=404, detail="Story folder not found")
+
+    md_file = pick_story_md(folder_path)
+    if not md_file:
+        raise HTTPException(status_code=404, detail="No markdown file found in story directory")
+
+    with open(md_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    return {"html": render_story_html(collection, story_id, content)}
+
+
+@app.delete("/story/{collection}/{story_id:path}")
+async def delete_story(
+    collection: str, 
+    story_id: str, 
+    request: Request
+):
+    """Deletes the story folder (markdown + images). Admin role required."""
+    enforce_rbac(collection, request=request)
+
+    if get_current_role(request) != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required to delete stories.",
+        )
+
+    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    if not os.path.exists(folder_path):
+        raise HTTPException(status_code=404, detail="Story folder not found")
+
+    shutil.rmtree(folder_path, ignore_errors=True)
+    if os.path.exists(folder_path):
+        raise HTTPException(status_code=500, detail="Failed to delete story folder")
+    return {"ok": True, "deleted": story_id}
+
+
+@app.get("/story/{collection}/{story_id:path}", response_class=HTMLResponse)
+async def read_story(
+    collection: str, 
+    story_id: str, 
+    request: Request
+):
+    """Reads story Markdown dynamically and enforces access controls."""
+    enforce_rbac(collection, request=request)
+    
+    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    if not os.path.exists(folder_path):
+        raise HTTPException(status_code=404, detail="Story folder not found")
+        
+    md_file = pick_story_md(folder_path)
+    if not md_file:
+        raise HTTPException(status_code=404, detail="No markdown file found in story directory")
+        
+    with open(md_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    html_content = render_story_html(collection, story_id, content)
+    is_admin = get_current_role(request) == "admin"
+
+    verdict_html = ""
+    mod = story_moderation(folder_path)
+    if mod:
+        v = mod.get("verdict", "")
+        color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
+        if v == "RED":
+            reason = html.escape(mod.get("reasons") or mod.get("reason") or "No reason provided.")
+            verdict_html = (
+                f'<div class="mod-badge" tabindex="0" data-reason="{reason}" '
+                f'style="font-family:sans-serif; color:{color}; font-size:13px; '
+                f'margin-bottom:12px; display:inline-block; cursor:pointer; '
+                f'border-bottom:1px dotted {color};">Moderation: {v} (tap for reason)</div>'
+            )
+        else:
+            verdict_html = (
+                f'<div style="font-family:sans-serif; color:{color}; font-size:13px; '
+                f'margin-bottom:12px;">Moderation: {v}</div>'
+            )
+
+    delete_button_html = '<button id="delete-btn">Delete story</button>' if is_admin else ""
+
+    # Escaped parameters for safe JavaScript injection and HTTP URL generation
+    story_id_js = json.dumps(story_id)
+    encoded_collection = quote(collection)
+    encoded_story_path = "/".join(quote(part) for part in story_id.split("/"))
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{html.escape(story_id.split('/')[-1].replace('-', ' ').title())}</title>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+        <style>
+            * {{ box-sizing: border-box; }}
+            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
+            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
+            article {{ overflow-wrap: break-word; }}
+            article p, article li {{ font-size: 1em; }}
+            img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 20px 0; display: block; }}
+            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
+            a.back {{ color: #666; text-decoration: none; }}
+            .topbar button {{ background: none; border: 1px solid #c44; color: #c44; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-family: sans-serif; font-size: 14px; }}
+            .topbar button:hover {{ background: #fceaea; }}
+            blockquote {{ border-left: 4px solid #ddd; margin: 0 0 1em; padding: 0 0 0 16px; color: #555; }}
+            code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.85em; }}
+            pre {{ background: #f0f0f0; padding: 12px; border-radius: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+            pre code {{ background: none; padding: 0; font-size: 0.85em; }}
+            .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 1em 0; }}
+            table {{ border-collapse: collapse; font-size: 0.9em; }}
+            th, td {{ border: 1px solid #ccc; padding: 6px 10px; }}
+            .mod-badge {{ position: relative; }}
+            .mod-badge:hover::after, .mod-badge.show-tip::after {{
+                content: attr(data-reason);
+                position: absolute; left: 0; top: 100%; margin-top: 4px;
+                background: #222; color: #fff; padding: 6px 10px; border-radius: 6px;
+                font-size: 12px; line-height: 1.4; white-space: normal;
+                width: max-content; max-width: 280px; z-index: 10;
+            }}
+            @media (max-width: 600px) {{
+                body {{ padding: 12px; font-size: 19px; }}
+                .topbar {{ flex-direction: column; align-items: stretch; }}
+                .topbar button {{ width: 100%; }}
+            }}
+            @media (prefers-color-scheme: dark) {{
+                body {{ background: #16181d; color: #e6e6e6; }}
+                a.back {{ color: #999; }}
+                .topbar button {{ border-color: #e05a5a; color: #ff7a7a; }}
+                .topbar button:hover {{ background: #2a1c1c; }}
+                blockquote {{ border-left-color: #444; color: #aaa; }}
+                code {{ background: #2a2e37; }}
+                pre {{ background: #2a2e37; }}
+                th, td {{ border-color: #3a3f4a; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <nav class="topbar">
+            <a href="/" class="back">← Back to Collections</a>
+            {delete_button_html}
+        </nav>
+        {verdict_html}
+        <article id="story-article">{html_content}</article>
+        <script>
+            const storyId = {story_id_js};
+            const article = document.getElementById('story-article');
+            let lastHtml = article.innerHTML;
+
+            function typesetMath() {{
+                if (typeof renderMathInElement !== 'function') {{
+                    setTimeout(typesetMath, 100);
+                    return;
+                }}
+                renderMathInElement(article, {{
+                    delimiters: [
+                        {{left: '\\\\[', right: '\\\\]', display: true}},
+                        {{left: '\\\\(', right: '\\\\)', display: false}},
+                        {{left: '$$', right: '$$', display: true}},
+                        {{left: '$', right: '$', display: false}}
+                    ],
+                    throwOnError: false
+                }});
+            }}
+            typesetMath();
+
+            async function poll() {{
+                try {{
+                    const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/content');
+                    if (!r.ok) return;
+                    const data = await r.json();
+                    const newHtml = data.html;
+                    if (newHtml !== lastHtml) {{
+                        if (newHtml.startsWith(lastHtml)) {{
+                            const nearBottom = window.innerHeight + window.scrollY > document.body.scrollHeight - 150;
+                            article.insertAdjacentHTML('beforeend', newHtml.slice(lastHtml.length));
+                            if (nearBottom) window.scrollTo(0, document.body.scrollHeight);
+                        }} else {{
+                            article.innerHTML = newHtml;
+                        }}
+                        lastHtml = newHtml;
+                        typesetMath();
+                    }}
+                }} catch (e) {{}}
+                setTimeout(poll, 3000);
+            }}
+            poll();
+
+            const deleteBtn = document.getElementById('delete-btn');
+            if (deleteBtn) {{
+                deleteBtn.addEventListener('click', async () => {{
+                    if (!confirm(`Delete story "${{storyId}}" and all its images?`)) return;
+                    try {{
+                        const r = await fetch('/story/{encoded_collection}/{encoded_story_path}', {{ method: 'DELETE' }});
+                        if (r.ok) {{
+                            window.location.href = '/';
+                        }} else {{
+                            const d = await r.json();
+                            alert('Delete failed: ' + (d.detail || r.status));
+                        }}
+                    }} catch (e) {{
+                        alert('Delete failed: ' + e.message);
+                    }}
+                }});
+            }}
+
+            // Tap-to-toggle tooltip for the moderation reason (title= doesn't work on mobile touch).
+            document.querySelectorAll('.mod-badge').forEach(el => {{
+                el.addEventListener('click', e => {{
+                    e.stopPropagation();
+                    el.classList.toggle('show-tip');
+                }});
+            }});
+            document.addEventListener('click', () => {{
+                document.querySelectorAll('.mod-badge.show-tip').forEach(o => o.classList.remove('show-tip'));
+            }});
+        </script>
+    </body>
+    </html>
+    """
+</file>
+
 <file path="server/api.py">
 """HTTP API endpoints for the chat web UI.
 
@@ -13990,709 +14774,6 @@ async def handle_chat(user_message):
         llm_call_bot(user_message)
     )
     return user_response, bot_response
-</file>
-
-<file path="markdown_hosting.py">
-import os
-import json
-import html
-import shutil
-import markdown
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import HTMLResponse, FileResponse
-from urllib.parse import quote
-
-from server.dotenv import load_dotenv
-
-load_dotenv()
-
-app = FastAPI()
-
-BASE_STORIES_DIR = "./stories"
-
-# Directory roots resolved from environment variables.
-# Hierarchy: everyone -> free dir, premium +1 dir, admin +1 more dir.
-# PREMIUM and ADMIN dirs are REQUIRED — markdown hosting fails fast if missing.
-_FREE_DIR = os.getenv("STORIES_FREE_DIR", os.path.expanduser("~/local-ai-files/stories"))
-_PREMIUM_DIR = os.getenv("STORIES_PREMIUM_DIR", "")
-_ADMIN_DIR = os.getenv("STORIES_ADMIN_DIR", "")
-
-for _var, _val in (("STORIES_PREMIUM_DIR", _PREMIUM_DIR), ("STORIES_ADMIN_DIR", _ADMIN_DIR)):
-    if not _val:
-        raise RuntimeError(
-            f"markdown_hosting.py cannot start: required environment variable "
-            f"{_var} is not set."
-        )
-
-# Each collection requires a minimum role level to access.
-ROLE_LEVEL = {
-    "guest": 0,
-    "free": 0,
-    "user": 0,
-    "premium": 1,
-    "admin": 2,
-}
-
-COLLECTION_RULES = {
-    "free_stories": {"path": _FREE_DIR, "min_level": 0},     # everyone
-    "premium_stories": {"path": _PREMIUM_DIR, "min_level": 1},  # free + premium
-    "admin_stories": {"path": _ADMIN_DIR, "min_level": 2},    # free + premium + admin
-}
-
-
-# --- Auth & RBAC Helpers (shared Authentik-backed identity) ---
-
-def get_current_user(request: Request) -> str | None:
-    """Username authenticated through nginx's auth_request (X-Authentik-*).
-
-    Direct localhost callers may present ``Authorization: Bearer <jwt>``; that
-    is verified against Authentik's JWKS (see server/auth.py). Returns None
-    when no identity is present.
-    """
-    from server.auth import get_current_user as _get_current_user
-    return _get_current_user(request.headers)
-
-
-def get_current_role(request: Request) -> str:
-    """Role (free/premium/admin) derived from Authentik group membership."""
-    from server.auth import get_identity as _get_identity
-    identity = _get_identity(request.headers)
-    return identity["role"] if identity else "free"
-
-
-def user_role_level(username: str | None, role: str | None = None) -> int:
-    """Map a username (or resolved role) to its hierarchy level (0=guest ... 2=admin)."""
-    if role is None:
-        if not username:
-            return ROLE_LEVEL["guest"]
-        return ROLE_LEVEL.get(get_user_role(username), ROLE_LEVEL["free"])
-    return ROLE_LEVEL.get(role, ROLE_LEVEL["free"])
-
-
-def get_user_role(username: str) -> str:
-    """Resolve role from the shared identity provider's group membership.
-
-    Kept for backward compatibility; the chat server derives role from
-    X-Authentik-Groups via server/auth.py.
-    """
-    from server.auth import role_from_groups
-    return role_from_groups(_stories_role_groups_for(username))
-
-
-def _stories_role_groups_for(username: str) -> list:
-    """Best-effort group mapping for a username seen without claim headers.
-
-    Legacy fallback so direct localhost requests (no nginx auth_request) still
-    get a sensible role. Once nginx fronts the service this path is never hit.
-    """
-    if username in {"palash"}:
-        return ["admin"]
-    if username in {"totan"}:
-        return ["premium"]
-    return ["free"]
-
-
-def enforce_rbac(collection_folder: str, request: Request | None = None, username: str | None = None):
-    """Checks the user's role against the collection's minimum required level."""
-    rule = COLLECTION_RULES.get(collection_folder)
-    if not rule:
-        raise HTTPException(status_code=404, detail="Collection not found")
-
-    if request is not None:
-        level = user_role_level(None, get_current_role(request))
-        authed = bool(get_current_user(request))
-    else:
-        authed = bool(username)
-        level = user_role_level(username)
-
-    min_level = rule["min_level"]
-    if level < min_level:
-        if not authed and min_level > 0:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required.",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access Denied: higher subscription/role required for this story collection.",
-        )
-
-
-def error_page(status_code: int, detail: str) -> str:
-    """Render a styled HTML error page for browser navigation.
-
-    API and live-polling endpoints keep their JSON error responses (see
-    ``_http_exception_html_handler``); anything a user would navigate to in the
-    browser gets a proper page instead of raw JSON. Unauthenticated browser
-    traffic never reaches here anonymously in production — nginx runs
-    ``auth_request`` against the Authentik proxy outpost, so a 401 means the
-    Authentik session simply needs to be established.
-    """
-    titles = {
-        401: "Authentication Required",
-        403: "Access Denied",
-        404: "Not Found",
-    }
-    title = titles.get(status_code, f"Error {status_code}")
-    if status_code == 401:
-        message = "Please log in to view this story collection."
-    else:
-        message = html.escape(str(detail))
-    login_block = """
-    <span class="login-toggle"><a href="/sso/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
-    """
-    return f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>{title}</title>
-        <style>
-            * {{ box-sizing: border-box; }}
-            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
-            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
-            h1 {{ color: #c44; }}
-            a.back {{ color: #666; text-decoration: none; }}
-            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
-            .topbar .login {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
-            .topbar .login.hidden {{ display: none; }}
-            .topbar .login-toggle a {{ color: #06c; font-weight: bold; }}
-            .topbar input {{ padding: 6px 8px; border: 1px solid #aaa; border-radius: 6px; font-size: 14px; background: #fff; color: #111; }}
-            .topbar button {{ background: none; border: 1px solid #888; color: #888; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-family: sans-serif; font-size: 13px; }}
-            .topbar button:hover {{ background: #eee; }}
-            .topbar button.primary {{ background: #06c; color: #fff; border-color: #06c; }}
-            .topbar button.primary:hover {{ background: #0577e6; }}
-            .topbar #login-msg {{ color: #c44; font-size: 12px; width: 100%; }}
-            @media (max-width: 600px) {{
-                body {{ padding: 12px; font-size: 19px; }}
-                .topbar {{ flex-direction: column; align-items: stretch; }}
-                .topbar .login {{ flex-direction: column; align-items: stretch; }}
-                .topbar input {{ width: 100%; }}
-            }}
-            @media (prefers-color-scheme: dark) {{
-                body {{ background: #16181d; color: #e6e6e6; }}
-                h1 {{ color: #ff8080; }}
-                a.back {{ color: #999; }}
-                .topbar .login-toggle a {{ color: #7ab8ff; }}
-                .topbar input {{ background: #1f232b; border-color: #3a3f4a; color: #e6e6e6; }}
-                .topbar input::placeholder {{ color: #888; }}
-                .topbar button {{ background: #1f232b; border-color: #555; color: #cfcfcf; }}
-                .topbar button:hover {{ background: #262b34; }}
-                .topbar button.primary {{ background: #3a7ee0; border-color: #3a7ee0; color: #fff; }}
-                .topbar button.primary:hover {{ background: #4a8cec; }}
-                .topbar #login-msg {{ color: #ff8080; }}
-            }}
-        </style>
-    </head>
-    <body>
-        <nav class="topbar">
-            <a href="/" class="back">← Back to Collections</a>
-            {login_block}
-        </nav>
-        <h1>{title}</h1>
-        <p>{message}</p>
-    </body>
-    </html>
-    """
-
-
-@app.exception_handler(HTTPException)
-async def _http_exception_html_handler(request: Request, exc: HTTPException):
-    """JSON errors for API/live-poll endpoints, HTML pages for browser routes."""
-    path = request.url.path
-    if path.startswith("/api/") or path.endswith("/content"):
-        return await http_exception_handler(request, exc)
-    return HTMLResponse(
-        status_code=exc.status_code,
-        content=error_page(exc.status_code, exc.detail),
-    )
-
-
-# --- Authentication Endpoints ---
-
-# Browser authentication is handled entirely by nginx's auth_request against
-# the Authentik proxy outpost (/sso/...). The endpoints that previously issued
-# self-managed X-Auth-Token cookies no longer exist: identity comes from the
-# X-Authentik-* claim headers nginx forwards upstream.
-
-
-# --- Dynamic Story Engine & Media Router ---
-
-def pick_story_md(folder_path):
-    """Prefer the editor's revised file (story_rN_ts.edited.md) over the original."""
-    mds = [f for f in os.listdir(folder_path) if f.endswith(".md")]
-    if not mds:
-        return None
-    edited = [f for f in mds if f.endswith(".edited.md")]
-    return os.path.join(folder_path, (edited or mds)[0])
-
-
-def story_moderation(folder_path):
-    """Return the moderator verdict dict for a story, or None."""
-    for f in os.listdir(folder_path):
-        if f.endswith(".moderation.json"):
-            try:
-                with open(os.path.join(folder_path, f), encoding="utf-8") as fh:
-                    return json.load(fh)
-            except (OSError, json.JSONDecodeError):
-                return None
-    return None
-
-
-def moderation_badge(mod):
-    """HTML snippet showing the GREEN/RED verdict, or empty string.
-
-    For RED verdicts, includes the moderator's reason as a tap/hover tooltip
-    (see .mod-badge CSS/JS shared by both pages).
-    """
-    if not mod:
-        return ""
-    v = mod.get("verdict", "")
-    color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
-    if v == "RED":
-        reason = html.escape(mod.get("reasons") or mod.get("reason") or "No reason provided.")
-        return (
-            f' <span class="mod-badge" tabindex="0" data-reason="{reason}" '
-            f'style="color:{color}; font-size:11px; font-family:sans-serif; '
-            f'cursor:pointer; border-bottom:1px dotted {color};">({v})</span>'
-        )
-    return (
-        f' <span style="color:{color}; font-size:11px; font-family:sans-serif;">'
-        f"({v})</span>"
-    )
-
-
-def list_collection_stories(root: str):
-    """Return [(genre_label | None, story_id)] for a collection root.
-
-    Legacy flat story folders (md directly inside root) are reported with
-    genre None; genre folders contain story subdirectories.
-    """
-    entries = sorted(
-        os.listdir(root),
-        key=lambda e: os.path.getmtime(os.path.join(root, e)),
-        reverse=True,
-    )
-    items = []
-    for entry in entries:
-        full = os.path.join(root, entry)
-        if not os.path.isdir(full):
-            continue
-        if any(f.endswith(".md") for f in os.listdir(full)):
-            items.append((None, entry))
-            continue
-        for sub in sorted(os.listdir(full), reverse=True):
-            subfull = os.path.join(full, sub)
-            if os.path.isdir(subfull) and any(
-                f.endswith(".md") for f in os.listdir(subfull)
-            ):
-                items.append((entry, os.path.join(entry, sub)))
-    return items
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    """Collections index listing available story collections and their stories."""
-    username = get_current_user(request)
-    role = get_current_role(request)
-    user_level = user_role_level(username, role)
-    cards = []
-    for name, rule in COLLECTION_RULES.items():
-        if rule["min_level"] > user_level:
-            continue
-        root = rule["path"]
-        if not os.path.isdir(root):
-            continue
-        items = list_collection_stories(root)
-        if not items:
-            continue
-        grouped = {}
-        for genre, sid in items:
-            grouped.setdefault(genre, []).append(sid)
-        sections = []
-        for genre, sids in grouped.items():
-            heading = f"<h3>{genre.replace('_', ' ').title()}</h3>" if genre else ""
-            lis = []
-            for sid in sids:
-                badge = moderation_badge(story_moderation(os.path.join(root, sid)))
-                
-                # Safely quote path segments for URLs and escape HTML text display
-                encoded_sid = "/".join(quote(part) for part in sid.split("/"))
-                display_name = html.escape(sid.split("/")[-1])
-                
-                lis.append(
-                    f'<li><a href="/story/{name}/{encoded_sid}">{display_name}</a>{badge}</li>'
-                )
-            sections.append(heading + "<ul>" + "".join(lis) + "</ul>")
-        cards.append(
-            f"<h2>{name.replace('_', ' ').title()}</h2>" + "".join(sections)
-        )
-    body = "".join(cards) or "<p>No story collections found yet.</p>"
-    if username:
-        auth_html = f"""
-        <span class="logged">Logged in as <strong>{username}</strong> ({role})</span>
-        <button id="logout-btn">Log out</button>
-        """
-    else:
-        auth_html = """
-        <span class="login-toggle"><a href="/sso/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
-        """
-    return f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Story Collections</title>
-        <style>
-            * {{ box-sizing: border-box; }}
-            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
-            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
-            h1, h2, h3 {{ color: #333; line-height: 1.3; }}
-            ul {{ margin: 0 0 1.2em; padding-left: 1.4em; }}
-            li {{ margin-bottom: 0.6em; }}
-            a {{ color: #06c; text-decoration: none; }}
-            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; font-family: sans-serif; font-size: 14px; }}
-            .topbar .logged {{ margin: 0; color: #555; }}
-            .topbar .login {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
-            .topbar .login.hidden {{ display: none; }}
-            .topbar .login-toggle a {{ color: #06c; font-weight: bold; }}
-            .topbar input {{ padding: 6px 8px; border: 1px solid #aaa; border-radius: 6px; font-size: 14px; background: #fff; color: #111; }}
-            .topbar button {{ background: none; border: 1px solid #888; color: #888; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-family: sans-serif; font-size: 13px; }}
-            .topbar button:hover {{ background: #eee; }}
-            .topbar button.primary {{ background: #06c; color: #fff; border-color: #06c; }}
-            .topbar button.primary:hover {{ background: #0577e6; }}
-            .topbar #login-msg {{ color: #c44; font-size: 12px; width: 100%; }}
-            .mod-badge {{ position: relative; }}
-            .mod-badge:hover::after, .mod-badge.show-tip::after {{
-                content: attr(data-reason);
-                position: absolute; left: 0; top: 100%; margin-top: 4px;
-                background: #222; color: #fff; padding: 6px 10px; border-radius: 6px;
-                font-size: 12px; line-height: 1.4; white-space: normal;
-                width: max-content; max-width: 240px; z-index: 10;
-            }}
-            @media (max-width: 600px) {{
-                body {{ padding: 12px; font-size: 19px; }}
-                .topbar {{ flex-direction: column; align-items: stretch; }}
-                .topbar .login {{ flex-direction: column; align-items: stretch; }}
-                .topbar input {{ width: 100%; }}
-            }}
-            @media (prefers-color-scheme: dark) {{
-                body {{ background: #16181d; color: #e6e6e6; }}
-                h1, h2, h3 {{ color: #f0f0f0; }}
-                a {{ color: #7ab8ff; }}
-                .topbar .logged {{ color: #aaa; }}
-                .topbar .login-toggle a {{ color: #7ab8ff; }}
-                .topbar input {{ background: #1f232b; border-color: #3a3f4a; color: #e6e6e6; }}
-                .topbar input::placeholder {{ color: #888; }}
-                .topbar button {{ background: #1f232b; border-color: #555; color: #cfcfcf; }}
-                .topbar button:hover {{ background: #262b34; }}
-                .topbar button.primary {{ background: #3a7ee0; border-color: #3a7ee0; color: #fff; }}
-                .topbar button.primary:hover {{ background: #4a8cec; }}
-                .topbar #login-msg {{ color: #ff8080; }}
-            }}
-        </style>
-    </head>
-    <body>
-        <nav class="topbar">{auth_html}</nav>
-        <h1>Story Collections</h1>
-        {body}
-        <script>
-            const logoutBtn = document.getElementById('logout-btn');
-            if (logoutBtn) {{
-                logoutBtn.addEventListener('click', () => {{
-                    window.location.href = '/outpost.goauthentik.io/sign_out?rd=%2Fstories%2F';
-                }});
-            }}
-            // Tap-to-toggle tooltip for moderation badges (title= doesn't work on mobile touch).
-            document.querySelectorAll('.mod-badge').forEach(el => {{
-                el.addEventListener('click', e => {{
-                    e.stopPropagation();
-                    document.querySelectorAll('.mod-badge.show-tip').forEach(o => {{
-                        if (o !== el) o.classList.remove('show-tip');
-                    }});
-                    el.classList.toggle('show-tip');
-                }});
-            }});
-            document.addEventListener('click', () => {{
-                document.querySelectorAll('.mod-badge.show-tip').forEach(o => o.classList.remove('show-tip'));
-            }});
-        </script>
-    </body>
-    </html>
-    """
-@app.get("/media/{collection}/{story_id:path}/{filename}")
-async def serve_story_image(
-    collection: str, 
-    story_id: str, 
-    filename: str, 
-    request: Request
-):
-    """Serves media dynamically while checking the authenticated session."""
-    enforce_rbac(collection, request=request)
-    
-    root = COLLECTION_RULES[collection]["path"]
-    file_path = os.path.join(root, story_id, filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Image not found")
-        
-    return FileResponse(file_path)
-
-
-def render_story_html(collection: str, story_id: str, content: str) -> str:
-    """Render story markdown and rewrite image srcs to the authenticated media route.
-
-    pymdownx.arithmatex (generic mode) leaves $...$ / $$...$$ math untouched
-    but wraps it in <span class="arithmatex"> / <div class="arithmatex">
-    so the KaTeX auto-render script loaded on the story page can find and
-    typeset it client-side.
-    """
-    html_content = markdown.markdown(
-        content,
-        extensions=['extra', 'tables', 'fenced_code', 'pymdownx.arithmatex'],
-        extension_configs={'pymdownx.arithmatex': {'generic': True}},
-    )
-    html_content = html_content.replace(
-        '<table>', '<div class="table-wrap"><table>'
-    ).replace('</table>', '</table></div>')
-    return html_content.replace('src="', f'src="/media/{collection}/{story_id}/')
-
-
-@app.get("/story/{collection}/{story_id:path}/content")
-async def story_content(
-    collection: str, 
-    story_id: str, 
-    request: Request
-):
-    """Returns the current rendered story HTML for live polling."""
-    enforce_rbac(collection, request=request)
-
-    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
-    if not os.path.exists(folder_path):
-        raise HTTPException(status_code=404, detail="Story folder not found")
-
-    md_file = pick_story_md(folder_path)
-    if not md_file:
-        raise HTTPException(status_code=404, detail="No markdown file found in story directory")
-
-    with open(md_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    return {"html": render_story_html(collection, story_id, content)}
-
-
-@app.delete("/story/{collection}/{story_id:path}")
-async def delete_story(
-    collection: str, 
-    story_id: str, 
-    request: Request
-):
-    """Deletes the story folder (markdown + images). Admin role required."""
-    enforce_rbac(collection, request=request)
-
-    if get_current_role(request) != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required to delete stories.",
-        )
-
-    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
-    if not os.path.exists(folder_path):
-        raise HTTPException(status_code=404, detail="Story folder not found")
-
-    shutil.rmtree(folder_path, ignore_errors=True)
-    if os.path.exists(folder_path):
-        raise HTTPException(status_code=500, detail="Failed to delete story folder")
-    return {"ok": True, "deleted": story_id}
-
-
-@app.get("/story/{collection}/{story_id:path}", response_class=HTMLResponse)
-async def read_story(
-    collection: str, 
-    story_id: str, 
-    request: Request
-):
-    """Reads story Markdown dynamically and enforces access controls."""
-    enforce_rbac(collection, request=request)
-    
-    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
-    if not os.path.exists(folder_path):
-        raise HTTPException(status_code=404, detail="Story folder not found")
-        
-    md_file = pick_story_md(folder_path)
-    if not md_file:
-        raise HTTPException(status_code=404, detail="No markdown file found in story directory")
-        
-    with open(md_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    html_content = render_story_html(collection, story_id, content)
-    is_admin = get_current_role(request) == "admin"
-
-    verdict_html = ""
-    mod = story_moderation(folder_path)
-    if mod:
-        v = mod.get("verdict", "")
-        color = "#2a7" if v == "GREEN" else ("#c44" if v == "RED" else "#888")
-        if v == "RED":
-            reason = html.escape(mod.get("reasons") or mod.get("reason") or "No reason provided.")
-            verdict_html = (
-                f'<div class="mod-badge" tabindex="0" data-reason="{reason}" '
-                f'style="font-family:sans-serif; color:{color}; font-size:13px; '
-                f'margin-bottom:12px; display:inline-block; cursor:pointer; '
-                f'border-bottom:1px dotted {color};">Moderation: {v} (tap for reason)</div>'
-            )
-        else:
-            verdict_html = (
-                f'<div style="font-family:sans-serif; color:{color}; font-size:13px; '
-                f'margin-bottom:12px;">Moderation: {v}</div>'
-            )
-
-    delete_button_html = '<button id="delete-btn">Delete story</button>' if is_admin else ""
-
-    # Escaped parameters for safe JavaScript injection and HTTP URL generation
-    story_id_js = json.dumps(story_id)
-    encoded_collection = quote(collection)
-    encoded_story_path = "/".join(quote(part) for part in story_id.split("/"))
-
-    return f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>{html.escape(story_id.split('/')[-1].replace('-', ' ').title())}</title>
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-        <style>
-            * {{ box-sizing: border-box; }}
-            html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
-            body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
-            article {{ overflow-wrap: break-word; }}
-            article p, article li {{ font-size: 1em; }}
-            img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 20px 0; display: block; }}
-            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
-            a.back {{ color: #666; text-decoration: none; }}
-            .topbar button {{ background: none; border: 1px solid #c44; color: #c44; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-family: sans-serif; font-size: 14px; }}
-            .topbar button:hover {{ background: #fceaea; }}
-            blockquote {{ border-left: 4px solid #ddd; margin: 0 0 1em; padding: 0 0 0 16px; color: #555; }}
-            code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.85em; }}
-            pre {{ background: #f0f0f0; padding: 12px; border-radius: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
-            pre code {{ background: none; padding: 0; font-size: 0.85em; }}
-            .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 1em 0; }}
-            table {{ border-collapse: collapse; font-size: 0.9em; }}
-            th, td {{ border: 1px solid #ccc; padding: 6px 10px; }}
-            .mod-badge {{ position: relative; }}
-            .mod-badge:hover::after, .mod-badge.show-tip::after {{
-                content: attr(data-reason);
-                position: absolute; left: 0; top: 100%; margin-top: 4px;
-                background: #222; color: #fff; padding: 6px 10px; border-radius: 6px;
-                font-size: 12px; line-height: 1.4; white-space: normal;
-                width: max-content; max-width: 280px; z-index: 10;
-            }}
-            @media (max-width: 600px) {{
-                body {{ padding: 12px; font-size: 19px; }}
-                .topbar {{ flex-direction: column; align-items: stretch; }}
-                .topbar button {{ width: 100%; }}
-            }}
-            @media (prefers-color-scheme: dark) {{
-                body {{ background: #16181d; color: #e6e6e6; }}
-                a.back {{ color: #999; }}
-                .topbar button {{ border-color: #e05a5a; color: #ff7a7a; }}
-                .topbar button:hover {{ background: #2a1c1c; }}
-                blockquote {{ border-left-color: #444; color: #aaa; }}
-                code {{ background: #2a2e37; }}
-                pre {{ background: #2a2e37; }}
-                th, td {{ border-color: #3a3f4a; }}
-            }}
-        </style>
-    </head>
-    <body>
-        <nav class="topbar">
-            <a href="/" class="back">← Back to Collections</a>
-            {delete_button_html}
-        </nav>
-        {verdict_html}
-        <article id="story-article">{html_content}</article>
-        <script>
-            const storyId = {story_id_js};
-            const article = document.getElementById('story-article');
-            let lastHtml = article.innerHTML;
-
-            function typesetMath() {{
-                if (typeof renderMathInElement !== 'function') {{
-                    setTimeout(typesetMath, 100);
-                    return;
-                }}
-                renderMathInElement(article, {{
-                    delimiters: [
-                        {{left: '\\\\[', right: '\\\\]', display: true}},
-                        {{left: '\\\\(', right: '\\\\)', display: false}},
-                        {{left: '$$', right: '$$', display: true}},
-                        {{left: '$', right: '$', display: false}}
-                    ],
-                    throwOnError: false
-                }});
-            }}
-            typesetMath();
-
-            async function poll() {{
-                try {{
-                    const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/content');
-                    if (!r.ok) return;
-                    const data = await r.json();
-                    const newHtml = data.html;
-                    if (newHtml !== lastHtml) {{
-                        if (newHtml.startsWith(lastHtml)) {{
-                            const nearBottom = window.innerHeight + window.scrollY > document.body.scrollHeight - 150;
-                            article.insertAdjacentHTML('beforeend', newHtml.slice(lastHtml.length));
-                            if (nearBottom) window.scrollTo(0, document.body.scrollHeight);
-                        }} else {{
-                            article.innerHTML = newHtml;
-                        }}
-                        lastHtml = newHtml;
-                        typesetMath();
-                    }}
-                }} catch (e) {{}}
-                setTimeout(poll, 3000);
-            }}
-            poll();
-
-            const deleteBtn = document.getElementById('delete-btn');
-            if (deleteBtn) {{
-                deleteBtn.addEventListener('click', async () => {{
-                    if (!confirm(`Delete story "${{storyId}}" and all its images?`)) return;
-                    try {{
-                        const r = await fetch('/story/{encoded_collection}/{encoded_story_path}', {{ method: 'DELETE' }});
-                        if (r.ok) {{
-                            window.location.href = '/';
-                        }} else {{
-                            const d = await r.json();
-                            alert('Delete failed: ' + (d.detail || r.status));
-                        }}
-                    }} catch (e) {{
-                        alert('Delete failed: ' + e.message);
-                    }}
-                }});
-            }}
-
-            // Tap-to-toggle tooltip for the moderation reason (title= doesn't work on mobile touch).
-            document.querySelectorAll('.mod-badge').forEach(el => {{
-                el.addEventListener('click', e => {{
-                    e.stopPropagation();
-                    el.classList.toggle('show-tip');
-                }});
-            }});
-            document.addEventListener('click', () => {{
-                document.querySelectorAll('.mod-badge.show-tip').forEach(o => o.classList.remove('show-tip'));
-            }});
-        </script>
-    </body>
-    </html>
-    """
 </file>
 
 <file path="server/config.py">
