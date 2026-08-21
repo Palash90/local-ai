@@ -68,6 +68,7 @@ def _critic_completion(system, user, mode="gpu", max_tokens=600):
     last_err = None
     for attempt in range(2):
         try:
+            M.mark_slot_kv_dirty(mode)
             r = requests.post(M.server_url(mode), json=payload, timeout=120)
             r.raise_for_status()
             content = r.json()["choices"][0]["message"].get("content")

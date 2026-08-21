@@ -122,6 +122,16 @@ _cpu_model_status = "unloaded"
 _last_tps = None
 _last_llm_use = time.time()
 _cpu_last_llm_use = time.time()
+
+# KV-cache slot checkpoints per llama-server lane (see llm.py). Maps mode →
+# {"file": str, "model": str, "ts": float, "n_tokens": int} describing the
+# last successfully saved /slots/{id}?action=save snapshot, which is restored
+# after the model loads again so the conversation KV is not re-prefilled.
+_slot_checkpoints = {}
+# Per-lane flag set whenever a completion reaches a llama-server (its slot KV
+# changed) and cleared once that KV is captured by save/restore. Gates whether
+# an unload snapshots the slot again.
+_slot_kv_dirty = {"gpu": False, "cpu": False}
 _client_location = None
 _overheated = False
 _gpu_temp = None

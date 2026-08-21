@@ -173,6 +173,26 @@ MODEL_ID, MODEL_ID_CPU = _load_model_ids(
 COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
 LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-server")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KV-cache slot checkpoints (--slot-save-path).
+#
+# The GPU llama-server is unloaded from VRAM for every ComfyUI render (and both
+# servers idle-unload after 300s), which throws away the KV cache of the whole
+# conversation prefix. With --slot-save-path the server exposes
+# POST /slots/{id}?action=save|restore, so llm.py snapshots the KV to this
+# directory right before an unload and restores it after the model loads again
+# — the next completion then only evaluates NEW tokens instead of re-prefilling
+# the entire context.
+#
+# The directory MUST exist before llama-server starts: its arg parser rejects
+# a missing --slot-save-path directory at startup, hence the makedirs here.
+# ─────────────────────────────────────────────────────────────────────────────
+LLAMA_SLOT_SAVE_DIR = os.environ.get(
+    "LLAMA_SLOT_SAVE_DIR", os.path.expanduser("~/local-ai-files/kv-slots")
+)
+os.makedirs(LLAMA_SLOT_SAVE_DIR, exist_ok=True)
+
 LLAMA_QWEN_NGL = "0"
 LLAMA_GEMMA_NGL = "99"
 LLAMA_SERVER_ARGS = [
@@ -194,6 +214,11 @@ LLAMA_SERVER_ARGS = [
     "-tb", "8",
     "-ub", "512",
     "--timeout", "3600",
+
+    # KV-cache checkpointing: enables POST /slots/{id}?action=save|restore so
+    # the conversation KV survives model unload/reload cycles (image gen).
+    # The router passes this down to each loaded model instance.
+    "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
 
     # Sampling Parameters
     "--temp", "1.0",
@@ -236,7 +261,11 @@ LLAMA_SERVER_ARGS_CPU = [
     "--top-k", "64",
     "--min-p", "0.0",
     "--repeat-penalty", "1.0",
-    "--device", "none"
+    "--device", "none",
+
+    # KV-cache checkpointing (see LLAMA_SERVER_ARGS): the CPU lane also
+    # idle-unloads, and re-prefilling an agent story context on CPU is slow.
+    "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
 ]
 
 FILES_DIR = os.path.expanduser("~/local-ai-files")

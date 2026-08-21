@@ -86,6 +86,7 @@ def _summarize_with_llm(text, mode="gpu"):
         "stream": False,
     }
     try:
+        M.mark_slot_kv_dirty(mode)
         r = requests.post(M.server_url(mode), json=payload, timeout=120)
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]

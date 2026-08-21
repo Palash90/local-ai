@@ -13,11 +13,145 @@ other one.
 """
 
 import json
+import os
 import time
 
 import requests
 
 from server.features.state import M
+
+
+# Rotating KV-checkpoint filename per lane (slot 0 is the only slot — both
+# servers run with the default --parallel 1). Kept constant so each
+# save overwrites the previous snapshot instead of filling the disk.
+_SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv"}
+
+
+def slot_checkpoint_file(mode="gpu"):
+    """Checkpoint filename (relative to ``LLAMA_SLOT_SAVE_DIR``) for ``mode``."""
+    return _SLOT_CHECKPOINT_FILES.get(mode, _SLOT_CHECKPOINT_FILES["gpu"])
+
+
+def slot_checkpoint_path(mode="gpu"):
+    """Absolute path of the KV-checkpoint file for ``mode``."""
+    return os.path.join(M.LLAMA_SLOT_SAVE_DIR, slot_checkpoint_file(mode))
+
+
+def mark_slot_kv_dirty(mode="gpu"):
+    """Flag the lane's slot KV as changed by an outgoing completion.
+
+    Called right before any request is sent to ``mode``'s chat-completions
+    endpoint — processing a prompt always mutates the server's slot KV. The
+    flag decides whether :func:`save_slot_checkpoint` snapshots again on the
+    next unload or the on-disk snapshot is already up to date."""
+    with M._data_lock:
+        M._slot_kv_dirty[mode] = True
+
+
+def save_slot_checkpoint(mode="gpu"):
+    """Snapshot the llama-server's current KV cache to disk.
+
+    Calls ``POST /slots/0?action=save`` so the KV of everything processed so
+    far survives an imminent model unload. Skipped when the model is not
+    loaded or no completion has run since the last save/restore (the on-disk
+    snapshot is already current). Failures (slot busy, media tokens in the
+    slot, feature unavailable) never block the caller — they just mean the
+    next reload re-prefills from scratch, exactly like before this
+    optimization existed.
+    """
+    with M._data_lock:
+        ms = M._cpu_model_status if mode == "cpu" else M.model_status
+        dirty = M._slot_kv_dirty.get(mode, False)
+        cp = M._slot_checkpoints.get(mode)
+    if ms != "chat_loaded":
+        return False
+    if not dirty and cp:
+        return True  # snapshot on disk already reflects the current KV
+
+    filename = slot_checkpoint_file(mode)
+    try:
+        r = requests.post(
+            f"{M.server_base(mode)}/slots/0?action=save",
+            # "model" is required in router mode: the parent picks the child
+            # instance to proxy to from this field (the child itself ignores it).
+            json={"filename": filename, "model": M.server_model_id(mode)},
+            timeout=180,
+        )
+        if r.status_code == 200:
+            n_tokens = r.json().get("n_tokens", 0)
+            with M._data_lock:
+                M._slot_checkpoints[mode] = {
+                    "file": filename,
+                    "model": M.server_model_id(mode),
+                    "ts": time.time(),
+                    "n_tokens": n_tokens,
+                }
+                M._slot_kv_dirty[mode] = False
+            print(
+                f"[llama] {mode} slot KV checkpointed ({n_tokens} tokens) -> {filename}"
+            )
+            return True
+        print(
+            f"[llama] {mode} slot KV save failed ({r.status_code}): {r.text[:200]}"
+        )
+    except Exception as e:
+        print(f"[llama] {mode} slot KV save error: {e}")
+    return False
+
+
+def restore_slot_checkpoint(mode="gpu"):
+    """Restore the previously saved KV cache into slot 0 of ``mode``'s server.
+
+    Called right after a model load. The restored prefix is only a *cache*:
+    the next completion still verifies its prompt against the restored tokens
+    and evaluates whatever is new, so a stale snapshot costs time but can
+    never produce wrong output.
+    """
+    with M._data_lock:
+        cp = dict(M._slot_checkpoints.get(mode) or {})
+    if not cp:
+        return False
+    filename = cp.get("file") or slot_checkpoint_file(mode)
+    if not os.path.exists(os.path.join(M.LLAMA_SLOT_SAVE_DIR, filename)):
+        with M._data_lock:
+            M._slot_checkpoints.pop(mode, None)
+        return False
+    if cp.get("model") != M.server_model_id(mode):
+        # Snapshot belongs to another model — restoring it would fail (or worse,
+        # misload state), drop it silently.
+        print(
+            f"[llama] Dropping stale {mode} KV checkpoint "
+            f"(saved for '{cp.get('model')}', now '{M.server_model_id(mode)}')"
+        )
+        with M._data_lock:
+            M._slot_checkpoints.pop(mode, None)
+        return False
+
+    try:
+        r = requests.post(
+            f"{M.server_base(mode)}/slots/0?action=restore",
+            # See save_slot_checkpoint: router mode routes by body "model".
+            json={"filename": filename, "model": M.server_model_id(mode)},
+            timeout=180,
+        )
+        if r.status_code == 200:
+            n_tokens = r.json().get("n_tokens", cp.get("n_tokens", 0))
+            with M._data_lock:
+                # The slot now holds exactly the snapshot's KV again.
+                M._slot_kv_dirty[mode] = False
+            print(
+                f"[llama] {mode} slot KV restored from checkpoint ({n_tokens} tokens)"
+            )
+            return True
+        # Unusable snapshot — clear it so we don't retry every load.
+        print(
+            f"[llama] {mode} slot KV restore failed ({r.status_code}): {r.text[:200]}"
+        )
+    except Exception as e:
+        print(f"[llama] {mode} slot KV restore error: {e}")
+    with M._data_lock:
+        M._slot_checkpoints.pop(mode, None)
+    return False
 
 
 def _consult_worker(*args, **kwargs):
@@ -127,12 +261,20 @@ def unload_llama_model(mode="gpu"):
         with M._data_lock:
             if (M._cpu_model_status if mode == "cpu" else M.model_status) == "unloaded":
                 return True
+
+        print(f"[llama] Requesting {mode} model unload from VRAM/RAM...")
+        # Checkpoint the KV cache BEFORE it is destroyed by the unload, so the
+        # post-image-gen (or post-idle) reload can restore it instead of
+        # re-prefilling the whole conversation. This must happen while the
+        # model still reads "chat_loaded" — save_slot_checkpoint skips
+        # anything else — hence before the "unloading" transition below.
+        M.save_slot_checkpoint(mode)
+        with M._data_lock:
             if mode == "cpu":
                 M._cpu_model_status = "unloading"
             else:
                 M.model_status = "unloading"
 
-        print(f"[llama] Requesting {mode} model unload from VRAM/RAM...")
         try:
             r = requests.post(
                 f"{M.server_base(mode)}/models/unload",
@@ -163,8 +305,17 @@ def unload_llama_model(mode="gpu"):
 
 def load_llama_model(mode="gpu"):
     """Load the model on the llama-server for ``mode`` and wait for it to be
-    ready, tracking the per-server model status and idle timestamp."""
+    ready, tracking the per-server model status and idle timestamp.
+
+    When the load follows an unload (image generation, idle release), the KV
+    checkpoint saved by :func:`save_slot_checkpoint` is restored so the next
+    completion only has to evaluate new tokens."""
     with M._data_lock:
+        # Only a fresh load benefits from a restore: if the model is already
+        # running, its live KV is newer than any snapshot on disk.
+        was_unloaded = (
+            M._cpu_model_status if mode == "cpu" else M.model_status
+        ) == "unloaded"
         if mode == "cpu":
             M._cpu_model_status = "loading"
         else:
@@ -187,6 +338,10 @@ def load_llama_model(mode="gpu"):
                         else:
                             M.model_status = "chat_loaded"
                             M._last_llm_use = time.time()  # Reset idle timer upon loading
+                    # Resume from the pre-unload KV checkpoint (no-op when
+                    # there is none or the load wasn't a reload).
+                    if was_unloaded:
+                        M.restore_slot_checkpoint(mode)
                     return True
                 time.sleep(2)
         else:
@@ -203,6 +358,8 @@ def load_llama_model(mode="gpu"):
             else:
                 M.model_status = "chat_loaded"
                 M._last_llm_use = time.time()  # Reset idle timer upon loading
+        if was_unloaded:
+            M.restore_slot_checkpoint(mode)
         return True
 
     with M._data_lock:
@@ -273,6 +430,7 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             #"reasoning_effort": "medium",
         }
         payload["stream"] = True
+        M.mark_slot_kv_dirty(mode)
         r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
         if r.status_code != 200:
             err_body = r.text[:500] if r.text else f"HTTP {r.status_code}"
