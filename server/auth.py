@@ -73,7 +73,9 @@ def role_from_groups(groups):
 def _split_groups(raw):
     if not raw:
         return []
-    return [g.strip() for g in re.split(r"[,\s]+", str(raw)) if g.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(g).strip() for g in raw if str(g).strip()]
+    return [g.strip() for g in re.split(r"[|,\s]+", str(raw)) if g.strip()]
 
 
 def identity_from_headers(headers):

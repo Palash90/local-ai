@@ -408,7 +408,7 @@ async def index(request: Request):
             const logoutBtn = document.getElementById('logout-btn');
             if (logoutBtn) {{
                 logoutBtn.addEventListener('click', () => {{
-                    window.location.href = '/sso/outpost.goauthentik.io/end?rd=%2Fstories%2F';
+                    window.location.href = '/outpost.goauthentik.io/sign_out?rd=%2Fstories%2F';
                 }});
             }}
             // Tap-to-toggle tooltip for moderation badges (title= doesn't work on mobile touch).

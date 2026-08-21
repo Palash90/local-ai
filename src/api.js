@@ -11,7 +11,7 @@ async function authFetch(url, options = {}) {
 }
 
 export async function logout() {
-  window.location.assign('/outpost.goauthentik.io/end?rd=/');
+  window.location.assign('/outpost.goauthentik.io/sign_out?rd=/');
 }
 
 export async function checkAuth() {
