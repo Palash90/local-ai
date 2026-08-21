@@ -51,6 +51,7 @@ prompts/
   tasks.json
 scripts/
   authentik_bootstrap.py
+  gcp_heartbeat_server.py
 searxng/
   settings.yml
 server/
@@ -98,6 +99,7 @@ src/
 authentik-compose.yaml
 chat-webui.py
 docker-compose.yaml
+gcp_nginx.conf
 genre_creator.py
 index.html
 LICENSE
@@ -117,6 +119,439 @@ vite.config.js
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="scripts/gcp_heartbeat_server.py">
+#!/usr/bin/env python3
+"""Heartbeat receiver + split-horizon DNS for the GCP VM.
+
+One process, two jobs:
+
+1. Heartbeat receiver (HTTP, default :9863)
+   The homeserver's ConnectionManager (server/features/monitoring.py) POSTs
+   its current addresses every 10 seconds over the WireGuard tunnel:
+
+       {"ipv6":        "2405:201:...",   # stable global IPv6
+        "public_ipv4": "49.37...",       # WAN IPv4 (NAT'd, via ipify)
+        "wifi_ipv4":   "192.168.29.x"}   # LAN IPv4 on the WiFi interface
+
+   GET /status returns the last payload as JSON.
+
+2. Split-horizon DNS (UDP+TCP :53)
+   Answers for home.palashkantikundu.in depend on WHO asks:
+     - query source IP == homeserver's latest WAN IP(s)  ->  LAN IPv4 (+AAAA)
+     - everyone else                                     ->  this VM's public IP
+   so same-network clients connect directly over the LAN while remote clients
+   go through the nginx/WireGuard tunnel. Every other name is forwarded to
+   upstream resolvers — but only for known homeserver IPs (no open resolver).
+
+Run on the VM (port 53 needs root or CAP_NET_BIND_SERVICE):
+
+    sudo pip3 install dnslib
+    sudo python3 gcp_heartbeat_server.py [--bind 10.66.66.1] [--port 9863] \
+        [--dns-bind 0.0.0.0] [--dns-port 53] [--gcp-ip 35.212.x.x]
+
+The VM's public IP is auto-detected from the GCP metadata server unless
+--gcp-ip is given. Open udp/tcp 53 in the GCP firewall.
+"""
+
+import argparse
+import ipaddress
+import json
+import os
+import threading
+import urllib.request
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from dnslib import A, AAAA, QTYPE, RCODE, RR, SOA, DNSRecord
+from dnslib.server import DNSServer, BaseResolver
+
+ZONE = "home.palashkantikundu.in"
+UPSTREAMS = ["1.1.1.1", "8.8.8.8"]
+ZONE_TTL = 30          # short TTL so IP changes propagate fast
+WG_PEER_IP = "10.66.66.3"
+
+_lock = threading.Lock()
+_latest = {}
+
+# Recently seen WAN IPs of the homeserver (Jio rotates them).
+_recent_public_ips = {}          # ip -> last seen timestamp
+_RECENT_TTL = 48 * 3600
+_RECENT_MAX = 10
+
+
+def _log(message, log_file=None):
+    line = f"{datetime.now().isoformat()} {message}"
+    print(line, flush=True)
+    if log_file:
+        with open(log_file, "a") as fh:
+            fh.write(line + "\n")
+
+
+def _valid_ip(value, version):
+    try:
+        return str(ipaddress.ip_address(value)) if value else None
+    except ValueError:
+        return None
+
+
+def _remember_public_ip(ip, now):
+    _recent_public_ips[ip] = now
+    stale = [k for k, ts in _recent_public_ips.items() if now - ts > _RECENT_TTL]
+    for k in stale:
+        del _recent_public_ips[k]
+    while len(_recent_public_ips) > _RECENT_MAX:
+        del _recent_public_ips[min(_recent_public_ips, key=lambda k: _recent_public_ips[k])]
+
+
+# ---------------------------------------------------------------------------
+# DNS
+# ---------------------------------------------------------------------------
+
+def _detect_gcp_ip():
+    """Public IP of this VM via the GCP metadata server."""
+    try:
+        req = urllib.request.Request(
+            "http://metadata.google.internal/computeMetadata/v1/instance/"
+            "network-interfaces/0/access-configs/0/external-ip",
+            headers={"Metadata-Flavor": "Google"},
+        )
+        return urllib.request.urlopen(req, timeout=2).read().decode().strip()
+    except Exception:
+        return None
+
+
+class HomeResolver(BaseResolver):
+    """Zone answers driven by heartbeat state; everything else forwarded."""
+
+    def __init__(self, gcp_ip):
+        self.gcp_ip = gcp_ip
+
+    def _snapshot(self):
+        with _lock:
+            return (
+                set(_recent_public_ips),
+                _latest.get("wifi_ipv4"),
+                _latest.get("ipv6"),
+            )
+
+    def _soa(self, reply):
+        reply.add_auth(RR(
+            ZONE, QTYPE.SOA,
+            rdata=SOA(f"ns.{ZONE}", f"hostmaster.{ZONE}", (2024010101, 300, 60, 600, 30)),
+            ttl=ZONE_TTL,
+        ))
+
+    def resolve(self, request, handler):
+        client = handler.client_address[0]
+        reply = request.reply()
+        name = str(request.q.qname).rstrip(".").lower()
+        qtype = QTYPE[request.q.qtype]
+
+        local_ips, wifi_ip, server_v6 = self._snapshot()
+        is_local_client = client in local_ips
+
+        if name == ZONE:
+            if qtype == "A":
+                target = wifi_ip if (is_local_client and wifi_ip) else self.gcp_ip
+                if target:
+                    reply.add_answer(RR(request.q.qname, QTYPE.A,
+                                        rdata=A(target), ttl=ZONE_TTL))
+                else:
+                    self._soa(reply)
+            elif qtype == "AAAA":
+                # Remote clients get no AAAA (the GCP proxy is v4-only);
+                # same-network clients get the server's global v6.
+                if is_local_client and server_v6:
+                    reply.add_answer(RR(request.q.qname, QTYPE.AAAA,
+                                        rdata=AAAA(server_v6), ttl=ZONE_TTL))
+                else:
+                    self._soa(reply)
+            else:
+                self._soa(reply)
+            return reply
+
+        # Recursion only for the homeserver itself (no open resolver).
+        if not (is_local_client or client == WG_PEER_IP):
+            reply.header.rcode = RCODE.REFUSED
+            return reply
+
+        try:
+            return DNSRecord.parse(request.send(self._upstream(), 53, timeout=3))
+        except Exception:
+            reply.header.rcode = RCODE.SERVFAIL
+            return reply
+
+    @staticmethod
+    def _upstream():
+        return UPSTREAMS[0]
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat HTTP receiver
+# ---------------------------------------------------------------------------
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path != "/heartbeat":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            self.send_error(400, "invalid JSON")
+            return
+
+        record = {
+            "ipv6": _valid_ip(data.get("ipv6"), 6),
+            "public_ipv4": _valid_ip(data.get("public_ipv4"), 4),
+            "wifi_ipv4": _valid_ip(data.get("wifi_ipv4"), 4),
+            "remote_addr": self.client_address[0],
+            "received_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with _lock:
+            _latest.clear()
+            _latest.update(record)
+
+        if record["public_ipv4"]:
+            now = datetime.now(timezone.utc).timestamp()
+            with _lock:
+                _remember_public_ip(record["public_ipv4"], now)
+
+        _log(f"heartbeat from {record['remote_addr']}: "
+             f"v6={record['ipv6']} pub_v4={record['public_ipv4']} wifi_v4={record['wifi_ipv4']}",
+             self.server.log_file)
+        self.send_response(200)
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path != "/status":
+            self.send_error(404)
+            return
+        with _lock:
+            body = json.dumps(_latest).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass  # request lines are logged by _log() instead
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bind", default="10.66.66.1",
+                        help="heartbeat listener address (default: WireGuard IP)")
+    parser.add_argument("--port", type=int, default=9863)
+    parser.add_argument("--log", default=os.path.expanduser("~/heartbeat.log"),
+                        help="append received heartbeats to this file")
+    parser.add_argument("--dns-bind", default="0.0.0.0",
+                        help="DNS listener address (default: all interfaces)")
+    parser.add_argument("--dns-port", type=int, default=53,
+                        help="DNS port, 0 disables the DNS server")
+    parser.add_argument("--gcp-ip", default=None,
+                        help="this VM's public IPv4 (default: auto-detect)")
+    args = parser.parse_args()
+
+    gcp_ip = args.gcp_ip or _detect_gcp_ip()
+
+    if args.dns_port:
+        resolver = HomeResolver(gcp_ip)
+        udp = DNSServer(resolver, port=args.dns_port, address=args.dns_bind)
+        tcp = DNSServer(resolver, port=args.dns_port, address=args.dns_bind, tcp=True)
+        udp.start_thread()
+        tcp.start_thread()
+        if not udp.isAlive() or not tcp.isAlive():
+            raise SystemExit(f"could not bind DNS on {args.dns_bind}:{args.dns_port}")
+        print(f"DNS listening on {args.dns_bind}:{args.dns_port} "
+              f"(zone={ZONE}, tunnel_ip={gcp_ip})", flush=True)
+
+    httpd = ThreadingHTTPServer((args.bind, args.port), Handler)
+    httpd.log_file = args.log
+    print(f"Heartbeat receiver listening on http://{args.bind}:{args.port}", flush=True)
+    try:
+        httpd.serve_forever()
+    finally:
+        if args.dns_port:
+            udp.stop()
+            tcp.stop()
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="src/components/ImageLightbox.jsx">
+import { useEffect, useRef, useState, useCallback } from 'react'
+
+export default function ImageLightbox({ src, onClose }) {
+  const [zoom, setZoom] = useState(1)
+  const [panX, setPanX] = useState(0)
+  const [panY, setPanY] = useState(0)
+  const dragging = useRef(false)
+  const startX = useRef(0)
+  const startY = useRef(0)
+  const pinchDist = useRef(0)
+
+  function handleClose() {
+    onClose()
+    if (window.history.state && window.history.state.lightboxOpen) {
+      window.history.back()
+    }
+  }
+
+  useEffect(() => {
+    if (!src) return
+    const onPopState = () => onClose()
+    window.addEventListener('popstate', onPopState)
+    if (!(window.history.state && window.history.state.lightboxOpen)) {
+      window.history.pushState({ lightboxOpen: true }, '')
+    }
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [src, onClose])
+
+  const updateTransform = useCallback(() => {
+    const img = document.getElementById('fullscreen-img')
+    if (img) {
+      img.style.transform = `scale(${zoom}) translate(${panX}px, ${panY}px)`
+    }
+    const label = document.getElementById('zoom-label')
+    if (label) label.textContent = Math.round(zoom * 100) + '%'
+  }, [zoom, panX, panY])
+
+  useEffect(() => {
+    if (!src) return
+    setZoom(1)
+    setPanX(0)
+    setPanY(0)
+    const img = document.getElementById('fullscreen-img')
+    if (img) {
+      img.src = src
+      img.style.transform = ''
+    }
+    const label = document.getElementById('zoom-label')
+    if (label) label.textContent = '100%'
+  }, [src])
+
+  useEffect(() => {
+    if (!src) return
+    const overlay = document.getElementById('image-overlay')
+
+    function handleWheel(e) {
+      e.preventDefault()
+      const delta = e.deltaY > 0 ? -0.1 : 0.1
+      setZoom(z => Math.max(0.25, Math.min(10, z + delta)))
+    }
+
+    function handleMouseDown(e) {
+      const img = document.getElementById('fullscreen-img')
+      if (e.target === img) {
+        dragging.current = true
+        startX.current = e.clientX - panX
+        startY.current = e.clientY - panY
+        overlay.style.cursor = 'grabbing'
+        e.preventDefault()
+      } else {
+        handleClose()
+      }
+    }
+
+    function handleMouseMove(e) {
+      if (!dragging.current) return
+      setPanX(e.clientX - startX.current)
+      setPanY(e.clientY - startY.current)
+    }
+
+    function handleMouseUp() {
+      if (dragging.current) {
+        dragging.current = false
+        overlay.style.cursor = 'grab'
+      }
+    }
+
+    function handleTouchStart(e) {
+      if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX
+        const dy = e.touches[0].clientY - e.touches[1].clientY
+        pinchDist.current = Math.sqrt(dx * dx + dy * dy)
+        dragging.current = false
+        e.preventDefault()
+      } else if (e.touches.length === 1 && e.target === document.getElementById('fullscreen-img')) {
+        dragging.current = true
+        startX.current = e.touches[0].clientX - panX
+        startY.current = e.touches[0].clientY - panY
+        e.preventDefault()
+      }
+    }
+
+    function handleTouchMove(e) {
+      if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX
+        const dy = e.touches[0].clientY - e.touches[1].clientY
+        const dist = Math.sqrt(dx * dx + dy * dy)
+        if (pinchDist.current > 0) {
+          setZoom(z => Math.max(0.25, Math.min(10, z * (dist / pinchDist.current))))
+          pinchDist.current = dist
+        }
+        e.preventDefault()
+      } else if (e.touches.length === 1 && dragging.current) {
+        setPanX(e.touches[0].clientX - startX.current)
+        setPanY(e.touches[0].clientY - startY.current)
+        e.preventDefault()
+      }
+    }
+
+    function handleTouchEnd(e) {
+      if (dragging.current && e.touches.length === 0) {
+        dragging.current = false
+      }
+      if (e.changedTouches.length === 1 && e.target !== document.getElementById('fullscreen-img')) {
+        handleClose()
+      }
+    }
+
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') handleClose()
+    }
+
+    overlay.addEventListener('wheel', handleWheel, { passive: false })
+    overlay.addEventListener('mousedown', handleMouseDown)
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    overlay.addEventListener('touchstart', handleTouchStart, { passive: false })
+    overlay.addEventListener('touchmove', handleTouchMove, { passive: false })
+    overlay.addEventListener('touchend', handleTouchEnd)
+    document.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      overlay.removeEventListener('wheel', handleWheel)
+      overlay.removeEventListener('mousedown', handleMouseDown)
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      overlay.removeEventListener('touchstart', handleTouchStart)
+      overlay.removeEventListener('touchmove', handleTouchMove)
+      overlay.removeEventListener('touchend', handleTouchEnd)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [src, onClose, panX, panY])
+
+  useEffect(() => {
+    updateTransform()
+  }, [zoom, panX, panY, updateTransform])
+
+  if (!src) return null
+
+  return (
+    <div id="image-overlay" className="open">
+      <div className="img-wrap"><img id="fullscreen-img" /></div>
+      <div className="zoom-label" id="zoom-label">100%</div>
+    </div>
+  )
+}
+</file>
 
 <file path="src/components/LocationPrompt.jsx">
 export default function LocationPrompt({ onAllow, onDeny, error }) {
@@ -382,6 +817,71 @@ import './App.css'
 createRoot(document.getElementById('root')).render(<App />)
 </file>
 
+<file path="gcp_nginx.conf">
+server {
+    listen 80;
+    server_name home.palashkantikundu.in;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name home.palashkantikundu.in;
+
+    ssl_certificate     /etc/nginx/ssl/home.palashkantikundu.in/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/home.palashkantikundu.in/privkey.pem;
+
+    # Intercept errors from home server connection
+    proxy_intercept_errors on;
+    error_page 502 503 504 = @server_offline;
+
+    # Inline HTML page served when main server is down
+    location @server_offline {
+        default_type text/html;
+        return 502 '<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Main Server Offline</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; max-width: 420px; width: 100%; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+        .icon { font-size: 48px; margin-bottom: 16px; }
+        .title { font-size: 20px; font-weight: 600; color: #f85149; margin-bottom: 8px; }
+        .desc { font-size: 14px; color: #8b949e; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">⚠️</div>
+        <div class="title">Main Server Offline</div>
+        <div class="desc">The home server is currently unreachable or powered off. Please try again later.</div>
+    </div>
+</body>
+</html>';
+    }
+
+    location / {
+            proxy_pass https://10.66.66.3;
+            proxy_ssl_server_name on;
+            proxy_ssl_verify off;
+
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Via-GCP "true";
+
+            # Fast failover timeouts
+            proxy_connect_timeout 3s;
+            proxy_read_timeout 5s;
+            proxy_send_timeout 5s;
+    }
+}
+</file>
+
 <file path="index.html">
 <!DOCTYPE html>
 <html lang="en">
@@ -419,86 +919,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-</file>
-
-<file path="restart_services.sh">
-#!/usr/bin/env bash
-# Restart the top-level local-ai services.
-#
-#   chat-webui          python3 ./chat-webui.py                    (port 3001)
-#   markdown hosting    uvicorn markdown_hosting:app               (port 3002)
-#   code hosting        python3 code_host.py .                     (port 9000)
-#   request tracker     sudo python3 server/track_dashboard.py     (port 8093)
-#
-# Every service runs under nohup and appends to its own log in logs/.
-# The tracker reads /var/log/nginx/track.log, so it runs under sudo —
-# you may be prompted for your password once.
-set -u
-
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GIT_DIR="$(dirname "$REPO_DIR")"
-LOG_DIR="$REPO_DIR/logs"
-mkdir -p "$LOG_DIR"
-
-stop_all() {
-    local pattern="$1" name="$2"
-    if pgrep -f "$pattern" >/dev/null 2>&1; then
-        pkill -TERM -f "$pattern" 2>/dev/null
-        for _ in $(seq 1 20); do
-            pgrep -f "$pattern" >/dev/null 2>&1 || break
-            sleep 0.5
-        done
-        pkill -KILL -f "$pattern" 2>/dev/null
-        echo "  stopped: $name"
-    else
-        echo "  not running: $name"
-    fi
-}
-
-start_one() {
-    local name="$1" logfile="$2" dir="$3"
-    shift 3
-    (
-        cd "$dir" || exit 1
-        nohup "$@" >>"$logfile" 2>&1 &
-        echo "  started: $name (pid $!, log $logfile)"
-    )
-}
-
-echo "== Stopping =="
-stop_all 'chat-webui\.py'      "chat web ui"
-stop_all 'markdown_hosting'    "markdown hosting"
-stop_all 'code_host\.py'       "code hosting"
-stop_all 'track_dashboard'     "request tracker"
-
-# Tracker log must exist and be readable (same prep as local_cloud.sh).
-sudo touch /var/log/nginx/track.log
-sudo chmod 640 /var/log/nginx/track.log
-
-echo "== Starting =="
-start_one "chat web ui"     "$LOG_DIR/chat-webui.log"       "$REPO_DIR" python3 ./chat-webui.py
-start_one "markdown hosting" "$LOG_DIR/markdown-hosting.log" "$REPO_DIR" python3 -m uvicorn markdown_hosting:app --host 127.0.0.1 --port 3002
-start_one "code hosting"    "$LOG_DIR/code-host.log"        "$GIT_DIR"  python3 code_host.py .
-start_one "request tracker" "$LOG_DIR/track-dashboard.log"  "$REPO_DIR" sudo python3 server/track_dashboard.py --port 8093 --log /var/log/nginx/track.log
-
-sleep 3
-echo "== Health =="
-check() {
-    local name="$1" url="$2"
-    local code
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null)
-    if [ "$code" != "000" ]; then
-        echo "  UP   $name ($url -> HTTP $code)"
-    else
-        echo "  DOWN $name ($url) — check its log in $LOG_DIR/"
-        [ "$name" = "request tracker" ] && \
-            echo "       (tracker needs sudo; run this script from a terminal so the password can be prompted)"
-    fi
-}
-check "chat web ui"      http://127.0.0.1:3001/
-check "markdown hosting" http://127.0.0.1:3002/
-check "code hosting"     http://127.0.0.1:9000/
-check "request tracker"  http://127.0.0.1:8093/
 </file>
 
 <file path="server_startup_commands.md">
@@ -1529,175 +1949,6 @@ export default function ChatArea({ messages, pendingMessages, currentSessionId, 
 }
 </file>
 
-<file path="src/components/ImageLightbox.jsx">
-import { useEffect, useRef, useState, useCallback } from 'react'
-
-export default function ImageLightbox({ src, onClose }) {
-  const [zoom, setZoom] = useState(1)
-  const [panX, setPanX] = useState(0)
-  const [panY, setPanY] = useState(0)
-  const dragging = useRef(false)
-  const startX = useRef(0)
-  const startY = useRef(0)
-  const pinchDist = useRef(0)
-
-  function handleClose() {
-    onClose()
-    if (window.history.state && window.history.state.lightboxOpen) {
-      window.history.back()
-    }
-  }
-
-  useEffect(() => {
-    if (!src) return
-    const onPopState = () => onClose()
-    window.addEventListener('popstate', onPopState)
-    if (!(window.history.state && window.history.state.lightboxOpen)) {
-      window.history.pushState({ lightboxOpen: true }, '')
-    }
-    return () => window.removeEventListener('popstate', onPopState)
-  }, [src, onClose])
-
-  const updateTransform = useCallback(() => {
-    const img = document.getElementById('fullscreen-img')
-    if (img) {
-      img.style.transform = `scale(${zoom}) translate(${panX}px, ${panY}px)`
-    }
-    const label = document.getElementById('zoom-label')
-    if (label) label.textContent = Math.round(zoom * 100) + '%'
-  }, [zoom, panX, panY])
-
-  useEffect(() => {
-    if (!src) return
-    setZoom(1)
-    setPanX(0)
-    setPanY(0)
-    const img = document.getElementById('fullscreen-img')
-    if (img) {
-      img.src = src
-      img.style.transform = ''
-    }
-    const label = document.getElementById('zoom-label')
-    if (label) label.textContent = '100%'
-  }, [src])
-
-  useEffect(() => {
-    if (!src) return
-    const overlay = document.getElementById('image-overlay')
-
-    function handleWheel(e) {
-      e.preventDefault()
-      const delta = e.deltaY > 0 ? -0.1 : 0.1
-      setZoom(z => Math.max(0.25, Math.min(10, z + delta)))
-    }
-
-    function handleMouseDown(e) {
-      const img = document.getElementById('fullscreen-img')
-      if (e.target === img) {
-        dragging.current = true
-        startX.current = e.clientX - panX
-        startY.current = e.clientY - panY
-        overlay.style.cursor = 'grabbing'
-        e.preventDefault()
-      } else {
-        handleClose()
-      }
-    }
-
-    function handleMouseMove(e) {
-      if (!dragging.current) return
-      setPanX(e.clientX - startX.current)
-      setPanY(e.clientY - startY.current)
-    }
-
-    function handleMouseUp() {
-      if (dragging.current) {
-        dragging.current = false
-        overlay.style.cursor = 'grab'
-      }
-    }
-
-    function handleTouchStart(e) {
-      if (e.touches.length === 2) {
-        const dx = e.touches[0].clientX - e.touches[1].clientX
-        const dy = e.touches[0].clientY - e.touches[1].clientY
-        pinchDist.current = Math.sqrt(dx * dx + dy * dy)
-        dragging.current = false
-        e.preventDefault()
-      } else if (e.touches.length === 1 && e.target === document.getElementById('fullscreen-img')) {
-        dragging.current = true
-        startX.current = e.touches[0].clientX - panX
-        startY.current = e.touches[0].clientY - panY
-        e.preventDefault()
-      }
-    }
-
-    function handleTouchMove(e) {
-      if (e.touches.length === 2) {
-        const dx = e.touches[0].clientX - e.touches[1].clientX
-        const dy = e.touches[0].clientY - e.touches[1].clientY
-        const dist = Math.sqrt(dx * dx + dy * dy)
-        if (pinchDist.current > 0) {
-          setZoom(z => Math.max(0.25, Math.min(10, z * (dist / pinchDist.current))))
-          pinchDist.current = dist
-        }
-        e.preventDefault()
-      } else if (e.touches.length === 1 && dragging.current) {
-        setPanX(e.touches[0].clientX - startX.current)
-        setPanY(e.touches[0].clientY - startY.current)
-        e.preventDefault()
-      }
-    }
-
-    function handleTouchEnd(e) {
-      if (dragging.current && e.touches.length === 0) {
-        dragging.current = false
-      }
-      if (e.changedTouches.length === 1 && e.target !== document.getElementById('fullscreen-img')) {
-        handleClose()
-      }
-    }
-
-    function handleKeyDown(e) {
-      if (e.key === 'Escape') handleClose()
-    }
-
-    overlay.addEventListener('wheel', handleWheel, { passive: false })
-    overlay.addEventListener('mousedown', handleMouseDown)
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    overlay.addEventListener('touchstart', handleTouchStart, { passive: false })
-    overlay.addEventListener('touchmove', handleTouchMove, { passive: false })
-    overlay.addEventListener('touchend', handleTouchEnd)
-    document.addEventListener('keydown', handleKeyDown)
-
-    return () => {
-      overlay.removeEventListener('wheel', handleWheel)
-      overlay.removeEventListener('mousedown', handleMouseDown)
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-      overlay.removeEventListener('touchstart', handleTouchStart)
-      overlay.removeEventListener('touchmove', handleTouchMove)
-      overlay.removeEventListener('touchend', handleTouchEnd)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [src, onClose, panX, panY])
-
-  useEffect(() => {
-    updateTransform()
-  }, [zoom, panX, panY, updateTransform])
-
-  if (!src) return null
-
-  return (
-    <div id="image-overlay" className="open">
-      <div className="img-wrap"><img id="fullscreen-img" /></div>
-      <div className="zoom-label" id="zoom-label">100%</div>
-    </div>
-  )
-}
-</file>
-
 <file path="src/components/OverloadWarning.jsx">
 export default function OverloadWarning({ overheated, gpuTemp, ramEvacuating }) {
   if (!overheated && !ramEvacuating) return null
@@ -1907,6 +2158,86 @@ fastapi
 uvicorn
 PyJWT
 Markdown
+</file>
+
+<file path="restart_services.sh">
+#!/usr/bin/env bash
+# Restart the top-level local-ai services.
+#
+#   chat-webui          python3 ./chat-webui.py                    (port 3001)
+#   markdown hosting    uvicorn markdown_hosting:app               (port 3002)
+#   code hosting        python3 code_host.py .                     (port 9000)
+#   request tracker     sudo python3 server/track_dashboard.py     (port 8093)
+#
+# Every service runs under nohup and appends to its own log in logs/.
+# The tracker reads /var/log/nginx/track.log, so it runs under sudo —
+# you may be prompted for your password once.
+set -u
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GIT_DIR="$(dirname "$REPO_DIR")"
+LOG_DIR="$REPO_DIR/logs"
+mkdir -p "$LOG_DIR"
+
+stop_all() {
+    local pattern="$1" name="$2"
+    if pgrep -f "$pattern" >/dev/null 2>&1; then
+        pkill -TERM -f "$pattern" 2>/dev/null
+        for _ in $(seq 1 20); do
+            pgrep -f "$pattern" >/dev/null 2>&1 || break
+            sleep 0.5
+        done
+        pkill -KILL -f "$pattern" 2>/dev/null
+        echo "  stopped: $name"
+    else
+        echo "  not running: $name"
+    fi
+}
+
+start_one() {
+    local name="$1" logfile="$2" dir="$3"
+    shift 3
+    (
+        cd "$dir" || exit 1
+        nohup "$@" >>"$logfile" 2>&1 &
+        echo "  started: $name (pid $!, log $logfile)"
+    )
+}
+
+echo "== Stopping =="
+stop_all 'chat-webui\.py'      "chat web ui"
+stop_all 'markdown_hosting'    "markdown hosting"
+stop_all 'code_host\.py'       "code hosting"
+stop_all 'track_dashboard'     "request tracker"
+
+# Tracker log must exist and be readable (same prep as local_cloud.sh).
+sudo touch /var/log/nginx/track.log
+sudo chmod 640 /var/log/nginx/track.log
+
+echo "== Starting =="
+start_one "chat web ui"     "$LOG_DIR/chat-webui.log"       "$REPO_DIR" python3 ./chat-webui.py
+start_one "markdown hosting" "$LOG_DIR/markdown-hosting.log" "$REPO_DIR" python3 -m uvicorn markdown_hosting:app --host 127.0.0.1 --port 3002
+start_one "code hosting"    "$LOG_DIR/code-host.log"        "$GIT_DIR"  python3 code_host.py .
+start_one "request tracker" "$LOG_DIR/track-dashboard.log"  "$REPO_DIR" sudo python3 server/track_dashboard.py --port 8093 --log /var/log/nginx/track.log
+
+sleep 3
+echo "== Health =="
+check() {
+    local name="$1" url="$2"
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null)
+    if [ "$code" != "000" ]; then
+        echo "  UP   $name ($url -> HTTP $code)"
+    else
+        echo "  DOWN $name ($url) — check its log in $LOG_DIR/"
+        [ "$name" = "request tracker" ] && \
+            echo "       (tracker needs sudo; run this script from a terminal so the password can be prompted)"
+    fi
+}
+check "chat web ui"      http://127.0.0.1:3001/
+check "markdown hosting" http://127.0.0.1:3002/
+check "code hosting"     http://127.0.0.1:9000/
+check "request tracker"  http://127.0.0.1:8093/
 </file>
 
 <file path="sso-debugging.md">
@@ -4168,6 +4499,10 @@ services:
     container_name: cloud-app
     image: nextcloud
     restart: always
+    # Pin the public hostname to the host so server-side OIDC calls (discovery,
+    # logout) hit local nginx directly instead of round-tripping via GCP/DNS.
+    extra_hosts:
+      - "home.palashkantikundu.in:host-gateway"
     networks:
       - external-net
       - internal-net
@@ -5692,15 +6027,6 @@ export default function InputBar({ onSend, hasPending }) {
 }
 </file>
 
-<file path=".gitignore">
-node_modules
-dist
-*.pyc
-*.log
-# Environment / secrets (fill in your real values; never commit these)
-.env
-</file>
-
 <file path="src/components/Message.jsx">
 import { useMemo, useRef, useState, useCallback, useEffect, memo } from 'react'
 import { marked } from 'marked'
@@ -6459,6 +6785,15 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
 }
 
 export default memo(Message)
+</file>
+
+<file path=".gitignore">
+node_modules
+dist
+*.pyc
+*.log
+# Environment / secrets (fill in your real values; never commit these)
+.env
 </file>
 
 <file path="src/App.css">
@@ -9120,6 +9455,436 @@ export async function fetchPublicShare(token) {
 }
 </file>
 
+<file path="src/App.jsx">
+import { useState, useEffect, useRef, useCallback } from 'react'
+import * as api from './api'
+import ModelBar from './components/ModelBar'
+import Sidebar from './components/Sidebar'
+import ChatArea from './components/ChatArea'
+import InputBar from './components/InputBar'
+import ImageLightbox from './components/ImageLightbox'
+import OverloadWarning from './components/OverloadWarning'
+import TaskPanel from './components/TaskPanel'
+import LocationPrompt from './components/LocationPrompt'
+import PublicShareView from './components/PublicShareView'
+
+function shareTokenFromPath() {
+  const m = /^\/s\/([A-Za-z0-9]+)\/?$/.exec(window.location.pathname)
+  return m ? m[1] : null
+}
+
+export default function App() {
+  const [authenticated, setAuthenticated] = useState(false)
+  const [publicShareToken, setPublicShareToken] = useState(() => shareTokenFromPath())
+  const [username, setUsername] = useState('')
+  const [sessions, setSessions] = useState([])
+  const [currentSessionId, setCurrentSessionId] = useState(null)
+  const [messages, setMessages] = useState([])
+  const [pendingMessages, setPendingMessages] = useState({})
+  const [tokenEstimate, setTokenEstimate] = useState(0)
+  const [contextCompressed, setContextCompressed] = useState(false)
+  const [rawTokenEstimate, setRawTokenEstimate] = useState(0)
+  const [maxContext, setMaxContext] = useState(24576)
+  const [modelStatus, setModelStatus] = useState('unloaded')
+  const [modelTps, setModelTps] = useState(null)
+  const [overheated, setOverheated] = useState(false)
+  const [gpuTemp, setGpuTemp] = useState(null)
+  const [ramEvacuating, setRamEvacuating] = useState(false)
+  const [reminderCount, setReminderCount] = useState(0)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [lightboxSrc, setLightboxSrc] = useState(null)
+  const [loadingSessions, setLoadingSessions] = useState({})
+  const [showTasks, setShowTasks] = useState(false)
+  const [showLocationPrompt, setShowLocationPrompt] = useState(false)
+  const [locationTaskId, setLocationTaskId] = useState(null)
+  const [locationError, setLocationError] = useState(null)
+  const sessionRef = useRef(null)
+  const selectingRef = useRef(false)
+  const pendingMessagesRef = useRef({})
+  const resolvedTasksRef = useRef(new Set())
+
+  useEffect(() => {
+    // Authentication is enforced by nginx's auth_request against Authentik:
+    // by the time this SPA loads, the browser already has a valid SSO session
+    // and /api/check-auth answers from the forwarded X-Authentik-* headers.
+    api.checkAuth()
+      .then(res => {
+        if (res.authenticated) {
+          setAuthenticated(true)
+          if (res.username) setUsername(res.username)
+          loadSessions().then(list => {
+            const lastSid = localStorage.getItem('last_sid')
+            if (lastSid && list.some(s => s.session_id === lastSid)) {
+              switchSession(lastSid)
+            } else if (list.length > 0) {
+              switchSession(list[0].session_id)
+            }
+          })
+        } else {
+          setAuthenticated(false)
+        }
+      })
+      .catch(() => setAuthenticated(false))
+  }, [])
+
+  useEffect(() => {
+    const handler = () => {
+      setAuthenticated(false);
+      setUsername('');
+      setSessions([]);
+      sessionRef.current = null; setCurrentSessionId(null);
+      setMessages([]);
+      setPendingMessages({});
+      setSidebarOpen(false);
+    };
+    window.addEventListener('auth:unauthorized', handler);
+    return () => window.removeEventListener('auth:unauthorized', handler);
+  }, [])
+
+  const hasPendingForCurrent = Object.values(pendingMessages).some(
+    p => p.sessionId === currentSessionId
+  )
+
+  useEffect(() => {
+    pendingMessagesRef.current = pendingMessages
+  }, [pendingMessages])
+
+  // ---- Auth ----
+  async function handleLogout() {
+    console.log('[logout] called')
+    await api.logout()
+    setAuthenticated(false)
+    setUsername('')
+    setSessions([])
+    sessionRef.current = null; setCurrentSessionId(null)
+    setMessages([])
+    setPendingMessages({})
+    setSidebarOpen(false)
+  }
+
+  // ---- Sessions ----
+  async function loadSessions() {
+    const list = await api.fetchSessions()
+    setSessions(list)
+    return list
+  }
+
+  function loadSessionMessages(sid) {
+    api.fetchMessages(sid).then(data => {
+      if (sessionRef.current !== sid) return
+      setMessages(data.messages || [])
+      setTokenEstimate(data.token_estimate || 0)
+      setContextCompressed(!!data.context_compressed)
+      setRawTokenEstimate(data.raw_token_estimate || 0)
+    }).catch(() => {
+      if (sessionRef.current !== sid) return
+      setMessages([])
+      setTokenEstimate(0)
+      setContextCompressed(false)
+      setRawTokenEstimate(0)
+    })
+  }
+
+  async function switchSession(sid) {
+    sessionRef.current = sid; setCurrentSessionId(sid)
+    localStorage.setItem('last_sid', sid)
+    loadSessionMessages(sid)
+    closeSidebar()
+  }
+
+  async function newChat() {
+    const data = await api.createSession()
+    sessionRef.current = data.session_id; setCurrentSessionId(data.session_id)
+    localStorage.setItem('last_sid', data.session_id)
+    setMessages([])
+    setTokenEstimate(0)
+    setContextCompressed(false)
+    setRawTokenEstimate(0)
+    const list = await loadSessions()
+    setSessions(list)
+    closeSidebar()
+  }
+
+  async function deleteSession_(sid) {
+    if (!confirm('Delete this session?')) return
+    await api.deleteSession(sid)
+    setPendingMessages(prev => {
+      const next = { ...prev }
+      for (const [tid, p] of Object.entries(prev)) {
+        if (p.sessionId === sid) delete next[tid]
+      }
+      return next
+    })
+    setStoredPending(getStoredPending().filter(p => p.sid !== sid))
+    const list = await loadSessions()
+    if (sid === currentSessionId) {
+      if (list.length > 0) {
+        switchSession(list[0].session_id)
+      } else {
+        newChat()
+      }
+    } else if (currentSessionId) {
+      loadSessionMessages(currentSessionId)
+    }
+  }
+
+  async function renameSession_(sid) {
+    const s = sessions.find(x => x.session_id === sid)
+    const newName = prompt('Session name:', s ? s.name : '')
+    if (!newName || newName.trim() === '') return
+    const prevSid = currentSessionId
+    await api.renameSession(sid, newName.trim())
+    const list = await loadSessions()
+    sessionRef.current = prevSid; setCurrentSessionId(prevSid)
+    setSessions(list)
+  }
+
+  function closeSidebar() {
+    setSidebarOpen(false)
+  }
+
+  // ---- Chat / Send ----
+  async function handleSend(text, image, research, cpu) {
+    if (!currentSessionId) return
+    const taskSid = currentSessionId
+    setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
+
+    const userMsg = { role: 'user', content: text || '\uD83D\uDCC4 file', _timestamp: new Date().toISOString() }
+
+    try {
+      const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined, undefined, research, cpu)
+      const taskId = data.task_id
+
+      setPendingMessages(prev => ({
+        ...prev,
+        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg },
+      }))
+
+      const stored = getStoredPending()
+      stored.push({ task_id: taskId, sid: taskSid })
+      setStoredPending(stored)
+    } catch (err) {
+      setMessages(prev => [...prev, userMsg, { role: 'assistant', content: 'Error: ' + err.message }])
+    }
+
+    setLoadingSessions(prev => {
+      const next = { ...prev }
+      next[taskSid] = (next[taskSid] || 1) - 1
+      if (!next[taskSid]) delete next[taskSid]
+      return next
+    })
+  }
+
+  // ---- Task completion callbacks (called by the active PendingMessage) ----
+  const handlePendingResolved = useCallback((pending, st) => {
+    const taskId = pending.taskId
+    if (resolvedTasksRef.current.has(taskId)) return
+    resolvedTasksRef.current.add(taskId)
+    setPendingMessages(prev => {
+      const next = { ...prev }
+      delete next[taskId]
+      return next
+    })
+    if (st.status === 'done') {
+      const userMsg = pending._userMsg
+      const assistantMsg = {
+        role: 'assistant',
+        content: st.response || '',
+        _elapsed_ms: st._elapsed_ms != null ? st._elapsed_ms : null,
+        _reasoning: st.reasoning || '',
+        _image_url: st.image || st._image_url,
+        _gen_prompt: st.gen_prompt,
+        _tools_used: st.tools_used || [],
+        _image_model: st._image_model,
+        _search_details: st._search_details || [],
+      }
+      if (pending.sessionId === sessionRef.current) {
+        setMessages(prev => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg])
+      }
+      if (st.token_estimate != null) setTokenEstimate(st.token_estimate)
+      setContextCompressed(!!st.context_compressed)
+      if (st.raw_token_estimate != null) setRawTokenEstimate(st.raw_token_estimate)
+      if (st.predicted_per_second != null) setModelTps(st.predicted_per_second)
+      if (st.session_name != null && st.session_id) {
+        setSessions(prev => prev.map(s => s.session_id === st.session_id ? { ...s, name: st.session_name } : s))
+      }
+    } else {
+      if (pending.sessionId === sessionRef.current) {
+        setMessages(prev => [...prev, ...(pending._userMsg ? [pending._userMsg] : []), {
+          role: 'assistant',
+          content: 'Error: ' + (st.error || 'Task was lost — please retry.'),
+        }])
+      }
+    }
+    const remaining = getStoredPending().filter(p => p.task_id !== taskId)
+    setStoredPending(remaining)
+  }, [])
+
+  const handleLocationNeeded = useCallback((taskId) => {
+    setShowLocationPrompt(true)
+    setLocationTaskId(taskId)
+    setLocationError(null)
+  }, [])
+
+  const closeLightbox = useCallback(() => setLightboxSrc(null), [])
+
+  // ---- Background task resolution ----
+  // Foreground pending tasks are self-polled by their PendingMessage (so only that
+  // message re-renders). This loop resolves tasks whose session is not currently open.
+  useEffect(() => {
+    if (!authenticated) return
+    const interval = setInterval(async () => {
+      for (const [taskId, p] of Object.entries(pendingMessagesRef.current)) {
+        if (p.sessionId === sessionRef.current) continue
+        try {
+          const st = await api.getTaskStatus(taskId)
+          const terminal = st && (st.status === 'done' || st.status === 'error' || st.status === 'cancelled' || st.status === 'unknown' || st.status === 'not_found')
+          if (terminal) {
+            handlePendingResolved(p, st)
+          } else if (st.message === 'location_needed') {
+            handleLocationNeeded(taskId)
+          }
+        } catch { }
+      }
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [authenticated, handlePendingResolved, handleLocationNeeded])
+
+  // ---- Model status polling ----
+  useEffect(() => {
+    if (!authenticated) return
+    const interval = setInterval(async () => {
+      try {
+        const data = await api.getModelStatus()
+        setModelStatus(data.model)
+        setOverheated(data.overheated)
+        setGpuTemp(data.gpu_temp)
+        if (data.ram_evacuating != null) setRamEvacuating(data.ram_evacuating)
+        if (data.predicted_per_second != null) setModelTps(data.predicted_per_second)
+        if (data.max_context != null) setMaxContext(data.max_context)
+        if (data.reminder_count != null) setReminderCount(data.reminder_count)
+      } catch { /* ignore */ }
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [authenticated])
+
+  // ---- Resume pending tasks on page load ----
+  useEffect(() => {
+    if (!authenticated) return
+    const stored = getStoredPending()
+    if (stored.length > 0) {
+      const pMap = {}
+      stored.forEach(item => {
+        pMap[item.task_id] = { sessionId: item.sid, status: 'working', message: 'Thinking...', taskId: item.task_id, reasoning: '' }
+      })
+      setPendingMessages(pMap)
+    }
+  }, [authenticated])
+
+  function handleLocationAllow() {
+    const tid = locationTaskId
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        setShowLocationPrompt(false)
+        setLocationTaskId(null)
+        api.sendLocation(pos.coords.latitude, pos.coords.longitude, tid)
+      },
+      err => {
+        if (err.code === 1) {
+          setLocationError('Location access is blocked in your browser. Please enable it in browser settings and try again.')
+        } else {
+          setLocationError('Could not get location: ' + err.message + '. Try again or click Deny.')
+        }
+      },
+      { timeout: 10000, enableHighAccuracy: false }
+    )
+  }
+
+  function handleLocationDeny() {
+    setShowLocationPrompt(false)
+    const tid = locationTaskId
+    setLocationTaskId(null)
+    setLocationError(null)
+    api.denyLocation(tid)
+  }
+
+  if (publicShareToken) {
+    return (
+      <PublicShareView
+        token={publicShareToken}
+        onExit={() => {
+          window.history.replaceState({}, '', '/')
+          setPublicShareToken(null)
+        }}
+      />
+    )
+  }
+
+  return (
+    <>
+      {showLocationPrompt && <LocationPrompt onAllow={handleLocationAllow} onDeny={handleLocationDeny} error={locationError} />}
+      <div style={{ display: authenticated ? '' : 'none' }}>
+        <ModelBar
+          modelStatus={modelStatus}
+          modelTps={modelTps}
+          tokenEstimate={tokenEstimate}
+          contextCompressed={contextCompressed}
+          rawTokenEstimate={rawTokenEstimate}
+          maxContext={maxContext}
+          onToggleSidebar={() => setSidebarOpen(o => !o)}
+          username={username}
+          onLogout={handleLogout}
+          reminderCount={reminderCount}
+          onToggleTasks={() => setShowTasks(o => !o)}
+        />
+        <div id="app-container">
+          <Sidebar
+            sessions={sessions}
+            currentSessionId={currentSessionId}
+            onSwitchSession={switchSession}
+            onNewChat={newChat}
+            onRenameSession={renameSession_}
+            onDeleteSession={deleteSession_}
+            onClose={closeSidebar}
+            open={sidebarOpen}
+          />
+          <OverloadWarning overheated={overheated} gpuTemp={gpuTemp} ramEvacuating={ramEvacuating} />
+          <ChatArea
+            messages={messages}
+            pendingMessages={pendingMessages}
+            currentSessionId={currentSessionId}
+            onImageOpen={setLightboxSrc}
+            selectingRef={selectingRef}
+            onPendingResolved={handlePendingResolved}
+            onLocationNeeded={handleLocationNeeded}
+          />
+          <InputBar
+            onSend={handleSend}
+            hasPending={hasPendingForCurrent}
+          />
+        </div>
+        <ImageLightbox src={lightboxSrc} onClose={closeLightbox} />
+        {showTasks && <TaskPanel onClose={() => setShowTasks(false)} />}
+      </div>
+    </>
+  )
+}
+
+function getStoredPending() {
+  try {
+    return JSON.parse(sessionStorage.getItem('opencode_pending')) || []
+  } catch {
+    return []
+  }
+}
+
+function setStoredPending(arr) {
+  try {
+    sessionStorage.setItem('opencode_pending', JSON.stringify(arr))
+  } catch { /* ignore */ }
+}
+</file>
+
 <file path="server/features/monitoring.py">
 """Health monitoring, server lifecycle and the background maintenance loops.
 
@@ -9137,7 +9902,6 @@ import os
 import subprocess
 import time
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -9467,13 +10231,72 @@ def _thermal_monitor():
                 M._evacuate_ram()
 
 
-TARGET_HOSTS = ["10.66.66.1"]
+def _get_current_ipv6():
+    """Get this machine's stable global IPv6 address."""
+    try:
+        iface = subprocess.check_output(
+            "ip -6 route show default | awk '{print $5; exit}'", shell=True, text=True
+        ).strip()
+        output = subprocess.check_output(
+            f"ip -6 addr show {iface} scope global", shell=True, text=True
+        )
+        for line in output.splitlines():
+            if "inet6" in line and "temporary" not in line:
+                return line.split()[1].split("/")[0]
+    except Exception as e:
+        print(f"[ddns] Failed to get IPv6: {e}")
+    return None
 
-def _ping_host(host):
-    # -c 1: send 1 packet, -W 2: wait up to 2 seconds for a response
-    cmd = ["ping", "-c", "1", "-W", "2", host]
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return host, result.returncode == 0
+
+def _get_wifi_ipv4():
+    """This machine's LAN IPv4 on the default (WiFi) interface."""
+    try:
+        iface = subprocess.check_output(
+            "ip -4 route show default | awk '{print $5; exit}'", shell=True, text=True
+        ).strip()
+        output = subprocess.check_output(
+            f"ip -4 addr show {iface} scope global", shell=True, text=True
+        )
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("inet ") and "secondary" not in line:
+                return line.split()[1].split("/")[0]
+    except Exception as e:
+        print(f"[heartbeat] Failed to get WiFi IPv4: {e}")
+    return None
+
+
+_public_ipv4_cache = {"ip": None, "ts": 0.0}
+
+
+def _get_public_ipv4():
+    """Public WAN IPv4 as seen from the internet, cached for 5 minutes."""
+    now = time.time()
+    if _public_ipv4_cache["ip"] and now - _public_ipv4_cache["ts"] < 300:
+        return _public_ipv4_cache["ip"]
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            r = requests.get(url, timeout=5)
+            ip = r.text.strip()
+            if r.status_code == 200 and ip.count(".") == 3:
+                _public_ipv4_cache.update(ip=ip, ts=now)
+                return ip
+        except Exception:
+            pass
+    print("[heartbeat] Could not determine public IPv4")
+    return _public_ipv4_cache["ip"]
+
+
+def _send_heartbeat():
+    """POST this machine's addresses to the GCP receiver over the tunnel."""
+    payload = {
+        "ipv6": _get_current_ipv6(),
+        "public_ipv4": _get_public_ipv4(),
+        "wifi_ipv4": _get_wifi_ipv4(),
+    }
+    r = requests.post(M.HEARTBEAT_URL, json=payload, timeout=5)
+    r.raise_for_status()
+    return payload
 
 
 def _ddns_enabled():
@@ -9536,23 +10359,17 @@ def maybe_update_dns():
 
 
 def _connection_manager():
-    # Adjust max_workers to match the number of hosts or system resources
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        while True:
-            # Ping all machines concurrently
-            results = executor.map(_ping_host, TARGET_HOSTS)
+    while True:
+        try:
+            payload = _send_heartbeat()
+            print(f"[+] heartbeat sent: {payload}")
+        except Exception as e:
+            print(f"[-] GCP unreachable ({M.HEARTBEAT_URL}): {e}")
 
-            # Process results
-            for host, is_alive in results:
-                if is_alive:
-                    print(f"[+] {host} is reachable")
-                else:
-                    print(f"[-] {host} is down/unreachable")
+        # Keep the GoDaddy AAAA record pointed at this machine's IPv6.
+        maybe_update_dns()
 
-            # Keep the GoDaddy AAAA record pointed at this machine's IPv6.
-            maybe_update_dns()
-
-            time.sleep(10)
+        time.sleep(10)
 </file>
 
 <file path="local_cloud.sh">
@@ -9968,15 +10785,7 @@ if [ -n "$NC_CONTAINER" ]; then
     docker exec --user www-data "$NC_CONTAINER" php occ config:system:set files_external_allow_create_new_local --value="true" --type=boolean
     docker exec --user www-data "$NC_CONTAINER" php occ app:enable files_external
 
-    echo "--- Configuring Nextcloud SSO via authentik (oidc_login) ---"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_provider_url --value="${AUTHENTIK_BASE_URL:-https://home.palashkantikundu.in/sso}/application/o/${AUTH_NC_CLIENT_ID:-nextcloud}/"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_client_id --value="${AUTH_NC_CLIENT_ID}"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_client_secret --value="${AUTH_NC_CLIENT_SECRET}"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_scope --value="openid profile email groups"
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_auto_redirect --value="true" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_disable_registration --value="false" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_create_group_membership --value="true" --type=boolean
-    docker exec --user www-data "$NC_CONTAINER" php occ config:system:set oidc_login_group_mapping --value='{"admin":"admin","premium":"premium","free":"free"}' --type=json echo "Restarting Nextcloud container..."
+    echo "Restarting Nextcloud container..."
     docker restart "$NC_CONTAINER"
 else
     echo "Error: Nextcloud container not found!"
@@ -10602,436 +11411,6 @@ def _image_worker():
             round=job["round"],
             tool_index=job["tool_index"],
         )
-</file>
-
-<file path="src/App.jsx">
-import { useState, useEffect, useRef, useCallback } from 'react'
-import * as api from './api'
-import ModelBar from './components/ModelBar'
-import Sidebar from './components/Sidebar'
-import ChatArea from './components/ChatArea'
-import InputBar from './components/InputBar'
-import ImageLightbox from './components/ImageLightbox'
-import OverloadWarning from './components/OverloadWarning'
-import TaskPanel from './components/TaskPanel'
-import LocationPrompt from './components/LocationPrompt'
-import PublicShareView from './components/PublicShareView'
-
-function shareTokenFromPath() {
-  const m = /^\/s\/([A-Za-z0-9]+)\/?$/.exec(window.location.pathname)
-  return m ? m[1] : null
-}
-
-export default function App() {
-  const [authenticated, setAuthenticated] = useState(false)
-  const [publicShareToken, setPublicShareToken] = useState(() => shareTokenFromPath())
-  const [username, setUsername] = useState('')
-  const [sessions, setSessions] = useState([])
-  const [currentSessionId, setCurrentSessionId] = useState(null)
-  const [messages, setMessages] = useState([])
-  const [pendingMessages, setPendingMessages] = useState({})
-  const [tokenEstimate, setTokenEstimate] = useState(0)
-  const [contextCompressed, setContextCompressed] = useState(false)
-  const [rawTokenEstimate, setRawTokenEstimate] = useState(0)
-  const [maxContext, setMaxContext] = useState(24576)
-  const [modelStatus, setModelStatus] = useState('unloaded')
-  const [modelTps, setModelTps] = useState(null)
-  const [overheated, setOverheated] = useState(false)
-  const [gpuTemp, setGpuTemp] = useState(null)
-  const [ramEvacuating, setRamEvacuating] = useState(false)
-  const [reminderCount, setReminderCount] = useState(0)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [lightboxSrc, setLightboxSrc] = useState(null)
-  const [loadingSessions, setLoadingSessions] = useState({})
-  const [showTasks, setShowTasks] = useState(false)
-  const [showLocationPrompt, setShowLocationPrompt] = useState(false)
-  const [locationTaskId, setLocationTaskId] = useState(null)
-  const [locationError, setLocationError] = useState(null)
-  const sessionRef = useRef(null)
-  const selectingRef = useRef(false)
-  const pendingMessagesRef = useRef({})
-  const resolvedTasksRef = useRef(new Set())
-
-  useEffect(() => {
-    // Authentication is enforced by nginx's auth_request against Authentik:
-    // by the time this SPA loads, the browser already has a valid SSO session
-    // and /api/check-auth answers from the forwarded X-Authentik-* headers.
-    api.checkAuth()
-      .then(res => {
-        if (res.authenticated) {
-          setAuthenticated(true)
-          if (res.username) setUsername(res.username)
-          loadSessions().then(list => {
-            const lastSid = localStorage.getItem('last_sid')
-            if (lastSid && list.some(s => s.session_id === lastSid)) {
-              switchSession(lastSid)
-            } else if (list.length > 0) {
-              switchSession(list[0].session_id)
-            }
-          })
-        } else {
-          setAuthenticated(false)
-        }
-      })
-      .catch(() => setAuthenticated(false))
-  }, [])
-
-  useEffect(() => {
-    const handler = () => {
-      setAuthenticated(false);
-      setUsername('');
-      setSessions([]);
-      sessionRef.current = null; setCurrentSessionId(null);
-      setMessages([]);
-      setPendingMessages({});
-      setSidebarOpen(false);
-    };
-    window.addEventListener('auth:unauthorized', handler);
-    return () => window.removeEventListener('auth:unauthorized', handler);
-  }, [])
-
-  const hasPendingForCurrent = Object.values(pendingMessages).some(
-    p => p.sessionId === currentSessionId
-  )
-
-  useEffect(() => {
-    pendingMessagesRef.current = pendingMessages
-  }, [pendingMessages])
-
-  // ---- Auth ----
-  async function handleLogout() {
-    console.log('[logout] called')
-    await api.logout()
-    setAuthenticated(false)
-    setUsername('')
-    setSessions([])
-    sessionRef.current = null; setCurrentSessionId(null)
-    setMessages([])
-    setPendingMessages({})
-    setSidebarOpen(false)
-  }
-
-  // ---- Sessions ----
-  async function loadSessions() {
-    const list = await api.fetchSessions()
-    setSessions(list)
-    return list
-  }
-
-  function loadSessionMessages(sid) {
-    api.fetchMessages(sid).then(data => {
-      if (sessionRef.current !== sid) return
-      setMessages(data.messages || [])
-      setTokenEstimate(data.token_estimate || 0)
-      setContextCompressed(!!data.context_compressed)
-      setRawTokenEstimate(data.raw_token_estimate || 0)
-    }).catch(() => {
-      if (sessionRef.current !== sid) return
-      setMessages([])
-      setTokenEstimate(0)
-      setContextCompressed(false)
-      setRawTokenEstimate(0)
-    })
-  }
-
-  async function switchSession(sid) {
-    sessionRef.current = sid; setCurrentSessionId(sid)
-    localStorage.setItem('last_sid', sid)
-    loadSessionMessages(sid)
-    closeSidebar()
-  }
-
-  async function newChat() {
-    const data = await api.createSession()
-    sessionRef.current = data.session_id; setCurrentSessionId(data.session_id)
-    localStorage.setItem('last_sid', data.session_id)
-    setMessages([])
-    setTokenEstimate(0)
-    setContextCompressed(false)
-    setRawTokenEstimate(0)
-    const list = await loadSessions()
-    setSessions(list)
-    closeSidebar()
-  }
-
-  async function deleteSession_(sid) {
-    if (!confirm('Delete this session?')) return
-    await api.deleteSession(sid)
-    setPendingMessages(prev => {
-      const next = { ...prev }
-      for (const [tid, p] of Object.entries(prev)) {
-        if (p.sessionId === sid) delete next[tid]
-      }
-      return next
-    })
-    setStoredPending(getStoredPending().filter(p => p.sid !== sid))
-    const list = await loadSessions()
-    if (sid === currentSessionId) {
-      if (list.length > 0) {
-        switchSession(list[0].session_id)
-      } else {
-        newChat()
-      }
-    } else if (currentSessionId) {
-      loadSessionMessages(currentSessionId)
-    }
-  }
-
-  async function renameSession_(sid) {
-    const s = sessions.find(x => x.session_id === sid)
-    const newName = prompt('Session name:', s ? s.name : '')
-    if (!newName || newName.trim() === '') return
-    const prevSid = currentSessionId
-    await api.renameSession(sid, newName.trim())
-    const list = await loadSessions()
-    sessionRef.current = prevSid; setCurrentSessionId(prevSid)
-    setSessions(list)
-  }
-
-  function closeSidebar() {
-    setSidebarOpen(false)
-  }
-
-  // ---- Chat / Send ----
-  async function handleSend(text, image, research, cpu) {
-    if (!currentSessionId) return
-    const taskSid = currentSessionId
-    setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
-
-    const userMsg = { role: 'user', content: text || '\uD83D\uDCC4 file', _timestamp: new Date().toISOString() }
-
-    try {
-      const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined, undefined, research, cpu)
-      const taskId = data.task_id
-
-      setPendingMessages(prev => ({
-        ...prev,
-        [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg },
-      }))
-
-      const stored = getStoredPending()
-      stored.push({ task_id: taskId, sid: taskSid })
-      setStoredPending(stored)
-    } catch (err) {
-      setMessages(prev => [...prev, userMsg, { role: 'assistant', content: 'Error: ' + err.message }])
-    }
-
-    setLoadingSessions(prev => {
-      const next = { ...prev }
-      next[taskSid] = (next[taskSid] || 1) - 1
-      if (!next[taskSid]) delete next[taskSid]
-      return next
-    })
-  }
-
-  // ---- Task completion callbacks (called by the active PendingMessage) ----
-  const handlePendingResolved = useCallback((pending, st) => {
-    const taskId = pending.taskId
-    if (resolvedTasksRef.current.has(taskId)) return
-    resolvedTasksRef.current.add(taskId)
-    setPendingMessages(prev => {
-      const next = { ...prev }
-      delete next[taskId]
-      return next
-    })
-    if (st.status === 'done') {
-      const userMsg = pending._userMsg
-      const assistantMsg = {
-        role: 'assistant',
-        content: st.response || '',
-        _elapsed_ms: st._elapsed_ms != null ? st._elapsed_ms : null,
-        _reasoning: st.reasoning || '',
-        _image_url: st.image || st._image_url,
-        _gen_prompt: st.gen_prompt,
-        _tools_used: st.tools_used || [],
-        _image_model: st._image_model,
-        _search_details: st._search_details || [],
-      }
-      if (pending.sessionId === sessionRef.current) {
-        setMessages(prev => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg])
-      }
-      if (st.token_estimate != null) setTokenEstimate(st.token_estimate)
-      setContextCompressed(!!st.context_compressed)
-      if (st.raw_token_estimate != null) setRawTokenEstimate(st.raw_token_estimate)
-      if (st.predicted_per_second != null) setModelTps(st.predicted_per_second)
-      if (st.session_name != null && st.session_id) {
-        setSessions(prev => prev.map(s => s.session_id === st.session_id ? { ...s, name: st.session_name } : s))
-      }
-    } else {
-      if (pending.sessionId === sessionRef.current) {
-        setMessages(prev => [...prev, ...(pending._userMsg ? [pending._userMsg] : []), {
-          role: 'assistant',
-          content: 'Error: ' + (st.error || 'Task was lost — please retry.'),
-        }])
-      }
-    }
-    const remaining = getStoredPending().filter(p => p.task_id !== taskId)
-    setStoredPending(remaining)
-  }, [])
-
-  const handleLocationNeeded = useCallback((taskId) => {
-    setShowLocationPrompt(true)
-    setLocationTaskId(taskId)
-    setLocationError(null)
-  }, [])
-
-  const closeLightbox = useCallback(() => setLightboxSrc(null), [])
-
-  // ---- Background task resolution ----
-  // Foreground pending tasks are self-polled by their PendingMessage (so only that
-  // message re-renders). This loop resolves tasks whose session is not currently open.
-  useEffect(() => {
-    if (!authenticated) return
-    const interval = setInterval(async () => {
-      for (const [taskId, p] of Object.entries(pendingMessagesRef.current)) {
-        if (p.sessionId === sessionRef.current) continue
-        try {
-          const st = await api.getTaskStatus(taskId)
-          const terminal = st && (st.status === 'done' || st.status === 'error' || st.status === 'cancelled' || st.status === 'unknown' || st.status === 'not_found')
-          if (terminal) {
-            handlePendingResolved(p, st)
-          } else if (st.message === 'location_needed') {
-            handleLocationNeeded(taskId)
-          }
-        } catch { }
-      }
-    }, 2000)
-    return () => clearInterval(interval)
-  }, [authenticated, handlePendingResolved, handleLocationNeeded])
-
-  // ---- Model status polling ----
-  useEffect(() => {
-    if (!authenticated) return
-    const interval = setInterval(async () => {
-      try {
-        const data = await api.getModelStatus()
-        setModelStatus(data.model)
-        setOverheated(data.overheated)
-        setGpuTemp(data.gpu_temp)
-        if (data.ram_evacuating != null) setRamEvacuating(data.ram_evacuating)
-        if (data.predicted_per_second != null) setModelTps(data.predicted_per_second)
-        if (data.max_context != null) setMaxContext(data.max_context)
-        if (data.reminder_count != null) setReminderCount(data.reminder_count)
-      } catch { /* ignore */ }
-    }, 2000)
-    return () => clearInterval(interval)
-  }, [authenticated])
-
-  // ---- Resume pending tasks on page load ----
-  useEffect(() => {
-    if (!authenticated) return
-    const stored = getStoredPending()
-    if (stored.length > 0) {
-      const pMap = {}
-      stored.forEach(item => {
-        pMap[item.task_id] = { sessionId: item.sid, status: 'working', message: 'Thinking...', taskId: item.task_id, reasoning: '' }
-      })
-      setPendingMessages(pMap)
-    }
-  }, [authenticated])
-
-  function handleLocationAllow() {
-    const tid = locationTaskId
-    navigator.geolocation.getCurrentPosition(
-      pos => {
-        setShowLocationPrompt(false)
-        setLocationTaskId(null)
-        api.sendLocation(pos.coords.latitude, pos.coords.longitude, tid)
-      },
-      err => {
-        if (err.code === 1) {
-          setLocationError('Location access is blocked in your browser. Please enable it in browser settings and try again.')
-        } else {
-          setLocationError('Could not get location: ' + err.message + '. Try again or click Deny.')
-        }
-      },
-      { timeout: 10000, enableHighAccuracy: false }
-    )
-  }
-
-  function handleLocationDeny() {
-    setShowLocationPrompt(false)
-    const tid = locationTaskId
-    setLocationTaskId(null)
-    setLocationError(null)
-    api.denyLocation(tid)
-  }
-
-  if (publicShareToken) {
-    return (
-      <PublicShareView
-        token={publicShareToken}
-        onExit={() => {
-          window.history.replaceState({}, '', '/')
-          setPublicShareToken(null)
-        }}
-      />
-    )
-  }
-
-  return (
-    <>
-      {showLocationPrompt && <LocationPrompt onAllow={handleLocationAllow} onDeny={handleLocationDeny} error={locationError} />}
-      <div style={{ display: authenticated ? '' : 'none' }}>
-        <ModelBar
-          modelStatus={modelStatus}
-          modelTps={modelTps}
-          tokenEstimate={tokenEstimate}
-          contextCompressed={contextCompressed}
-          rawTokenEstimate={rawTokenEstimate}
-          maxContext={maxContext}
-          onToggleSidebar={() => setSidebarOpen(o => !o)}
-          username={username}
-          onLogout={handleLogout}
-          reminderCount={reminderCount}
-          onToggleTasks={() => setShowTasks(o => !o)}
-        />
-        <div id="app-container">
-          <Sidebar
-            sessions={sessions}
-            currentSessionId={currentSessionId}
-            onSwitchSession={switchSession}
-            onNewChat={newChat}
-            onRenameSession={renameSession_}
-            onDeleteSession={deleteSession_}
-            onClose={closeSidebar}
-            open={sidebarOpen}
-          />
-          <OverloadWarning overheated={overheated} gpuTemp={gpuTemp} ramEvacuating={ramEvacuating} />
-          <ChatArea
-            messages={messages}
-            pendingMessages={pendingMessages}
-            currentSessionId={currentSessionId}
-            onImageOpen={setLightboxSrc}
-            selectingRef={selectingRef}
-            onPendingResolved={handlePendingResolved}
-            onLocationNeeded={handleLocationNeeded}
-          />
-          <InputBar
-            onSend={handleSend}
-            hasPending={hasPendingForCurrent}
-          />
-        </div>
-        <ImageLightbox src={lightboxSrc} onClose={closeLightbox} />
-        {showTasks && <TaskPanel onClose={() => setShowTasks(false)} />}
-      </div>
-    </>
-  )
-}
-
-function getStoredPending() {
-  try {
-    return JSON.parse(sessionStorage.getItem('opencode_pending')) || []
-  } catch {
-    return []
-  }
-}
-
-function setStoredPending(arr) {
-  try {
-    sessionStorage.setItem('opencode_pending', JSON.stringify(arr))
-  } catch { /* ignore */ }
-}
 </file>
 
 <file path="prompts/self_chat.txt">
@@ -14813,6 +15192,11 @@ DDNS_DOMAIN = os.environ.get("DDNS_DOMAIN", "palashkantikundu.in")
 DDNS_SUBDOMAIN = os.environ.get("DDNS_SUBDOMAIN", "home")
 DDNS_CHECK_INTERVAL = int(os.environ.get("DDNS_CHECK_INTERVAL", "300"))
 
+# GCP heartbeat — the ConnectionManager thread POSTs this machine's addresses
+# to the receiver running on the GCP VM (scripts/gcp_heartbeat_server.py)
+# over the WireGuard tunnel every 10s.
+HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "http://10.66.66.1:9863/heartbeat")
+
 # External origin used to build public share links. Set this to a portless URL
 # (e.g. http://192.168.1.10 or https://chat.example.com) when the server is also
 # reachable on port 80/443, because WhatsApp and several other messengers stop
@@ -15360,6 +15744,7 @@ from server.config import (  # noqa: F401
     FORCE_GPU_LANE,
     GODADDY_API_KEY,
     GODADDY_API_SECRET,
+    HEARTBEAT_URL,
     HOST,
     IMG_PATH,
     IMAGE_MODELS,

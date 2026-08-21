@@ -137,9 +137,9 @@ class HomeResolver(BaseResolver):
                 else:
                     self._soa(reply)
             elif qtype == "AAAA":
-                # Remote clients get no AAAA (the GCP proxy is v4-only);
-                # same-network clients get the server's global v6.
-                if is_local_client and server_v6:
+                # Always hand out the home server's global IPv6 — local or remote,
+                # it's directly reachable either way.
+                if server_v6:
                     reply.add_answer(RR(request.q.qname, QTYPE.AAAA,
                                         rdata=AAAA(server_v6), ttl=ZONE_TTL))
                 else:
