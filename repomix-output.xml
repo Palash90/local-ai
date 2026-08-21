@@ -120,270 +120,6 @@ vite.config.js
 <files>
 This section contains the contents of the repository's files.
 
-<file path="scripts/gcp_heartbeat_server.py">
-#!/usr/bin/env python3
-"""Heartbeat receiver + split-horizon DNS for the GCP VM.
-
-One process, two jobs:
-
-1. Heartbeat receiver (HTTP, default :9863)
-   The homeserver's ConnectionManager (server/features/monitoring.py) POSTs
-   its current addresses every 10 seconds over the WireGuard tunnel:
-
-       {"ipv6":        "2405:201:...",   # stable global IPv6
-        "public_ipv4": "49.37...",       # WAN IPv4 (NAT'd, via ipify)
-        "wifi_ipv4":   "192.168.29.x"}   # LAN IPv4 on the WiFi interface
-
-   GET /status returns the last payload as JSON.
-
-2. Split-horizon DNS (UDP+TCP :53)
-   Answers for home.palashkantikundu.in depend on WHO asks:
-     - query source IP == homeserver's latest WAN IP(s)  ->  LAN IPv4 (+AAAA)
-     - everyone else                                     ->  this VM's public IP
-   so same-network clients connect directly over the LAN while remote clients
-   go through the nginx/WireGuard tunnel. Every other name is forwarded to
-   upstream resolvers — but only for known homeserver IPs (no open resolver).
-
-Run on the VM (port 53 needs root or CAP_NET_BIND_SERVICE):
-
-    sudo pip3 install dnslib
-    sudo python3 gcp_heartbeat_server.py [--bind 10.66.66.1] [--port 9863] \
-        [--dns-bind 0.0.0.0] [--dns-port 53] [--gcp-ip 35.212.x.x]
-
-The VM's public IP is auto-detected from the GCP metadata server unless
---gcp-ip is given. Open udp/tcp 53 in the GCP firewall.
-"""
-
-import argparse
-import ipaddress
-import json
-import os
-import threading
-import urllib.request
-from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-from dnslib import A, AAAA, QTYPE, RCODE, RR, SOA, DNSRecord
-from dnslib.server import DNSServer, BaseResolver
-
-ZONE = "home.palashkantikundu.in"
-UPSTREAMS = ["1.1.1.1", "8.8.8.8"]
-ZONE_TTL = 30          # short TTL so IP changes propagate fast
-WG_PEER_IP = "10.66.66.3"
-
-_lock = threading.Lock()
-_latest = {}
-
-# Recently seen WAN IPs of the homeserver (Jio rotates them).
-_recent_public_ips = {}          # ip -> last seen timestamp
-_RECENT_TTL = 48 * 3600
-_RECENT_MAX = 10
-
-
-def _log(message, log_file=None):
-    line = f"{datetime.now().isoformat()} {message}"
-    print(line, flush=True)
-    if log_file:
-        with open(log_file, "a") as fh:
-            fh.write(line + "\n")
-
-
-def _valid_ip(value, version):
-    try:
-        return str(ipaddress.ip_address(value)) if value else None
-    except ValueError:
-        return None
-
-
-def _remember_public_ip(ip, now):
-    _recent_public_ips[ip] = now
-    stale = [k for k, ts in _recent_public_ips.items() if now - ts > _RECENT_TTL]
-    for k in stale:
-        del _recent_public_ips[k]
-    while len(_recent_public_ips) > _RECENT_MAX:
-        del _recent_public_ips[min(_recent_public_ips, key=lambda k: _recent_public_ips[k])]
-
-
-# ---------------------------------------------------------------------------
-# DNS
-# ---------------------------------------------------------------------------
-
-def _detect_gcp_ip():
-    """Public IP of this VM via the GCP metadata server."""
-    try:
-        req = urllib.request.Request(
-            "http://metadata.google.internal/computeMetadata/v1/instance/"
-            "network-interfaces/0/access-configs/0/external-ip",
-            headers={"Metadata-Flavor": "Google"},
-        )
-        return urllib.request.urlopen(req, timeout=2).read().decode().strip()
-    except Exception:
-        return None
-
-
-class HomeResolver(BaseResolver):
-    """Zone answers driven by heartbeat state; everything else forwarded."""
-
-    def __init__(self, gcp_ip):
-        self.gcp_ip = gcp_ip
-
-    def _snapshot(self):
-        with _lock:
-            return (
-                set(_recent_public_ips),
-                _latest.get("wifi_ipv4"),
-                _latest.get("ipv6"),
-            )
-
-    def _soa(self, reply):
-        reply.add_auth(RR(
-            ZONE, QTYPE.SOA,
-            rdata=SOA(f"ns.{ZONE}", f"hostmaster.{ZONE}", (2024010101, 300, 60, 600, 30)),
-            ttl=ZONE_TTL,
-        ))
-
-    def resolve(self, request, handler):
-        client = handler.client_address[0]
-        reply = request.reply()
-        name = str(request.q.qname).rstrip(".").lower()
-        qtype = QTYPE[request.q.qtype]
-
-        local_ips, wifi_ip, server_v6 = self._snapshot()
-        is_local_client = client in local_ips
-
-        if name == ZONE:
-            if qtype == "A":
-                target = wifi_ip if (is_local_client and wifi_ip) else self.gcp_ip
-                if target:
-                    reply.add_answer(RR(request.q.qname, QTYPE.A,
-                                        rdata=A(target), ttl=ZONE_TTL))
-                else:
-                    self._soa(reply)
-            elif qtype == "AAAA":
-                # Remote clients get no AAAA (the GCP proxy is v4-only);
-                # same-network clients get the server's global v6.
-                if is_local_client and server_v6:
-                    reply.add_answer(RR(request.q.qname, QTYPE.AAAA,
-                                        rdata=AAAA(server_v6), ttl=ZONE_TTL))
-                else:
-                    self._soa(reply)
-            else:
-                self._soa(reply)
-            return reply
-
-        # Recursion only for the homeserver itself (no open resolver).
-        if not (is_local_client or client == WG_PEER_IP):
-            reply.header.rcode = RCODE.REFUSED
-            return reply
-
-        try:
-            return DNSRecord.parse(request.send(self._upstream(), 53, timeout=3))
-        except Exception:
-            reply.header.rcode = RCODE.SERVFAIL
-            return reply
-
-    @staticmethod
-    def _upstream():
-        return UPSTREAMS[0]
-
-
-# ---------------------------------------------------------------------------
-# Heartbeat HTTP receiver
-# ---------------------------------------------------------------------------
-
-class Handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        if self.path != "/heartbeat":
-            self.send_error(404)
-            return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(length) or b"{}")
-        except (ValueError, json.JSONDecodeError):
-            self.send_error(400, "invalid JSON")
-            return
-
-        record = {
-            "ipv6": _valid_ip(data.get("ipv6"), 6),
-            "public_ipv4": _valid_ip(data.get("public_ipv4"), 4),
-            "wifi_ipv4": _valid_ip(data.get("wifi_ipv4"), 4),
-            "remote_addr": self.client_address[0],
-            "received_at": datetime.now(timezone.utc).isoformat(),
-        }
-        with _lock:
-            _latest.clear()
-            _latest.update(record)
-
-        if record["public_ipv4"]:
-            now = datetime.now(timezone.utc).timestamp()
-            with _lock:
-                _remember_public_ip(record["public_ipv4"], now)
-
-        _log(f"heartbeat from {record['remote_addr']}: "
-             f"v6={record['ipv6']} pub_v4={record['public_ipv4']} wifi_v4={record['wifi_ipv4']}",
-             self.server.log_file)
-        self.send_response(200)
-        self.end_headers()
-
-    def do_GET(self):
-        if self.path != "/status":
-            self.send_error(404)
-            return
-        with _lock:
-            body = json.dumps(_latest).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, fmt, *args):
-        pass  # request lines are logged by _log() instead
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bind", default="10.66.66.1",
-                        help="heartbeat listener address (default: WireGuard IP)")
-    parser.add_argument("--port", type=int, default=9863)
-    parser.add_argument("--log", default=os.path.expanduser("~/heartbeat.log"),
-                        help="append received heartbeats to this file")
-    parser.add_argument("--dns-bind", default="0.0.0.0",
-                        help="DNS listener address (default: all interfaces)")
-    parser.add_argument("--dns-port", type=int, default=53,
-                        help="DNS port, 0 disables the DNS server")
-    parser.add_argument("--gcp-ip", default=None,
-                        help="this VM's public IPv4 (default: auto-detect)")
-    args = parser.parse_args()
-
-    gcp_ip = args.gcp_ip or _detect_gcp_ip()
-
-    if args.dns_port:
-        resolver = HomeResolver(gcp_ip)
-        udp = DNSServer(resolver, port=args.dns_port, address=args.dns_bind)
-        tcp = DNSServer(resolver, port=args.dns_port, address=args.dns_bind, tcp=True)
-        udp.start_thread()
-        tcp.start_thread()
-        if not udp.isAlive() or not tcp.isAlive():
-            raise SystemExit(f"could not bind DNS on {args.dns_bind}:{args.dns_port}")
-        print(f"DNS listening on {args.dns_bind}:{args.dns_port} "
-              f"(zone={ZONE}, tunnel_ip={gcp_ip})", flush=True)
-
-    httpd = ThreadingHTTPServer((args.bind, args.port), Handler)
-    httpd.log_file = args.log
-    print(f"Heartbeat receiver listening on http://{args.bind}:{args.port}", flush=True)
-    try:
-        httpd.serve_forever()
-    finally:
-        if args.dns_port:
-            udp.stop()
-            tcp.stop()
-
-
-if __name__ == "__main__":
-    main()
-</file>
-
 <file path="src/components/ImageLightbox.jsx">
 import { useEffect, useRef, useState, useCallback } from 'react'
 
@@ -815,71 +551,6 @@ import 'katex/dist/katex.min.css'
 import './App.css'
 
 createRoot(document.getElementById('root')).render(<App />)
-</file>
-
-<file path="gcp_nginx.conf">
-server {
-    listen 80;
-    server_name home.palashkantikundu.in;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name home.palashkantikundu.in;
-
-    ssl_certificate     /etc/nginx/ssl/home.palashkantikundu.in/fullchain.pem;
-    ssl_certificate_key /etc/nginx/ssl/home.palashkantikundu.in/privkey.pem;
-
-    # Intercept errors from home server connection
-    proxy_intercept_errors on;
-    error_page 502 503 504 = @server_offline;
-
-    # Inline HTML page served when main server is down
-    location @server_offline {
-        default_type text/html;
-        return 502 '<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Main Server Offline</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
-        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; max-width: 420px; width: 100%; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
-        .icon { font-size: 48px; margin-bottom: 16px; }
-        .title { font-size: 20px; font-weight: 600; color: #f85149; margin-bottom: 8px; }
-        .desc { font-size: 14px; color: #8b949e; line-height: 1.5; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="icon">⚠️</div>
-        <div class="title">Main Server Offline</div>
-        <div class="desc">The home server is currently unreachable or powered off. Please try again later.</div>
-    </div>
-</body>
-</html>';
-    }
-
-    location / {
-            proxy_pass https://10.66.66.3;
-            proxy_ssl_server_name on;
-            proxy_ssl_verify off;
-
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_set_header X-Via-GCP "true";
-
-            # Fast failover timeouts
-            proxy_connect_timeout 3s;
-            proxy_read_timeout 5s;
-            proxy_send_timeout 5s;
-    }
-}
 </file>
 
 <file path="index.html">
@@ -1379,6 +1050,270 @@ def _first_signing_key(base, token):
         if it.get("private_key"):
             return it["pk"]
     return items[0]["pk"] if items else None
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="scripts/gcp_heartbeat_server.py">
+#!/usr/bin/env python3
+"""Heartbeat receiver + split-horizon DNS for the GCP VM.
+
+One process, two jobs:
+
+1. Heartbeat receiver (HTTP, default :9863)
+   The homeserver's ConnectionManager (server/features/monitoring.py) POSTs
+   its current addresses every 10 seconds over the WireGuard tunnel:
+
+       {"ipv6":        "2405:201:...",   # stable global IPv6
+        "public_ipv4": "49.37...",       # WAN IPv4 (NAT'd, via ipify)
+        "wifi_ipv4":   "192.168.29.x"}   # LAN IPv4 on the WiFi interface
+
+   GET /status returns the last payload as JSON.
+
+2. Split-horizon DNS (UDP+TCP :53)
+   Answers for home.palashkantikundu.in depend on WHO asks:
+     - query source IP == homeserver's latest WAN IP(s)  ->  LAN IPv4 (+AAAA)
+     - everyone else                                     ->  this VM's public IP
+   so same-network clients connect directly over the LAN while remote clients
+   go through the nginx/WireGuard tunnel. Every other name is forwarded to
+   upstream resolvers — but only for known homeserver IPs (no open resolver).
+
+Run on the VM (port 53 needs root or CAP_NET_BIND_SERVICE):
+
+    sudo pip3 install dnslib
+    sudo python3 gcp_heartbeat_server.py [--bind 10.66.66.1] [--port 9863] \
+        [--dns-bind 0.0.0.0] [--dns-port 53] [--gcp-ip 35.212.x.x]
+
+The VM's public IP is auto-detected from the GCP metadata server unless
+--gcp-ip is given. Open udp/tcp 53 in the GCP firewall.
+"""
+
+import argparse
+import ipaddress
+import json
+import os
+import threading
+import urllib.request
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from dnslib import A, AAAA, QTYPE, RCODE, RR, SOA, DNSRecord
+from dnslib.server import DNSServer, BaseResolver
+
+ZONE = "home.palashkantikundu.in"
+UPSTREAMS = ["1.1.1.1", "8.8.8.8"]
+ZONE_TTL = 30          # short TTL so IP changes propagate fast
+WG_PEER_IP = "10.66.66.3"
+
+_lock = threading.Lock()
+_latest = {}
+
+# Recently seen WAN IPs of the homeserver (Jio rotates them).
+_recent_public_ips = {}          # ip -> last seen timestamp
+_RECENT_TTL = 48 * 3600
+_RECENT_MAX = 10
+
+
+def _log(message, log_file=None):
+    line = f"{datetime.now().isoformat()} {message}"
+    print(line, flush=True)
+    if log_file:
+        with open(log_file, "a") as fh:
+            fh.write(line + "\n")
+
+
+def _valid_ip(value, version):
+    try:
+        return str(ipaddress.ip_address(value)) if value else None
+    except ValueError:
+        return None
+
+
+def _remember_public_ip(ip, now):
+    _recent_public_ips[ip] = now
+    stale = [k for k, ts in _recent_public_ips.items() if now - ts > _RECENT_TTL]
+    for k in stale:
+        del _recent_public_ips[k]
+    while len(_recent_public_ips) > _RECENT_MAX:
+        del _recent_public_ips[min(_recent_public_ips, key=lambda k: _recent_public_ips[k])]
+
+
+# ---------------------------------------------------------------------------
+# DNS
+# ---------------------------------------------------------------------------
+
+def _detect_gcp_ip():
+    """Public IP of this VM via the GCP metadata server."""
+    try:
+        req = urllib.request.Request(
+            "http://metadata.google.internal/computeMetadata/v1/instance/"
+            "network-interfaces/0/access-configs/0/external-ip",
+            headers={"Metadata-Flavor": "Google"},
+        )
+        return urllib.request.urlopen(req, timeout=2).read().decode().strip()
+    except Exception:
+        return None
+
+
+class HomeResolver(BaseResolver):
+    """Zone answers driven by heartbeat state; everything else forwarded."""
+
+    def __init__(self, gcp_ip):
+        self.gcp_ip = gcp_ip
+
+    def _snapshot(self):
+        with _lock:
+            return (
+                set(_recent_public_ips),
+                _latest.get("wifi_ipv4"),
+                _latest.get("ipv6"),
+            )
+
+    def _soa(self, reply):
+        reply.add_auth(RR(
+            ZONE, QTYPE.SOA,
+            rdata=SOA(f"ns.{ZONE}", f"hostmaster.{ZONE}", (2024010101, 300, 60, 600, 30)),
+            ttl=ZONE_TTL,
+        ))
+
+    def resolve(self, request, handler):
+        client = handler.client_address[0]
+        reply = request.reply()
+        name = str(request.q.qname).rstrip(".").lower()
+        qtype = QTYPE[request.q.qtype]
+
+        local_ips, wifi_ip, server_v6 = self._snapshot()
+        is_local_client = client in local_ips
+
+        if name == ZONE:
+            if qtype == "A":
+                target = wifi_ip if (is_local_client and wifi_ip) else self.gcp_ip
+                if target:
+                    reply.add_answer(RR(request.q.qname, QTYPE.A,
+                                        rdata=A(target), ttl=ZONE_TTL))
+                else:
+                    self._soa(reply)
+            elif qtype == "AAAA":
+                # Always hand out the home server's global IPv6 — local or remote,
+                # it's directly reachable either way.
+                if server_v6:
+                    reply.add_answer(RR(request.q.qname, QTYPE.AAAA,
+                                        rdata=AAAA(server_v6), ttl=ZONE_TTL))
+                else:
+                    self._soa(reply)
+            else:
+                self._soa(reply)
+            return reply
+
+        # Recursion only for the homeserver itself (no open resolver).
+        if not (is_local_client or client == WG_PEER_IP):
+            reply.header.rcode = RCODE.REFUSED
+            return reply
+
+        try:
+            return DNSRecord.parse(request.send(self._upstream(), 53, timeout=3))
+        except Exception:
+            reply.header.rcode = RCODE.SERVFAIL
+            return reply
+
+    @staticmethod
+    def _upstream():
+        return UPSTREAMS[0]
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat HTTP receiver
+# ---------------------------------------------------------------------------
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path != "/heartbeat":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            self.send_error(400, "invalid JSON")
+            return
+
+        record = {
+            "ipv6": _valid_ip(data.get("ipv6"), 6),
+            "public_ipv4": _valid_ip(data.get("public_ipv4"), 4),
+            "wifi_ipv4": _valid_ip(data.get("wifi_ipv4"), 4),
+            "remote_addr": self.client_address[0],
+            "received_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with _lock:
+            _latest.clear()
+            _latest.update(record)
+
+        if record["public_ipv4"]:
+            now = datetime.now(timezone.utc).timestamp()
+            with _lock:
+                _remember_public_ip(record["public_ipv4"], now)
+
+        _log(f"heartbeat from {record['remote_addr']}: "
+             f"v6={record['ipv6']} pub_v4={record['public_ipv4']} wifi_v4={record['wifi_ipv4']}",
+             self.server.log_file)
+        self.send_response(200)
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path != "/status":
+            self.send_error(404)
+            return
+        with _lock:
+            body = json.dumps(_latest).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass  # request lines are logged by _log() instead
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bind", default="10.66.66.1",
+                        help="heartbeat listener address (default: WireGuard IP)")
+    parser.add_argument("--port", type=int, default=9863)
+    parser.add_argument("--log", default=os.path.expanduser("~/heartbeat.log"),
+                        help="append received heartbeats to this file")
+    parser.add_argument("--dns-bind", default="0.0.0.0",
+                        help="DNS listener address (default: all interfaces)")
+    parser.add_argument("--dns-port", type=int, default=53,
+                        help="DNS port, 0 disables the DNS server")
+    parser.add_argument("--gcp-ip", default=None,
+                        help="this VM's public IPv4 (default: auto-detect)")
+    args = parser.parse_args()
+
+    gcp_ip = args.gcp_ip or _detect_gcp_ip()
+
+    if args.dns_port:
+        resolver = HomeResolver(gcp_ip)
+        udp = DNSServer(resolver, port=args.dns_port, address=args.dns_bind)
+        tcp = DNSServer(resolver, port=args.dns_port, address=args.dns_bind, tcp=True)
+        udp.start_thread()
+        tcp.start_thread()
+        if not udp.isAlive() or not tcp.isAlive():
+            raise SystemExit(f"could not bind DNS on {args.dns_bind}:{args.dns_port}")
+        print(f"DNS listening on {args.dns_bind}:{args.dns_port} "
+              f"(zone={ZONE}, tunnel_ip={gcp_ip})", flush=True)
+
+    httpd = ThreadingHTTPServer((args.bind, args.port), Handler)
+    httpd.log_file = args.log
+    print(f"Heartbeat receiver listening on http://{args.bind}:{args.port}", flush=True)
+    try:
+        httpd.serve_forever()
+    finally:
+        if args.dns_port:
+            udp.stop()
+            tcp.stop()
 
 
 if __name__ == "__main__":
@@ -2055,6 +1990,71 @@ export async function downloadFile(url, fallbackName = 'file') {
 
 <file path=".repomixignore">
 prompts/master_details.json
+</file>
+
+<file path="gcp_nginx.conf">
+server {
+    listen 80;
+    server_name home.palashkantikundu.in;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name home.palashkantikundu.in;
+
+    ssl_certificate     /etc/nginx/ssl/home.palashkantikundu.in/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/home.palashkantikundu.in/privkey.pem;
+
+    # Intercept errors from home server connection
+    proxy_intercept_errors on;
+    error_page 502 503 504 = @server_offline;
+
+    # Inline HTML page served when main server is down
+    location @server_offline {
+        default_type text/html;
+        return 502 '<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Main Server Offline</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; max-width: 420px; width: 100%; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+        .icon { font-size: 48px; margin-bottom: 16px; }
+        .title { font-size: 20px; font-weight: 600; color: #f85149; margin-bottom: 8px; }
+        .desc { font-size: 14px; color: #8b949e; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">⚠️</div>
+        <div class="title">Main Server Offline</div>
+        <div class="desc">The home server is currently unreachable or powered off. Please try again later.</div>
+    </div>
+</body>
+</html>';
+    }
+
+    location / {
+            proxy_pass https://10.66.66.3;
+            proxy_ssl_server_name on;
+            proxy_ssl_verify off;
+
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Via-GCP "true";
+
+            # Fast failover timeouts
+            proxy_connect_timeout 3s;
+            proxy_read_timeout 5s;
+            proxy_send_timeout 5s;
+    }
+}
 </file>
 
 <file path="genre_creator.py">
@@ -4462,77 +4462,6 @@ def read_file_text(file_path):
     return ""
 </file>
 
-<file path="docker-compose.yaml">
-version: '3.8'
-
-services:
-  searxng:
-    image: searxng/searxng:latest
-    container_name: searxng
-    restart: unless-stopped
-    networks:
-      - external-net
-      - internal-net
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
-
-  # 2. Nextcloud Database
-  cloud-db:
-    container_name: cloud-db
-    image: mariadb:10.11
-    restart: always
-    command: --transaction-isolation=READ-COMMITTED --log-bin-trust-function-creators=1
-    networks:
-      - internal-net
-    volumes:
-      - db_data:/var/lib/mysql
-    environment:
-      MYSQL_ROOT_PASSWORD: your_root_password
-      MYSQL_DATABASE: nextcloud
-      MYSQL_USER: nextcloud
-      MYSQL_PASSWORD: your_db_password
-
-  # 3. Nextcloud Application
-  cloud-app:
-    container_name: cloud-app
-    image: nextcloud
-    restart: always
-    # Pin the public hostname to the host so server-side OIDC calls (discovery,
-    # logout) hit local nginx directly instead of round-tripping via GCP/DNS.
-    extra_hosts:
-      - "home.palashkantikundu.in:host-gateway"
-    networks:
-      - external-net
-      - internal-net
-    ports:
-      - "8082:80"
-    depends_on:
-      - cloud-db
-    volumes:
-      - nextcloud_data:/var/www/html
-      - /mnt/wwn-0x50014ee2173893e0-part1/BackUp-Copy-2:/mnt/my_backups:ro
-    environment:
-      MYSQL_HOST: cloud-db
-      MYSQL_DATABASE: nextcloud
-      MYSQL_USER: nextcloud
-      MYSQL_PASSWORD: your_db_password
-      # Dynamic Host & Subpath rules
-      OVERWRITEPROTOCOL: "https"
-      OVERWRITEWEBROOT: "/cloud"
-
-networks:
-  external-net:
-    driver: bridge
-  internal-net:
-    driver: bridge
-
-volumes:
-  db_data:
-  nextcloud_data:
-</file>
-
 <file path="setup.sh">
 #!/usr/bin/env bash
 set -euo pipefail
@@ -5185,6 +5114,77 @@ def context_token_report(sid, messages):
         "raw_token_estimate": raw,
         "context_compressed": raw > effective,
     }
+</file>
+
+<file path="docker-compose.yaml">
+version: '3.8'
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    networks:
+      - external-net
+      - internal-net
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+
+  # 2. Nextcloud Database
+  cloud-db:
+    container_name: cloud-db
+    image: mariadb:10.11
+    restart: always
+    command: --transaction-isolation=READ-COMMITTED --log-bin-trust-function-creators=1
+    networks:
+      - internal-net
+    volumes:
+      - db_data:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: your_root_password
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: your_db_password
+
+  # 3. Nextcloud Application
+  cloud-app:
+    container_name: cloud-app
+    image: nextcloud
+    restart: always
+    # Pin the public hostname to the host so server-side OIDC calls (discovery,
+    # logout) hit local nginx directly instead of round-tripping via GCP/DNS.
+    extra_hosts:
+      - "home.palashkantikundu.in:host-gateway"
+    networks:
+      - external-net
+      - internal-net
+    ports:
+      - "8082:80"
+    depends_on:
+      - cloud-db
+    volumes:
+      - nextcloud_data:/var/www/html
+      - /mnt/wwn-0x50014ee2173893e0-part1/BackUp-Copy-2:/mnt/my_backups:ro
+    environment:
+      MYSQL_HOST: cloud-db
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: your_db_password
+      # Dynamic Host & Subpath rules
+      OVERWRITEPROTOCOL: "https"
+      OVERWRITEWEBROOT: "/cloud"
+
+networks:
+  external-net:
+    driver: bridge
+  internal-net:
+    driver: bridge
+
+volumes:
+  db_data:
+  nextcloud_data:
 </file>
 
 <file path="package.json">
@@ -9885,6 +9885,624 @@ function setStoredPending(arr) {
 }
 </file>
 
+<file path="server/features/images.py">
+"""ComfyUI image generation and editing."""
+
+import base64
+import json
+import os
+import random
+import time
+import uuid
+
+import requests
+
+from server.features.state import M
+from server.features.users import _safe_username
+
+
+# LLM-selectable framing presets for generate_image. All values are divisible
+# by 8 (latent-safe for EmptySD3LatentImage) and stay near the ~2 MP budget of
+# the default 1920x1080, so VRAM usage and generation time are stable no matter
+# which framing the model picks.
+ASPECT_SIZES = {
+    "landscape": (1920, 1080),
+    "portrait": (1080, 1920),
+    "square": (1440, 1440),
+}
+
+
+def _aspect_dims(aspect_ratio):
+    return ASPECT_SIZES.get(aspect_ratio, ASPECT_SIZES["landscape"])
+
+
+def _output_dir(user):
+    return os.path.join(M.COMFYUI_OUTPUT, _safe_username(user))
+
+
+def _input_dir(user):
+    return os.path.join(M.COMFYUI_INPUT, _safe_username(user))
+
+
+def _output_rel(target):
+    if os.path.isabs(target):
+        try:
+            return os.path.relpath(target, M.COMFYUI_OUTPUT)
+        except ValueError:
+            return os.path.basename(target)
+    return target
+
+
+def _image_url_rel(url):
+    marker = "/output/"
+    if marker in url:
+        return url.split(marker, 1)[-1]
+    return os.path.basename(url)
+
+
+def free_comfyui_vram():
+    print("[comfyui] Freeing VRAM...")
+    try:
+        r = requests.post(
+            f"{M.COMFYUI_URL}/free",
+            json={"unload_models": True, "free_memory": True},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            print("[comfyui] VRAM freed")
+            return True
+    except Exception as e:
+        print(f"[comfyui] Free error: {e}")
+    finally:
+        time.sleep(10)
+    return False
+
+
+def generate_image(prompt, task_id, negative_prompt="", model="z_image", aspect_ratio="landscape"):
+    print(f"\n[image] Generating image for task {task_id} with the prompt: {prompt}")
+    M.set_status(task_id, "Freeing VRAM for image generation...")
+    # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
+    # The CPU server (self-chat agents) keeps running untouched.
+    M.unload_llama_model("gpu")
+
+    width, height = _aspect_dims(aspect_ratio)
+
+    user = M._task_user(task_id)
+    gen_tag = str(uuid.uuid4())[:8]
+    prefix = f"{_safe_username(user)}/gen_{gen_tag}_"
+    cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+    if model == "z_image":
+        print("Chose Z-Image Turbo for image generation")
+        workflow = {
+            "62": {
+                "class_type": "CLIPLoader",
+                "inputs": {"clip_name": cfg["clip1"], "type": "lumina2"},
+            },
+            "63": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
+            "66": {
+                "class_type": "UNETLoader",
+                "inputs": {"unet_name": cfg["unet"], "weight_dtype": "default"},
+            },
+            "67": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": prompt, "clip": ["62", 0]},
+            },
+            "68": {
+                "class_type": "EmptySD3LatentImage",
+                "inputs": {"width": width, "height": height, "batch_size": 1},
+            },
+            "69": {
+                "class_type": "ModelSamplingAuraFlow",
+                "inputs": {"shift": 3, "model": ["66", 0]},
+            },
+            "71": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative_prompt, "clip": ["62", 0]},
+            },
+            "70": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**31),
+                    "steps": 8,
+                    "cfg": 1.0,
+                    "sampler_name": "res_multistep",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                    "model": ["69", 0],
+                    "positive": ["67", 0],
+                    "negative": ["71", 0],
+                    "latent_image": ["68", 0],
+                },
+            },
+            "65": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["70", 0], "vae": ["63", 0]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": prefix, "images": ["65", 0]},
+            },
+        }
+    elif model == "sd3_5_medium":
+        print("Chose SD 3.5 for image generation")
+        workflow = {
+            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": cfg["unet"]}},
+            "2": {
+                "class_type": "TripleCLIPLoaderGGUF",
+                "inputs": {
+                    "clip_name1": cfg["clip1"],
+                    "clip_name2": cfg["clip2"],
+                    "clip_name3": cfg["t5"],
+                    "type": "sd3",
+                },
+            },
+            "3": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": prompt, "clip": ["2", 0]},
+            },
+            "4": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative_prompt, "clip": ["2", 0]},
+            },
+            "5": {
+                "class_type": "EmptySD3LatentImage",
+                "inputs": {"width": width, "height": height, "batch_size": 1},
+            },
+            "6": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**31),
+                    "steps": 20,  # Recommended steps for SD 3.5 Medium
+                    "cfg": 4.5,  # Recommended CFG range for SD 3.5 Medium: 3.5 to 5.0
+                    "sampler_name": "euler",
+                    "scheduler": "sgm_uniform",
+                    "denoise": 1.0,
+                    "model": ["1", 0],
+                    "positive": ["3", 0],
+                    "negative": ["4", 0],
+                    "latent_image": ["5", 0],
+                },
+            },
+            "7": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["6", 0], "vae": ["7", 0]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": prefix, "images": ["8", 0]},
+            },
+        }
+    else:
+        print("No Image Model Selected Perfectly")
+
+    with M._data_lock:
+        M.model_status = "image_active"
+        M.tasks[task_id]["gen_prompt"] = prompt
+        M.tasks[task_id]["_image_model"] = model
+        M.tasks[task_id]["negative_prompt"] = negative_prompt
+    M.ensure_comfyui_running()
+    p_short = prompt[:200] + ("..." if len(prompt) > 200 else "")
+    M.set_status(task_id, f"Generating image ({model})... Prompt: {p_short}")
+    try:
+        r = requests.post(
+            f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
+        )
+        data = r.json()
+
+        if "error" in data:
+            result = json.dumps({"error": f"ComfyUI: {data['error']}"})
+        else:
+            prompt_id = data["prompt_id"]
+            found_file = None
+            for _ in range(300):
+                time.sleep(1)
+                try:
+                    hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
+                    hist = hr.json()
+
+                    if prompt_id in hist:
+                        outputs = hist[prompt_id].get("outputs", {})
+                        for node_id, node_out in outputs.items():
+                            for img in node_out.get("images", []):
+                                fname = img["filename"]
+                                fpath = os.path.join(
+                                    M.COMFYUI_OUTPUT, img.get("subfolder", ""), fname
+                                )
+                                found_file = fpath
+                                break
+                        if found_file:
+                            break
+                except Exception:
+                    pass
+            if found_file:
+                with M._data_lock:
+                    cancelled = bool(M.tasks.get(task_id, {}).get("status") == "cancelled")
+                if cancelled:
+                    try:
+                        if os.path.exists(found_file):
+                            os.remove(found_file)
+                            print(f"[image] Deleted orphaned image for cancelled task {task_id}: {found_file}")
+                    except OSError:
+                        pass
+                    result = json.dumps({"error": "Cancelled — session was deleted"})
+                else:
+                    M.tasks[task_id]["image_file"] = M._output_rel(found_file)
+                    M.set_status(task_id, f"Image saved as {found_file}")
+                    print(f"[generate_image] SUCCESS: {found_file}")  # DEBUG
+                    result = json.dumps(
+                        {
+                            "prompt_id": prompt_id,
+                            "file": found_file,
+                            "rel": M._output_rel(found_file),
+                        }
+                    )
+            else:
+                print(f"[generate_image] TIMEOUT for task {task_id} after 300s")  # DEBUG
+                result = json.dumps({"error": "Image generation timeout"})
+    except Exception as e:
+        result = json.dumps({"error": str(e)})
+    finally:
+        M.set_status(task_id, "Freeing image generation VRAM...")
+        M.free_comfyui_vram()
+        M.set_status(task_id, "Loading chat model...")
+        M.load_llama_model("gpu")
+    return result
+
+
+def edit_image(
+    prompt,
+    task_id,
+    image_b64,
+    negative_prompt="",
+    denoise=0.4,
+    model="z_image",
+    sid=None,
+):
+    print("Image edit called with denoise", denoise)
+    user = M._task_user(task_id)
+    if not image_b64 and sid:
+        with M._data_lock:
+            msgs = list(M.sessions.get(sid, []))
+        print(f"[edit_image] Scanning {len(msgs)} session messages for image sources")
+
+        for msg in reversed(msgs):
+            # 1. Check generated image URL attribute (_image_url)
+            url = (msg.get("_image_url") or "").strip()
+            if url:
+                fname = os.path.join(M.IMG_PATH, M._image_url_rel(url))
+                fpath = fname
+                print(
+                    f"[edit_image] Checking _image_url path={fpath} exists={os.path.exists(fpath)}"
+                )
+                if os.path.exists(fpath):
+                    with open(fpath, "rb") as f:
+                        image_b64 = base64.b64encode(f.read()).decode()
+                    break
+
+            # 2. Check user-uploaded images stored in the message's content array
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in reversed(content):
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        img_url = part.get("image_url", {}).get("url", "")
+                        if img_url.startswith("data:image"):
+                            # Extracted base64 string directly from user upload
+                            image_b64 = img_url.split(",", 1)[-1]
+                            print(
+                                "[edit_image] Extracted base64 image from user message content"
+                            )
+                            break
+                        fpath = M.resolve_image_path(img_url)
+                        if fpath and os.path.exists(fpath):
+                            with open(fpath, "rb") as f:
+                                image_b64 = base64.b64encode(f.read()).decode()
+                            print(
+                                f"[edit_image] Loaded image from {img_url} ({len(image_b64)} bytes base64)"
+                            )
+                            break
+                if image_b64:
+                    break
+
+    if not image_b64:
+        print("[edit_image] FAILED to find an image to edit")
+        return json.dumps({"error": "No image provided for editing."})
+
+    print(
+        f"[edit_image] Found image ({len(image_b64)} bytes base64), proceeding with edit"
+    )
+
+    print(f"\n[image_edit] Editing image for task {task_id} with prompt: {prompt}")
+    M.set_status(task_id, "Freeing VRAM for image editing...")
+    # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
+    # The CPU server (self-chat agents) keeps running untouched.
+    M.unload_llama_model("gpu")
+
+    gen_tag = str(uuid.uuid4())[:8]
+    prefix = f"{_safe_username(user)}/edit_{gen_tag}_"
+    input_filename = f"{_safe_username(user)}/input_{gen_tag}.png"
+
+    input_dir = M.COMFYUI_INPUT
+    os.makedirs(os.path.dirname(os.path.join(input_dir, input_filename)), exist_ok=True)
+    input_filepath = os.path.join(input_dir, input_filename)
+
+    with open(input_filepath, "wb") as f:
+        f.write(base64.b64decode(image_b64))
+
+    cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+
+    workflow = {
+        "62": {
+            "class_type": "CLIPLoader",
+            "inputs": {"clip_name": cfg["clip1"], "type": "lumina2"},
+        },
+        "63": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
+        "66": {
+            "class_type": "UNETLoader",
+            "inputs": {"unet_name": cfg["unet"], "weight_dtype": "default"},
+        },
+        "67": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": prompt, "clip": ["62", 0]},
+        },
+        "71": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": negative_prompt, "clip": ["62", 0]},
+        },
+        "69": {
+            "class_type": "ModelSamplingAuraFlow",
+            "inputs": {"shift": 3, "model": ["66", 0]},
+        },
+        "5_load": {"class_type": "LoadImage", "inputs": {"image": input_filename}},
+        "5_scale": {
+            "class_type": "ImageScaleToTotalPixels",
+            "inputs": {
+                "image": ["5_load", 0],
+                "megapixels": 1.049,  # ~1024x1024
+                "upscale_method": "bicubic",
+                "resolution_steps": 1,
+            },
+        },
+        # Standard VAEEncode instead of VAEEncodeForInpaint
+        "5_encode": {
+            "class_type": "VAEEncode",
+            "inputs": {"pixels": ["5_scale", 0], "vae": ["63", 0]},
+        },
+        "70": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": random.randint(0, 2**31),
+                "steps": 8,
+                "cfg": 1.0,
+                "sampler_name": "res_multistep",
+                "scheduler": "simple",
+                "denoise": float(denoise),  # Dynamically controls edit depth
+                "model": ["69", 0],
+                "positive": ["67", 0],
+                "negative": ["71", 0],
+                "latent_image": ["5_encode", 0],
+            },
+        },
+        "65": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["70", 0], "vae": ["63", 0]},
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": prefix, "images": ["65", 0]},
+        },
+    }
+    with M._data_lock:
+        M.model_status = "image_active"
+        M.tasks[task_id]["gen_prompt"] = prompt
+        M.tasks[task_id]["_image_model"] = model
+        M.tasks[task_id]["negative_prompt"] = negative_prompt
+
+    M.ensure_comfyui_running()
+    M.set_status(task_id, f"Editing image ({model})... Prompt: {prompt[:150]}")
+
+    try:
+        r = requests.post(
+            f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
+        )
+        data = r.json()
+
+        if "error" in data:
+            result = json.dumps({"error": f"ComfyUI: {data['error']}"})
+        else:
+            prompt_id = data["prompt_id"]
+            found_file = None
+            for _ in range(300):
+                time.sleep(1)
+                try:
+                    hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
+                    hist = hr.json()
+                    if prompt_id in hist:
+                        outputs = hist[prompt_id].get("outputs", {})
+                        for node_id, node_out in outputs.items():
+                            for img in node_out.get("images", []):
+                                fname = img["filename"]
+                                found_file = os.path.join(
+                                    M.IMG_PATH, img.get("subfolder", ""), fname
+                                )
+                                break
+                        if found_file:
+                            break
+                except Exception:
+                    pass
+
+            if found_file:
+                with M._data_lock:
+                    cancelled = bool(M.tasks.get(task_id, {}).get("status") == "cancelled")
+                if cancelled:
+                    try:
+                        if os.path.exists(found_file):
+                            os.remove(found_file)
+                            print(f"[image] Deleted orphaned edited image for cancelled task {task_id}: {found_file}")
+                    except OSError:
+                        pass
+                    result = json.dumps({"error": "Cancelled — session was deleted"})
+                else:
+                    M.tasks[task_id]["image_file"] = M._output_rel(found_file)
+                    M.set_status(task_id, f"Edited image saved as {found_file}")
+                    result = json.dumps(
+                        {
+                            "prompt_id": prompt_id,
+                            "file": found_file,
+                            "rel": M._output_rel(found_file),
+                        }
+                    )
+            else:
+                result = json.dumps({"error": "Image editing timeout"})
+    except Exception as e:
+        result = json.dumps({"error": str(e)})
+    finally:
+        if os.path.exists(input_filepath):
+            try:
+                os.remove(input_filepath)
+                print(f"[edit_image] Cleaned up input file: {input_filepath}")
+            except Exception as e:
+                print(f"[edit_image] Failed to cleanup input file: {e}")
+        M.set_status(task_id, "Freeing image generation VRAM...")
+        M.free_comfyui_vram()
+        M.set_status(task_id, "Loading chat model...")
+        M.load_llama_model("gpu")
+
+    return result
+
+
+def _enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index):
+    """Queue an image generation/edit job for the single image worker thread.
+
+    Image work is serialized so the VRAM choreography (llama unload / ComfyUI
+    / free / reload) and the ``image_active`` model status never race, even when
+    CPU and GPU chat lanes process tasks concurrently. The job carries its
+    originating session so the finished image lands in the right conversation.
+    """
+    with M._data_lock:
+        image_b64 = M.tasks.get(task_id, {}).get("_original_image")
+    M.set_status(task_id, "Queued for image generation...")
+    M._image_queue.put(
+        {
+            "task_id": task_id,
+            "sid": sid,
+            "tool_name": tool_name,
+            "args": args,
+            "tc_id": tc["id"],
+            "round": round_num,
+            "tool_index": tool_index,
+            "image_b64": image_b64,
+        }
+    )
+    print(f"[image_worker] Queued {tool_name} for task {task_id} (sid {sid})")
+
+
+def _run_generate_image(task_id, args):
+    result = M.generate_image(
+        prompt=args.get("prompt", ""),
+        task_id=task_id,
+        negative_prompt=args.get("negative_prompt", ""),
+        model=args.get("model") or "z_image",
+        aspect_ratio=args.get("aspect_ratio") or "landscape",
+    )
+    res_data = json.loads(result)
+    if "file" in res_data:
+        rel = res_data.get("rel") or os.path.basename(res_data["file"])
+        image_url = f"/output/{rel}"
+        image_model_s = args.get("model") or "z_image"
+        with M._data_lock:
+            t = M.tasks.get(task_id)
+            if t:
+                t.setdefault("_tools_used", []).append("generate_image")
+                t["image_file"] = rel
+                t["gen_prompt"] = args.get("prompt", "")
+                t["_image_model"] = image_model_s
+        return json.dumps(
+            {
+                "image_url": image_url,
+                "prompt": args.get("prompt", ""),
+                "model": image_model_s,
+            }
+        )
+    return result
+
+
+def _run_edit_image(task_id, sid, args, image_b64):
+    result = M.edit_image(
+        prompt=args.get("prompt", ""),
+        task_id=task_id,
+        image_b64=image_b64,
+        negative_prompt=args.get("negative_prompt", ""),
+        denoise=args.get("denoise", 0.4),
+        model="z_image",
+        sid=sid,
+    )
+    res_data = json.loads(result)
+    if "file" in res_data:
+        rel = res_data.get("rel") or os.path.basename(res_data["file"])
+        image_url = f"/output/{rel}"
+        with M._data_lock:
+            t = M.tasks.get(task_id)
+            if t:
+                t.setdefault("_tools_used", []).append("edit_image")
+                t["image_file"] = rel
+                t["gen_prompt"] = args.get("prompt", "")
+                t["_image_model"] = None
+        return json.dumps(
+            {
+                "image_url": image_url,
+                "prompt": args.get("prompt", ""),
+                "model": None,
+            }
+        )
+    return result
+
+
+def _image_worker():
+    """Run one image job at a time from the image queue.
+
+    On completion the worker posts the same ``tool_ok`` event the tool worker
+    would have, so the event loop, pending-tool counting and session attachment
+    are unchanged. Matching to the originating session is preserved through the
+    job's ``sid`` and the task-keyed ``image_file`` stored on ``tasks[task_id]``.
+    """
+    while True:
+        job = M._image_queue.get()
+        if job.get("tool_name") == "__shutdown__":
+            break
+        task_id = job["task_id"]
+        with M._data_lock:
+            t = M.tasks.get(task_id)
+            if t is None or t.get("status") in ("cancelled", "error"):
+                continue
+        sid = job["sid"]
+        tool_name = job["tool_name"]
+        args = job["args"]
+        try:
+            if tool_name == "generate_image":
+                result = _run_generate_image(task_id, args)
+                print("Waiting 5s for GPU to cool down")
+                time.sleep(5)
+            elif tool_name == "edit_image":
+                result = _run_edit_image(task_id, sid, args, job.get("image_b64"))
+                print("Waiting 5s for GPU to cool down")
+                time.sleep(5)
+            else:
+                result = json.dumps({"error": f"Unknown image tool: {tool_name}"})
+        except Exception as e:
+            print(f"[image_worker] {tool_name} crashed for task {task_id}: {e}")
+            result = json.dumps({"error": f"Tool {tool_name} failed: {e}"})
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=job["tc_id"],
+            result=result,
+            sid=sid,
+            round=job["round"],
+            tool_index=job["tool_index"],
+        )
+</file>
+
 <file path="server/features/monitoring.py">
 """Health monitoring, server lifecycle and the background maintenance loops.
 
@@ -10793,624 +11411,6 @@ else
 fi
 
 echo "=== All tasks completed successfully ==="
-</file>
-
-<file path="server/features/images.py">
-"""ComfyUI image generation and editing."""
-
-import base64
-import json
-import os
-import random
-import time
-import uuid
-
-import requests
-
-from server.features.state import M
-from server.features.users import _safe_username
-
-
-# LLM-selectable framing presets for generate_image. All values are divisible
-# by 8 (latent-safe for EmptySD3LatentImage) and stay near the ~2 MP budget of
-# the default 1920x1080, so VRAM usage and generation time are stable no matter
-# which framing the model picks.
-ASPECT_SIZES = {
-    "landscape": (1920, 1080),
-    "portrait": (1080, 1920),
-    "square": (1440, 1440),
-}
-
-
-def _aspect_dims(aspect_ratio):
-    return ASPECT_SIZES.get(aspect_ratio, ASPECT_SIZES["landscape"])
-
-
-def _output_dir(user):
-    return os.path.join(M.COMFYUI_OUTPUT, _safe_username(user))
-
-
-def _input_dir(user):
-    return os.path.join(M.COMFYUI_INPUT, _safe_username(user))
-
-
-def _output_rel(target):
-    if os.path.isabs(target):
-        try:
-            return os.path.relpath(target, M.COMFYUI_OUTPUT)
-        except ValueError:
-            return os.path.basename(target)
-    return target
-
-
-def _image_url_rel(url):
-    marker = "/output/"
-    if marker in url:
-        return url.split(marker, 1)[-1]
-    return os.path.basename(url)
-
-
-def free_comfyui_vram():
-    print("[comfyui] Freeing VRAM...")
-    try:
-        r = requests.post(
-            f"{M.COMFYUI_URL}/free",
-            json={"unload_models": True, "free_memory": True},
-            timeout=30,
-        )
-        if r.status_code == 200:
-            print("[comfyui] VRAM freed")
-            return True
-    except Exception as e:
-        print(f"[comfyui] Free error: {e}")
-    finally:
-        time.sleep(10)
-    return False
-
-
-def generate_image(prompt, task_id, negative_prompt="", model="z_image", aspect_ratio="landscape"):
-    print(f"\n[image] Generating image for task {task_id} with the prompt: {prompt}")
-    M.set_status(task_id, "Freeing VRAM for image generation...")
-    # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
-    # The CPU server (self-chat agents) keeps running untouched.
-    M.unload_llama_model("gpu")
-
-    width, height = _aspect_dims(aspect_ratio)
-
-    user = M._task_user(task_id)
-    gen_tag = str(uuid.uuid4())[:8]
-    prefix = f"{_safe_username(user)}/gen_{gen_tag}_"
-    cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
-    if model == "z_image":
-        print("Chose Z-Image Turbo for image generation")
-        workflow = {
-            "62": {
-                "class_type": "CLIPLoader",
-                "inputs": {"clip_name": cfg["clip1"], "type": "lumina2"},
-            },
-            "63": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
-            "66": {
-                "class_type": "UNETLoader",
-                "inputs": {"unet_name": cfg["unet"], "weight_dtype": "default"},
-            },
-            "67": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": prompt, "clip": ["62", 0]},
-            },
-            "68": {
-                "class_type": "EmptySD3LatentImage",
-                "inputs": {"width": width, "height": height, "batch_size": 1},
-            },
-            "69": {
-                "class_type": "ModelSamplingAuraFlow",
-                "inputs": {"shift": 3, "model": ["66", 0]},
-            },
-            "71": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": negative_prompt, "clip": ["62", 0]},
-            },
-            "70": {
-                "class_type": "KSampler",
-                "inputs": {
-                    "seed": random.randint(0, 2**31),
-                    "steps": 8,
-                    "cfg": 1.0,
-                    "sampler_name": "res_multistep",
-                    "scheduler": "simple",
-                    "denoise": 1.0,
-                    "model": ["69", 0],
-                    "positive": ["67", 0],
-                    "negative": ["71", 0],
-                    "latent_image": ["68", 0],
-                },
-            },
-            "65": {
-                "class_type": "VAEDecode",
-                "inputs": {"samples": ["70", 0], "vae": ["63", 0]},
-            },
-            "9": {
-                "class_type": "SaveImage",
-                "inputs": {"filename_prefix": prefix, "images": ["65", 0]},
-            },
-        }
-    elif model == "sd3_5_medium":
-        print("Chose SD 3.5 for image generation")
-        workflow = {
-            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": cfg["unet"]}},
-            "2": {
-                "class_type": "TripleCLIPLoaderGGUF",
-                "inputs": {
-                    "clip_name1": cfg["clip1"],
-                    "clip_name2": cfg["clip2"],
-                    "clip_name3": cfg["t5"],
-                    "type": "sd3",
-                },
-            },
-            "3": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": prompt, "clip": ["2", 0]},
-            },
-            "4": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": negative_prompt, "clip": ["2", 0]},
-            },
-            "5": {
-                "class_type": "EmptySD3LatentImage",
-                "inputs": {"width": width, "height": height, "batch_size": 1},
-            },
-            "6": {
-                "class_type": "KSampler",
-                "inputs": {
-                    "seed": random.randint(0, 2**31),
-                    "steps": 20,  # Recommended steps for SD 3.5 Medium
-                    "cfg": 4.5,  # Recommended CFG range for SD 3.5 Medium: 3.5 to 5.0
-                    "sampler_name": "euler",
-                    "scheduler": "sgm_uniform",
-                    "denoise": 1.0,
-                    "model": ["1", 0],
-                    "positive": ["3", 0],
-                    "negative": ["4", 0],
-                    "latent_image": ["5", 0],
-                },
-            },
-            "7": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
-            "8": {
-                "class_type": "VAEDecode",
-                "inputs": {"samples": ["6", 0], "vae": ["7", 0]},
-            },
-            "9": {
-                "class_type": "SaveImage",
-                "inputs": {"filename_prefix": prefix, "images": ["8", 0]},
-            },
-        }
-    else:
-        print("No Image Model Selected Perfectly")
-
-    with M._data_lock:
-        M.model_status = "image_active"
-        M.tasks[task_id]["gen_prompt"] = prompt
-        M.tasks[task_id]["_image_model"] = model
-        M.tasks[task_id]["negative_prompt"] = negative_prompt
-    M.ensure_comfyui_running()
-    p_short = prompt[:200] + ("..." if len(prompt) > 200 else "")
-    M.set_status(task_id, f"Generating image ({model})... Prompt: {p_short}")
-    try:
-        r = requests.post(
-            f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
-        )
-        data = r.json()
-
-        if "error" in data:
-            result = json.dumps({"error": f"ComfyUI: {data['error']}"})
-        else:
-            prompt_id = data["prompt_id"]
-            found_file = None
-            for _ in range(300):
-                time.sleep(1)
-                try:
-                    hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
-                    hist = hr.json()
-
-                    if prompt_id in hist:
-                        outputs = hist[prompt_id].get("outputs", {})
-                        for node_id, node_out in outputs.items():
-                            for img in node_out.get("images", []):
-                                fname = img["filename"]
-                                fpath = os.path.join(
-                                    M.COMFYUI_OUTPUT, img.get("subfolder", ""), fname
-                                )
-                                found_file = fpath
-                                break
-                        if found_file:
-                            break
-                except Exception:
-                    pass
-            if found_file:
-                with M._data_lock:
-                    cancelled = bool(M.tasks.get(task_id, {}).get("status") == "cancelled")
-                if cancelled:
-                    try:
-                        if os.path.exists(found_file):
-                            os.remove(found_file)
-                            print(f"[image] Deleted orphaned image for cancelled task {task_id}: {found_file}")
-                    except OSError:
-                        pass
-                    result = json.dumps({"error": "Cancelled — session was deleted"})
-                else:
-                    M.tasks[task_id]["image_file"] = M._output_rel(found_file)
-                    M.set_status(task_id, f"Image saved as {found_file}")
-                    print(f"[generate_image] SUCCESS: {found_file}")  # DEBUG
-                    result = json.dumps(
-                        {
-                            "prompt_id": prompt_id,
-                            "file": found_file,
-                            "rel": M._output_rel(found_file),
-                        }
-                    )
-            else:
-                print(f"[generate_image] TIMEOUT for task {task_id} after 300s")  # DEBUG
-                result = json.dumps({"error": "Image generation timeout"})
-    except Exception as e:
-        result = json.dumps({"error": str(e)})
-    finally:
-        M.set_status(task_id, "Freeing image generation VRAM...")
-        M.free_comfyui_vram()
-        M.set_status(task_id, "Loading chat model...")
-        M.load_llama_model("gpu")
-    return result
-
-
-def edit_image(
-    prompt,
-    task_id,
-    image_b64,
-    negative_prompt="",
-    denoise=0.4,
-    model="z_image",
-    sid=None,
-):
-    print("Image edit called with denoise", denoise)
-    user = M._task_user(task_id)
-    if not image_b64 and sid:
-        with M._data_lock:
-            msgs = list(M.sessions.get(sid, []))
-        print(f"[edit_image] Scanning {len(msgs)} session messages for image sources")
-
-        for msg in reversed(msgs):
-            # 1. Check generated image URL attribute (_image_url)
-            url = (msg.get("_image_url") or "").strip()
-            if url:
-                fname = os.path.join(M.IMG_PATH, M._image_url_rel(url))
-                fpath = fname
-                print(
-                    f"[edit_image] Checking _image_url path={fpath} exists={os.path.exists(fpath)}"
-                )
-                if os.path.exists(fpath):
-                    with open(fpath, "rb") as f:
-                        image_b64 = base64.b64encode(f.read()).decode()
-                    break
-
-            # 2. Check user-uploaded images stored in the message's content array
-            content = msg.get("content")
-            if isinstance(content, list):
-                for part in reversed(content):
-                    if isinstance(part, dict) and part.get("type") == "image_url":
-                        img_url = part.get("image_url", {}).get("url", "")
-                        if img_url.startswith("data:image"):
-                            # Extracted base64 string directly from user upload
-                            image_b64 = img_url.split(",", 1)[-1]
-                            print(
-                                "[edit_image] Extracted base64 image from user message content"
-                            )
-                            break
-                        fpath = M.resolve_image_path(img_url)
-                        if fpath and os.path.exists(fpath):
-                            with open(fpath, "rb") as f:
-                                image_b64 = base64.b64encode(f.read()).decode()
-                            print(
-                                f"[edit_image] Loaded image from {img_url} ({len(image_b64)} bytes base64)"
-                            )
-                            break
-                if image_b64:
-                    break
-
-    if not image_b64:
-        print("[edit_image] FAILED to find an image to edit")
-        return json.dumps({"error": "No image provided for editing."})
-
-    print(
-        f"[edit_image] Found image ({len(image_b64)} bytes base64), proceeding with edit"
-    )
-
-    print(f"\n[image_edit] Editing image for task {task_id} with prompt: {prompt}")
-    M.set_status(task_id, "Freeing VRAM for image editing...")
-    # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
-    # The CPU server (self-chat agents) keeps running untouched.
-    M.unload_llama_model("gpu")
-
-    gen_tag = str(uuid.uuid4())[:8]
-    prefix = f"{_safe_username(user)}/edit_{gen_tag}_"
-    input_filename = f"{_safe_username(user)}/input_{gen_tag}.png"
-
-    input_dir = M.COMFYUI_INPUT
-    os.makedirs(os.path.dirname(os.path.join(input_dir, input_filename)), exist_ok=True)
-    input_filepath = os.path.join(input_dir, input_filename)
-
-    with open(input_filepath, "wb") as f:
-        f.write(base64.b64decode(image_b64))
-
-    cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
-
-    workflow = {
-        "62": {
-            "class_type": "CLIPLoader",
-            "inputs": {"clip_name": cfg["clip1"], "type": "lumina2"},
-        },
-        "63": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
-        "66": {
-            "class_type": "UNETLoader",
-            "inputs": {"unet_name": cfg["unet"], "weight_dtype": "default"},
-        },
-        "67": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": prompt, "clip": ["62", 0]},
-        },
-        "71": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": negative_prompt, "clip": ["62", 0]},
-        },
-        "69": {
-            "class_type": "ModelSamplingAuraFlow",
-            "inputs": {"shift": 3, "model": ["66", 0]},
-        },
-        "5_load": {"class_type": "LoadImage", "inputs": {"image": input_filename}},
-        "5_scale": {
-            "class_type": "ImageScaleToTotalPixels",
-            "inputs": {
-                "image": ["5_load", 0],
-                "megapixels": 1.049,  # ~1024x1024
-                "upscale_method": "bicubic",
-                "resolution_steps": 1,
-            },
-        },
-        # Standard VAEEncode instead of VAEEncodeForInpaint
-        "5_encode": {
-            "class_type": "VAEEncode",
-            "inputs": {"pixels": ["5_scale", 0], "vae": ["63", 0]},
-        },
-        "70": {
-            "class_type": "KSampler",
-            "inputs": {
-                "seed": random.randint(0, 2**31),
-                "steps": 8,
-                "cfg": 1.0,
-                "sampler_name": "res_multistep",
-                "scheduler": "simple",
-                "denoise": float(denoise),  # Dynamically controls edit depth
-                "model": ["69", 0],
-                "positive": ["67", 0],
-                "negative": ["71", 0],
-                "latent_image": ["5_encode", 0],
-            },
-        },
-        "65": {
-            "class_type": "VAEDecode",
-            "inputs": {"samples": ["70", 0], "vae": ["63", 0]},
-        },
-        "9": {
-            "class_type": "SaveImage",
-            "inputs": {"filename_prefix": prefix, "images": ["65", 0]},
-        },
-    }
-    with M._data_lock:
-        M.model_status = "image_active"
-        M.tasks[task_id]["gen_prompt"] = prompt
-        M.tasks[task_id]["_image_model"] = model
-        M.tasks[task_id]["negative_prompt"] = negative_prompt
-
-    M.ensure_comfyui_running()
-    M.set_status(task_id, f"Editing image ({model})... Prompt: {prompt[:150]}")
-
-    try:
-        r = requests.post(
-            f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
-        )
-        data = r.json()
-
-        if "error" in data:
-            result = json.dumps({"error": f"ComfyUI: {data['error']}"})
-        else:
-            prompt_id = data["prompt_id"]
-            found_file = None
-            for _ in range(300):
-                time.sleep(1)
-                try:
-                    hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
-                    hist = hr.json()
-                    if prompt_id in hist:
-                        outputs = hist[prompt_id].get("outputs", {})
-                        for node_id, node_out in outputs.items():
-                            for img in node_out.get("images", []):
-                                fname = img["filename"]
-                                found_file = os.path.join(
-                                    M.IMG_PATH, img.get("subfolder", ""), fname
-                                )
-                                break
-                        if found_file:
-                            break
-                except Exception:
-                    pass
-
-            if found_file:
-                with M._data_lock:
-                    cancelled = bool(M.tasks.get(task_id, {}).get("status") == "cancelled")
-                if cancelled:
-                    try:
-                        if os.path.exists(found_file):
-                            os.remove(found_file)
-                            print(f"[image] Deleted orphaned edited image for cancelled task {task_id}: {found_file}")
-                    except OSError:
-                        pass
-                    result = json.dumps({"error": "Cancelled — session was deleted"})
-                else:
-                    M.tasks[task_id]["image_file"] = M._output_rel(found_file)
-                    M.set_status(task_id, f"Edited image saved as {found_file}")
-                    result = json.dumps(
-                        {
-                            "prompt_id": prompt_id,
-                            "file": found_file,
-                            "rel": M._output_rel(found_file),
-                        }
-                    )
-            else:
-                result = json.dumps({"error": "Image editing timeout"})
-    except Exception as e:
-        result = json.dumps({"error": str(e)})
-    finally:
-        if os.path.exists(input_filepath):
-            try:
-                os.remove(input_filepath)
-                print(f"[edit_image] Cleaned up input file: {input_filepath}")
-            except Exception as e:
-                print(f"[edit_image] Failed to cleanup input file: {e}")
-        M.set_status(task_id, "Freeing image generation VRAM...")
-        M.free_comfyui_vram()
-        M.set_status(task_id, "Loading chat model...")
-        M.load_llama_model("gpu")
-
-    return result
-
-
-def _enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index):
-    """Queue an image generation/edit job for the single image worker thread.
-
-    Image work is serialized so the VRAM choreography (llama unload / ComfyUI
-    / free / reload) and the ``image_active`` model status never race, even when
-    CPU and GPU chat lanes process tasks concurrently. The job carries its
-    originating session so the finished image lands in the right conversation.
-    """
-    with M._data_lock:
-        image_b64 = M.tasks.get(task_id, {}).get("_original_image")
-    M.set_status(task_id, "Queued for image generation...")
-    M._image_queue.put(
-        {
-            "task_id": task_id,
-            "sid": sid,
-            "tool_name": tool_name,
-            "args": args,
-            "tc_id": tc["id"],
-            "round": round_num,
-            "tool_index": tool_index,
-            "image_b64": image_b64,
-        }
-    )
-    print(f"[image_worker] Queued {tool_name} for task {task_id} (sid {sid})")
-
-
-def _run_generate_image(task_id, args):
-    result = M.generate_image(
-        prompt=args.get("prompt", ""),
-        task_id=task_id,
-        negative_prompt=args.get("negative_prompt", ""),
-        model=args.get("model") or "z_image",
-        aspect_ratio=args.get("aspect_ratio") or "landscape",
-    )
-    res_data = json.loads(result)
-    if "file" in res_data:
-        rel = res_data.get("rel") or os.path.basename(res_data["file"])
-        image_url = f"/output/{rel}"
-        image_model_s = args.get("model") or "z_image"
-        with M._data_lock:
-            t = M.tasks.get(task_id)
-            if t:
-                t.setdefault("_tools_used", []).append("generate_image")
-                t["image_file"] = rel
-                t["gen_prompt"] = args.get("prompt", "")
-                t["_image_model"] = image_model_s
-        return json.dumps(
-            {
-                "image_url": image_url,
-                "prompt": args.get("prompt", ""),
-                "model": image_model_s,
-            }
-        )
-    return result
-
-
-def _run_edit_image(task_id, sid, args, image_b64):
-    result = M.edit_image(
-        prompt=args.get("prompt", ""),
-        task_id=task_id,
-        image_b64=image_b64,
-        negative_prompt=args.get("negative_prompt", ""),
-        denoise=args.get("denoise", 0.4),
-        model="z_image",
-        sid=sid,
-    )
-    res_data = json.loads(result)
-    if "file" in res_data:
-        rel = res_data.get("rel") or os.path.basename(res_data["file"])
-        image_url = f"/output/{rel}"
-        with M._data_lock:
-            t = M.tasks.get(task_id)
-            if t:
-                t.setdefault("_tools_used", []).append("edit_image")
-                t["image_file"] = rel
-                t["gen_prompt"] = args.get("prompt", "")
-                t["_image_model"] = None
-        return json.dumps(
-            {
-                "image_url": image_url,
-                "prompt": args.get("prompt", ""),
-                "model": None,
-            }
-        )
-    return result
-
-
-def _image_worker():
-    """Run one image job at a time from the image queue.
-
-    On completion the worker posts the same ``tool_ok`` event the tool worker
-    would have, so the event loop, pending-tool counting and session attachment
-    are unchanged. Matching to the originating session is preserved through the
-    job's ``sid`` and the task-keyed ``image_file`` stored on ``tasks[task_id]``.
-    """
-    while True:
-        job = M._image_queue.get()
-        if job.get("tool_name") == "__shutdown__":
-            break
-        task_id = job["task_id"]
-        with M._data_lock:
-            t = M.tasks.get(task_id)
-            if t is None or t.get("status") in ("cancelled", "error"):
-                continue
-        sid = job["sid"]
-        tool_name = job["tool_name"]
-        args = job["args"]
-        try:
-            if tool_name == "generate_image":
-                result = _run_generate_image(task_id, args)
-                print("Waiting 5s for GPU to cool down")
-                time.sleep(5)
-            elif tool_name == "edit_image":
-                result = _run_edit_image(task_id, sid, args, job.get("image_b64"))
-                print("Waiting 5s for GPU to cool down")
-                time.sleep(5)
-            else:
-                result = json.dumps({"error": f"Unknown image tool: {tool_name}"})
-        except Exception as e:
-            print(f"[image_worker] {tool_name} crashed for task {task_id}: {e}")
-            result = json.dumps({"error": f"Tool {tool_name} failed: {e}"})
-        M._event_post(
-            "tool_ok",
-            task_id,
-            tc_id=job["tc_id"],
-            result=result,
-            sid=sid,
-            round=job["round"],
-            tool_index=job["tool_index"],
-        )
 </file>
 
 <file path="prompts/self_chat.txt">
@@ -15155,6 +15155,330 @@ async def handle_chat(user_message):
     return user_response, bot_response
 </file>
 
+<file path="chat-webui.py">
+#!/usr/bin/env python3
+"""Chat Web UI — script entrypoint.
+
+The chat engine implementation now lives in the :mod:`server.features` package.
+This file remains the single script entrypoint and the owner of every shared
+value: it re-exports the feature modules' functions and state, registers itself
+with the ``M`` proxy (see :mod:`server.features.state`), and wires up the
+background threads.
+
+Feature code resolves shared state, config values and cross-cutting helpers at
+call time through the ``M`` proxy, so monkeypatching ``chat-webui.<name>`` —
+which the test-suite relies on — keeps working across module boundaries.
+"""
+import http.server, json, os, re, glob, uuid, base64, requests, subprocess, time, random, threading, sys, io, tempfile, queue as _queue_mod  # noqa: F401
+
+sys.stdout.reconfigure(line_buffering=True)  # noqa
+from datetime import datetime  # noqa: F401
+from urllib.parse import urlparse, parse_qs  # noqa: F401
+
+from server.read_file import read_file_text
+
+from server.config import (  # noqa: F401
+    AUDIO_TOKEN_COST,
+    COMFYUI_DIR,
+    COMFYUI_INPUT,
+    COMFYUI_OUTPUT,
+    COMFYUI_URL,
+    DDNS_CHECK_INTERVAL,
+    DDNS_DOMAIN,
+    DDNS_SUBDOMAIN,
+    FILES_DIR,
+    FORCE_GPU_LANE,
+    GODADDY_API_KEY,
+    GODADDY_API_SECRET,
+    HEARTBEAT_URL,
+    HOST,
+    IMG_PATH,
+    IMAGE_MODELS,
+    IMAGE_TOKEN_COST,
+    LLAMA_BASE,
+    LLAMA_BASE_CPU,
+    LLAMA_GEMMA_NGL,
+    LLAMA_QWEN_NGL,
+    LLAMA_SERVER_ARGS,
+    LLAMA_SERVER_ARGS_CPU,
+    LLAMA_SERVER_PATH,
+    LLAMA_URL,
+    LLAMA_URL_CPU,
+    MODEL_ID,
+    MODEL_ID_CPU,
+    PER_MESSAGE_OVERHEAD,
+    PORT,
+    PROMPT_PATH,
+    REASONING_BUDGET,
+    SEARXNG_URL,
+    SELF_CHAT_MODE,
+    SESSIONS_DIR,
+    SESSIONS_FILE,
+    SHARE_BASE_URL,
+    SHARES_FILE,
+    TASKS_DB,
+    THEMES_DB,
+    TOOL_FREE_AGENTS,
+    TOOLS,
+    TOOLS_TOKEN_COST,
+    UPLOADS_DIR,
+    VENV_PYTHON,
+    VERIFY_FETCH_CHARS,
+    VERIFY_MAX_CITES_PER_URL,
+    VERIFY_RETRIES,
+    build_sys_content,
+)
+
+from server.api import APP_STATE_NAMES, Handler, set_app_state
+
+import sys
+
+sys.path.insert(0, COMFYUI_DIR)
+
+# ---------------------------------------------------------------------------
+# Feature modules — the chat engine implementation.
+# ---------------------------------------------------------------------------
+
+from server.features.state import (  # noqa: E402
+    ACTIVE_WINDOW_SECONDS,
+    AUTO_COMPACT_THRESHOLD,
+    MAX_INPUT_TOKENS,
+    MAX_QUEUE_SIZE,
+    MAX_TOOL_ROUNDS,
+    RAM_EVAC_THRESHOLD,
+    RAM_RESUME_THRESHOLD,
+    TEMP_THRESHOLD_OFF,
+    TEMP_THRESHOLD_ON,
+    _active_tokens,
+    _agent_tokens,
+    _agent_users,
+    _client_location,
+    _cpu_last_llm_use,
+    _cpu_model_status,
+    _current_task_ids,
+    _data_lock,
+    _effective_contexts,
+    _effective_contexts_lock,
+    _event_queue,
+    _gpu_temp,
+    _image_queue,
+    _last_llm_use,
+    _last_tps,
+    _llm_pools,
+    _location_events,
+    _model_transition_lock,
+    _overheated,
+    _queue_conds,
+    _queue_locks,
+    _ram_evacuating,
+    _task_queues,
+    _tokens_lock,
+    _tool_pools,
+    _user_last_seen,
+    _user_last_seen_lock,
+    _users_cache,
+    _users_cache_time,
+    model_status,
+    register_entrypoint,
+    sessions,
+    sessions_meta,
+    shares,
+    tasks,
+)
+
+from server.features.tasks_db import (  # noqa: E402
+    _db_fetch,
+    _db_fetch_one,
+    _db_run,
+    _init_tasks_db,
+    handle_task_tool,
+    task_complete,
+    task_create,
+    task_delete,
+    task_get,
+    task_list,
+    task_update,
+)
+
+from server.features.themes_db import (  # noqa: E402
+    _init_themes_db,
+    handle_theme_tool,
+)
+
+from server.features.users import (  # noqa: E402
+    _safe_username,
+    active_users,
+    get_current_identity,
+    get_current_user,
+    get_user_context_path,
+    read_user_context,
+    write_user_context,
+)
+
+from server.features.sessions import (  # noqa: E402
+    _load_extra_prompts,
+    _prepare_session,
+    _session_file,
+    _session_meta_from,
+    load_sessions,
+    save_sessions,
+)
+
+from server.features.shares import (  # noqa: E402
+    create_share,
+    get_share,
+    list_shares,
+    load_shares,
+    revoke_share,
+    save_shares,
+)
+
+from server.features.context import (  # noqa: E402
+    _image_to_data_url,
+    _latest_read_image_url,
+    _reference_historical_images,
+    _summarize_with_llm,
+    _text_tokens,
+    compact_messages_copy,
+    context_token_report,
+    effective_token_estimate,
+    estimate_tokens,
+    prepare_context_for_llm,
+    resolve_image_path,
+    strip_html,
+    trim_messages_for_context,
+)
+
+from server.features.llm import (  # noqa: E402
+    _consult_worker,
+    _inject_read_image,
+    _llm_worker,
+    _start_llm_round,
+    active_model_id,
+    consult_expert_model,
+    is_llama_alive,
+    load_llama_model,
+    server_base,
+    server_last_use,
+    server_model_id,
+    server_status,
+    server_url,
+    task_mode,
+    unload_llama_model,
+)
+from server.features.tools import (  # noqa: E402
+    _dispatch_tool,
+    _tool_worker,
+    fetch_page,
+    web_search,
+)
+
+from server.features.images import (  # noqa: E402
+    _enqueue_image_job,
+    _image_url_rel,
+    _image_worker,
+    _input_dir,
+    _output_dir,
+    _output_rel,
+    edit_image,
+    free_comfyui_vram,
+    generate_image,
+)
+
+from server.features.monitoring import (  # noqa: E402
+    _cpu_lane_needed,
+    _ensure_llama_server_for_task,
+    _evacuate_ram,
+    _idle_unload_loop,
+    _reminder_loop,
+    _thermal_monitor,
+    _connection_manager,
+    ensure_comfyui_running,
+    ensure_llama_server,
+    get_gpu_temp,
+    get_ram_usage,
+    kill_comfyui,
+    kill_llama_server,
+    model_status_snapshot,
+    restart_llama_server,
+    restart_servers,
+)
+
+from server.features.orchestration import (  # noqa: E402
+    _delete_task_image,
+    _event_loop,
+    _event_post,
+    _finalize_task,
+    _human_priority_active,
+    _queue_worker,
+    _set_task_error,
+    _task_max_rounds,
+    _task_user,
+    location_str,
+    set_client_location,
+    set_status,
+)
+
+from server.features.critic import (  # noqa: E402
+    extract_citations,
+    run_verification,
+    run_verification_worker,
+)
+
+# Point the M proxy at this module: from here on, feature modules resolve all
+# shared state, config values and cross-cutting helpers through it.
+register_entrypoint(sys.modules[__name__])
+
+_init_tasks_db()
+_init_themes_db()
+
+SYS_CONTENT = build_sys_content()
+
+print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)
+
+set_app_state({name: globals()[name] for name in APP_STATE_NAMES})
+
+
+if __name__ == "__main__":
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+    load_sessions()
+    load_shares()
+    try:
+        r = requests.get(f"{LLAMA_BASE}/health", timeout=3)
+        if r.status_code != 200:
+            raise Exception("health check failed")
+        print("[startup] GPU llama-server is running")
+    except Exception:
+        print("[startup] GPU llama-server not reachable — starting...")
+        restart_servers()
+    try:
+        r = requests.get(SEARXNG_URL, timeout=3)
+        if r.status_code in (200, 301, 302):
+            print("[startup] SearXNG is running")
+        else:
+            raise Exception(f"status {r.status_code}")
+    except Exception as e:
+        print(f"[startup] ERROR: SearXNG is not reachable at {SEARXNG_URL} ({e}). Web search will not work. Exiting.")
+        sys.exit(1)
+    threading.Thread(target=_event_loop, daemon=True).start()
+    # One queue worker per lane: GPU (interactive UI users) and CPU (self-chat
+    # agents) now run fully independently, so an agent task can never make a
+    # UI user wait behind it.
+    threading.Thread(target=_queue_worker, args=("gpu",), daemon=True).start()
+    threading.Thread(target=_queue_worker, args=("cpu",), daemon=True).start()
+    threading.Thread(target=_image_worker, daemon=True).start()
+    threading.Thread(target=_idle_unload_loop, daemon=True).start()
+    threading.Thread(target=_thermal_monitor, daemon=True).start()
+    threading.Thread(target=_reminder_loop, daemon=True).start()
+    threading.Thread(target=_connection_manager, daemon=True).start()
+    print(f"Chat UI running on http://localhost:{PORT}")
+    s = http.server.HTTPServer((HOST, PORT), Handler)
+    try:
+        s.serve_forever()
+    except KeyboardInterrupt:
+        s.shutdown()
+</file>
+
 <file path="server/config.py">
 #!/usr/bin/env python3
 import json
@@ -15707,330 +16031,6 @@ def build_sys_content():
     sys_content = sys_content.replace("%model_list%", model_list)
     sys_content = sys_content.replace("%_image_keys%", str(list(IMAGE_MODELS.keys())))
     return sys_content
-</file>
-
-<file path="chat-webui.py">
-#!/usr/bin/env python3
-"""Chat Web UI — script entrypoint.
-
-The chat engine implementation now lives in the :mod:`server.features` package.
-This file remains the single script entrypoint and the owner of every shared
-value: it re-exports the feature modules' functions and state, registers itself
-with the ``M`` proxy (see :mod:`server.features.state`), and wires up the
-background threads.
-
-Feature code resolves shared state, config values and cross-cutting helpers at
-call time through the ``M`` proxy, so monkeypatching ``chat-webui.<name>`` —
-which the test-suite relies on — keeps working across module boundaries.
-"""
-import http.server, json, os, re, glob, uuid, base64, requests, subprocess, time, random, threading, sys, io, tempfile, queue as _queue_mod  # noqa: F401
-
-sys.stdout.reconfigure(line_buffering=True)  # noqa
-from datetime import datetime  # noqa: F401
-from urllib.parse import urlparse, parse_qs  # noqa: F401
-
-from server.read_file import read_file_text
-
-from server.config import (  # noqa: F401
-    AUDIO_TOKEN_COST,
-    COMFYUI_DIR,
-    COMFYUI_INPUT,
-    COMFYUI_OUTPUT,
-    COMFYUI_URL,
-    DDNS_CHECK_INTERVAL,
-    DDNS_DOMAIN,
-    DDNS_SUBDOMAIN,
-    FILES_DIR,
-    FORCE_GPU_LANE,
-    GODADDY_API_KEY,
-    GODADDY_API_SECRET,
-    HEARTBEAT_URL,
-    HOST,
-    IMG_PATH,
-    IMAGE_MODELS,
-    IMAGE_TOKEN_COST,
-    LLAMA_BASE,
-    LLAMA_BASE_CPU,
-    LLAMA_GEMMA_NGL,
-    LLAMA_QWEN_NGL,
-    LLAMA_SERVER_ARGS,
-    LLAMA_SERVER_ARGS_CPU,
-    LLAMA_SERVER_PATH,
-    LLAMA_URL,
-    LLAMA_URL_CPU,
-    MODEL_ID,
-    MODEL_ID_CPU,
-    PER_MESSAGE_OVERHEAD,
-    PORT,
-    PROMPT_PATH,
-    REASONING_BUDGET,
-    SEARXNG_URL,
-    SELF_CHAT_MODE,
-    SESSIONS_DIR,
-    SESSIONS_FILE,
-    SHARE_BASE_URL,
-    SHARES_FILE,
-    TASKS_DB,
-    THEMES_DB,
-    TOOL_FREE_AGENTS,
-    TOOLS,
-    TOOLS_TOKEN_COST,
-    UPLOADS_DIR,
-    VENV_PYTHON,
-    VERIFY_FETCH_CHARS,
-    VERIFY_MAX_CITES_PER_URL,
-    VERIFY_RETRIES,
-    build_sys_content,
-)
-
-from server.api import APP_STATE_NAMES, Handler, set_app_state
-
-import sys
-
-sys.path.insert(0, COMFYUI_DIR)
-
-# ---------------------------------------------------------------------------
-# Feature modules — the chat engine implementation.
-# ---------------------------------------------------------------------------
-
-from server.features.state import (  # noqa: E402
-    ACTIVE_WINDOW_SECONDS,
-    AUTO_COMPACT_THRESHOLD,
-    MAX_INPUT_TOKENS,
-    MAX_QUEUE_SIZE,
-    MAX_TOOL_ROUNDS,
-    RAM_EVAC_THRESHOLD,
-    RAM_RESUME_THRESHOLD,
-    TEMP_THRESHOLD_OFF,
-    TEMP_THRESHOLD_ON,
-    _active_tokens,
-    _agent_tokens,
-    _agent_users,
-    _client_location,
-    _cpu_last_llm_use,
-    _cpu_model_status,
-    _current_task_ids,
-    _data_lock,
-    _effective_contexts,
-    _effective_contexts_lock,
-    _event_queue,
-    _gpu_temp,
-    _image_queue,
-    _last_llm_use,
-    _last_tps,
-    _llm_pools,
-    _location_events,
-    _model_transition_lock,
-    _overheated,
-    _queue_conds,
-    _queue_locks,
-    _ram_evacuating,
-    _task_queues,
-    _tokens_lock,
-    _tool_pools,
-    _user_last_seen,
-    _user_last_seen_lock,
-    _users_cache,
-    _users_cache_time,
-    model_status,
-    register_entrypoint,
-    sessions,
-    sessions_meta,
-    shares,
-    tasks,
-)
-
-from server.features.tasks_db import (  # noqa: E402
-    _db_fetch,
-    _db_fetch_one,
-    _db_run,
-    _init_tasks_db,
-    handle_task_tool,
-    task_complete,
-    task_create,
-    task_delete,
-    task_get,
-    task_list,
-    task_update,
-)
-
-from server.features.themes_db import (  # noqa: E402
-    _init_themes_db,
-    handle_theme_tool,
-)
-
-from server.features.users import (  # noqa: E402
-    _safe_username,
-    active_users,
-    get_current_identity,
-    get_current_user,
-    get_user_context_path,
-    read_user_context,
-    write_user_context,
-)
-
-from server.features.sessions import (  # noqa: E402
-    _load_extra_prompts,
-    _prepare_session,
-    _session_file,
-    _session_meta_from,
-    load_sessions,
-    save_sessions,
-)
-
-from server.features.shares import (  # noqa: E402
-    create_share,
-    get_share,
-    list_shares,
-    load_shares,
-    revoke_share,
-    save_shares,
-)
-
-from server.features.context import (  # noqa: E402
-    _image_to_data_url,
-    _latest_read_image_url,
-    _reference_historical_images,
-    _summarize_with_llm,
-    _text_tokens,
-    compact_messages_copy,
-    context_token_report,
-    effective_token_estimate,
-    estimate_tokens,
-    prepare_context_for_llm,
-    resolve_image_path,
-    strip_html,
-    trim_messages_for_context,
-)
-
-from server.features.llm import (  # noqa: E402
-    _consult_worker,
-    _inject_read_image,
-    _llm_worker,
-    _start_llm_round,
-    active_model_id,
-    consult_expert_model,
-    is_llama_alive,
-    load_llama_model,
-    server_base,
-    server_last_use,
-    server_model_id,
-    server_status,
-    server_url,
-    task_mode,
-    unload_llama_model,
-)
-from server.features.tools import (  # noqa: E402
-    _dispatch_tool,
-    _tool_worker,
-    fetch_page,
-    web_search,
-)
-
-from server.features.images import (  # noqa: E402
-    _enqueue_image_job,
-    _image_url_rel,
-    _image_worker,
-    _input_dir,
-    _output_dir,
-    _output_rel,
-    edit_image,
-    free_comfyui_vram,
-    generate_image,
-)
-
-from server.features.monitoring import (  # noqa: E402
-    _cpu_lane_needed,
-    _ensure_llama_server_for_task,
-    _evacuate_ram,
-    _idle_unload_loop,
-    _reminder_loop,
-    _thermal_monitor,
-    _connection_manager,
-    ensure_comfyui_running,
-    ensure_llama_server,
-    get_gpu_temp,
-    get_ram_usage,
-    kill_comfyui,
-    kill_llama_server,
-    model_status_snapshot,
-    restart_llama_server,
-    restart_servers,
-)
-
-from server.features.orchestration import (  # noqa: E402
-    _delete_task_image,
-    _event_loop,
-    _event_post,
-    _finalize_task,
-    _human_priority_active,
-    _queue_worker,
-    _set_task_error,
-    _task_max_rounds,
-    _task_user,
-    location_str,
-    set_client_location,
-    set_status,
-)
-
-from server.features.critic import (  # noqa: E402
-    extract_citations,
-    run_verification,
-    run_verification_worker,
-)
-
-# Point the M proxy at this module: from here on, feature modules resolve all
-# shared state, config values and cross-cutting helpers through it.
-register_entrypoint(sys.modules[__name__])
-
-_init_tasks_db()
-_init_themes_db()
-
-SYS_CONTENT = build_sys_content()
-
-print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)
-
-set_app_state({name: globals()[name] for name in APP_STATE_NAMES})
-
-
-if __name__ == "__main__":
-    os.makedirs(UPLOADS_DIR, exist_ok=True)
-    load_sessions()
-    load_shares()
-    try:
-        r = requests.get(f"{LLAMA_BASE}/health", timeout=3)
-        if r.status_code != 200:
-            raise Exception("health check failed")
-        print("[startup] GPU llama-server is running")
-    except Exception:
-        print("[startup] GPU llama-server not reachable — starting...")
-        restart_servers()
-    try:
-        r = requests.get(SEARXNG_URL, timeout=3)
-        if r.status_code in (200, 301, 302):
-            print("[startup] SearXNG is running")
-        else:
-            raise Exception(f"status {r.status_code}")
-    except Exception as e:
-        print(f"[startup] ERROR: SearXNG is not reachable at {SEARXNG_URL} ({e}). Web search will not work. Exiting.")
-        sys.exit(1)
-    threading.Thread(target=_event_loop, daemon=True).start()
-    # One queue worker per lane: GPU (interactive UI users) and CPU (self-chat
-    # agents) now run fully independently, so an agent task can never make a
-    # UI user wait behind it.
-    threading.Thread(target=_queue_worker, args=("gpu",), daemon=True).start()
-    threading.Thread(target=_queue_worker, args=("cpu",), daemon=True).start()
-    threading.Thread(target=_image_worker, daemon=True).start()
-    threading.Thread(target=_idle_unload_loop, daemon=True).start()
-    threading.Thread(target=_thermal_monitor, daemon=True).start()
-    threading.Thread(target=_reminder_loop, daemon=True).start()
-    threading.Thread(target=_connection_manager, daemon=True).start()
-    print(f"Chat UI running on http://localhost:{PORT}")
-    s = http.server.HTTPServer((HOST, PORT), Handler)
-    try:
-        s.serve_forever()
-    except KeyboardInterrupt:
-        s.shutdown()
 </file>
 
 <file path="self-chat.py">
