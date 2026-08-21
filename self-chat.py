@@ -6,6 +6,7 @@ import argparse
 import requests
 import re
 import shutil
+import threading
 import traceback
 from difflib import SequenceMatcher
 from datetime import datetime
@@ -56,7 +57,11 @@ STORY_BASE_DIR = os.path.expanduser("~/local-ai-files/stories")
 PREMIUM_STORIES_DIR = os.getenv("STORIES_PREMIUM_DIR")
 ADMIN_STORIES_DIR = os.getenv("STORIES_ADMIN_DIR")
 
-BASE_URL = "http://localhost:3001"
+# Agents normally run on this machine next to chat-webui; override with
+# SELF_CHAT_BASE_URL only when pointing them somewhere else.
+BASE_URL = os.environ.get(
+    "SELF_CHAT_BASE_URL", "http://localhost:3001"
+).rstrip("/")
 USERNAME_A = "kolpo"
 USERNAME_B = "kaya"
 # Each agent is a real Authentik user with its own password. Use the shared
@@ -1298,18 +1303,50 @@ def is_duplicate(new_text, previous_text, threshold=0.8):
     )
 
 
+# Authentik access tokens are short-lived (currently 5 minutes), but agents
+# log in once per run and keep working for hours. _TOKEN_META remembers the
+# credentials behind every issued token so auth_headers() can transparently
+# re-grant a fresh one whenever the current bearer is about to expire.
+_TOKEN_META = {}
+_TOKEN_LOCK = threading.RLock()
+TOKEN_REFRESH_MARGIN = 60
+
+
+def _decode_exp(token):
+    payload = token.split(".")[1]
+    data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    return int(data.get("exp", 0))
+
+
 def login(username, password):
     from server.auth import oidc_password_grant
 
     try:
-        return oidc_password_grant(username, password)
+        token = oidc_password_grant(username, password)
     except Exception as e:
         print(f"[login] Authentik password grant failed for {username}: {e}")
         raise
+    with _TOKEN_LOCK:
+        _TOKEN_META[token] = (username, password, _decode_exp(token))
+    return token
+
+
+def _fresh_token(token):
+    """Return ``token`` unless it is missing or near expiry; re-login then."""
+    username, password, exp = _TOKEN_META.get(token, (None, None, 0))
+    if exp and time.time() < exp - TOKEN_REFRESH_MARGIN:
+        return token
+    if username is None:
+        # Token we did not issue ourselves — nothing to re-authenticate with.
+        return token
+    print(f"[auth] {username}'s access token expired — re-authenticating")
+    return login(username, password)
 
 
 def auth_headers(token):
     """Headers carrying the Authentik access token as a Bearer credential."""
+    with _TOKEN_LOCK:
+        token = _fresh_token(token)
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -1430,7 +1467,11 @@ def call_llm(
     status_url = f"{BASE_URL}/api/status/{task_id}"
 
     while True:
-        status_resp = requests.get(status_url, headers=headers, timeout=40)
+        # Re-resolve headers every poll: a long CPU generation can outlive
+        # the token, and each poll must carry a still-valid bearer.
+        status_resp = requests.get(
+            status_url, headers=auth_headers(token), timeout=40
+        )
         status_resp.raise_for_status()
         data = status_resp.json()
 
