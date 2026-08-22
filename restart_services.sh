@@ -47,6 +47,8 @@ stop_all 'markdown_hosting'    "markdown hosting"
 stop_all 'code_host\.py'       "code hosting"
 stop_all 'track_dashboard'     "request tracker"
 
+sudo wg-quick up wg0
+
 # Tracker log must exist and be readable (same prep as local_cloud.sh).
 sudo touch /var/log/nginx/track.log
 sudo chmod 640 /var/log/nginx/track.log
