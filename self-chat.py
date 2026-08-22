@@ -54,8 +54,10 @@ STORY_BASE_DIR = os.path.expanduser("~/local-ai-files/stories")
 # Resolved the same way markdown_hosting.py resolves its collections: from
 # the OS environment (STORIES_PREMIUM_DIR / STORIES_ADMIN_DIR), falling back
 # to the shared free stories dir when unset.
-PREMIUM_STORIES_DIR = os.getenv("STORIES_PREMIUM_DIR")
-ADMIN_STORIES_DIR = os.getenv("STORIES_ADMIN_DIR")
+# Expand ~/ so .env-style values resolve against $HOME instead of CWD
+# (markdown_hosting.py applies expanduser to the same variables).
+PREMIUM_STORIES_DIR = os.path.expanduser(os.getenv("STORIES_PREMIUM_DIR", ""))
+ADMIN_STORIES_DIR = os.path.expanduser(os.getenv("STORIES_ADMIN_DIR", ""))
 
 # Agents normally run on this machine next to chat-webui; override with
 # SELF_CHAT_BASE_URL only when pointing them somewhere else.
@@ -2019,7 +2021,7 @@ def resolve_story_path(spec, roles):
             path = f"{path}/admin"
         if "premium" in roles:
             path = f"{path}/premium"
-        return path
+        return os.path.expanduser(path)
 
     if "admin" in roles:
         if not ADMIN_STORIES_DIR:

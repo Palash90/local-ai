@@ -5,6 +5,7 @@
 #   markdown hosting    uvicorn markdown_hosting:app               (port 3002)
 #   code hosting        python3 code_host.py .                     (port 9000)
 #   request tracker     sudo python3 server/track_dashboard.py     (port 8093)
+#   nextcloud           restart cloud-app + occ files:scan --all
 #
 # Every service runs under nohup and appends to its own log in logs/.
 # The tracker reads /var/log/nginx/track.log, so it runs under sudo —
@@ -57,7 +58,28 @@ echo "== Starting =="
 start_one "chat web ui"     "$LOG_DIR/chat-webui.log"       "$REPO_DIR" python3 ./chat-webui.py
 start_one "markdown hosting" "$LOG_DIR/markdown-hosting.log" "$REPO_DIR" python3 -m uvicorn markdown_hosting:app --host 127.0.0.1 --port 3002
 start_one "code hosting"    "$LOG_DIR/code-host.log"        "$GIT_DIR"  python3 code_host.py .
-start_one "request tracker" "$LOG_DIR/track-dashboard.log"  "$REPO_DIR" sudo python3 server/track_dashboard.py --port 8093 --log /var/log/nginx/track.log
+start_one "request tracker"  "$LOG_DIR/track-dashboard.log"  "$REPO_DIR" sudo python3 server/track_dashboard.py --port 8093 --log /var/log/nginx/track.log
+
+echo "== Nextcloud =="
+BACKUP_MNT="/mnt/wwn-0x50014ee2173893e0-part1"
+if ! findmnt "$BACKUP_MNT" >/dev/null 2>&1; then
+    echo "  backup disk not mounted, mounting $BACKUP_MNT"
+    sudo mount "$BACKUP_MNT"
+fi
+if findmnt "$BACKUP_MNT" >/dev/null 2>&1 \
+   && docker ps --format '{{.Names}}' | grep -qx cloud-app; then
+    # Restart so the bind mount re-resolves to the live directory
+    docker compose -f "$REPO_DIR/docker-compose.yaml" restart cloud-app
+    sleep 5
+    if docker exec cloud-app ls /mnt/my_backups >/dev/null 2>&1; then
+        echo "  external storage visible in container, scanning files"
+        docker exec -u www-data cloud-app php occ files:scan --all
+    else
+        echo "  WARNING: /mnt/my_backups still empty inside cloud-app — check $BACKUP_MNT"
+    fi
+else
+    echo "  skipped: nextcloud (disk not mounted or cloud-app not running)"
+fi
 
 sleep 3
 echo "== Health =="
