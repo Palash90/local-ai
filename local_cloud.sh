@@ -267,25 +267,44 @@ server {
             }
         }
 
-        /* Mobile Layout - Collapsible Breadcrumb */
-        @media (max-width: 600px) {
-            #global-nav-wrapper { top: 12px; right: 12px; }
-            .desktop-nav { display: none !important; }
-            .mobile-breadcrumb details {
-            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
-            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            backdrop-filter: blur(4px); font-size: 12px;
-            }
-            .mobile-breadcrumb summary {
-            padding: 6px 10px; color: #58a6ff; font-weight: 600;
-            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
-            }
-            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
-            .mobile-breadcrumb .menu {
-            display: flex; flex-direction: column; gap: 6px;
-            padding: 8px 12px 10px; border-top: 1px solid #30363d;
-            }
-        }
+        /* Mobile Layout - Ultra Compact Collapsible Overlay */
+@media (max-width: 600px) {
+  #global-nav-wrapper { top: 12px; right: 12px; }
+  .desktop-nav { display: none !important; }
+  
+  .mobile-breadcrumb details {
+    background: rgba(22, 27, 34, 0.95);
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(4px);
+    font-size: 13px;
+  }
+  
+  /* Compact Icon Target */
+  .mobile-breadcrumb summary {
+    padding: 6px 10px;
+    color: #58a6ff;
+    font-weight: 600;
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px; /* Increases icon visibility */
+    line-height: 1;
+  }
+  .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
+  
+  /* Menu Items Dropdown */
+  .mobile-breadcrumb .menu {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 12px 10px;
+    border-top: 1px solid #30363d;
+  }
+}
         #global-nav-wrapper a { text-decoration: none; }
         </style>
 
