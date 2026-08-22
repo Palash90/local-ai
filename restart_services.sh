@@ -4,7 +4,6 @@
 #   chat-webui          python3 ./chat-webui.py                    (port 3001)
 #   markdown hosting    uvicorn markdown_hosting:app               (port 3002)
 #   code hosting        python3 code_host.py .                     (port 9000)
-#   request tracker     sudo python3 server/track_dashboard.py     (port 8093)
 #   nextcloud           restart cloud-app + occ files:scan --all
 #
 # Every service runs under nohup and appends to its own log in logs/.
@@ -46,7 +45,6 @@ echo "== Stopping =="
 stop_all 'chat-webui\.py'      "chat web ui"
 stop_all 'markdown_hosting'    "markdown hosting"
 stop_all 'code_host\.py'       "code hosting"
-stop_all 'track_dashboard'     "request tracker"
 
 sudo wg-quick up wg0
 
@@ -58,7 +56,6 @@ echo "== Starting =="
 start_one "chat web ui"     "$LOG_DIR/chat-webui.log"       "$REPO_DIR" python3 ./chat-webui.py
 start_one "markdown hosting" "$LOG_DIR/markdown-hosting.log" "$REPO_DIR" python3 -m uvicorn markdown_hosting:app --host 127.0.0.1 --port 3002
 start_one "code hosting"    "$LOG_DIR/code-host.log"        "$GIT_DIR"  python3 code_host.py .
-start_one "request tracker"  "$LOG_DIR/track-dashboard.log"  "$REPO_DIR" sudo python3 server/track_dashboard.py --port 8093 --log /var/log/nginx/track.log
 
 echo "== Nextcloud =="
 BACKUP_MNT="/mnt/wwn-0x50014ee2173893e0-part1"
@@ -98,4 +95,3 @@ check() {
 check "chat web ui"      http://127.0.0.1:3001/
 check "markdown hosting" http://127.0.0.1:3002/
 check "code hosting"     http://127.0.0.1:9000/
-check "request tracker"  http://127.0.0.1:8093/

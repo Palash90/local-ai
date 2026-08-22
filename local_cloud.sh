@@ -57,11 +57,6 @@ cat << 'EOF' | sudo tee /var/www/dashboard/index.html > /dev/null
             <div class="title">Code Hoster</div>
             <div class="desc">/code/</div>
         </a>
-        <a href="/track/" class="card">
-            <div class="icon">📊</div>
-            <div class="title">Request Tracker</div>
-            <div class="desc">/track/</div>
-        </a>
     </div>
 </body>
 </html>
@@ -79,7 +74,7 @@ map $http_x_via_gcp $gcp_overlay {
 
 map $http_user_agent $cloud_inject {
     "~*nextcloud-(android|ios|desktop)" '';
-    default '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+    default '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a></div></body>';
 }
 
 upstream ak_outpost {
@@ -105,8 +100,6 @@ server {
 
     client_max_body_size 512M;
     client_body_buffer_size 128k;
-
-    access_log /var/log/nginx/track.log track;
 
     # Expose Outpost traffic directly so browser auth flow and internal calls do not fail
     location /outpost.goauthentik.io/ {
@@ -141,7 +134,74 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+        # Inject CSS and responsive HTML standard across all locations
+        sub_filter '</body>' '$gcp_overlay<style>
+        /* Fixed positioning ensures auto-scrolling retention */
+        #global-nav-wrapper {
+            position: fixed;
+            z-index: 999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        /* Desktop Layout */
+        @media (min-width: 601px) {
+            #global-nav-wrapper { bottom: 16px; right: 16px; }
+            .mobile-breadcrumb { display: none !important; }
+            .desktop-nav {
+            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
+            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
+            }
+        }
+
+        /* Mobile Layout - Collapsible Breadcrumb */
+        @media (max-width: 600px) {
+            #global-nav-wrapper { top: 12px; right: 12px; }
+            .desktop-nav { display: none !important; }
+            .mobile-breadcrumb details {
+            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
+            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px); font-size: 12px;
+            }
+            .mobile-breadcrumb summary {
+            padding: 6px 10px; color: #58a6ff; font-weight: 600;
+            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
+            }
+            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
+            .mobile-breadcrumb .menu {
+            display: flex; flex-direction: column; gap: 6px;
+            padding: 8px 12px 10px; border-top: 1px solid #30363d;
+            }
+        }
+        #global-nav-wrapper a { text-decoration: none; }
+        </style>
+
+        <div id="global-nav-wrapper">
+        <!-- Desktop Horizontal Bar -->
+        <div class="desktop-nav">
+            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
+            <a href="/ai/" style="color:#c9d1d9;">AI</a>
+            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+            <a href="/code/" style="color:#c9d1d9;">Code</a>
+            <a href="/search/" style="color:#c9d1d9;">Search</a>
+            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+        </div>
+
+        <!-- Mobile Collapsible Breadcrumb -->
+        <div class="mobile-breadcrumb">
+            <details>
+            <summary><span>📂 Menu</span></summary>
+            <div class="menu">
+                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
+                <a href="/ai/" style="color:#c9d1d9;">AI</a>
+                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+                <a href="/code/" style="color:#c9d1d9;">Code</a>
+                <a href="/search/" style="color:#c9d1d9;">Search</a>
+                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+            </div>
+            </details>
+        </div>
+        </div></body>';
     }
 
     # Authentik SSO Core (matches both /sso and /sso/*)
@@ -187,8 +247,75 @@ server {
         # ON TOP of the Local AI busy/model header (#model-bar is fixed,
         # 48px tall, full-width there), so it drops to just BELOW the header
         # band instead and shrinks/scrolls horizontally.
-        sub_filter '</body>' '$gcp_overlay<style>#global-nav-bar{position:absolute;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px)}#global-nav-bar a{white-space:nowrap}@media(min-width:601px){#global-nav-bar{top:8px;right:80px}}@media(max-width:600px){#global-nav-bar{top:56px;right:8px;padding:4px 10px;font-size:11px;gap:6px;max-width:calc(100vw - 16px);overflow-x:auto}}</style><div id="global-nav-bar"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
-    }
+        # Inject CSS and responsive HTML standard across all locations
+        sub_filter '</body>' '$gcp_overlay<style>
+        /* Fixed positioning ensures auto-scrolling retention */
+        #global-nav-wrapper {
+            position: fixed;
+            z-index: 999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        /* Desktop Layout */
+        @media (min-width: 601px) {
+            #global-nav-wrapper { bottom: 16px; right: 16px; }
+            .mobile-breadcrumb { display: none !important; }
+            .desktop-nav {
+            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
+            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
+            }
+        }
+
+        /* Mobile Layout - Collapsible Breadcrumb */
+        @media (max-width: 600px) {
+            #global-nav-wrapper { top: 12px; right: 12px; }
+            .desktop-nav { display: none !important; }
+            .mobile-breadcrumb details {
+            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
+            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px); font-size: 12px;
+            }
+            .mobile-breadcrumb summary {
+            padding: 6px 10px; color: #58a6ff; font-weight: 600;
+            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
+            }
+            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
+            .mobile-breadcrumb .menu {
+            display: flex; flex-direction: column; gap: 6px;
+            padding: 8px 12px 10px; border-top: 1px solid #30363d;
+            }
+        }
+        #global-nav-wrapper a { text-decoration: none; }
+        </style>
+
+        <div id="global-nav-wrapper">
+        <!-- Desktop Horizontal Bar -->
+        <div class="desktop-nav">
+            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
+            <a href="/ai/" style="color:#c9d1d9;">AI</a>
+            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+            <a href="/code/" style="color:#c9d1d9;">Code</a>
+            <a href="/search/" style="color:#c9d1d9;">Search</a>
+            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+        </div>
+
+        <!-- Mobile Collapsible Breadcrumb -->
+        <div class="mobile-breadcrumb">
+            <details>
+            <summary><span>📂 Menu</span></summary>
+            <div class="menu">
+                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
+                <a href="/ai/" style="color:#c9d1d9;">AI</a>
+                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+                <a href="/code/" style="color:#c9d1d9;">Code</a>
+                <a href="/search/" style="color:#c9d1d9;">Search</a>
+                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+            </div>
+            </details>
+        </div>
+        </div></body>';
+     }
 
     location ^~ /api/public/ {
         proxy_pass http://127.0.0.1:3001/api/public/;
@@ -243,7 +370,74 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+        # Inject CSS and responsive HTML standard across all locations
+        sub_filter '</body>' '$gcp_overlay<style>
+        /* Fixed positioning ensures auto-scrolling retention */
+        #global-nav-wrapper {
+            position: fixed;
+            z-index: 999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        /* Desktop Layout */
+        @media (min-width: 601px) {
+            #global-nav-wrapper { bottom: 16px; right: 16px; }
+            .mobile-breadcrumb { display: none !important; }
+            .desktop-nav {
+            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
+            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
+            }
+        }
+
+        /* Mobile Layout - Collapsible Breadcrumb */
+        @media (max-width: 600px) {
+            #global-nav-wrapper { top: 12px; right: 12px; }
+            .desktop-nav { display: none !important; }
+            .mobile-breadcrumb details {
+            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
+            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px); font-size: 12px;
+            }
+            .mobile-breadcrumb summary {
+            padding: 6px 10px; color: #58a6ff; font-weight: 600;
+            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
+            }
+            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
+            .mobile-breadcrumb .menu {
+            display: flex; flex-direction: column; gap: 6px;
+            padding: 8px 12px 10px; border-top: 1px solid #30363d;
+            }
+        }
+        #global-nav-wrapper a { text-decoration: none; }
+        </style>
+
+        <div id="global-nav-wrapper">
+        <!-- Desktop Horizontal Bar -->
+        <div class="desktop-nav">
+            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
+            <a href="/ai/" style="color:#c9d1d9;">AI</a>
+            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+            <a href="/code/" style="color:#c9d1d9;">Code</a>
+            <a href="/search/" style="color:#c9d1d9;">Search</a>
+            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+s        </div>
+
+        <!-- Mobile Collapsible Breadcrumb -->
+        <div class="mobile-breadcrumb">
+            <details>
+            <summary><span>📂 Menu</span></summary>
+            <div class="menu">
+                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
+                <a href="/ai/" style="color:#c9d1d9;">AI</a>
+                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+                <a href="/code/" style="color:#c9d1d9;">Code</a>
+                <a href="/search/" style="color:#c9d1d9;">Search</a>
+                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+            </div>
+            </details>
+        </div>
+        </div></body>';
     }
 
     location /story/ {
@@ -268,7 +462,74 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+        # Inject CSS and responsive HTML standard across all locations
+        sub_filter '</body>' '$gcp_overlay<style>
+        /* Fixed positioning ensures auto-scrolling retention */
+        #global-nav-wrapper {
+            position: fixed;
+            z-index: 999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        /* Desktop Layout */
+        @media (min-width: 601px) {
+            #global-nav-wrapper { bottom: 16px; right: 16px; }
+            .mobile-breadcrumb { display: none !important; }
+            .desktop-nav {
+            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
+            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
+            }
+        }
+
+        /* Mobile Layout - Collapsible Breadcrumb */
+        @media (max-width: 600px) {
+            #global-nav-wrapper { top: 12px; right: 12px; }
+            .desktop-nav { display: none !important; }
+            .mobile-breadcrumb details {
+            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
+            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px); font-size: 12px;
+            }
+            .mobile-breadcrumb summary {
+            padding: 6px 10px; color: #58a6ff; font-weight: 600;
+            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
+            }
+            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
+            .mobile-breadcrumb .menu {
+            display: flex; flex-direction: column; gap: 6px;
+            padding: 8px 12px 10px; border-top: 1px solid #30363d;
+            }
+        }
+        #global-nav-wrapper a { text-decoration: none; }
+        </style>
+
+        <div id="global-nav-wrapper">
+        <!-- Desktop Horizontal Bar -->
+        <div class="desktop-nav">
+            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
+            <a href="/ai/" style="color:#c9d1d9;">AI</a>
+            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+            <a href="/code/" style="color:#c9d1d9;">Code</a>
+            <a href="/search/" style="color:#c9d1d9;">Search</a>
+            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+        </div>
+
+        <!-- Mobile Collapsible Breadcrumb -->
+        <div class="mobile-breadcrumb">
+            <details>
+            <summary><span>📂 Menu</span></summary>
+            <div class="menu">
+                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
+                <a href="/ai/" style="color:#c9d1d9;">AI</a>
+                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+                <a href="/code/" style="color:#c9d1d9;">Code</a>
+                <a href="/search/" style="color:#c9d1d9;">Search</a>
+                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+            </div>
+            </details>
+        </div>
+        </div></body>';
     }
 
     location /media/ {
@@ -304,7 +565,74 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+       # Inject CSS and responsive HTML standard across all locations
+        sub_filter '</body>' '$gcp_overlay<style>
+        /* Fixed positioning ensures auto-scrolling retention */
+        #global-nav-wrapper {
+            position: fixed;
+            z-index: 999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        /* Desktop Layout */
+        @media (min-width: 601px) {
+            #global-nav-wrapper { bottom: 16px; right: 16px; }
+            .mobile-breadcrumb { display: none !important; }
+            .desktop-nav {
+            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
+            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
+            }
+        }
+
+        /* Mobile Layout - Collapsible Breadcrumb */
+        @media (max-width: 600px) {
+            #global-nav-wrapper { top: 12px; right: 12px; }
+            .desktop-nav { display: none !important; }
+            .mobile-breadcrumb details {
+            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
+            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px); font-size: 12px;
+            }
+            .mobile-breadcrumb summary {
+            padding: 6px 10px; color: #58a6ff; font-weight: 600;
+            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
+            }
+            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
+            .mobile-breadcrumb .menu {
+            display: flex; flex-direction: column; gap: 6px;
+            padding: 8px 12px 10px; border-top: 1px solid #30363d;
+            }
+        }
+        #global-nav-wrapper a { text-decoration: none; }
+        </style>
+
+        <div id="global-nav-wrapper">
+        <!-- Desktop Horizontal Bar -->
+        <div class="desktop-nav">
+            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
+            <a href="/ai/" style="color:#c9d1d9;">AI</a>
+            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+            <a href="/code/" style="color:#c9d1d9;">Code</a>
+            <a href="/search/" style="color:#c9d1d9;">Search</a>
+            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+        </div>
+
+        <!-- Mobile Collapsible Breadcrumb -->
+        <div class="mobile-breadcrumb">
+            <details>
+            <summary><span>📂 Menu</span></summary>
+            <div class="menu">
+                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
+                <a href="/ai/" style="color:#c9d1d9;">AI</a>
+                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+                <a href="/code/" style="color:#c9d1d9;">Code</a>
+                <a href="/search/" style="color:#c9d1d9;">Search</a>
+                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+            </div>
+            </details>
+        </div>
+        </div></body>'; 
     }
 
     # 4. Nextcloud
@@ -341,34 +669,74 @@ server {
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
-    }
+        # Inject CSS and responsive HTML standard across all locations
+        sub_filter '</body>' '$gcp_overlay<style>
+        /* Fixed positioning ensures auto-scrolling retention */
+        #global-nav-wrapper {
+            position: fixed;
+            z-index: 999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        /* Desktop Layout */
+        @media (min-width: 601px) {
+            #global-nav-wrapper { bottom: 16px; right: 16px; }
+            .mobile-breadcrumb { display: none !important; }
+            .desktop-nav {
+            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
+            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
+            }
+        }
 
-    # 6. Request tracking dashboard
-    location /track/ {
-        auth_request /ak-auth-ai;
-        auth_request_set $authentik_username $upstream_http_x_authentik_username;
-        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
-        auth_request_set $authentik_email $upstream_http_x_authentik_email;
-        auth_request_set $authentik_name $upstream_http_x_authentik_name;
-        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
-        error_page 401 = @ak-sso-ai;
+        /* Mobile Layout - Collapsible Breadcrumb */
+        @media (max-width: 600px) {
+            #global-nav-wrapper { top: 12px; right: 12px; }
+            .desktop-nav { display: none !important; }
+            .mobile-breadcrumb details {
+            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
+            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px); font-size: 12px;
+            }
+            .mobile-breadcrumb summary {
+            padding: 6px 10px; color: #58a6ff; font-weight: 600;
+            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
+            }
+            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
+            .mobile-breadcrumb .menu {
+            display: flex; flex-direction: column; gap: 6px;
+            padding: 8px 12px 10px; border-top: 1px solid #30363d;
+            }
+        }
+        #global-nav-wrapper a { text-decoration: none; }
+        </style>
 
-        proxy_pass http://127.0.0.1:8093/;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Accept-Encoding "";
-        proxy_set_header X-Authentik-Username $authentik_username;
-        proxy_set_header X-Authentik-Groups $authentik_groups;
-        proxy_set_header X-Authentik-Email $authentik_email;
-        proxy_set_header X-Authentik-Name $authentik_name;
-        proxy_set_header X-Authentik-UID $authentik_uid;
+        <div id="global-nav-wrapper">
+        <!-- Desktop Horizontal Bar -->
+        <div class="desktop-nav">
+            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
+            <a href="/ai/" style="color:#c9d1d9;">AI</a>
+            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+            <a href="/code/" style="color:#c9d1d9;">Code</a>
+            <a href="/search/" style="color:#c9d1d9;">Search</a>
+            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+        </div>
 
-        sub_filter_once off;
-        sub_filter_types text/html;
-        sub_filter '</body>' '$gcp_overlay<div id="global-nav-bar" style="position:absolute;top:8px;right:80px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a><a href="/track/" style="color:#c9d1d9;text-decoration:none;">Track</a></div></body>';
+        <!-- Mobile Collapsible Breadcrumb -->
+        <div class="mobile-breadcrumb">
+            <details>
+            <summary><span>📂 Menu</span></summary>
+            <div class="menu">
+                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
+                <a href="/ai/" style="color:#c9d1d9;">AI</a>
+                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+                <a href="/code/" style="color:#c9d1d9;">Code</a>
+                <a href="/search/" style="color:#c9d1d9;">Search</a>
+                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+            </div>
+            </details>
+        </div>
+        </div></body>';
     }
 }
 
@@ -387,21 +755,6 @@ sudo ln -sf /etc/nginx/sites-available/homeserver /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl reload nginx
 
-echo "=== 4b. Request Tracking Dashboard ==="
-sudo touch /var/log/nginx/track.log
-sudo chmod 640 /var/log/nginx/track.log
-if [ -n "$CHAT_DIR" ] && [ -f "$CHAT_DIR/server/track_dashboard.py" ]; then
-    if ! pgrep -f "server/track_dashboard.py" > /dev/null; then
-        nohup python3 "$CHAT_DIR/server/track_dashboard.py" --log /var/log/nginx/track.log \
-            > /tmp/track_dashboard.log 2>&1 &
-        echo "    Request Tracker started on http://localhost:8093/track/"
-    else
-        echo "    Request Tracker already running"
-    fi
-else
-    echo "    Skipping python tracker start: \$CHAT_DIR is unset or file missing."
-fi
-
 echo "=== 5. Dynamic Nextcloud Container Configuration ==="
 NC_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E 'cloud-app|nextcloud' | head -n 1)
 
@@ -416,6 +769,8 @@ if [ -n "$NC_CONTAINER" ]; then
     docker exec --user www-data "$NC_CONTAINER" php occ config:system:set files_external_allow_create_new_local --value="true" --type=boolean
     docker exec --user www-data "$NC_CONTAINER" php occ app:enable files_external
 
+    docker exec --user www-data $(docker ps --format '{{.Names}}' | grep -E 'cloud-app|nextcloud' | head -n 1) php occ config:system:set skeletondirectory --value=""
+    
     echo "Restarting Nextcloud container..."
     docker restart "$NC_CONTAINER"
 else
