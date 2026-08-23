@@ -437,8 +437,12 @@ async def get_message_status(task_id: str) -> str:
 # start_chat_batch enqueues N prompts and returns a batch_id immediately; a
 # background asyncio task works through them ONE AT A TIME (the GPU lane has a
 # single LLM worker and the lane queue caps at 5, so firing in parallel would
-# just 503). get_batch_status reports per-item progress and collects the final
-# reply text of each item so the client never needs to re-read sessions.
+# just 503). Items finish in waves; get_batch_status reports progress plus
+# new_indexes (terminal replies never fetched yet), and every successful
+# get_batch_results fetch marks its items collected so later polls only show
+# genuinely new work. The flow is bidirectional: submit_batch_results lets
+# the client attach its own per-item outcomes (grades, notes, anything) back
+# onto the batch in ONE call, riding out again via get_batch_results.
 # ─────────────────────────────────────────────────────────────────────────────
 
 BATCH_MAX_ITEMS = 50          # hard cap per batch
@@ -461,6 +465,11 @@ def _batch_summary(batch_id, b):
         "progress": f"{finished} out of {total} items completed",
         "percent_complete": round(finished * 100 / total) if total else 100,
         **counts,
+        "results_submitted": sum(1 for it in items if "submitted" in it),
+        "uncollected": sum(
+            1 for it in items
+            if it["status"] in ("done", "error") and "collected_at" not in it
+        ),
         "created": b["created"],
     }
 
@@ -591,12 +600,16 @@ async def start_chat_batch(
       standard text batch ......... ~2 min PER ITEM
       tools/images batch .......... ~3-5 min PER ITEM
       research batch .............. ~5-7 min PER ITEM
-    WORKFLOW:
+     WORKFLOW — repeat per polling wave until percent_complete == 100:
       1. Sleep ~30 minutes, then call get_batch_status(batch_id).
-      2. It lists completed_indexes (ids only, no reply text).
-      3. Pull the new answers with get_batch_results(batch_id, [new ids]).
-      4. Re-poll every ~30 minutes until percent_complete == 100.
-    Never poll faster than every 30 minutes; collect replies incrementally —
+      2. Read its new_indexes (terminal replies you have NOT fetched yet).
+      3. Fetch them: get_batch_results(batch_id, new_indexes) — they get
+         marked collected and won't reappear in later waves.
+      4. Optionally send your per-item outcomes back IN ONE CALL:
+         submit_batch_results(batch_id, [{"index": i, "result": ...}, ...]).
+      5. Re-poll every ~30 minutes; newly finished items show up in
+         new_indexes automatically.
+    Never poll faster than every 30 minutes; process waves incrementally —
     do not wait for the whole batch to finish.
     """
     if not isinstance(prompts, list) or not prompts:
@@ -647,9 +660,11 @@ async def start_chat_batch(
             f"{len(prompts)} prompts queued SEQUENTIALLY (~{per_item_min} min "
             f"per item, ≈{est_total} min total). Do NOT poll immediately: "
             f"sleep ~30 minutes, then call get_batch_status('{batch_id}') — "
-            "it returns completed_indexes (ids only). Pull new answers with "
-            f"get_batch_results('{batch_id}', [new ids]), then re-poll every "
-            "~30 minutes until percent_complete == 100."
+            "it returns new_indexes (ids only, no text). Fetch those replies "
+            f"with get_batch_results('{batch_id}', [ids]) — they are marked "
+            f"collected and won't reappear. Optionally push outcomes back via "
+            f"one submit_batch_results('{batch_id}', results) call. Re-poll "
+            "every ~30 minutes; each wave reveals only new items."
         ),
     })
 
@@ -663,6 +678,7 @@ async def get_batch_status(batch_id: str) -> str:
 
     Poll this every ~30 MINUTES while the batch runs (items take minutes
     each and are processed sequentially; faster polling wastes calls).
+    Items finish in WAVES, so each poll may reveal new work.
 
     Returns JSON:
       {
@@ -670,13 +686,18 @@ async def get_batch_status(batch_id: str) -> str:
         "progress": "15 out of 20 items completed",
         "percent_complete": 75,
         "done": x, "error": y, "running": r, "queued": q,
-        "completed_indexes": [0, 1, 2, ...],   ← ready to collect
+        "completed_indexes": [0, 1, 2, ...],   ← terminal (done or error)
         "failed_indexes": [7],
+        "new_indexes": [3, 4, 7],   ← terminal AND never fetched yet
+        "results_submitted": 5,     ← items carrying your submitted result
         "note": "..."
       }
-    The batch is finished only at percent_complete == 100. Feed NEW indexes
-    from completed_indexes into get_batch_results(batch_id, indexes) to
-    retrieve the actual answers — this tool never carries reply text.
+    The batch is finished only at percent_complete == 100. Each polling
+    wave: fetch whatever appears in new_indexes via get_batch_results —
+    fetched items are marked collected and drop OUT of new_indexes on later
+    polls, so you never re-process old replies. What you do with each reply
+    (grading, summarising, forwarding) is up to you; optionally push your
+    per-item outcome back with submit_batch_results.
     Unknown ids yield {"error": "unknown batch_id"}.
     """
     b = _BATCHES.get(batch_id)
@@ -689,33 +710,52 @@ async def get_batch_status(batch_id: str) -> str:
     out["failed_indexes"] = [
         it["index"] for it in b["items"] if it["status"] == "error"
     ]
+    out["new_indexes"] = [
+        it["index"] for it in b["items"]
+        if it["status"] in ("done", "error") and "collected_at" not in it
+    ]
+    out["results_submitted"] = sum(1 for it in b["items"] if "submitted" in it)
     out["note"] = (
-        "Status only — no reply text. Collect answers with "
-        f"get_batch_results('{batch_id}', [newly completed indexes])."
+        "Status only — no reply text. For each NEW wave: "
+        f"get_batch_results('{batch_id}', new_indexes) fetches those replies "
+        "(and marks them collected). Attach your own outcomes — grades, "
+        "notes, anything — with one submit_batch_results("
+        f"'{batch_id}', results) call."
     )
     return json.dumps(out)
 
 
 @mcp.tool()
-async def get_batch_results(batch_id: str, indexes: list = None) -> str:
-    """Collect the actual assistant replies produced by a bulk-chat batch.
+async def get_batch_results(
+    batch_id: str, indexes: list = None, new_only: bool = False
+) -> str:
+    """Collect assistant replies produced by a bulk-chat batch — per wave.
 
     Args:
       batch_id: the id returned by start_chat_batch.
-      indexes: list of item indexes to fetch (the values listed in
-        completed_indexes / failed_indexes by get_batch_status). Omit to
-        fetch EVERY item finished so far in one shot.
+      indexes: list of item indexes to fetch. Omit to fetch EVERY item
+        finished so far in one shot.
+      new_only: true → skip items already fetched before (every successful
+        fetch marks the reply 'collected'). Handy with no indexes to grab
+        "everything new since my last poll" — replies never show up twice.
+
+    Each fetched item records a collected_at timestamp; get_batch_status
+    uses it to compute new_indexes for subsequent waves. What you do with
+    the replies is up to you (grade, summarise, forward...); optionally
+    attach your own per-item outcome via submit_batch_results.
 
     Returns a JSON array:
       [{"index": 0, "status": "done", "prompt": "<original>",
-        "reply": "<full assistant answer>", "session_id": "<uuid>"},
+        "reply": "<full assistant answer>", "session_id": "<uuid>",
+        "collected_at": <unix ts>,
+        "submitted_result": <your attached result, if any>},
        {"index": 7, "status": "error", "prompt": "...",
         "error": "<why it failed>"},
        {"index": 99, "error": "unknown index"}]
 
     Items still running/queued are simply absent unless requested explicitly,
-    in which case they appear with status "running"/"queued" and no reply.
-    Fetch incrementally as new indexes complete — no need to wait for 100%.
+    in which case they appear with status "running"/"queued" and no reply
+    and are NOT marked collected. Fetch incrementally — never wait for 100%.
     """
     b = _BATCHES.get(batch_id)
     if not b:
@@ -730,8 +770,16 @@ async def get_batch_results(batch_id: str, indexes: list = None) -> str:
                 selected.append(by_idx[int(i)])
             except (KeyError, TypeError, ValueError):
                 selected.append({"index": i, "error": "unknown index"})
+    if new_only:
+        selected = [it for it in selected if "collected_at" not in it]
+    now = int(time.time())
     out = []
     for it in selected:
+        if "status" not in it:
+            out.append(it)  # unknown-index placeholder — pass through as-is
+            continue
+        if it["status"] in ("done", "error") and "collected_at" not in it:
+            it["collected_at"] = now
         entry = {
             "index": it["index"],
             "status": it["status"],
@@ -744,8 +792,95 @@ async def get_batch_results(batch_id: str, indexes: list = None) -> str:
             entry["error"] = it["error"]
         else:
             entry["note"] = "not finished yet — poll get_batch_status"
+        if "submitted" in it:
+            entry["submitted_result"] = it["submitted"]["result"]
+            entry["submitted_at"] = it["submitted"]["submitted_at"]
         out.append(entry)
     return json.dumps(out)
+
+
+@mcp.tool()
+async def submit_batch_results(batch_id: str, results: list) -> str:
+    """Push YOUR OWN per-item outcomes back onto a batch — in ONE call.
+
+    The counterpart to get_batch_results: after collecting a batch's
+    assistant replies, send YOUR results for them back IN A BATCH instead
+    of one request per item. A "result" is whatever your pipeline produces
+    per reply — a grade/score, a summary, an annotation, a follow-up flag,
+    any JSON payload. Each submission is stored on its batch item and
+    travels back out through get_batch_results, so the full prompt → reply
+    → outcome round trip lives on the same batch_id.
+
+    Args:
+      batch_id: the id returned by start_chat_batch.
+      results: list of objects, one per item:
+        [{"index": 0, "result": "grade: 4/5 — concise, accurate"},
+         {"index": 7, "result": {"score": 2, "reason": "hallucinated"}}]
+        - "index": must match an item index of this batch.
+        - "result": any JSON-serialisable payload — string, number or
+          object. Extra keys inside an entry are ignored.
+
+    Returns JSON:
+      {"batch_id": ..., "accepted": [0, 7],
+       "rejected": [{"index": 99, "error": "unknown index"}],
+       "results_submitted": 2,
+       "note": "..."}
+    Re-submitting an index OVERWRITES that item's previous result. Items
+    need not be finished (or even running) to accept a submission — grading
+    may legitimately happen out of order.
+
+    WAVES: batches finish incrementally, so this is normally called once per
+    polling wave, not once per batch:
+      1. get_batch_status → new_indexes (terminal, not yet fetched)
+      2. get_batch_results(batch_id, new_indexes) → replies
+      3. process them → ONE submit_batch_results call with all outcomes
+      4. repeat ~30 min later; fetched indexes vanish from new_indexes.
+    Unknown batch ids yield {"error": "unknown batch_id"}; entries without a
+    usable "index" or missing "result" are rejected individually and
+    reported back.
+    """
+    b = _BATCHES.get(batch_id)
+    if not b:
+        return json.dumps({"error": "unknown batch_id"})
+    if not isinstance(results, list) or not results:
+        return json.dumps({"error": "results must be a non-empty list of objects"})
+    by_idx = {it["index"]: it for it in b["items"]}
+    accepted, rejected = [], []
+    for entry in results:
+        if not isinstance(entry, dict):
+            rejected.append({
+                "entry": str(entry)[:120],
+                "error": "entry must be an object with 'index' and 'result'",
+            })
+            continue
+        try:
+            idx = int(entry.get("index"))
+        except (TypeError, ValueError):
+            rejected.append({"entry": str(entry)[:120], "error": "missing/invalid 'index'"})
+            continue
+        if idx not in by_idx:
+            rejected.append({"index": idx, "error": "unknown index"})
+            continue
+        if "result" not in entry:
+            rejected.append({"index": idx, "error": "missing 'result'"})
+            continue
+        by_idx[idx]["submitted"] = {
+            "result": entry["result"],
+            "submitted_at": int(time.time()),
+        }
+        accepted.append(idx)
+    total_submitted = sum(1 for it in b["items"] if "submitted" in it)
+    return json.dumps({
+        "batch_id": batch_id,
+        "accepted": accepted,
+        "rejected": rejected,
+        "results_submitted": total_submitted,
+        "note": (
+            f"Stored {len(accepted)} result(s) on batch '{batch_id}'. "
+            f"Retrieve them via get_batch_results('{batch_id}') — submitted "
+            "values appear as 'submitted_result' alongside each reply."
+        ),
+    })
 
 
 @mcp.tool()
