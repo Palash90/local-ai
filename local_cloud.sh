@@ -74,7 +74,68 @@ map $http_x_via_gcp $gcp_overlay {
 
 map $http_user_agent $cloud_inject {
     "~*nextcloud-(android|ios|desktop)" '';
-    default '$gcp_overlay<div id="global-nav-bar" style="position:absolute;bottom:16px;right:16px;z-index:999999;display:flex;gap:8px;background:rgba(22,27,34,0.95);padding:6px 12px;border-radius:20px;border:1px solid #30363d;box-shadow:0 4px 12px rgba(0,0,0,0.5);font-family:sans-serif;font-size:13px;backdrop-filter:blur(4px);"><a href="/" style="color:#58a6ff;text-decoration:none;font-weight:600;">Home</a><span style="color:#484f58;">|</span><a href="/ai/" style="color:#c9d1d9;text-decoration:none;">AI</a><a href="/stories/" style="color:#c9d1d9;text-decoration:none;">Stories</a><a href="/code/" style="color:#c9d1d9;text-decoration:none;">Code</a><a href="/search/" style="color:#c9d1d9;text-decoration:none;">Search</a><a href="/cloud/" style="color:#c9d1d9;text-decoration:none;">Cloud</a></div></body>';
+    default '$gcp_overlay<style>
+        /* Fixed positioning ensures auto-scrolling retention */
+        #global-nav-wrapper {
+            position: fixed;
+            z-index: 999999;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        @media (min-width: 601px) {
+            #global-nav-wrapper { bottom: 16px; right: 16px; }
+            html { scroll-padding-bottom: 72px; }
+            body { padding-bottom: 64px !important; }
+            .mobile-breadcrumb { display: none !important; }
+            .desktop-nav {
+            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
+            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
+            }
+        }
+        @media (max-width: 600px) {
+            #global-nav-wrapper { top: 12px; right: 12px; }
+            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
+            .desktop-nav { display: none !important; }
+            .mobile-breadcrumb details {
+            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
+            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            backdrop-filter: blur(4px); font-size: 12px;
+            }
+            .mobile-breadcrumb summary {
+            padding: 6px 10px; color: #58a6ff; font-weight: 600;
+            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
+            }
+            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
+            .mobile-breadcrumb .menu {
+            display: flex; flex-direction: column; gap: 6px;
+            padding: 8px 12px 10px; border-top: 1px solid #30363d;
+            }
+        }
+        #global-nav-wrapper a { text-decoration: none; }
+        </style>
+        <div id="global-nav-wrapper">
+        <div class="desktop-nav">
+            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
+            <a href="/ai/" style="color:#c9d1d9;">AI</a>
+            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+            <a href="/code/" style="color:#c9d1d9;">Code</a>
+            <a href="/search/" style="color:#c9d1d9;">Search</a>
+            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+        </div>
+        <div class="mobile-breadcrumb">
+            <details>
+            <summary><span>📂 Menu</span></summary>
+            <div class="menu">
+                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
+                <a href="/ai/" style="color:#c9d1d9;">AI</a>
+                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
+                <a href="/code/" style="color:#c9d1d9;">Code</a>
+                <a href="/search/" style="color:#c9d1d9;">Search</a>
+                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
+            </div>
+            </details>
+        </div>
+        </div></body>';
 }
 
 upstream ak_outpost {
@@ -87,8 +148,6 @@ map $http_upgrade $connection_upgrade {
     default upgrade;
     ''      close;
 }
-
-log_format track escape=json '{"time":"$time_iso8601","gcp":"$http_x_via_gcp","ip":"$remote_addr","method":"$request_method","uri":"$request_uri","status":$status,"in":$request_length,"out":$bytes_sent,"ua":"$http_user_agent"}';
 
 server {
     listen 443 ssl;
@@ -146,6 +205,8 @@ server {
         /* Desktop Layout */
         @media (min-width: 601px) {
             #global-nav-wrapper { bottom: 16px; right: 16px; }
+            html { scroll-padding-bottom: 72px; }
+            body { padding-bottom: 64px !important; }
             .mobile-breadcrumb { display: none !important; }
             .desktop-nav {
             display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
@@ -157,6 +218,7 @@ server {
         /* Mobile Layout - Collapsible Breadcrumb */
         @media (max-width: 600px) {
             #global-nav-wrapper { top: 12px; right: 12px; }
+            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
             .desktop-nav { display: none !important; }
             .mobile-breadcrumb details {
             background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
@@ -259,6 +321,8 @@ server {
         /* Desktop Layout */
         @media (min-width: 601px) {
             #global-nav-wrapper { bottom: 16px; right: 16px; }
+            html { scroll-padding-bottom: 72px; }
+            body { padding-bottom: 64px !important; }
             .mobile-breadcrumb { display: none !important; }
             .desktop-nav {
             display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
@@ -270,6 +334,7 @@ server {
         /* Mobile Layout - Ultra Compact Collapsible Overlay */
 @media (max-width: 600px) {
   #global-nav-wrapper { top: 12px; right: 12px; }
+  html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
   .desktop-nav { display: none !important; }
   
   .mobile-breadcrumb details {
@@ -401,6 +466,8 @@ server {
         /* Desktop Layout */
         @media (min-width: 601px) {
             #global-nav-wrapper { bottom: 16px; right: 16px; }
+            html { scroll-padding-bottom: 72px; }
+            body { padding-bottom: 64px !important; }
             .mobile-breadcrumb { display: none !important; }
             .desktop-nav {
             display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
@@ -412,6 +479,7 @@ server {
         /* Mobile Layout - Collapsible Breadcrumb */
         @media (max-width: 600px) {
             #global-nav-wrapper { top: 12px; right: 12px; }
+            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
             .desktop-nav { display: none !important; }
             .mobile-breadcrumb details {
             background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
@@ -493,6 +561,8 @@ s        </div>
         /* Desktop Layout */
         @media (min-width: 601px) {
             #global-nav-wrapper { bottom: 16px; right: 16px; }
+            html { scroll-padding-bottom: 72px; }
+            body { padding-bottom: 64px !important; }
             .mobile-breadcrumb { display: none !important; }
             .desktop-nav {
             display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
@@ -504,6 +574,7 @@ s        </div>
         /* Mobile Layout - Collapsible Breadcrumb */
         @media (max-width: 600px) {
             #global-nav-wrapper { top: 12px; right: 12px; }
+            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
             .desktop-nav { display: none !important; }
             .mobile-breadcrumb details {
             background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
@@ -596,6 +667,8 @@ s        </div>
         /* Desktop Layout */
         @media (min-width: 601px) {
             #global-nav-wrapper { bottom: 16px; right: 16px; }
+            html { scroll-padding-bottom: 72px; }
+            body { padding-bottom: 64px !important; }
             .mobile-breadcrumb { display: none !important; }
             .desktop-nav {
             display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
@@ -607,6 +680,7 @@ s        </div>
         /* Mobile Layout - Collapsible Breadcrumb */
         @media (max-width: 600px) {
             #global-nav-wrapper { top: 12px; right: 12px; }
+            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
             .desktop-nav { display: none !important; }
             .mobile-breadcrumb details {
             background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
@@ -700,6 +774,8 @@ s        </div>
         /* Desktop Layout */
         @media (min-width: 601px) {
             #global-nav-wrapper { bottom: 16px; right: 16px; }
+            html { scroll-padding-bottom: 72px; }
+            body { padding-bottom: 64px !important; }
             .mobile-breadcrumb { display: none !important; }
             .desktop-nav {
             display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
@@ -711,6 +787,7 @@ s        </div>
         /* Mobile Layout - Collapsible Breadcrumb */
         @media (max-width: 600px) {
             #global-nav-wrapper { top: 12px; right: 12px; }
+            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
             .desktop-nav { display: none !important; }
             .mobile-breadcrumb details {
             background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;

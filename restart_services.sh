@@ -7,8 +7,6 @@
 #   nextcloud           restart cloud-app + occ files:scan --all
 #
 # Every service runs under nohup and appends to its own log in logs/.
-# The tracker reads /var/log/nginx/track.log, so it runs under sudo —
-# you may be prompted for your password once.
 set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,10 +46,6 @@ stop_all 'code_host\.py'       "code hosting"
 
 sudo wg-quick up wg0
 
-# Tracker log must exist and be readable (same prep as local_cloud.sh).
-sudo touch /var/log/nginx/track.log
-sudo chmod 640 /var/log/nginx/track.log
-
 echo "== Starting =="
 start_one "chat web ui"     "$LOG_DIR/chat-webui.log"       "$REPO_DIR" python3 ./chat-webui.py
 start_one "markdown hosting" "$LOG_DIR/markdown-hosting.log" "$REPO_DIR" python3 -m uvicorn markdown_hosting:app --host 127.0.0.1 --port 3002
@@ -88,8 +82,6 @@ check() {
         echo "  UP   $name ($url -> HTTP $code)"
     else
         echo "  DOWN $name ($url) — check its log in $LOG_DIR/"
-        [ "$name" = "request tracker" ] && \
-            echo "       (tracker needs sudo; run this script from a terminal so the password can be prompted)"
     fi
 }
 check "chat web ui"      http://127.0.0.1:3001/
