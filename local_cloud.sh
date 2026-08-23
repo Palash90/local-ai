@@ -271,6 +271,22 @@ server {
         proxy_set_header X-Forwarded-Proto https;
     }
 
+    location = /.well-known/oauth-protected-resource {
+        proxy_pass http://127.0.0.1:8000/.well-known/oauth-protected-resource;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location = /.well-known/oauth-protected-resource/mcp {
+        proxy_pass http://127.0.0.1:8000/.well-known/oauth-protected-resource/mcp;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
     location = /authorize {
         proxy_pass http://127.0.0.1:8000/authorize;
         proxy_set_header Host $http_host;

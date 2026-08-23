@@ -481,8 +481,21 @@ async def oauth_token(request):
     })
 
 
+async def oauth_protected_resource(request):
+    """RFC 9728 protected-resource metadata. Claude checks this (both the
+    bare path and the /mcp-suffixed variant) to confirm which authorization
+    server backs this resource before it will call /mcp at all."""
+    base = str(request.base_url).rstrip("/")
+    return JSONResponse({
+        "resource": f"{base}/mcp",
+        "authorization_servers": [base],
+    })
+
+
 app = Starlette(routes=[
     Route("/.well-known/oauth-authorization-server", oauth_metadata),
+    Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+    Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource),
     Route("/authorize", oauth_authorize),
     Route("/oauth/token", oauth_token, methods=["POST"]),
     Mount("/", app=EnforcementAuthMiddleware(mcp.streamable_http_app())),
