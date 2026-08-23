@@ -1,3 +1,19 @@
+"""MCP gateway exposing a narrow chat-oriented surface of the local-ai API.
+
+All tools act as the single configured identity (``MCP_USER``): the gateway
+authenticates inbound clients with a static bearer token
+(``MCP_INBOUND_TOKEN``) and then talks to the main API on loopback using a
+self-refreshing Authentik OIDC access token obtained via a password grant.
+
+Intended workflow for an MCP client (e.g. Claude):
+1. ``list_sessions`` to discover existing conversations (or ``create_session``)
+2. optionally ``get_user_context`` / ``get_session_messages`` for background
+3. ``send_chat_message`` to submit a user message — this is ASYNCHRONOUS and
+   returns a task id
+4. poll ``get_message_status`` until the task reaches a terminal state
+5. ``get_session_messages`` again to read the assistant's reply
+"""
+
 import os, sys, json, time, threading, base64, httpx
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
@@ -92,19 +108,67 @@ async def _call(method: str, path: str, **kw) -> str:
 
 @mcp.tool()
 async def get_user_context() -> str:
-    """Get the current user's profile and memory context."""
+    """Read the current user's persistent profile / memory context.
+
+    Returns a JSON object:
+      {
+        "context": "<free-text profile notes saved across ALL conversations>",
+        "username": "<owner of this gateway identity>",
+        "context_file": "<server-side path of the context file>"
+      }
+
+    The context holds durable facts about the user (preferences, personal
+    details, ongoing projects) that survive across sessions. Use it to
+    personalize answers BEFORE asking the user to repeat known information.
+    This is memory, NOT conversation history — use get_session_messages for
+    the transcript of a specific conversation.
+
+    No parameters. Read-only; it never modifies anything.
+    """
     return await _call("GET", "/api/user-context")
 
 # --- CHAT ---
 
 @mcp.tool()
 async def list_sessions() -> str:
-    """List all chat sessions for the current user."""
+    """List all chat sessions of the user, most recently active first.
+
+    Returns a JSON array (possibly empty), one entry per session:
+      [
+        {
+          "session_id": "<uuid — pass this to other chat tools>",
+          "name": "<sidebar title, e.g. 'New Chat'>",
+          "created": <unix epoch seconds>,
+          "updated": <unix epoch seconds>,
+          ...context-token accounting fields...
+        },
+        ...
+      ]
+
+    Use this FIRST whenever a task references "the conversation/chat" without
+    an explicit id: pick the relevant session (usually the one with the most
+    recent "updated"), then call get_session_messages on its session_id.
+    Sessions listed here are owned exclusively by this gateway's user.
+    """
     return await _call("GET", "/api/sessions")
 
 @mcp.tool()
 async def create_session(system_prompt: str = "", system_prompts: list = None) -> str:
-    """Create a new chat session."""
+    """Create a brand-new empty chat session and return its id.
+
+    Args:
+      system_prompt: optional single system prompt string applied to the new
+        conversation (persona/instructions). Omit for the default behavior.
+      system_prompts: optional list of additional named system-prompt entries
+        supported by the backend (advanced; rarely needed).
+
+    Returns JSON: {"session_id": "<uuid>"}.
+
+    The new session starts with no messages and the name "New Chat". To send
+    the first message into it, pass this session_id to send_chat_message.
+    Creating a session does NOT automatically switch any UI state — it is a
+    pure data operation.
+    """
     payload = {}
     if system_prompt:
         payload["system_prompt"] = system_prompt
@@ -114,12 +178,39 @@ async def create_session(system_prompt: str = "", system_prompts: list = None) -
 
 @mcp.tool()
 async def get_session_messages(session_id: str) -> str:
-    """Get all messages from a specific chat session."""
+    """Read the full message transcript of one chat session.
+
+    Args:
+      session_id: uuid of the session (from list_sessions or create_session).
+
+    Returns JSON:
+      {
+        "messages": [ {"role": "user"|"assistant"|..., "content": "...",
+                       ...attachment/image fields when present...}, ... ],
+        ...context-token accounting fields...
+      }
+
+    Messages are ordered oldest → newest, exactly as rendered in the web UI.
+    Errors: HTTP-404 wrapped as {"error": "Upstream 404", ...} when the id is
+    unknown or belongs to another user. Use after get_message_status reports
+    "done" to read the assistant's reply (it is the last message).
+    """
     return await _call("GET", f"/api/sessions/{session_id}/messages")
 
 @mcp.tool()
 async def rename_session(session_id: str, name: str) -> str:
-    """Rename an existing chat session."""
+    """Rename a chat session (the title shown in the UI sidebar).
+
+    Args:
+      session_id: uuid of an existing session.
+      name: the new human-readable title (short is best).
+
+    Returns JSON: {"status": "updated"}.
+
+    Purely cosmetic metadata — renaming never alters the messages. Useful
+    after the first exchange so the conversation can be recognized later in
+    list_sessions.
+    """
     return await _call("PUT", f"/api/sessions/{session_id}", json={"name": name})
 
 @mcp.tool()
@@ -130,7 +221,26 @@ async def send_chat_message(
     cpu: bool = False,
     no_tools: bool = False
 ) -> str:
-    """Submit a message to a session and queue processing."""
+    """Submit a user message into a chat session for ASYNC processing.
+
+    This is the equivalent of typing into the web chat box and pressing send.
+    It ENQUEUES the message and returns immediately — the model has NOT yet
+    answered when this call returns.
+
+    Args:
+      session_id: target conversation (from list_sessions/create_session).
+      message: the user's message text.
+      research: enable the deep web-research pipeline (slower, cited reports).
+      cpu: force the request onto the CPU model lane instead of GPU.
+      no_tools: disable the model's built-in tool calling for this turn.
+
+    Returns JSON: {"task_id": "<uuid>"}.
+
+    REQUIRED follow-up: poll get_message_status(task_id) until the status is
+    a terminal value ("done", "error" or "cancelled"), then fetch the reply
+    with get_session_messages(session_id). Never assume the answer exists
+    right after this call.
+    """
     payload = {
         "session_id": session_id,
         "message": message,
@@ -142,7 +252,25 @@ async def send_chat_message(
 
 @mcp.tool()
 async def get_message_status(task_id: str) -> str:
-    """Check status of an asynchronous chat message task."""
+    """Check the processing state of one submitted chat message.
+
+    Args:
+      task_id: the uuid returned by send_chat_message.
+
+    Returns JSON describing the task. "status" progresses:
+      "queued"    → accepted, waiting for a worker
+      "working"   → the LLM is generating ("message" may hold progress text)
+      "done"      → finished; the reply IS persisted in the session —
+                    retrieve it with get_session_messages
+      "error"     → failed; details in the payload
+      "cancelled" → cancelled by the user/server
+    An unknown task_id yields {"status": "unknown"}.
+
+    Poll this roughly every 1–2 seconds; generation can take from a few
+    seconds up to several minutes for research mode. This tool NEVER returns
+    the reply text itself — always read the final answer via
+    get_session_messages.
+    """
     return await _call("GET", f"/api/status/{task_id}")
 
 
