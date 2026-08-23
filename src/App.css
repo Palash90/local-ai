@@ -1455,7 +1455,10 @@ input[type=file] {
   max-width: 720px;
   margin: 0 auto;
   padding: 24px 16px 48px;
-  min-height: 100vh;
+  /* The SPA shell sets html/body to overflow:hidden and expects every
+     surface to manage its own scrolling — this one included. */
+  height: 100vh;
+  overflow-y: auto;
   box-sizing: border-box;
 }
 
@@ -1836,4 +1839,23 @@ input[type=file] {
 
 #location-allow-btn:hover {
   background: #5b7dfa;
+}
+
+/* Sidebar shares-mode toggle */
+.sidebar-tab {
+  background: none;
+  border: 1px solid var(--border, #30363d);
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  margin-left: 6px;
+  padding: 4px 8px;
+}
+.sidebar-tab:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.share-orphan {
+  color: #f85149;
+  font-style: italic;
 }

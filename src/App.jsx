@@ -40,6 +40,8 @@ export default function App() {
   const [showLocationPrompt, setShowLocationPrompt] = useState(false)
   const [locationTaskId, setLocationTaskId] = useState(null)
   const [locationError, setLocationError] = useState(null)
+  const [showShares, setShowShares] = useState(false)
+  const [shares, setShares] = useState([])
   const sessionRef = useRef(null)
   const selectingRef = useRef(false)
   const pendingMessagesRef = useRef({})
@@ -170,6 +172,25 @@ export default function App() {
     }
   }
 
+  async function toggleShares() {
+    const next = !showShares
+    setShowShares(next)
+    if (next) {
+      const data = await api.listShares()
+      setShares((data && data.shares) || [])
+    }
+  }
+
+  async function revokeShare_(s) {
+    const purge = !s.session_exists
+    const msg = purge
+      ? 'The original chat is deleted. Unshare AND permanently delete its files?'
+      : 'Stop sharing this message?'
+    if (!confirm(msg)) return
+    await api.revokeShare(s.token, purge)
+    setShares(prev => prev.filter(x => x.token !== s.token))
+  }
+
   async function renameSession_(sid) {
     const s = sessions.find(x => x.session_id === sid)
     const newName = prompt('Session name:', s ? s.name : '')
@@ -206,7 +227,9 @@ export default function App() {
       stored.push({ task_id: taskId, sid: taskSid })
       setStoredPending(stored)
     } catch (err) {
-      setMessages(prev => [...prev, userMsg, { role: 'assistant', content: 'Error: ' + err.message }])
+      // Don't append a synthetic error pair locally — keep our array in sync
+      // with whatever the server actually persisted.
+      loadSessionMessages(taskSid)
     }
 
     setLoadingSessions(prev => {
@@ -228,20 +251,13 @@ export default function App() {
       return next
     })
     if (st.status === 'done') {
-      const userMsg = pending._userMsg
-      const assistantMsg = {
-        role: 'assistant',
-        content: st.response || '',
-        _elapsed_ms: st._elapsed_ms != null ? st._elapsed_ms : null,
-        _reasoning: st.reasoning || '',
-        _image_url: st.image || st._image_url,
-        _gen_prompt: st.gen_prompt,
-        _tools_used: st.tools_used || [],
-        _image_model: st._image_model,
-        _search_details: st._search_details || [],
-      }
       if (pending.sessionId === sessionRef.current) {
-        setMessages(prev => [...prev, ...(userMsg ? [userMsg] : []), assistantMsg])
+        // Re-fetch instead of appending locally: the server persists hidden
+        // bookkeeping entries (assistant tool_calls, tool results) between the
+        // user message and the final answer. Appending just the visible pair
+        // here desyncs our array indexes from the stored ones — which broke
+        // per-index operations like sharing until the next full reload.
+        loadSessionMessages(pending.sessionId)
       }
       if (st.token_estimate != null) setTokenEstimate(st.token_estimate)
       setContextCompressed(!!st.context_compressed)
@@ -252,10 +268,8 @@ export default function App() {
       }
     } else {
       if (pending.sessionId === sessionRef.current) {
-        setMessages(prev => [...prev, ...(pending._userMsg ? [pending._userMsg] : []), {
-          role: 'assistant',
-          content: 'Error: ' + (st.error || 'Task was lost — please retry.'),
-        }])
+        // Same index-desync reasoning as the success path above.
+        loadSessionMessages(pending.sessionId)
       }
     }
     const remaining = getStoredPending().filter(p => p.task_id !== taskId)
@@ -387,6 +401,10 @@ export default function App() {
             onNewChat={newChat}
             onRenameSession={renameSession_}
             onDeleteSession={deleteSession_}
+            shares={shares}
+            showShares={showShares}
+            onToggleShares={toggleShares}
+            onRevokeShare={revokeShare_}
             onClose={closeSidebar}
             open={sidebarOpen}
           />

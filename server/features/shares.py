@@ -20,10 +20,55 @@ Storage is a simple JSON file (``SHARES_FILE``) shaped as::
 import copy
 import json
 import os
+import re
 import time
 import uuid
 
+from server.config import COMFYUI_OUTPUT, UPLOADS_DIR
 from server.features.state import M
+
+# Image/upload references embedded anywhere inside a message snapshot
+# ("[IMAGE: /output/x.png]", "[FILE: /uploads/y.pdf]", image_url parts, ...).
+_IMAGE_REF_RE = re.compile(r"/(?:uploads|output)/[A-Za-z0-9._\-/]+")
+
+
+def message_image_refs(obj):
+    """Every uploads/|output/ reference found anywhere in a message structure.
+
+    Returns paths relative to the files root, e.g. {"uploads/a.pdf",
+    "output/img.png"}. Used both to scope what a public share may serve and
+    to decide which artifacts are safe to purge on unshare.
+    """
+    refs = set()
+
+    def walk(node):
+        if isinstance(node, str):
+            for match in _IMAGE_REF_RE.findall(node):
+                refs.add(match.strip("/"))
+        elif isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(obj)
+    return refs
+
+
+def _ref_file_path(ref):
+    """Absolute path for an "uploads/..." or "output/..." ref, or None."""
+    if ref.startswith("uploads/"):
+        root, rest = UPLOADS_DIR, ref[len("uploads/"):]
+    elif ref.startswith("output/"):
+        root, rest = COMFYUI_OUTPUT, ref[len("output/"):]
+    else:
+        return None
+    real_root = os.path.realpath(root)
+    fpath = os.path.realpath(os.path.join(real_root, rest))
+    if fpath != real_root and not fpath.startswith(real_root + os.sep):
+        return None
+    return fpath
 
 
 def load_shares():
@@ -138,19 +183,44 @@ def get_share(token):
         return M.shares.get(token)
 
 
-def revoke_share(token, user):
+def revoke_share(token, user, purge=False):
     """Remove a share. Only the owner may revoke.
 
-    Returns ``True`` on success, ``False`` if the share does not exist or the
-    user is not its owner.
+    With ``purge`` the artifacts referenced ONLY by this share's snapshot are
+    deleted as well — used when the underlying chat is already gone and the
+    user wants the files gone with it. A ref survives if any other active
+    share or any still-existing session message references it.
+
+    Returns ``(ok, info)`` where info carries ``session_exists`` (was the
+    originating chat still present?) and ``purged`` (refs actually deleted).
     """
     with M._data_lock:
         rec = M.shares.get(token)
         if not rec or rec.get("owner") != user:
-            return False
+            return False, {}
+        session_exists = rec.get("session_id") in M.sessions_meta
+        own_refs = message_image_refs(rec.get("message", {}))
         del M.shares[token]
+        # Refs still needed elsewhere: other shares or live conversations.
+        keep = set()
+        for other in M.shares.values():
+            keep |= message_image_refs(other.get("message", {}))
+        for msgs in M.sessions.values():
+            for msg in msgs:
+                keep |= message_image_refs(msg)
     save_shares()
-    return True
+
+    purged = []
+    if purge:
+        for ref in sorted(own_refs - keep):
+            fpath = _ref_file_path(ref)
+            if fpath and os.path.exists(fpath):
+                try:
+                    os.remove(fpath)
+                    purged.append(ref)
+                except OSError:
+                    pass
+    return True, {"session_exists": session_exists, "purged": purged}
 
 
 def list_shares(user):
@@ -174,6 +244,7 @@ def list_shares(user):
                     "token": token,
                     "url": _share_url(token),
                     "session_id": rec.get("session_id"),
+                    "session_exists": rec.get("session_id") in M.sessions_meta,
                     "msg_index": rec.get("msg_index"),
                     "created": rec.get("created"),
                     "preview": preview,

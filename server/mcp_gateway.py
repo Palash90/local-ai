@@ -20,13 +20,15 @@ from starlette.responses import JSONResponse
 import uvicorn
 
 try:
-    from server.auth import oidc_password_grant
+    from server.auth import identity_from_bearer, oidc_password_grant
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from server.auth import oidc_password_grant
+    from server.auth import identity_from_bearer, oidc_password_grant
 
 API_BASE = os.environ.get("CHAT_API_BASE", "http://127.0.0.1:3001")
-INBOUND_TOKEN = os.environ.get("MCP_INBOUND_TOKEN", "secret-mcp-key")
+MCP_ALLOWED_USERS = [
+    u.strip() for u in os.environ.get("MCP_ALLOWED_USERS", "").split(",") if u.strip()
+]
 MCP_USER = os.environ.get("MCP_USER", "")
 MCP_USER_PASSWORD = os.environ.get("MCP_USER_PASSWORD", "")
 TOKEN_REFRESH_MARGIN = 60
@@ -34,6 +36,14 @@ TOKEN_REFRESH_MARGIN = 60
 mcp = FastMCP("chat-webui-api", stateless_http=True)
 
 class EnforcementAuthMiddleware:
+    """Inbound gate: callers must present a valid Authentik access token.
+
+    The bearer JWT is verified against Authentik's JWKS on every request —
+    no shared static secret exists anymore, so tokens are revocable and
+    every call carries a real identity. Optionally restricted to specific
+    usernames via MCP_ALLOWED_USERS (empty = any realm user).
+    """
+
     def __init__(self, app):
         self.app = app
 
@@ -45,9 +55,17 @@ class EnforcementAuthMiddleware:
 
             headers = dict(scope.get("headers", []))
             auth_header = headers.get(b"authorization", b"").decode("utf-8")
-            expected_token = f"Bearer {INBOUND_TOKEN}"
-
-            if auth_header != expected_token:
+            try:
+                identity = identity_from_bearer(auth_header)
+            except RuntimeError:
+                # Transient JWKS failure — treat as unauthenticated rather
+                # than crashing the request handler.
+                identity = None
+            if identity and MCP_ALLOWED_USERS:
+                identity = (
+                    identity if identity.get("username") in MCP_ALLOWED_USERS else None
+                )
+            if not identity:
                 response = JSONResponse({"error": "Unauthorized"}, status_code=401)
                 await response(scope, receive, send)
                 return

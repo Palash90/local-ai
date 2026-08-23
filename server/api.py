@@ -507,9 +507,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not user:
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
-            token = self.path.split("/")[3]
-            if revoke_share(token, user):
-                self.send_json({"status": "revoked"})
+            token = self.path.split("/")[3].split("?")[0]
+            purge = parse_qs(urlparse(self.path).query).get("purge", [""])[0] == "1"
+            ok, info = revoke_share(token, user, purge=purge)
+            if ok:
+                self.send_json({"status": "revoked", **info})
             else:
                 self.send_json({"error": "Share not found or not yours"}, status=404)
         elif self.path.startswith("/api/sessions/"):
@@ -537,13 +539,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             "error": "Session was deleted",
                             "session_id": sid,
                         }
+            # Files still referenced by an active public share must survive:
+            # the share snapshot points at them by path and is rendered long
+            # after the chat is gone.
+            with _data_lock:
+                share_recs = list(shares.values())
+            protected_refs = set()
+            for rec in share_recs:
+                protected_refs |= _snapshot_image_refs(rec.get("message", {}))
+            protected_output = {
+                r[len("output/"):] for r in protected_refs if r.startswith("output/")
+            }
+            protected_uploads = {
+                os.path.basename(r) for r in protected_refs if r.startswith("uploads/")
+            }
             for msg in msgs:
                 if msg.get("role") == "assistant":
                     url = msg.get("_image_url", "") or ""
                     if url:
-                        fname = os.path.join(IMG_PATH, _image_url_rel(url))
-                        fpath = fname
-                        if os.path.exists(fpath):
+                        rel = _image_url_rel(url)
+                        fpath = os.path.join(IMG_PATH, rel)
+                        if rel in protected_output:
+                            print(f"[delete] Kept shared image: {fpath}")
+                        elif os.path.exists(fpath):
                             print(f"[delete] Removed output image: {fpath}")
                             os.remove(fpath)
                 raw = msg.get("content", "")
@@ -561,7 +579,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             url_part = part[idx:].split("]")[0]
                             fname = os.path.basename(url_part)
                             fpath = os.path.join(UPLOADS_DIR, fname)
-                            if os.path.exists(fpath):
+                            if fname in protected_uploads:
+                                print(f"[delete] Kept shared upload: {fpath}")
+                            elif os.path.exists(fpath):
                                 print(f"[delete] Removed uploaded file: {fpath}")
                                 os.remove(fpath)
             # Remove image uploads stored as image_url content parts (the
@@ -578,7 +598,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         continue
                     fname = os.path.basename(url.split("?", 1)[0])
                     fpath = os.path.join(UPLOADS_DIR, fname)
-                    if os.path.exists(fpath):
+                    if fname in protected_uploads:
+                        print(f"[delete] Kept shared upload: {fpath}")
+                    elif os.path.exists(fpath):
                         print(f"[delete] Removed uploaded image: {fpath}")
                         os.remove(fpath)
 

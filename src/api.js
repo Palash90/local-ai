@@ -171,8 +171,9 @@ export async function listShares() {
   return r.json();
 }
 
-export async function revokeShare(token) {
-  const r = await authFetch(`/api/shares/${token}`, { method: 'DELETE' });
+export async function revokeShare(token, purge = false) {
+  const qs = purge ? '?purge=1' : '';
+  const r = await authFetch(`/api/shares/${token}${qs}`, { method: 'DELETE' });
   return r.json();
 }
 
