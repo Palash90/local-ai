@@ -45,6 +45,7 @@ TOKEN_REFRESH_MARGIN = 60
 
 mcp = FastMCP("chat-webui-api", stateless_http=True)
 
+
 class EnforcementAuthMiddleware:
     """Inbound gate: callers must present a valid Authentik access token.
 
@@ -65,7 +66,9 @@ class EnforcementAuthMiddleware:
 
             headers = dict(scope.get("headers", []))
             auth_header = headers.get(b"authorization", b"").decode("utf-8")
-            presented = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+            presented = (
+                auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+            )
 
             identity = None
             if MCP_OAUTH_CLIENT_SECRET and presented == MCP_OAUTH_CLIENT_SECRET:
@@ -82,7 +85,9 @@ class EnforcementAuthMiddleware:
                     identity = None
                 if identity and MCP_ALLOWED_USERS:
                     identity = (
-                        identity if identity.get("username") in MCP_ALLOWED_USERS else None
+                        identity
+                        if identity.get("username") in MCP_ALLOWED_USERS
+                        else None
                     )
             if not identity:
                 response = JSONResponse({"error": "Unauthorized"}, status_code=401)
@@ -121,8 +126,10 @@ def _auth_headers():
         now = time.time()
         exp = _token_cache["exp"]
         fresh = _token_cache["value"] and (
-            exp and now < exp - TOKEN_REFRESH_MARGIN
-            or not exp and now < TOKEN_REFRESH_MARGIN
+            exp
+            and now < exp - TOKEN_REFRESH_MARGIN
+            or not exp
+            and now < TOKEN_REFRESH_MARGIN
         )
         if not fresh:
             token = oidc_password_grant(MCP_USER, MCP_USER_PASSWORD)
@@ -136,7 +143,9 @@ async def _call(method: str, path: str, **kw) -> str:
     except Exception as e:
         return json.dumps({"error": f"MCP upstream auth failed: {e}"})
     async with httpx.AsyncClient() as client:
-        r = await client.request(method, f"{API_BASE}{path}", headers=headers, timeout=30.0, **kw)
+        r = await client.request(
+            method, f"{API_BASE}{path}", headers=headers, timeout=30.0, **kw
+        )
         if r.status_code >= 400:
             return json.dumps({"error": f"Upstream {r.status_code}", "detail": r.text})
         return r.text
@@ -163,7 +172,9 @@ async def _call_image(path: str):
         fmt = content_type.split("/")[-1].split(";")[0]
         return Image(data=r.content, format=fmt), None
 
+
 # --- PROFILE ---
+
 
 @mcp.tool()
 async def get_user_context() -> str:
@@ -186,7 +197,9 @@ async def get_user_context() -> str:
     """
     return await _call("GET", "/api/user-context")
 
+
 # --- CHAT ---
+
 
 @mcp.tool()
 async def list_sessions() -> str:
@@ -210,6 +223,7 @@ async def list_sessions() -> str:
     Sessions listed here are owned exclusively by this gateway's user.
     """
     return await _call("GET", "/api/sessions")
+
 
 @mcp.tool()
 async def create_session(system_prompt: str = "", system_prompts: list = None) -> str:
@@ -235,6 +249,7 @@ async def create_session(system_prompt: str = "", system_prompts: list = None) -
         payload["system_prompts"] = system_prompts
     return await _call("POST", "/api/sessions", json=payload)
 
+
 @mcp.tool()
 async def get_session_messages(session_id: str) -> str:
     """Read the full message transcript of one chat session.
@@ -256,6 +271,7 @@ async def get_session_messages(session_id: str) -> str:
     """
     return await _call("GET", f"/api/sessions/{session_id}/messages")
 
+
 @mcp.tool()
 async def rename_session(session_id: str, name: str) -> str:
     """Rename a chat session (the title shown in the UI sidebar).
@@ -272,19 +288,29 @@ async def rename_session(session_id: str, name: str) -> str:
     """
     return await _call("PUT", f"/api/sessions/{session_id}", json={"name": name})
 
+
 @mcp.tool()
 async def send_chat_message(
     session_id: str,
     message: str,
     research: bool = False,
     cpu: bool = False,
-    no_tools: bool = False
+    no_tools: bool = False,
 ) -> str:
     """Submit a user message into a chat session for ASYNC processing.
 
     This is the equivalent of typing into the web chat box and pressing send.
     It ENQUEUES the message and returns immediately — the model has NOT yet
     answered when this call returns.
+
+    SPEED EXPECTATION — generation is SLOW by design:
+      simple replies ......... ~40–90 seconds
+      tool flows (images,
+      web search, files) ..... often 2–3 minutes
+      research mode .......... frequently 3 minutes or MORE
+    Treat up to 5 minutes of "working" as NORMAL. Never declare failure,
+    retry, or re-send just because the answer hasn't appeared yet — check
+    get_message_status instead.
 
     Args:
       session_id: target conversation (from list_sessions/create_session).
@@ -293,7 +319,7 @@ async def send_chat_message(
       cpu: force the request onto the CPU model lane instead of GPU.
       no_tools: disable the model's built-in tool calling for this turn.
 
-    Returns JSON: {"task_id": "<uuid>"}.
+    Returns JSON: {"task_id": "<uuid>", "wait_hint": "<polling guidance>"}.
 
     REQUIRED follow-up: poll get_message_status(task_id) until the status is
     a terminal value ("done", "error" or "cancelled"), then fetch the reply
@@ -307,7 +333,27 @@ async def send_chat_message(
         "cpu": cpu,
         "no_tools": no_tools,
     }
-    return await _call("POST", "/api/chat", json=payload)
+    res = await _call("POST", "/api/chat", json=payload)
+
+    # Extract string content safely if _call returns a Response object
+    raw_text = res.text if hasattr(res, "text") else res
+
+    try:
+        obj = json.loads(raw_text)
+    except (ValueError, TypeError):
+        return raw_text
+
+    if isinstance(obj, dict) and "error" not in obj:
+        task_id = obj.get("task_id", "")
+        obj["wait_hint"] = (
+            f"Generation runs on a local LLM and is slow (~40-90s simple, 2-3m tools, 3m+ research). "
+            f"Poll get_message_status(task_id='{task_id}') every few seconds; treat up to 5 minutes "
+            f"of 'working' as normal before declaring an error."
+        )
+        return json.dumps(obj)
+
+    return raw_text
+
 
 @mcp.tool()
 async def get_message_status(task_id: str) -> str:
@@ -325,12 +371,47 @@ async def get_message_status(task_id: str) -> str:
       "cancelled" → cancelled by the user/server
     An unknown task_id yields {"status": "unknown"}.
 
-    Poll this roughly every 1–2 seconds; generation can take from a few
-    seconds up to several minutes for research mode. This tool NEVER returns
-    the reply text itself — always read the final answer via
-    get_session_messages.
+    PATIENCE: generation on a local LLM routinely takes 40–90 seconds and
+    up to 3–7 minutes for heavy tasks (research mode, image pipelines).
+
+    POLLING STRATEGY:
+    - First 60s: Poll every 20-30 seconds.
+    - 1 minute to 2 mins: Poll every 30-40 seconds.
+    - After 2 mins (Image Gen / Research): Poll every 45-60 seconds.
+    Do NOT poll rapidly (under 15s).
+
+    This tool NEVER returns the reply text itself — always read the final answer
+    via get_session_messages.
     """
-    return await _call("GET", f"/api/status/{task_id}")
+    res = await _call("GET", f"/api/status/{task_id}")
+    raw_text = res.text if hasattr(res, "text") else res
+
+    try:
+        obj = json.loads(raw_text)
+    except (ValueError, TypeError):
+        return raw_text
+
+    if isinstance(obj, dict):
+        status = obj.get("status")
+        if status == "working":
+            elapsed = obj.get("elapsed_seconds", 0)
+            
+            if elapsed > 120:
+                recommended_sleep = "45-60"
+            elif elapsed > 60:
+                recommended_sleep = "30-40"
+            else:
+                recommended_sleep = "20-30"
+
+            obj["next_action"] = (
+                f"Still generating (elapsed: {elapsed}s). "
+                f"Sleep {recommended_sleep} seconds before calling get_message_status again."
+            )
+        elif status == "done":
+            obj["next_action"] = "Generation complete. Call get_session_messages to read the response."
+        return json.dumps(obj)
+
+    return raw_text
 
 @mcp.tool()
 async def get_image(image_id: str):
@@ -379,17 +460,21 @@ async def oauth_metadata(request):
     """RFC 8414 authorization-server metadata. Claude's connector discovers
     this from the base URL to find /authorize and /oauth/token."""
     base = str(request.base_url).rstrip("/")
-    return JSONResponse({
-        "issuer": base,
-        "authorization_endpoint": f"{base}/authorize",
-        "token_endpoint": f"{base}/oauth/token",
-        "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code", "client_credentials"],
-        "code_challenge_methods_supported": ["S256", "plain"],
-        "token_endpoint_auth_methods_supported": [
-            "client_secret_post", "client_secret_basic", "none",
-        ],
-    })
+    return JSONResponse(
+        {
+            "issuer": base,
+            "authorization_endpoint": f"{base}/authorize",
+            "token_endpoint": f"{base}/oauth/token",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "client_credentials"],
+            "code_challenge_methods_supported": ["S256", "plain"],
+            "token_endpoint_auth_methods_supported": [
+                "client_secret_post",
+                "client_secret_basic",
+                "none",
+            ],
+        }
+    )
 
 
 async def oauth_authorize(request):
@@ -466,8 +551,11 @@ async def oauth_token(request):
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
         if form.get("redirect_uri", "") != entry["redirect_uri"]:
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
-        if not _pkce_ok(form.get("code_verifier", ""), entry["code_challenge"],
-                         entry["code_challenge_method"]):
+        if not _pkce_ok(
+            form.get("code_verifier", ""),
+            entry["code_challenge"],
+            entry["code_challenge_method"],
+        ):
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
     elif grant_type == "client_credentials":
         if not client_secret or client_secret != MCP_OAUTH_CLIENT_SECRET:
@@ -475,11 +563,13 @@ async def oauth_token(request):
     else:
         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
-    return JSONResponse({
-        "access_token": MCP_OAUTH_CLIENT_SECRET,
-        "token_type": "bearer",
-        "expires_in": 31536000,
-    })
+    return JSONResponse(
+        {
+            "access_token": MCP_OAUTH_CLIENT_SECRET,
+            "token_type": "bearer",
+            "expires_in": 31536000,
+        }
+    )
 
 
 async def oauth_protected_resource(request):
@@ -487,18 +577,22 @@ async def oauth_protected_resource(request):
     bare path and the /mcp-suffixed variant) to confirm which authorization
     server backs this resource before it will call /mcp at all."""
     base = str(request.base_url).rstrip("/")
-    return JSONResponse({
-        "resource": f"{base}/mcp",
-        "authorization_servers": [base],
-    })
+    return JSONResponse(
+        {
+            "resource": f"{base}/mcp",
+            "authorization_servers": [base],
+        }
+    )
 
 
 mcp_app = mcp.streamable_http_app()
+
 
 @asynccontextmanager
 async def lifespan(app):
     async with mcp_app.router.lifespan_context(mcp_app):
         yield
+
 
 app = Starlette(
     lifespan=lifespan,
@@ -512,9 +606,11 @@ app = Starlette(
     ],
 )
 
+
 def run():
     host = os.environ.get("MCP_HOST", "127.0.0.1")
     uvicorn.run(app, host=host, port=8000)
+
 
 if __name__ == "__main__":
     run()
