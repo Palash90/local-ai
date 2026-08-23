@@ -307,10 +307,16 @@ async def send_chat_message(
       simple replies ......... ~40–90 seconds
       tool flows (images,
       web search, files) ..... often 2–3 minutes
-      research mode .......... frequently 3 minutes or MORE
-    Treat up to 5 minutes of "working" as NORMAL. Never declare failure,
+      research mode .......... frequently 3–7 minutes
+    Treat long stretches of "working" as NORMAL. Never declare failure,
     retry, or re-send just because the answer hasn't appeared yet — check
     get_message_status instead.
+
+    POLLING STRATEGY:
+    - First 60s: Poll every 20-30 seconds.
+    - 1 minute to 2 mins: Poll every 30-40 seconds.
+    - After 2 mins (Image Gen / Research): Poll every 45-60 seconds.
+    Do NOT poll rapidly (under 15s).
 
     Args:
       session_id: target conversation (from list_sessions/create_session).
@@ -345,10 +351,21 @@ async def send_chat_message(
 
     if isinstance(obj, dict) and "error" not in obj:
         task_id = obj.get("task_id", "")
+
+        if research:
+            init_delay = 60
+            mode_desc = "Deep research mode enabled (est. 3-7 mins)"
+        elif not no_tools:
+            init_delay = 30
+            mode_desc = "Tool execution pipeline active (est. 2-3 mins)"
+        else:
+            init_delay = 20
+            mode_desc = "Standard text generation (est. 40-90s)"
+
         obj["wait_hint"] = (
-            f"Generation runs on a local LLM and is slow (~40-90s simple, 2-3m tools, 3m+ research). "
-            f"Poll get_message_status(task_id='{task_id}') every few seconds; treat up to 5 minutes "
-            f"of 'working' as normal before declaring an error."
+            f"{mode_desc}. Do NOT poll immediately. "
+            f"Sleep at least {init_delay} seconds BEFORE calling get_message_status(task_id='{task_id}') for the first time. "
+            f"Never poll faster than every 15-20 seconds."
         )
         return json.dumps(obj)
 
