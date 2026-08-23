@@ -3,3 +3,5 @@ fastapi
 uvicorn
 PyJWT
 Markdown
+mcp[cli]
+websockets

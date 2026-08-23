@@ -272,6 +272,7 @@ from server.features.critic import (  # noqa: E402
     run_verification,
     run_verification_worker,
 )
+from server.mcp_gateway import run as run_mcp
 
 # Point the M proxy at this module: from here on, feature modules resolve all
 # shared state, config values and cross-cutting helpers through it.
@@ -319,6 +320,7 @@ if __name__ == "__main__":
     threading.Thread(target=_thermal_monitor, daemon=True).start()
     threading.Thread(target=_reminder_loop, daemon=True).start()
     threading.Thread(target=_connection_manager, daemon=True).start()
+    threading.Thread(target=run_mcp, daemon=True).start()
     print(f"Chat UI running on http://localhost:{PORT}")
     s = http.server.HTTPServer((HOST, PORT), Handler)
     try:
