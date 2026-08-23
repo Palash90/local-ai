@@ -1,11 +1,19 @@
-import os, httpx
+import os, sys, json, time, threading, base64, httpx
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
 import uvicorn
 
-API_BASE = "http://127.0.0.1:3001"
-STATIC_TOKEN = os.environ.get("MCP_GATEWAY_TOKEN", "")
+try:
+    from server.auth import oidc_password_grant
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from server.auth import oidc_password_grant
+
+API_BASE = os.environ.get("CHAT_API_BASE", "http://127.0.0.1:3001")
 INBOUND_TOKEN = os.environ.get("MCP_INBOUND_TOKEN", "secret-mcp-key")
+MCP_USER = os.environ.get("MCP_USER", "")
+MCP_USER_PASSWORD = os.environ.get("MCP_USER_PASSWORD", "")
+TOKEN_REFRESH_MARGIN = 60
 
 mcp = FastMCP("chat-webui-api", stateless_http=True)
 
@@ -31,10 +39,53 @@ class EnforcementAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+_token_lock = threading.Lock()
+_token_cache = {"value": "", "exp": 0}
+
+
+def _decode_exp(token):
+    """Expiry timestamp of a JWT access token, or 0 if unreadable."""
+    try:
+        payload = token.split(".")[1]
+        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return int(data.get("exp", 0))
+    except Exception:
+        return 0
+
+
+def _auth_headers():
+    """Bearer headers holding a fresh Authentik access token for MCP_USER.
+
+    Re-grants via the OIDC password grant shortly before expiry, mirroring
+    the self-chat agent token lifecycle.
+    """
+    if not MCP_USER or not MCP_USER_PASSWORD:
+        raise RuntimeError(
+            "MCP_USER / MCP_USER_PASSWORD not set — cannot authenticate to the API"
+        )
+    global _token_cache
+    with _token_lock:
+        now = time.time()
+        exp = _token_cache["exp"]
+        fresh = _token_cache["value"] and (
+            exp and now < exp - TOKEN_REFRESH_MARGIN
+            or not exp and now < TOKEN_REFRESH_MARGIN
+        )
+        if not fresh:
+            token = oidc_password_grant(MCP_USER, MCP_USER_PASSWORD)
+            _token_cache = {"value": token, "exp": _decode_exp(token)}
+        return {"Authorization": f"Bearer {_token_cache['value']}"}
+
+
 async def _call(method: str, path: str, **kw) -> str:
-    headers = {"Authorization": f"Bearer {STATIC_TOKEN}"} if STATIC_TOKEN else {}
+    try:
+        headers = _auth_headers()
+    except Exception as e:
+        return json.dumps({"error": f"MCP upstream auth failed: {e}"})
     async with httpx.AsyncClient() as client:
         r = await client.request(method, f"{API_BASE}{path}", headers=headers, timeout=30.0, **kw)
+        if r.status_code >= 400:
+            return json.dumps({"error": f"Upstream {r.status_code}", "detail": r.text})
         return r.text
 
 # --- PROFILE ---
@@ -98,7 +149,8 @@ async def get_task_status(task_id: str) -> str:
 app = EnforcementAuthMiddleware(mcp.streamable_http_app())
 
 def run():
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.environ.get("MCP_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=8000)
 
 if __name__ == "__main__":
     run()
