@@ -72,68 +72,95 @@ map $http_x_via_gcp $gcp_overlay {
     default '';
 }
 
-map $http_user_agent $cloud_inject {
+# Single source of truth for the floating nav overlay. Every location block
+# below references this one map via `sub_filter '</body>' '$nav_overlay';`
+# so the markup/CSS only ever lives in one place. Skipped entirely for the
+# native Nextcloud apps, which shouldn't get HTML injected into their views.
+map $http_user_agent $nav_overlay {
     "~*nextcloud-(android|ios|desktop)" '';
     default '$gcp_overlay<style>
-        /* Fixed positioning ensures auto-scrolling retention */
+        /* Floating vertical icon dock, identical on desktop and mobile */
         #global-nav-wrapper {
             position: fixed;
+            top: 50%;
+            right: 12px;
+            transform: translateY(-50%);
             z-index: 999999;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         }
-        @media (min-width: 601px) {
-            #global-nav-wrapper { bottom: 16px; right: 16px; }
-            html { scroll-padding-bottom: 72px; }
-            body { padding-bottom: 64px !important; }
-            .mobile-breadcrumb { display: none !important; }
-            .desktop-nav {
-            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
-            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
-            }
+        #global-nav-wrapper .nav-dock {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+            background: rgba(22, 27, 34, 0.9);
+            border: 1px solid #30363d;
+            border-radius: 22px;
+            padding: 8px 5px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
         }
+        #global-nav-wrapper .nav-dock a {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 30px;
+            height: 30px;
+            font-size: 16px;
+            line-height: 1;
+            border-radius: 50%;
+            text-decoration: none;
+            opacity: 0.82;
+            transition: opacity .15s ease, background-color .15s ease, transform .15s ease;
+        }
+        #global-nav-wrapper .nav-dock a:hover,
+        #global-nav-wrapper .nav-dock a:active {
+            opacity: 1;
+            background: rgba(88,166,255,0.16);
+            transform: scale(1.08);
+        }
+        #global-nav-wrapper .nav-dock a.home { opacity: 1; }
+        #global-nav-wrapper .nav-dock .sep {
+            width: 16px;
+            height: 1px;
+            background: #30363d;
+            margin: 3px 0;
+        }
+        /* Label tooltip, flyout to the left so it never clips off-screen */
+        #global-nav-wrapper .nav-dock a::after {
+            content: attr(data-label);
+            position: absolute;
+            right: 38px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(22,27,34,0.95);
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            font-size: 12px;
+            font-weight: 500;
+            padding: 4px 9px;
+            border-radius: 6px;
+            white-space: nowrap;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity .15s ease;
+        }
+        #global-nav-wrapper .nav-dock a:hover::after { opacity: 1; }
         @media (max-width: 600px) {
-            #global-nav-wrapper { top: 12px; right: 12px; }
-            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
-            .desktop-nav { display: none !important; }
-            .mobile-breadcrumb details {
-            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
-            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            backdrop-filter: blur(4px); font-size: 12px;
-            }
-            .mobile-breadcrumb summary {
-            padding: 6px 10px; color: #58a6ff; font-weight: 600;
-            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
-            }
-            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
-            .mobile-breadcrumb .menu {
-            display: flex; flex-direction: column; gap: 6px;
-            padding: 8px 12px 10px; border-top: 1px solid #30363d;
-            }
+            #global-nav-wrapper .nav-dock a::after { display: none; }
         }
-        #global-nav-wrapper a { text-decoration: none; }
         </style>
         <div id="global-nav-wrapper">
-        <div class="desktop-nav">
-            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-        </div>
-        <div class="mobile-breadcrumb">
-            <details>
-            <summary><span>📂 Menu</span></summary>
-            <div class="menu">
-                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
-                <a href="/ai/" style="color:#c9d1d9;">AI</a>
-                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-                <a href="/code/" style="color:#c9d1d9;">Code</a>
-                <a href="/search/" style="color:#c9d1d9;">Search</a>
-                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-            </div>
-            </details>
+        <div class="nav-dock">
+            <a href="/" class="home" data-label="Home">🏠</a>
+            <div class="sep"></div>
+            <a href="/ai/" data-label="AI">🤖</a>
+            <a href="/stories/" data-label="Stories">📖</a>
+            <a href="/code/" data-label="Code">💻</a>
+            <a href="/search/" data-label="Search">🔍</a>
+            <a href="/cloud/" data-label="Cloud">☁️</a>
         </div>
         </div></body>';
 }
@@ -194,76 +221,7 @@ server {
         sub_filter_once off;
         sub_filter_types text/html;
         # Inject CSS and responsive HTML standard across all locations
-        sub_filter '</body>' '$gcp_overlay<style>
-        /* Fixed positioning ensures auto-scrolling retention */
-        #global-nav-wrapper {
-            position: fixed;
-            z-index: 999999;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }
-        
-        /* Desktop Layout */
-        @media (min-width: 601px) {
-            #global-nav-wrapper { bottom: 16px; right: 16px; }
-            html { scroll-padding-bottom: 72px; }
-            body { padding-bottom: 64px !important; }
-            .mobile-breadcrumb { display: none !important; }
-            .desktop-nav {
-            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
-            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
-            }
-        }
-
-        /* Mobile Layout - Collapsible Breadcrumb */
-        @media (max-width: 600px) {
-            #global-nav-wrapper { top: 12px; right: 12px; }
-            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
-            .desktop-nav { display: none !important; }
-            .mobile-breadcrumb details {
-            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
-            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            backdrop-filter: blur(4px); font-size: 12px;
-            }
-            .mobile-breadcrumb summary {
-            padding: 6px 10px; color: #58a6ff; font-weight: 600;
-            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
-            }
-            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
-            .mobile-breadcrumb .menu {
-            display: flex; flex-direction: column; gap: 6px;
-            padding: 8px 12px 10px; border-top: 1px solid #30363d;
-            }
-        }
-        #global-nav-wrapper a { text-decoration: none; }
-        </style>
-
-        <div id="global-nav-wrapper">
-        <!-- Desktop Horizontal Bar -->
-        <div class="desktop-nav">
-            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-        </div>
-
-        <!-- Mobile Collapsible Breadcrumb -->
-        <div class="mobile-breadcrumb">
-            <details>
-            <summary><span>📂 Menu</span></summary>
-            <div class="menu">
-                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
-                <a href="/ai/" style="color:#c9d1d9;">AI</a>
-                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-                <a href="/code/" style="color:#c9d1d9;">Code</a>
-                <a href="/search/" style="color:#c9d1d9;">Search</a>
-                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-            </div>
-            </details>
-        </div>
-        </div></body>';
+        sub_filter '</body>' '$nav_overlay';
     }
 
     # Authentik SSO Core (matches both /sso and /sso/*)
@@ -310,95 +268,7 @@ server {
         # 48px tall, full-width there), so it drops to just BELOW the header
         # band instead and shrinks/scrolls horizontally.
         # Inject CSS and responsive HTML standard across all locations
-        sub_filter '</body>' '$gcp_overlay<style>
-        /* Fixed positioning ensures auto-scrolling retention */
-        #global-nav-wrapper {
-            position: fixed;
-            z-index: 999999;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }
-        
-        /* Desktop Layout */
-        @media (min-width: 601px) {
-            #global-nav-wrapper { bottom: 16px; right: 16px; }
-            html { scroll-padding-bottom: 72px; }
-            body { padding-bottom: 64px !important; }
-            .mobile-breadcrumb { display: none !important; }
-            .desktop-nav {
-            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
-            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
-            }
-        }
-
-        /* Mobile Layout - Ultra Compact Collapsible Overlay */
-@media (max-width: 600px) {
-  #global-nav-wrapper { top: 12px; right: 12px; }
-  html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
-  .desktop-nav { display: none !important; }
-  
-  .mobile-breadcrumb details {
-    background: rgba(22, 27, 34, 0.95);
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-    backdrop-filter: blur(4px);
-    font-size: 13px;
-  }
-  
-  /* Compact Icon Target */
-  .mobile-breadcrumb summary {
-    padding: 6px 10px;
-    color: #58a6ff;
-    font-weight: 600;
-    cursor: pointer;
-    list-style: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 16px; /* Increases icon visibility */
-    line-height: 1;
-  }
-  .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
-  
-  /* Menu Items Dropdown */
-  .mobile-breadcrumb .menu {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 8px 12px 10px;
-    border-top: 1px solid #30363d;
-  }
-}
-        #global-nav-wrapper a { text-decoration: none; }
-        </style>
-
-        <div id="global-nav-wrapper">
-        <!-- Desktop Horizontal Bar -->
-        <div class="desktop-nav">
-            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-        </div>
-
-        <!-- Mobile Collapsible Breadcrumb -->
-        <div class="mobile-breadcrumb">
-            <details>
-            <summary><span>📂 Menu</span></summary>
-            <div class="menu">
-                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
-                <a href="/ai/" style="color:#c9d1d9;">AI</a>
-                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-                <a href="/code/" style="color:#c9d1d9;">Code</a>
-                <a href="/search/" style="color:#c9d1d9;">Search</a>
-                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-            </div>
-            </details>
-        </div>
-        </div></body>';
+        sub_filter '</body>' '$nav_overlay';
      }
 
     location ^~ /api/public/ {
@@ -455,76 +325,7 @@ server {
         sub_filter_once off;
         sub_filter_types text/html;
         # Inject CSS and responsive HTML standard across all locations
-        sub_filter '</body>' '$gcp_overlay<style>
-        /* Fixed positioning ensures auto-scrolling retention */
-        #global-nav-wrapper {
-            position: fixed;
-            z-index: 999999;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }
-        
-        /* Desktop Layout */
-        @media (min-width: 601px) {
-            #global-nav-wrapper { bottom: 16px; right: 16px; }
-            html { scroll-padding-bottom: 72px; }
-            body { padding-bottom: 64px !important; }
-            .mobile-breadcrumb { display: none !important; }
-            .desktop-nav {
-            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
-            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
-            }
-        }
-
-        /* Mobile Layout - Collapsible Breadcrumb */
-        @media (max-width: 600px) {
-            #global-nav-wrapper { top: 12px; right: 12px; }
-            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
-            .desktop-nav { display: none !important; }
-            .mobile-breadcrumb details {
-            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
-            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            backdrop-filter: blur(4px); font-size: 12px;
-            }
-            .mobile-breadcrumb summary {
-            padding: 6px 10px; color: #58a6ff; font-weight: 600;
-            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
-            }
-            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
-            .mobile-breadcrumb .menu {
-            display: flex; flex-direction: column; gap: 6px;
-            padding: 8px 12px 10px; border-top: 1px solid #30363d;
-            }
-        }
-        #global-nav-wrapper a { text-decoration: none; }
-        </style>
-
-        <div id="global-nav-wrapper">
-        <!-- Desktop Horizontal Bar -->
-        <div class="desktop-nav">
-            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-s        </div>
-
-        <!-- Mobile Collapsible Breadcrumb -->
-        <div class="mobile-breadcrumb">
-            <details>
-            <summary><span>📂 Menu</span></summary>
-            <div class="menu">
-                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
-                <a href="/ai/" style="color:#c9d1d9;">AI</a>
-                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-                <a href="/code/" style="color:#c9d1d9;">Code</a>
-                <a href="/search/" style="color:#c9d1d9;">Search</a>
-                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-            </div>
-            </details>
-        </div>
-        </div></body>';
+        sub_filter '</body>' '$nav_overlay';
     }
 
     location /story/ {
@@ -550,76 +351,7 @@ s        </div>
         sub_filter_once off;
         sub_filter_types text/html;
         # Inject CSS and responsive HTML standard across all locations
-        sub_filter '</body>' '$gcp_overlay<style>
-        /* Fixed positioning ensures auto-scrolling retention */
-        #global-nav-wrapper {
-            position: fixed;
-            z-index: 999999;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }
-        
-        /* Desktop Layout */
-        @media (min-width: 601px) {
-            #global-nav-wrapper { bottom: 16px; right: 16px; }
-            html { scroll-padding-bottom: 72px; }
-            body { padding-bottom: 64px !important; }
-            .mobile-breadcrumb { display: none !important; }
-            .desktop-nav {
-            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
-            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
-            }
-        }
-
-        /* Mobile Layout - Collapsible Breadcrumb */
-        @media (max-width: 600px) {
-            #global-nav-wrapper { top: 12px; right: 12px; }
-            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
-            .desktop-nav { display: none !important; }
-            .mobile-breadcrumb details {
-            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
-            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            backdrop-filter: blur(4px); font-size: 12px;
-            }
-            .mobile-breadcrumb summary {
-            padding: 6px 10px; color: #58a6ff; font-weight: 600;
-            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
-            }
-            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
-            .mobile-breadcrumb .menu {
-            display: flex; flex-direction: column; gap: 6px;
-            padding: 8px 12px 10px; border-top: 1px solid #30363d;
-            }
-        }
-        #global-nav-wrapper a { text-decoration: none; }
-        </style>
-
-        <div id="global-nav-wrapper">
-        <!-- Desktop Horizontal Bar -->
-        <div class="desktop-nav">
-            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-        </div>
-
-        <!-- Mobile Collapsible Breadcrumb -->
-        <div class="mobile-breadcrumb">
-            <details>
-            <summary><span>📂 Menu</span></summary>
-            <div class="menu">
-                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
-                <a href="/ai/" style="color:#c9d1d9;">AI</a>
-                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-                <a href="/code/" style="color:#c9d1d9;">Code</a>
-                <a href="/search/" style="color:#c9d1d9;">Search</a>
-                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-            </div>
-            </details>
-        </div>
-        </div></body>';
+        sub_filter '</body>' '$nav_overlay';
     }
 
     location /media/ {
@@ -656,76 +388,7 @@ s        </div>
         sub_filter_once off;
         sub_filter_types text/html;
        # Inject CSS and responsive HTML standard across all locations
-        sub_filter '</body>' '$gcp_overlay<style>
-        /* Fixed positioning ensures auto-scrolling retention */
-        #global-nav-wrapper {
-            position: fixed;
-            z-index: 999999;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }
-        
-        /* Desktop Layout */
-        @media (min-width: 601px) {
-            #global-nav-wrapper { bottom: 16px; right: 16px; }
-            html { scroll-padding-bottom: 72px; }
-            body { padding-bottom: 64px !important; }
-            .mobile-breadcrumb { display: none !important; }
-            .desktop-nav {
-            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
-            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
-            }
-        }
-
-        /* Mobile Layout - Collapsible Breadcrumb */
-        @media (max-width: 600px) {
-            #global-nav-wrapper { top: 12px; right: 12px; }
-            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
-            .desktop-nav { display: none !important; }
-            .mobile-breadcrumb details {
-            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
-            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            backdrop-filter: blur(4px); font-size: 12px;
-            }
-            .mobile-breadcrumb summary {
-            padding: 6px 10px; color: #58a6ff; font-weight: 600;
-            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
-            }
-            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
-            .mobile-breadcrumb .menu {
-            display: flex; flex-direction: column; gap: 6px;
-            padding: 8px 12px 10px; border-top: 1px solid #30363d;
-            }
-        }
-        #global-nav-wrapper a { text-decoration: none; }
-        </style>
-
-        <div id="global-nav-wrapper">
-        <!-- Desktop Horizontal Bar -->
-        <div class="desktop-nav">
-            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-        </div>
-
-        <!-- Mobile Collapsible Breadcrumb -->
-        <div class="mobile-breadcrumb">
-            <details>
-            <summary><span>📂 Menu</span></summary>
-            <div class="menu">
-                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
-                <a href="/ai/" style="color:#c9d1d9;">AI</a>
-                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-                <a href="/code/" style="color:#c9d1d9;">Code</a>
-                <a href="/search/" style="color:#c9d1d9;">Search</a>
-                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-            </div>
-            </details>
-        </div>
-        </div></body>'; 
+        sub_filter '</body>' '$nav_overlay'; 
     }
 
     # 4. Nextcloud
@@ -745,7 +408,7 @@ s        </div>
 
         sub_filter_once off;
         sub_filter_types text/html;
-        sub_filter '</body>' '$cloud_inject';
+        sub_filter '</body>' '$nav_overlay';
     }
 
     location /.well-known/carddav { return 301 $scheme://$host/cloud/remote.php/dav; }
@@ -763,76 +426,7 @@ s        </div>
         sub_filter_once off;
         sub_filter_types text/html;
         # Inject CSS and responsive HTML standard across all locations
-        sub_filter '</body>' '$gcp_overlay<style>
-        /* Fixed positioning ensures auto-scrolling retention */
-        #global-nav-wrapper {
-            position: fixed;
-            z-index: 999999;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }
-        
-        /* Desktop Layout */
-        @media (min-width: 601px) {
-            #global-nav-wrapper { bottom: 16px; right: 16px; }
-            html { scroll-padding-bottom: 72px; }
-            body { padding-bottom: 64px !important; }
-            .mobile-breadcrumb { display: none !important; }
-            .desktop-nav {
-            display: flex; gap: 8px; background: rgba(22, 27, 34, 0.95);
-            padding: 6px 12px; border-radius: 20px; border: 1px solid #30363d;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 13px; backdrop-filter: blur(4px);
-            }
-        }
-
-        /* Mobile Layout - Collapsible Breadcrumb */
-        @media (max-width: 600px) {
-            #global-nav-wrapper { top: 12px; right: 12px; }
-            html { scroll-padding-top: 56px; scroll-padding-bottom: 12px; }
-            .desktop-nav { display: none !important; }
-            .mobile-breadcrumb details {
-            background: rgba(22, 27, 34, 0.95); border: 1px solid #30363d;
-            border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            backdrop-filter: blur(4px); font-size: 12px;
-            }
-            .mobile-breadcrumb summary {
-            padding: 6px 10px; color: #58a6ff; font-weight: 600;
-            cursor: pointer; list-style: none; display: flex; align-items: center; gap: 4px;
-            }
-            .mobile-breadcrumb summary::-webkit-details-marker { display: none; }
-            .mobile-breadcrumb .menu {
-            display: flex; flex-direction: column; gap: 6px;
-            padding: 8px 12px 10px; border-top: 1px solid #30363d;
-            }
-        }
-        #global-nav-wrapper a { text-decoration: none; }
-        </style>
-
-        <div id="global-nav-wrapper">
-        <!-- Desktop Horizontal Bar -->
-        <div class="desktop-nav">
-            <a href="/" style="color:#58a6ff;font-weight:600;">Home</a><span style="color:#484f58;">|</span>
-            <a href="/ai/" style="color:#c9d1d9;">AI</a>
-            <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-            <a href="/code/" style="color:#c9d1d9;">Code</a>
-            <a href="/search/" style="color:#c9d1d9;">Search</a>
-            <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-        </div>
-
-        <!-- Mobile Collapsible Breadcrumb -->
-        <div class="mobile-breadcrumb">
-            <details>
-            <summary><span>📂 Menu</span></summary>
-            <div class="menu">
-                <a href="/" style="color:#58a6ff;font-weight:600;">Home</a>
-                <a href="/ai/" style="color:#c9d1d9;">AI</a>
-                <a href="/stories/" style="color:#c9d1d9;">Stories</a>
-                <a href="/code/" style="color:#c9d1d9;">Code</a>
-                <a href="/search/" style="color:#c9d1d9;">Search</a>
-                <a href="/cloud/" style="color:#c9d1d9;">Cloud</a>
-            </div>
-            </details>
-        </div>
-        </div></body>';
+        sub_filter '</body>' '$nav_overlay';
     }
 }
 
