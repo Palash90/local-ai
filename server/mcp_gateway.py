@@ -1,39 +1,84 @@
-import os, json, requests
-from mcp.server.fastmcp import FastMCP, Context
+import os, httpx
+from mcp.server.fastmcp import FastMCP
+from starlette.responses import JSONResponse
+import uvicorn
 
 API_BASE = "http://127.0.0.1:3001"
 STATIC_TOKEN = os.environ.get("MCP_GATEWAY_TOKEN", "")
+INBOUND_TOKEN = os.environ.get("MCP_INBOUND_TOKEN", "secret-mcp-key")
+
 mcp = FastMCP("chat-webui-api", stateless_http=True)
 
-def _call(method, path, ctx, **kw):
+class EnforcementAuthMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        # Only process HTTP requests
+        if scope["type"] == "http":
+            # Handle CORS preflight
+            if scope.get("method") == "OPTIONS":
+                await self.app(scope, receive, send)
+                return
+
+            headers = dict(scope.get("headers", []))
+            auth_header = headers.get(b"authorization", b"").decode("utf-8")
+            expected_token = f"Bearer {INBOUND_TOKEN}"
+
+            if auth_header != expected_token:
+                response = JSONResponse({"error": "Unauthorized"}, status_code=401)
+                await response(scope, receive, send)
+                return
+
+        await self.app(scope, receive, send)
+
+
+async def _call(method: str, path: str, **kw) -> str:
     headers = {"Authorization": f"Bearer {STATIC_TOKEN}"} if STATIC_TOKEN else {}
-    r = requests.request(method, f"{API_BASE}{path}", headers=headers, timeout=30, **kw)
-    return r.text
+    async with httpx.AsyncClient() as client:
+        r = await client.request(method, f"{API_BASE}{path}", headers=headers, timeout=30.0, **kw)
+        return r.text
+
 
 @mcp.tool()
-def list_sessions(ctx: Context) -> str:
+async def list_sessions() -> str:
     """List the current user's chat sessions."""
-    return _call("GET", "/api/sessions", ctx)
+    return await _call("GET", "/api/sessions")
+
 
 @mcp.tool()
-def get_session_messages(session_id: str, ctx: Context) -> str:
+async def get_session_messages(session_id: str) -> str:
     """Get all messages in a chat session."""
-    return _call("GET", f"/api/sessions/{session_id}/messages", ctx)
+    return await _call("GET", f"/api/sessions/{session_id}/messages")
+
 
 @mcp.tool()
-def list_tasks(ctx: Context) -> str:
+async def list_tasks() -> str:
     """List the current user's tasks."""
-    return _call("GET", "/api/tasks", ctx)
+    return await _call("GET", "/api/tasks")
+
 
 @mcp.tool()
-def list_shares(ctx: Context) -> str:
+async def list_shares() -> str:
     """List the current user's shared messages."""
-    return _call("GET", "/api/shares", ctx)
+    return await _call("GET", "/api/shares")
+
 
 @mcp.tool()
-def share_message(session_id: str, msg_index: int, ctx: Context) -> str:
+async def share_message(session_id: str, msg_index: int) -> str:
     """Create a public share link for a message."""
-    return _call("POST", "/api/shares", ctx, json={"session_id": session_id, "msg_index": msg_index})
+    return await _call(
+        "POST",
+        "/api/shares",
+        json={"session_id": session_id, "msg_index": msg_index},
+    )
+
+
+# Extract the FastMCP HTTP app and wrap it directly
+app = EnforcementAuthMiddleware(mcp.streamable_http_app())
 
 def run():
-    mcp.run(transport="streamable-http")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+if __name__ == "__main__":
+    run()
