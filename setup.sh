@@ -137,21 +137,12 @@ fi
 # identity provider and its users/groups. Context files are derived from each
 # username at ~/local-ai-files/contexts/<user>.txt.
 
-if [ ! -f "$FILES_DIR/sys_prompt.txt" ]; then
-    cat > "$FILES_DIR/sys_prompt.txt" << 'PROMPTEOF'
-You are a helpful AI assistant with the following capabilities:
-
-- Web search: You can search the web for real-time information.
-- Image generation: You can generate images using ComfyUI. Available styles: %model_list%
-- Image editing: You can edit existing images.
-- File extraction: You can read text from uploaded PDF, DOCX, XLSX files.
-
-Current time: %current_time%
-Current location: %current_location%
-
-Always respond in a helpful, concise manner.
-PROMPTEOF
-    echo "    $FILES_DIR/sys_prompt.txt"
+# The system prompt lives in the repo (prompts/sys_prompt.txt) and is linked
+# into FILES_DIR like every other prompt file, so edits to the repo copy take
+# effect on the next chat-webui.py restart without manual copying.
+if [ ! -e "$FILES_DIR/sys_prompt.txt" ]; then
+    ln -s "$CHAT_DIR/prompts/sys_prompt.txt" "$FILES_DIR/sys_prompt.txt"
+    echo "    $FILES_DIR/sys_prompt.txt -> $CHAT_DIR/prompts/sys_prompt.txt"
 fi
 
 mkdir -p "$FILES_DIR/contexts"

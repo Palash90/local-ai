@@ -407,6 +407,65 @@ def _inject_read_image(messages):
     return out
 
 
+def _last_user_text(messages):
+    """Return the text of the most recent user message (multimodal-safe)."""
+    for m in reversed(messages):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            return c
+        if isinstance(c, list):
+            parts = [
+                p.get("text", "")
+                for p in c
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            if parts:
+                return "\n".join(parts)
+    return ""
+
+
+def _route_sampling(mode, messages):
+    """Classify the latest user message and return sampling overrides.
+
+    One tiny greedy call against the same llama-server that will serve the
+    real request. Returns {} (= server defaults) on any failure — the router
+    can never block generation.
+    """
+    text = _last_user_text(messages)
+    if not text.strip():
+        return {}
+    try:
+        r = requests.post(
+            M.server_url(mode),
+            json={
+                "model": M.server_model_id(mode),
+                "messages": [
+                    {"role": "system", "content": M.SAMPLING_ROUTER_PROMPT},
+                    {"role": "user", "content": text[:4000]},
+                ],
+                "max_tokens": M.SAMPLING_ROUTER_MAX_TOKENS,
+                "temperature": 0.0,
+                "top_k": 1,
+                "stream": False,
+            },
+            timeout=M.SAMPLING_ROUTER_TIMEOUT,
+        )
+        label = (
+            r.json()["choices"][0]["message"]["content"].strip().lower()
+        )
+    except Exception as e:
+        print(f"[sampling-router] failed ({e}); using server defaults")
+        return {}
+    for bucket, params in M.SAMPLING_BUCKETS.items():
+        if bucket in label:
+            print(f"[sampling-router] {mode}: '{label.strip()}' → {bucket} {params}")
+            return dict(params)
+    print(f"[sampling-router] unrecognised label '{label}'; using server defaults")
+    return {}
+
+
 def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
     try:
         if M.estimate_tokens(msgs) > M.AUTO_COMPACT_THRESHOLD:
@@ -426,6 +485,15 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             wire_tools = M.TOOLS
         else:
             wire_tools = M.TOOLS_HUMAN
+        # Sampling router: classify once on round 0, reuse for all rounds of
+        # this task (stored under an underscore key so it stays private).
+        with M._data_lock:
+            sampling = M.tasks.get(task_id, {}).get("_sampling")
+        if sampling is None:
+            sampling = _route_sampling(mode, messages) if round_num == 0 else {}
+            with M._data_lock:
+                if task_id in M.tasks:
+                    M.tasks[task_id]["_sampling"] = sampling
         payload = {
             "model": M.server_model_id(mode),
             "messages": messages,
@@ -434,6 +502,7 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             "max_tokens": M.MAX_OUTPUT_TOKENS,
             "reasoning_budget_tokens": M.REASONING_BUDGET,
         }
+        payload.update(sampling or {})
         payload["stream"] = True
         M.mark_slot_kv_dirty(mode)
         r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)

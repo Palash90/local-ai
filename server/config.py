@@ -48,6 +48,34 @@ HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "http://10.66.66.1:9863/heartbea
 SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL", "").strip().rstrip("/")
 REASONING_BUDGET = 2048
 MAX_OUTPUT_TOKENS = 8192
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sampling router (two-call split).
+#
+# Round 0 of every task fires a tiny greedy classifier call (bounded by
+# SAMPLING_ROUTER_MAX_TOKENS) that labels the user's message intent; the label
+# maps to a sampling profile injected into all LLM rounds of that task via
+# per-request temperature/top_k/top_p (supported by llama-server,
+# tools/server/server-chat.cpp). Any router failure falls back to empty
+# overrides (= server defaults), never blocks generation.
+# ─────────────────────────────────────────────────────────────────────────────
+SAMPLING_ROUTER_MAX_TOKENS = 12
+SAMPLING_ROUTER_TIMEOUT = 90  # covers a cold model load on either lane
+SAMPLING_ROUTER_PROMPT = (
+    "Classify the user's latest message by what kind of response it needs.\n"
+    "- creative: stories, poems, lyrics, fiction, worldbuilding, roleplay\n"
+    "- code: programming, debugging, math, data analysis, exact technical "
+    "output\n"
+    "- factual: facts, explanations, research, news, how-to questions\n"
+    "- chat: casual conversation, opinions, everything else\n"
+    "Answer with EXACTLY ONE word: creative, code, factual, or chat."
+)
+SAMPLING_BUCKETS = {
+    "creative": {"temperature": 1.0, "top_k": 80, "top_p": 0.97},
+    "code": {"temperature": 0.3, "top_k": 40, "top_p": 0.9},
+    "factual": {"temperature": 0.5, "top_k": 40, "top_p": 0.9},
+    "chat": {"temperature": 1.0, "top_k": 64, "top_p": 0.95},
+}
 CPU_PARALLEL_SLOTS = 4  # Set to desired number of concurrent CPU agent slots
 
 # ─────────────────────────────────────────────────────────────────────────────
