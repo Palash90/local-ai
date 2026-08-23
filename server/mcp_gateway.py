@@ -141,8 +141,8 @@ async def send_chat_message(
     return await _call("POST", "/api/chat", json=payload)
 
 @mcp.tool()
-async def get_task_status(task_id: str) -> str:
-    """Check status of an asynchronous processing task."""
+async def get_message_status(task_id: str) -> str:
+    """Check status of an asynchronous chat message task."""
     return await _call("GET", f"/api/status/{task_id}")
 
 
