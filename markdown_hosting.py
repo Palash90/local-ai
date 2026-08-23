@@ -145,7 +145,7 @@ def error_page(status_code: int, detail: str) -> str:
     else:
         message = html.escape(str(detail))
     login_block = """
-    <span class="login-toggle"><a href="/sso/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
+    <span class="login-toggle"><a href="/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
     """
     return f"""
     <!DOCTYPE html>
@@ -193,7 +193,7 @@ def error_page(status_code: int, detail: str) -> str:
     </head>
     <body>
         <nav class="topbar">
-            <a href="/" class="back">← Back to Collections</a>
+            <a href="/stories/" class="back">← Back to Collections</a>
             {login_block}
         </nav>
         <h1>{title}</h1>
@@ -342,7 +342,7 @@ async def index(request: Request):
         """
     else:
         auth_html = """
-        <span class="login-toggle"><a href="/sso/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
+        <span class="login-toggle"><a href="/outpost.goauthentik.io/start?rd=%2Fstories%2F">Sign in with SSO</a></span>
         """
     return f"""
     <!DOCTYPE html>
@@ -617,7 +617,7 @@ async def read_story(
     </head>
     <body>
         <nav class="topbar">
-            <a href="/" class="back">← Back to Collections</a>
+            <a href="/stories/" class="back">← Back to Collections</a>
             {delete_button_html}
         </nav>
         {verdict_html}

@@ -143,21 +143,21 @@ cat << 'EOF' | sudo tee /var/www/dashboard/nav-overlay.css > /dev/null
     /* Sleeker mobile treatment: slimmer capsule, smaller icons, more glass */
     #global-nav-wrapper .nav-dock {
         gap: 0;
-        padding: 6px 4px;
-        border-radius: 18px;
+        padding: 4px 2px;
+        border-radius: 12px;
         background: rgba(22, 27, 34, 0.72);
         border-color: rgba(48, 54, 61, 0.6);
         box-shadow: 0 2px 10px rgba(0,0,0,0.35);
     }
     #global-nav-wrapper .nav-dock a {
-        width: 26px;
-        height: 26px;
-        font-size: 14px;
+        width: 18px;
+        height: 20px;
+        font-size: 8px;
         opacity: 0.7;
     }
     #global-nav-wrapper .nav-dock a.home { opacity: 0.9; }
     #global-nav-wrapper .nav-dock .sep {
-        width: 12px;
+        width: 8px;
         margin: 2px 0;
     }
 }
@@ -427,28 +427,6 @@ server {
         auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
 
         # Redirect to SSO login on 401
-        error_page 401 = @ak-sso-ai;
-
-        proxy_pass http://127.0.0.1:3002;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header X-Authentik-Username $authentik_username;
-        proxy_set_header X-Authentik-Groups $authentik_groups;
-        proxy_set_header X-Authentik-Email $authentik_email;
-        proxy_set_header X-Authentik-Name $authentik_name;
-        proxy_set_header X-Authentik-UID $authentik_uid;
-    }
-
-    # 3. Protected Content (Gated by Authentik)
-    location ~ ^/(story|media)/(premium_stories|admin_stories)/ {
-        auth_request /ak-auth-ai;
-        auth_request_set $authentik_username $upstream_http_x_authentik_username;
-        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
-        auth_request_set $authentik_email $upstream_http_x_authentik_email;
-        auth_request_set $authentik_name $upstream_http_x_authentik_name;
-        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
         error_page 401 = @ak-sso-ai;
 
         proxy_pass http://127.0.0.1:3002;
