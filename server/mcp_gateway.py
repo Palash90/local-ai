@@ -2,11 +2,11 @@ import os, json, requests
 from mcp.server.fastmcp import FastMCP, Context
 
 API_BASE = "http://127.0.0.1:3001"
+STATIC_TOKEN = os.environ.get("MCP_GATEWAY_TOKEN", "")
 mcp = FastMCP("chat-webui-api", stateless_http=True)
 
-def _call(method, path, ctx: Context, **kw):
-    token = ctx.request_context.request.headers.get("authorization", "")
-    headers = {"Authorization": token} if token else {}
+def _call(method, path, ctx, **kw):
+    headers = {"Authorization": f"Bearer {STATIC_TOKEN}"} if STATIC_TOKEN else {}
     r = requests.request(method, f"{API_BASE}{path}", headers=headers, timeout=30, **kw)
     return r.text
 
