@@ -487,7 +487,7 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
   )
 }
 
-function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, selectingRef, onResolved, onLocationNeeded }) {
+function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, selectingRef, onResolved, onLocationNeeded, shareToken }) {
   const elRef = useRef(null)
   const chatEl = useRef(null)
   const [popupVisible, setPopupVisible] = useState(null)
@@ -575,10 +575,10 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
   const searchDetails = msg._search_details || []
   const fetchDetails = searchDetails.filter(d => d && d.tool === 'fetch_page')
   const genPrompt = msg._gen_prompt
-  const imageUrl = toApiImage(msg._image_url)
+  const imageUrl = toApiImage(msg._image_url, shareToken)
   const imageModel = msg._image_model
   const isUserImgUrl = typeof userImg === 'string' && (userImg.startsWith('/') || /^https?:/.test(userImg))
-  const userImgSrc = userImg ? (isUserImgUrl ? toApiImage(userImg) : 'data:image/jpeg;base64,' + userImg) : null
+  const userImgSrc = userImg ? (isUserImgUrl ? toApiImage(userImg, shareToken) : 'data:image/jpeg;base64,' + userImg) : null
 
   if (
     msg.role === 'assistant' &&

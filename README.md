@@ -158,15 +158,16 @@ Resolved identity is always a dict — `username`, `email`, `name`, `groups`, `r
 > assume the SSO-enabled nginx front-end (`local_cloud.sh`); running `chat-webui.py`
 > directly on port 3001 bypasses all of it.
 
-- **Bypass on bare `chat-webui.py`.** Running `python chat-webui.py` directly serves
-  port 3001 **without** the nginx SSO gate, so `identity_from_headers` finds no
-  `X-Authentik-*` headers and every endpoint treats the caller as unauthenticated.
-  Always front it with `local_cloud.sh`'s nginx config for real protection.
-- **File endpoints are unauthenticated on bare 3001.** `/output/...` (generated
-  images) and `/uploads/...` (uploaded documents) are served without an identity
-  check (`chat-webui.py` `do_GET`). Anyone who can reach port 3001 and knows a
-  filename can download them. Behind the SSO nginx gate (`/ai/`, `/api/`) these are
-  still protected because the whole location is gated at the edge.
+- **Bypass on bare `chat-webui.py`.** `chat-webui.py` binds to `127.0.0.1` by
+  default (`CHAT_HOST`), so it is only reachable through the nginx front-end or
+  from the box itself. Setting `CHAT_HOST=0.0.0.0` re-exposes every endpoint
+  without the SSO gate — don't.
+- **Image endpoints require identity.** `/output/...`, `/uploads/...` and
+  `/api/image/...` answer only with valid Authentik SSO headers (browser via
+  nginx) or a verified agent JWT (self-chat / MCP gateway). Public share pages
+  load images exclusively through the scoped
+  `/api/public/share/<token>/image/...` route, which serves only files
+  referenced by that share's snapshot.
 - **CORS is wide open.** Responses carry `Access-Control-Allow-Origin: *`
   (`chat-webui.py` `do_OPTIONS`/`send_json`). A malicious page on the same origin
   context could call the API and read responses; SSO cookies are HttpOnly and

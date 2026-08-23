@@ -49,7 +49,7 @@ export default function PublicShareView({ token, onExit }) {
       ) : (
         <div className="public-share-body">
           <div className="public-share-meta">Shared by <strong>{state.sharedBy || 'someone'}</strong></div>
-          <Message msg={state.message} onImageOpen={openImage} hideSpeak />
+          <Message msg={state.message} onImageOpen={openImage} hideSpeak shareToken={token} />
         </div>
       )}
       <ImageLightbox src={lightboxSrc} onClose={closeLightbox} />

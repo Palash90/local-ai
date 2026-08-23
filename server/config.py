@@ -20,7 +20,7 @@ VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
 COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080/")
 COMFYUI_URL = "http://localhost:8188"
-HOST = os.environ.get("CHAT_HOST", "0.0.0.0")
+HOST = os.environ.get("CHAT_HOST", "127.0.0.1")
 PORT = 3001
 
 # GoDaddy Dynamic DNS — updates the AAAA record for DDNS_DOMAIN/DDNS_SUBDOMAIN

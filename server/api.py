@@ -25,6 +25,7 @@ import requests
 from server.auth import (
     get_current_user,
     get_identity,
+    identity_from_bearer,
     identity_from_headers,
 )
 from server.config import (
@@ -43,6 +44,44 @@ IMAGE_MIME = {
     ".gif": "image/gif",
     ".bmp": "image/bmp",
 }
+
+
+def _get_identity_safe(headers):
+    """Resolve identity from SSO headers or a Bearer JWT; None on any failure.
+
+    Unlike get_identity(), a transient JWKS outage is treated as "no identity"
+    (401 downstream) instead of raising out of a static-file handler.
+    """
+    ident = identity_from_headers(headers)
+    if ident:
+        return ident
+    try:
+        return identity_from_bearer(headers.get("Authorization", ""))
+    except RuntimeError:
+        return None
+
+
+def _snapshot_image_refs(msg):
+    """Every uploads/|output/ image reference embedded in a share snapshot.
+
+    Used to scope the public share-image endpoint: a token may only serve
+    images that its own snapshot actually references.
+    """
+    refs = set()
+
+    def walk(obj):
+        if isinstance(obj, str):
+            for match in re.findall(r"/(?:uploads|output)/[A-Za-z0-9._\-/]+", obj):
+                refs.add(match.strip("/"))
+        elif isinstance(obj, dict):
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(msg)
+    return refs
 
 
 def resolve_image_file(image_id):
@@ -264,6 +303,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self.send_json({"shares": list_shares(user)})
         elif self.path.startswith("/api/public/share/"):
+            img_route = re.match(
+                r"^/api/public/share/([A-Za-z0-9]+)/image/(.+)$", self.path
+            )
+            if img_route:
+                token, image_id = img_route.group(1), img_route.group(2)
+                rec = get_share(token)
+                if not rec:
+                    self.send_error(404)
+                    return
+                normalized = image_id.strip("/")
+                if normalized not in _snapshot_image_refs(rec.get("message", {})):
+                    self.send_error(404)
+                    return
+                fpath = resolve_image_file(normalized)
+                if not fpath:
+                    self.send_error(404)
+                    return
+                ext = os.path.splitext(fpath)[1].lower()
+                ctype = IMAGE_MIME.get(ext, "image/jpeg")
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Disposition", "inline")
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                with open(fpath, "rb") as f:
+                    self._safe_write(f.read())
+                return
             token = os.path.basename(self.path)
             rec = get_share(token)
             if not rec:
@@ -277,6 +343,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 }
             )
         elif self.path.startswith("/output/"):
+            if not _get_identity_safe(self.headers):
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
             rel = urlparse(self.path).path
             rel = rel[len("/output/"):] if rel.startswith("/output/") else rel
             fpath = os.path.abspath(os.path.join(COMFYUI_OUTPUT, rel))
@@ -291,6 +360,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self.send_error(404)
         elif self.path.startswith("/uploads/"):
+            if not _get_identity_safe(self.headers):
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
             filename = os.path.basename(urlparse(self.path).path)
             fpath = os.path.abspath(os.path.join(UPLOADS_DIR, filename))
             if fpath.startswith(os.path.abspath(UPLOADS_DIR)) and os.path.exists(fpath):
@@ -303,6 +375,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self.send_error(404)
         elif self.path.startswith("/api/image/"):
+            if not _get_identity_safe(self.headers):
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
             image_id = self.path[len("/api/image/"):]
             fpath = resolve_image_file(image_id)
             if fpath:

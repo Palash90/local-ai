@@ -268,6 +268,17 @@ server {
         index index.html;
     }
 
+    # Public share pages (/s/<token>). The chat SPA client-routes this path
+    # (App.jsx shareTokenFromPath), so serve the built shell + its relative
+    # ./assets/* from the repo's dist/ — deliberately NOT behind auth_request,
+    # exactly like /api/public/. Message images resolve through the scoped
+    # /api/public/share/<token>/image/... route, never the raw file paths.
+    location /s/ {
+        alias /home/palash/git/local-ai/dist/;
+        try_files $uri $uri/ /s/index.html;
+        add_header Cache-Control "no-cache";
+    }
+
     location /mcp {
         proxy_pass http://127.0.0.1:8000;   # no trailing "/" — full URI preserved
         proxy_http_version 1.1;

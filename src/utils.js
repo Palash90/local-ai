@@ -1,6 +1,7 @@
-export function toApiImage(url) {
+export function toApiImage(url, shareToken) {
   if (!url || typeof url !== 'string') return url
-  if (url.startsWith('data:') || /^https?:/i.test(url) || url.startsWith('/api/image/')) return url
+  if (url.startsWith('data:') || /^https?:/i.test(url) || url.startsWith('/api/')) return url
+  if (shareToken && url.startsWith('/')) return `/api/public/share/${shareToken}/image/${url.slice(1)}`
   if (url.startsWith('/uploads/') || url.startsWith('/output/')) return '/api/image/' + url.slice(1)
   if (url.startsWith('/')) return '/api/image/' + url.slice(1)
   return url
