@@ -262,6 +262,30 @@ server {
         alias /var/www/dashboard/nav-overlay.css;
         add_header Cache-Control "no-cache";
     }
+    
+    location = /.well-known/oauth-authorization-server {
+        proxy_pass http://127.0.0.1:8000/.well-known/oauth-authorization-server;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location = /authorize {
+        proxy_pass http://127.0.0.1:8000/authorize;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location = /oauth/token {
+        proxy_pass http://127.0.0.1:8000/oauth/token;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
 
     location / {
         root /var/www/dashboard;

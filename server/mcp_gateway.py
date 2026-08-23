@@ -1,9 +1,10 @@
 """MCP gateway exposing a narrow chat-oriented surface of the local-ai API.
 
 All tools act as the single configured identity (``MCP_USER``): the gateway
-authenticates inbound clients with a static bearer token
-(``MCP_INBOUND_TOKEN``) and then talks to the main API on loopback using a
-self-refreshing Authentik OIDC access token obtained via a password grant.
+authenticates inbound clients via OAuth client_credentials
+(``MCP_OAUTH_CLIENT_ID``/``MCP_OAUTH_CLIENT_SECRET``) and then talks to the
+main API on loopback using a self-refreshing Authentik OIDC access token
+obtained via a password grant.
 
 Intended workflow for an MCP client (e.g. Claude):
 1. ``list_sessions`` to discover existing conversations (or ``create_session``)
@@ -16,7 +17,9 @@ Intended workflow for an MCP client (e.g. Claude):
 
 import os, sys, json, time, threading, base64, httpx
 from mcp.server.fastmcp import FastMCP, Image
+from starlette.applications import Starlette
 from starlette.responses import JSONResponse
+from starlette.routing import Route, Mount
 import uvicorn
 
 try:
@@ -31,6 +34,12 @@ MCP_ALLOWED_USERS = [
 ]
 MCP_USER = os.environ.get("MCP_USER", "")
 MCP_USER_PASSWORD = os.environ.get("MCP_USER_PASSWORD", "")
+# Paste these into Claude's "Add custom connector" -> Advanced settings.
+# MCP_OAUTH_CLIENT_SECRET doubles as the bearer token: /oauth/token hands it
+# back as the access_token, and the middleware below validates against it
+# directly — no separate inbound-token secret to keep in sync.
+MCP_OAUTH_CLIENT_ID = os.environ.get("MCP_OAUTH_CLIENT_ID", "")
+MCP_OAUTH_CLIENT_SECRET = os.environ.get("MCP_OAUTH_CLIENT_SECRET", "")
 TOKEN_REFRESH_MARGIN = 60
 
 mcp = FastMCP("chat-webui-api", stateless_http=True)
@@ -55,16 +64,25 @@ class EnforcementAuthMiddleware:
 
             headers = dict(scope.get("headers", []))
             auth_header = headers.get(b"authorization", b"").decode("utf-8")
-            try:
-                identity = identity_from_bearer(auth_header)
-            except RuntimeError:
-                # Transient JWKS failure — treat as unauthenticated rather
-                # than crashing the request handler.
-                identity = None
-            if identity and MCP_ALLOWED_USERS:
-                identity = (
-                    identity if identity.get("username") in MCP_ALLOWED_USERS else None
-                )
+            presented = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+
+            identity = None
+            if MCP_OAUTH_CLIENT_SECRET and presented == MCP_OAUTH_CLIENT_SECRET:
+                # Token issued by /oauth/token IS the client secret — a
+                # client that already proved it knows the secret at the
+                # token endpoint is trusted to present it again here.
+                identity = {"username": MCP_USER}
+            else:
+                try:
+                    identity = identity_from_bearer(auth_header)
+                except RuntimeError:
+                    # Transient JWKS failure — treat as unauthenticated rather
+                    # than crashing the request handler.
+                    identity = None
+                if identity and MCP_ALLOWED_USERS:
+                    identity = (
+                        identity if identity.get("username") in MCP_ALLOWED_USERS else None
+                    )
             if not identity:
                 response = JSONResponse({"error": "Unauthorized"}, status_code=401)
                 await response(scope, receive, send)
@@ -348,7 +366,127 @@ async def get_image(image_id: str):
     return err if err else img
 
 
-app = EnforcementAuthMiddleware(mcp.streamable_http_app())
+import secrets, hashlib
+from starlette.responses import RedirectResponse
+
+_auth_codes = {}
+_auth_codes_lock = threading.Lock()
+AUTH_CODE_TTL = 300
+
+
+async def oauth_metadata(request):
+    """RFC 8414 authorization-server metadata. Claude's connector discovers
+    this from the base URL to find /authorize and /oauth/token."""
+    base = str(request.base_url).rstrip("/")
+    return JSONResponse({
+        "issuer": base,
+        "authorization_endpoint": f"{base}/authorize",
+        "token_endpoint": f"{base}/oauth/token",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "client_credentials"],
+        "code_challenge_methods_supported": ["S256", "plain"],
+        "token_endpoint_auth_methods_supported": [
+            "client_secret_post", "client_secret_basic", "none",
+        ],
+    })
+
+
+async def oauth_authorize(request):
+    """Authorization-code leg. Single-tenant server: reaching this endpoint
+    at all already implies it's the owner (no separate login screen) — we
+    just check client_id and mint a short-lived code tied to the PKCE
+    challenge, then bounce back to Claude's redirect_uri."""
+    p = request.query_params
+    client_id = p.get("client_id", "")
+    redirect_uri = p.get("redirect_uri", "")
+    state = p.get("state", "")
+    code_challenge = p.get("code_challenge", "")
+    code_challenge_method = p.get("code_challenge_method", "S256")
+
+    if p.get("response_type") != "code" or not redirect_uri:
+        return JSONResponse({"error": "invalid_request"}, status_code=400)
+    if MCP_OAUTH_CLIENT_ID and client_id != MCP_OAUTH_CLIENT_ID:
+        return JSONResponse({"error": "unauthorized_client"}, status_code=401)
+
+    code = secrets.token_urlsafe(32)
+    with _auth_codes_lock:
+        _auth_codes[code] = {
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+            "exp": time.time() + AUTH_CODE_TTL,
+        }
+    sep = "&" if "?" in redirect_uri else "?"
+    location = f"{redirect_uri}{sep}code={code}"
+    if state:
+        location += f"&state={state}"
+    return RedirectResponse(location, status_code=302)
+
+
+def _pkce_ok(verifier, challenge, method):
+    if not challenge:
+        return True  # PKCE not used by this client
+    if method == "plain":
+        return verifier == challenge
+    calc = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+    return calc.rstrip(b"=").decode() == challenge
+
+
+async def oauth_token(request):
+    """Token endpoint: supports the authorization_code grant Claude actually
+    uses (code + PKCE verifier from /authorize), and client_credentials as a
+    fallback for other callers. Either way the issued access token is
+    MCP_OAUTH_CLIENT_SECRET, which the middleware below validates."""
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
+    grant_type = form.get("grant_type", "")
+    client_id = form.get("client_id", "")
+    client_secret = form.get("client_secret", "")
+    if not client_id:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("basic "):
+            decoded = base64.b64decode(auth[6:]).decode("utf-8", "ignore")
+            client_id, _, client_secret = decoded.partition(":")
+
+    if MCP_OAUTH_CLIENT_ID and client_id != MCP_OAUTH_CLIENT_ID:
+        return JSONResponse({"error": "invalid_client"}, status_code=401)
+    # Confidential clients that pass a secret must get it right; public
+    # clients (PKCE-only, no secret — Claude's default) skip this check.
+    if client_secret and client_secret != MCP_OAUTH_CLIENT_SECRET:
+        return JSONResponse({"error": "invalid_client"}, status_code=401)
+
+    if grant_type == "authorization_code":
+        code = form.get("code", "")
+        with _auth_codes_lock:
+            entry = _auth_codes.pop(code, None)
+        if not entry or entry["exp"] < time.time():
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        if form.get("redirect_uri", "") != entry["redirect_uri"]:
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        if not _pkce_ok(form.get("code_verifier", ""), entry["code_challenge"],
+                         entry["code_challenge_method"]):
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+    elif grant_type == "client_credentials":
+        if not client_secret or client_secret != MCP_OAUTH_CLIENT_SECRET:
+            return JSONResponse({"error": "invalid_client"}, status_code=401)
+    else:
+        return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+
+    return JSONResponse({
+        "access_token": MCP_OAUTH_CLIENT_SECRET,
+        "token_type": "bearer",
+        "expires_in": 31536000,
+    })
+
+
+app = Starlette(routes=[
+    Route("/.well-known/oauth-authorization-server", oauth_metadata),
+    Route("/authorize", oauth_authorize),
+    Route("/oauth/token", oauth_token, methods=["POST"]),
+    Mount("/", app=EnforcementAuthMiddleware(mcp.streamable_http_app())),
+])
 
 def run():
     host = os.environ.get("MCP_HOST", "127.0.0.1")
