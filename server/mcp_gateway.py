@@ -20,6 +20,7 @@ from mcp.server.fastmcp import FastMCP, Image
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
+from contextlib import asynccontextmanager
 import uvicorn
 
 try:
@@ -492,14 +493,24 @@ async def oauth_protected_resource(request):
     })
 
 
-app = Starlette(routes=[
-    Route("/.well-known/oauth-authorization-server", oauth_metadata),
-    Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
-    Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource),
-    Route("/authorize", oauth_authorize),
-    Route("/oauth/token", oauth_token, methods=["POST"]),
-    Mount("/", app=EnforcementAuthMiddleware(mcp.streamable_http_app())),
-])
+mcp_app = mcp.streamable_http_app()
+
+@asynccontextmanager
+async def lifespan(app):
+    async with mcp_app.router.lifespan_context(mcp_app):
+        yield
+
+app = Starlette(
+    lifespan=lifespan,
+    routes=[
+        Route("/.well-known/oauth-authorization-server", oauth_metadata),
+        Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+        Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource),
+        Route("/authorize", oauth_authorize),
+        Route("/oauth/token", oauth_token, methods=["POST"]),
+        Mount("/", app=EnforcementAuthMiddleware(mcp_app)),
+    ],
+)
 
 def run():
     host = os.environ.get("MCP_HOST", "127.0.0.1")
