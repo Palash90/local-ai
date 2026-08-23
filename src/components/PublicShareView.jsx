@@ -36,11 +36,6 @@ export default function PublicShareView({ token, onExit }) {
     <div id="public-share-view">
       <div className="public-share-topbar">
         <span className="public-share-label">Shared message</span>
-        {onExit && (
-          <button type="button" className="public-share-exit" onClick={onExit}>
-            Log in to chat
-          </button>
-        )}
       </div>
       {state.loading ? (
         <div className="public-share-status">Loading…</div>
