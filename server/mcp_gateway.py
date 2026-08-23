@@ -15,7 +15,7 @@ Intended workflow for an MCP client (e.g. Claude):
 5. ``get_session_messages`` again to read the assistant's reply
 """
 
-import os, sys, json, time, threading, base64, httpx
+import os, sys, json, time, uuid, asyncio, threading, base64, httpx
 from mcp.server.fastmcp import FastMCP, Image
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -429,6 +429,324 @@ async def get_message_status(task_id: str) -> str:
         return json.dumps(obj)
 
     return raw_text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bulk processing — batch chat prompts.
+#
+# start_chat_batch enqueues N prompts and returns a batch_id immediately; a
+# background asyncio task works through them ONE AT A TIME (the GPU lane has a
+# single LLM worker and the lane queue caps at 5, so firing in parallel would
+# just 503). get_batch_status reports per-item progress and collects the final
+# reply text of each item so the client never needs to re-read sessions.
+# ─────────────────────────────────────────────────────────────────────────────
+
+BATCH_MAX_ITEMS = 50          # hard cap per batch
+BATCH_POLL_INTERVAL = 15      # seconds between /api/status polls per item
+BATCH_ITEM_TIMEOUT = 2400     # seconds before one item is abandoned
+BATCH_CHAT_SUBMIT_RETRIES = 3 # retries when the lane queue answers 503
+_BATCHES: dict = {}
+
+
+def _batch_summary(batch_id, b):
+    items = b["items"]
+    total = len(items)
+    counts = {"done": 0, "error": 0, "running": 0, "queued": 0}
+    for it in items:
+        counts[it["status"]] = counts.get(it["status"], 0) + 1
+    finished = counts["done"] + counts["error"]
+    return {
+        "batch_id": batch_id,
+        "total": total,
+        "progress": f"{finished} out of {total} items completed",
+        "percent_complete": round(finished * 100 / total) if total else 100,
+        **counts,
+        "created": b["created"],
+    }
+
+
+async def _batch_create_session(system_prompt):
+    payload = {"system_prompt": system_prompt} if system_prompt else {}
+    res = await _call("POST", "/api/sessions", json=payload)
+    raw = res.text if hasattr(res, "text") else str(res)
+    try:
+        return json.loads(raw).get("session_id", "")
+    except (ValueError, TypeError, AttributeError):
+        return ""
+
+
+async def _run_batch(batch_id):
+    b = _BATCHES.get(batch_id)
+    if not b:
+        return
+    shared_sid = b["session_id"]
+    for it in b["items"]:
+        it["status"] = "running"
+        try:
+            sid = shared_sid or await _batch_create_session(b["system_prompt"])
+            if not sid:
+                it["status"] = "error"
+                it["error"] = "could not create session"
+                continue
+            it["session_id"] = sid
+
+            task_id = ""
+            for attempt in range(BATCH_CHAT_SUBMIT_RETRIES):
+                res = await _call(
+                    "POST",
+                    "/api/chat",
+                    json={
+                        "session_id": sid,
+                        "message": it["prompt"],
+                        "research": b["research"],
+                        "cpu": b["cpu"],
+                        "no_tools": b["no_tools"],
+                    },
+                )
+                raw = res.text if hasattr(res, "text") else str(res)
+                try:
+                    obj = json.loads(raw)
+                except (ValueError, TypeError):
+                    obj = {}
+                if isinstance(obj, dict) and obj.get("task_id"):
+                    task_id = obj["task_id"]
+                    break
+                busy = "503" in raw or "Busy" in raw
+                if not busy or attempt == BATCH_CHAT_SUBMIT_RETRIES - 1:
+                    raise RuntimeError(raw[:300])
+                await asyncio.sleep(20)
+
+            deadline = time.time() + BATCH_ITEM_TIMEOUT
+            final_status = ""
+            while time.time() < deadline:
+                await asyncio.sleep(BATCH_POLL_INTERVAL)
+                res = await _call("GET", f"/api/status/{task_id}")
+                raw = res.text if hasattr(res, "text") else str(res)
+                try:
+                    st = json.loads(raw).get("status", "")
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                if st in ("done", "error", "cancelled"):
+                    final_status = st
+                    break
+            if not final_status:
+                raise RuntimeError(f"timed out after {BATCH_ITEM_TIMEOUT}s")
+
+            if final_status != "done":
+                it["status"] = "error"
+                it["error"] = f"task ended as '{final_status}'"
+                continue
+
+            res = await _call("GET", f"/api/sessions/{sid}/messages")
+            raw = res.text if hasattr(res, "text") else str(res)
+            reply = ""
+            try:
+                msgs = json.loads(raw).get("messages", [])
+                for m in reversed(msgs):
+                    if m.get("role") == "assistant":
+                        c = m.get("content")
+                        reply = c if isinstance(c, str) else json.dumps(c)
+                        break
+            except (ValueError, TypeError, AttributeError):
+                pass
+            it["reply"] = reply
+            it["task_id"] = task_id
+            it["status"] = "done"
+        except Exception as e:
+            it["status"] = "error"
+            it["error"] = str(e)[:300]
+
+
+@mcp.tool()
+async def start_chat_batch(
+    prompts: list,
+    shared_session: bool = False,
+    system_prompt: str = "",
+    research: bool = False,
+    cpu: bool = False,
+    no_tools: bool = False,
+) -> str:
+    """Submit MANY chat prompts at once and get a batch_id back immediately.
+
+    Each prompt is processed SEQUENTIALLY through the normal chat pipeline
+    (tools, research mode and sampling all behave exactly like
+    send_chat_message), so a batch of N messages takes roughly N × single-turn
+    time. This tool never blocks on generation.
+
+    Args:
+      prompts: list of message strings to process, e.g.
+        ["Summarise X", "Draft a poem about Y"]. Max 50 items.
+      shared_session: false → every prompt gets its own fresh session
+        (independent answers, no cross-contamination — recommended).
+        true → all prompts run inside ONE new session and see each other's
+        context, like a conversation.
+      system_prompt: optional persona/instructions applied to created sessions.
+      research / cpu / no_tools: same meaning as send_chat_message, applied to
+        every item.
+
+    Returns JSON:
+      {"batch_id": "<id>", "total": <n>, "note": "..."}.
+
+    TIMING — items run SEQUENTIALLY, so budget generously:
+      standard text batch ......... ~2 min PER ITEM
+      tools/images batch .......... ~3-5 min PER ITEM
+      research batch .............. ~5-7 min PER ITEM
+    WORKFLOW:
+      1. Sleep ~30 minutes, then call get_batch_status(batch_id).
+      2. It lists completed_indexes (ids only, no reply text).
+      3. Pull the new answers with get_batch_results(batch_id, [new ids]).
+      4. Re-poll every ~30 minutes until percent_complete == 100.
+    Never poll faster than every 30 minutes; collect replies incrementally —
+    do not wait for the whole batch to finish.
+    """
+    if not isinstance(prompts, list) or not prompts:
+        return json.dumps({"error": "prompts must be a non-empty list"})
+    prompts = [p for p in prompts if isinstance(p, str) and p.strip()]
+    if not prompts:
+        return json.dumps({"error": "prompts contains no usable strings"})
+    if len(prompts) > BATCH_MAX_ITEMS:
+        return json.dumps({
+            "error": f"too many prompts ({len(prompts)}); max {BATCH_MAX_ITEMS}"
+        })
+
+    session_id = ""
+    if shared_session:
+        session_id = await _batch_create_session(system_prompt)
+        if not session_id:
+            return json.dumps({"error": "could not create shared session"})
+
+    batch_id = uuid.uuid4().hex[:12]
+    _BATCHES[batch_id] = {
+        "created": int(time.time()),
+        "system_prompt": system_prompt,
+        "session_id": session_id,
+        "research": research,
+        "cpu": cpu,
+        "no_tools": no_tools,
+        "items": [
+            {"index": i, "prompt": p, "session_id": "", "task_id": "",
+             "status": "queued", "reply": "", "error": ""}
+            for i, p in enumerate(prompts)
+        ],
+    }
+    asyncio.create_task(_run_batch(batch_id))
+
+    # Housekeeping: keep only the 20 most recent batches.
+    if len(_BATCHES) > 20:
+        for k in sorted(_BATCHES, key=lambda k: _BATCHES[k]["created"])[:-20]:
+            del _BATCHES[k]
+
+    per_item_min = 7 if (research or not no_tools) else 2
+    est_total = len(prompts) * per_item_min
+    return json.dumps({
+        "batch_id": batch_id,
+        "total": len(prompts),
+        "mode": "shared_session" if shared_session else "per_item_sessions",
+        "est_total_minutes": est_total,
+        "note": (
+            f"{len(prompts)} prompts queued SEQUENTIALLY (~{per_item_min} min "
+            f"per item, ≈{est_total} min total). Do NOT poll immediately: "
+            f"sleep ~30 minutes, then call get_batch_status('{batch_id}') — "
+            "it returns completed_indexes (ids only). Pull new answers with "
+            f"get_batch_results('{batch_id}', [new ids]), then re-poll every "
+            "~30 minutes until percent_complete == 100."
+        ),
+    })
+
+
+@mcp.tool()
+async def get_batch_status(batch_id: str) -> str:
+    """LIGHTWEIGHT progress check for a bulk-chat batch — no reply text here.
+
+    Args:
+      batch_id: the id returned by start_chat_batch.
+
+    Poll this every ~30 MINUTES while the batch runs (items take minutes
+    each and are processed sequentially; faster polling wastes calls).
+
+    Returns JSON:
+      {
+        "batch_id": ..., "total": n,
+        "progress": "15 out of 20 items completed",
+        "percent_complete": 75,
+        "done": x, "error": y, "running": r, "queued": q,
+        "completed_indexes": [0, 1, 2, ...],   ← ready to collect
+        "failed_indexes": [7],
+        "note": "..."
+      }
+    The batch is finished only at percent_complete == 100. Feed NEW indexes
+    from completed_indexes into get_batch_results(batch_id, indexes) to
+    retrieve the actual answers — this tool never carries reply text.
+    Unknown ids yield {"error": "unknown batch_id"}.
+    """
+    b = _BATCHES.get(batch_id)
+    if not b:
+        return json.dumps({"error": "unknown batch_id"})
+    out = _batch_summary(batch_id, b)
+    out["completed_indexes"] = [
+        it["index"] for it in b["items"] if it["status"] == "done"
+    ]
+    out["failed_indexes"] = [
+        it["index"] for it in b["items"] if it["status"] == "error"
+    ]
+    out["note"] = (
+        "Status only — no reply text. Collect answers with "
+        f"get_batch_results('{batch_id}', [newly completed indexes])."
+    )
+    return json.dumps(out)
+
+
+@mcp.tool()
+async def get_batch_results(batch_id: str, indexes: list = None) -> str:
+    """Collect the actual assistant replies produced by a bulk-chat batch.
+
+    Args:
+      batch_id: the id returned by start_chat_batch.
+      indexes: list of item indexes to fetch (the values listed in
+        completed_indexes / failed_indexes by get_batch_status). Omit to
+        fetch EVERY item finished so far in one shot.
+
+    Returns a JSON array:
+      [{"index": 0, "status": "done", "prompt": "<original>",
+        "reply": "<full assistant answer>", "session_id": "<uuid>"},
+       {"index": 7, "status": "error", "prompt": "...",
+        "error": "<why it failed>"},
+       {"index": 99, "error": "unknown index"}]
+
+    Items still running/queued are simply absent unless requested explicitly,
+    in which case they appear with status "running"/"queued" and no reply.
+    Fetch incrementally as new indexes complete — no need to wait for 100%.
+    """
+    b = _BATCHES.get(batch_id)
+    if not b:
+        return json.dumps({"error": "unknown batch_id"})
+    if indexes is None:
+        selected = [it for it in b["items"] if it["status"] in ("done", "error")]
+    else:
+        by_idx = {it["index"]: it for it in b["items"]}
+        selected = []
+        for i in indexes if isinstance(indexes, list) else []:
+            try:
+                selected.append(by_idx[int(i)])
+            except (KeyError, TypeError, ValueError):
+                selected.append({"index": i, "error": "unknown index"})
+    out = []
+    for it in selected:
+        entry = {
+            "index": it["index"],
+            "status": it["status"],
+            "prompt": it["prompt"],
+        }
+        if it["status"] == "done":
+            entry["reply"] = it["reply"]
+            entry["session_id"] = it["session_id"]
+        elif it["status"] == "error":
+            entry["error"] = it["error"]
+        else:
+            entry["note"] = "not finished yet — poll get_batch_status"
+        out.append(entry)
+    return json.dumps(out)
+
 
 @mcp.tool()
 async def get_image(image_id: str):
