@@ -334,6 +334,7 @@ server {
     }
 
     # 2. Chat Stories App
+    # 1. Stories Index Catalog (Optional SSO: passes user headers if logged in, falls back to guest if 401)
     location /stories/ {
         auth_request /ak-auth-ai;
         auth_request_set $authentik_username $upstream_http_x_authentik_username;
@@ -341,9 +342,12 @@ server {
         auth_request_set $authentik_email $upstream_http_x_authentik_email;
         auth_request_set $authentik_name $upstream_http_x_authentik_name;
         auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
-        error_page 401 = @ak-sso-ai;
 
-        proxy_pass http://127.0.0.1:3002/;
+        # Fall back to guest mode without blocking 401
+        error_page 401 = @stories_guest;
+
+        rewrite ^/stories/(.*)$ /$1 break;
+        proxy_pass http://127.0.0.1:3002;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -356,16 +360,28 @@ server {
         proxy_set_header X-Authentik-UID $authentik_uid;
     }
 
-    location /story/ {
+    location @stories_guest {
+        rewrite ^/stories/(.*)$ /$1 break;
+        proxy_pass http://127.0.0.1:3002;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Accept-Encoding "";
+    }
+
+    # 2. Free Stories & Media (Optional SSO pass-through)
+    location ^~ /story/free_stories/ {
         auth_request /ak-auth-ai;
         auth_request_set $authentik_username $upstream_http_x_authentik_username;
         auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
         auth_request_set $authentik_email $upstream_http_x_authentik_email;
         auth_request_set $authentik_name $upstream_http_x_authentik_name;
         auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
-        error_page 401 = @ak-sso-ai;
 
-        proxy_pass http://127.0.0.1:3002/story/;
+        error_page 401 = @free_content_guest;
+
+        proxy_pass http://127.0.0.1:3002;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -377,7 +393,56 @@ server {
         proxy_set_header X-Authentik-UID $authentik_uid;
     }
 
-    location /media/ {
+    location ^~ /media/free_stories/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+
+        error_page 401 = @free_content_guest;
+
+        proxy_pass http://127.0.0.1:3002;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+    }
+
+    location @free_content_guest {
+        proxy_pass http://127.0.0.1:3002;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # 3. Protected Premium & Admin Content (Strict SSO requirement)
+    location ~ ^/(story|media)/(premium_stories|admin_stories)/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+
+        # Redirect to SSO login on 401
+        error_page 401 = @ak-sso-ai;
+
+        proxy_pass http://127.0.0.1:3002;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+        proxy_set_header X-Authentik-Email $authentik_email;
+        proxy_set_header X-Authentik-Name $authentik_name;
+        proxy_set_header X-Authentik-UID $authentik_uid;
+    }
+
+    # 3. Protected Content (Gated by Authentik)
+    location ~ ^/(story|media)/(premium_stories|admin_stories)/ {
         auth_request /ak-auth-ai;
         auth_request_set $authentik_username $upstream_http_x_authentik_username;
         auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
@@ -386,7 +451,7 @@ server {
         auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
         error_page 401 = @ak-sso-ai;
 
-        proxy_pass http://127.0.0.1:3002/media/;
+        proxy_pass http://127.0.0.1:3002;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
