@@ -46,7 +46,8 @@ HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "http://10.66.66.1:9863/heartbea
 # "http://192.168.1.10:3001/s/<token>" becomes a dead short URL that ends at the
 # colon. Leave empty to keep building links from the browser's own origin.
 SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL", "").strip().rstrip("/")
-REASONING_BUDGET = 4096
+REASONING_BUDGET = 2048
+MAX_OUTPUT_TOKENS = 8192
 CPU_PARALLEL_SLOTS = 4  # Set to desired number of concurrent CPU agent slots
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -215,6 +216,10 @@ LLAMA_SERVER_ARGS = [
     "-ub", "512",
     "--timeout", "3600",
 
+    # Prompt-cache reuse: allow slots to reuse/shift cached prefix segments
+    # across multi-turn chats and tool rounds instead of re-prefilling.
+    "--cache-reuse", "256",
+
     # KV-cache checkpointing: enables POST /slots/{id}?action=save|restore so
     # the conversation KV survives model unload/reload cycles (image gen).
     # The router passes this down to each loaded model instance.
@@ -252,6 +257,10 @@ LLAMA_SERVER_ARGS_CPU = [
     "-t", "6",
     "-tb", "6",
 
+    # Prompt-cache reuse (see LLAMA_SERVER_ARGS): agent turns share long
+    # prefixes (system prompt + tools), so shifted reuse saves CPU prefill.
+    "--cache-reuse", "256",
+
     # Reasoning & Thinking Limits
     "--reasoning-budget", str(REASONING_BUDGET),
     "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
@@ -286,7 +295,17 @@ with open(
 ) as file:
     IMAGE_MODELS = json.load(file)
 
-TOOLS = [
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool definitions — two-tier.
+#
+# TOOLS_DETAILED is the source of truth: full descriptions and per-field
+# guidance for every callable tool. TOOLS is the slim wire format actually sent
+# with every chat request: name + one-line description + bare parameter schemas
+# (types/enums/required only). This cuts the static prompt overhead by ~60% on
+# every (re)prefill. The model can recover the full docs at runtime via the
+# `tool_details` meta-tool, which is dispatched in server/features/tools.py.
+# ─────────────────────────────────────────────────────────────────────────────
+TOOLS_DETAILED = [
         {
             "type": "function",
             "function": {
@@ -568,7 +587,122 @@ TOOLS = [
     },
 ]
 
+# Hot-path tools whose FULL definitions always go out on the wire — the model
+# must never need a `tool_details` round-trip before using these.
+_FULL_DOCS_TOOLS = {"web_search", "fetch_page"}
+
+_TOOL_SHORT_DESC = {
+    "web_search": (
+        "Search the web for real-time/current information (news, weather, "
+        "prices, events). Returns snippets only."
+    ),
+    "fetch_page": (
+        "Read the full text of a web page by URL; long pages are chunked, "
+        "re-call with chunk=2, 3, ... for the rest."
+    ),
+    "generate_image": (
+        "Generate/draw an image from a prompt. A style model MUST be chosen."
+    ),
+    "edit_image": (
+        "Img2img editor: restyle/modify an existing or uploaded image via "
+        "prompt + denoise strength."
+    ),
+    "get_user_location": (
+        "Ask the user's browser for their current city/area (may be denied)."
+    ),
+    "read_file": (
+        "Extract text from an uploaded file (PDF/DOC/DOCX/XLS/XLSX) via its "
+        "[FILE: url] path."
+    ),
+    "read_image": (
+        "View an image attached or generated earlier in the conversation via "
+        "its [IMAGE: url] path."
+    ),
+    "update_user_context": (
+        "Append lasting facts/preferences about the user; persists across "
+        "conversations. New info only."
+    ),
+    "manage_tasks": (
+        "Create/update/complete/delete/list/get the user's to-do tasks and "
+        "reminders."
+    ),
+    "track_theme": (
+        "Log/check creative theme+genre+mood+role combos to guarantee "
+        "variety (never repeat one)."
+    ),
+}
+
+
+def _slim_tools(detailed):
+    """Build the wire-format tool list from TOOLS_DETAILED.
+
+    Tools in _FULL_DOCS_TOOLS (the hot, latency-sensitive path) pass through
+    verbatim so their calling behaviour is unchanged. Everything else is
+    slimmed to name + one-line description + bare parameter schemas
+    (type + enum + required only); full docs stay reachable via `tool_details`.
+    """
+    slim = []
+    for t in detailed:
+        fn = t["function"]
+        if fn["name"] in _FULL_DOCS_TOOLS:
+            slim.append(t)
+            continue
+        params_in = fn.get("parameters", {}) or {}
+        props = {}
+        for key, spec in (params_in.get("properties") or {}).items():
+            s = {"type": spec.get("type")}
+            if "enum" in spec:
+                s["enum"] = spec["enum"]
+            props[key] = s
+        params = {"type": "object", "properties": props}
+        if params_in.get("required"):
+            params["required"] = params_in["required"]
+        slim.append({
+            "type": "function",
+            "function": {
+                "name": fn["name"],
+                "description": _TOOL_SHORT_DESC.get(fn["name"], ""),
+                "parameters": params,
+            },
+        })
+    return slim
+
+
+TOOLS = _slim_tools(TOOLS_DETAILED)
+TOOLS.append({
+    "type": "function",
+    "function": {
+        "name": "tool_details",
+        "description": (
+            "Return the FULL usage docs (every parameter with detailed field "
+            "guidance) for the named tools. Call this before using any tool "
+            "you are not completely sure how to parameterise correctly."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Comma-separated list of tool names.",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+})
+
+# Tools reserved for the self-chat pipeline (Kaya/Kolpo story rounds). They are
+# stripped from human UI requests (see TOOLS_HUMAN) to cut static prompt
+# tokens; the dispatch layer enforces the same split defensively.
+AGENT_ONLY_TOOLS = {"track_theme"}
+
 TOOLS_TOKEN_COST = len(json.dumps(TOOLS)) // 4
+
+# Human-facing subset: everything except AGENT_ONLY_TOOLS.
+TOOLS_HUMAN = [
+    t for t in TOOLS if t["function"]["name"] not in AGENT_ONLY_TOOLS
+]
+TOOLS_HUMAN_TOKEN_COST = len(json.dumps(TOOLS_HUMAN)) // 4
 
 
 def build_sys_content():

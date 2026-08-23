@@ -420,14 +420,19 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             task_user = M.tasks.get(task_id, {}).get("_user", "")
             task_no_tools = M.tasks.get(task_id, {}).get("no_tools", False)
         tool_free = task_user in M.TOOL_FREE_AGENTS or task_no_tools
+        # Agents (Kaya/Kolpo pipeline) get the full tool set; humans never see
+        # AGENT_ONLY_TOOLS (track_theme), saving its tokens on every turn.
+        if task_user in M._agent_users:
+            wire_tools = M.TOOLS
+        else:
+            wire_tools = M.TOOLS_HUMAN
         payload = {
             "model": M.server_model_id(mode),
             "messages": messages,
-            "tools": [] if tool_free else M.TOOLS,
+            "tools": [] if tool_free else wire_tools,
             "tool_choice": "none" if tool_free else "auto",
-            "max_tokens": M.MAX_INPUT_TOKENS,
-            #"reasoning_budget": REASONING_BUDGET,
-            #"reasoning_effort": "medium",
+            "max_tokens": M.MAX_OUTPUT_TOKENS,
+            "reasoning_budget_tokens": M.REASONING_BUDGET,
         }
         payload["stream"] = True
         M.mark_slot_kv_dirty(mode)

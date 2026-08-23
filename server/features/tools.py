@@ -605,8 +605,40 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                 user = t.get("_user", "")
         if not user:
             result = json.dumps({"ok": False, "error": "User not found"})
+        elif user not in M._agent_users:
+            result = json.dumps({
+                "ok": False,
+                "error": "track_theme is reserved for the self-chat agent pipeline",
+            })
         else:
             result = M.handle_theme_tool(user, args)
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
+    elif tool_name == "tool_details":
+        wanted = [n.strip() for n in str(args.get("name", "")).split(",") if n.strip()]
+        known = {t["function"]["name"]: t for t in M.TOOLS_DETAILED}
+        with M._data_lock:
+            req_user = M.tasks.get(task_id, {}).get("_user", "")
+        if req_user not in M._agent_users:
+            known = {
+                n: t for n, t in known.items() if n not in M.AGENT_ONLY_TOOLS
+            }
+        found = [known[n] for n in wanted if n in known]
+        if found:
+            result = json.dumps(found)
+        else:
+            result = json.dumps({
+                "error": "Unknown tool(s)",
+                "requested": wanted,
+                "available": sorted(known),
+            })
         M._event_post(
             "tool_ok",
             task_id,
