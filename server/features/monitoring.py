@@ -347,10 +347,16 @@ def _get_current_ipv6():
     """Get this machine's stable global IPv6 address."""
     try:
         iface = subprocess.check_output(
-            "ip -6 route show default | awk '{print $5; exit}'", shell=True, text=True
+            "ip -6 route show default | awk '{print $5; exit}'",
+            shell=True,
+            text=True,
+            timeout=10,
         ).strip()
         output = subprocess.check_output(
-            f"ip -6 addr show {iface} scope global", shell=True, text=True
+            f"ip -6 addr show {iface} scope global",
+            shell=True,
+            text=True,
+            timeout=10,
         )
         for line in output.splitlines():
             if "inet6" in line and "temporary" not in line:
@@ -364,10 +370,16 @@ def _get_wifi_ipv4():
     """This machine's LAN IPv4 on the default (WiFi) interface."""
     try:
         iface = subprocess.check_output(
-            "ip -4 route show default | awk '{print $5; exit}'", shell=True, text=True
+            "ip -4 route show default | awk '{print $5; exit}'",
+            shell=True,
+            text=True,
+            timeout=10,
         ).strip()
         output = subprocess.check_output(
-            f"ip -4 addr show {iface} scope global", shell=True, text=True
+            f"ip -4 addr show {iface} scope global",
+            shell=True,
+            text=True,
+            timeout=10,
         )
         for line in output.splitlines():
             line = line.strip()
@@ -420,10 +432,16 @@ def _get_current_ipv6():
     """Get this machine's stable global IPv6 address."""
     try:
         iface = subprocess.check_output(
-            "ip -6 route show default | awk '{print $5; exit}'", shell=True, text=True
+            "ip -6 route show default | awk '{print $5; exit}'",
+            shell=True,
+            text=True,
+            timeout=10,
         ).strip()
         output = subprocess.check_output(
-            f"ip -6 addr show {iface} scope global", shell=True, text=True
+            f"ip -6 addr show {iface} scope global",
+            shell=True,
+            text=True,
+            timeout=10,
         )
         for line in output.splitlines():
             if "inet6" in line and "temporary" not in line:
@@ -439,7 +457,9 @@ def _update_godaddy_aaaa(new_ip):
         "Authorization": f"sso-key {M.GODADDY_API_KEY}:{M.GODADDY_API_SECRET}",
         "Content-Type": "application/json",
     }
-    resp = requests.put(url, headers=headers, json=[{"data": new_ip, "ttl": 600}])
+    resp = requests.put(
+        url, headers=headers, json=[{"data": new_ip, "ttl": 600}], timeout=10
+    )
     if resp.status_code == 200:
         print(f"[ddns] GoDaddy AAAA updated to {new_ip}")
         return True

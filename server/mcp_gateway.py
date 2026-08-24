@@ -25,9 +25,53 @@ import uvicorn
 
 try:
     from server.auth import identity_from_bearer, oidc_password_grant
+    from server.batches_db import (
+        PENDING as BATCH_PENDING,
+        WORKING as BATCH_WORKING,
+        COMPLETED as BATCH_COMPLETED,
+        ERROR as BATCH_ERROR,
+        batch_get,
+        batch_insert,
+        claim_next_pending,
+        fail_open_items,
+        finish_batch,
+        init_batches_db,
+        item_update,
+        pending_count,
+        prune_batches,
+        queue_position,
+        requeue_stuck_batches,
+    )
+    from server.input_guard import (
+        GUARDRAIL_DECLINE,
+        is_jailbreak_attempt,
+        wrap_user_message,
+    )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from server.auth import identity_from_bearer, oidc_password_grant
+    from server.batches_db import (
+        PENDING as BATCH_PENDING,
+        WORKING as BATCH_WORKING,
+        COMPLETED as BATCH_COMPLETED,
+        ERROR as BATCH_ERROR,
+        batch_get,
+        batch_insert,
+        claim_next_pending,
+        fail_open_items,
+        finish_batch,
+        init_batches_db,
+        item_update,
+        pending_count,
+        prune_batches,
+        queue_position,
+        requeue_stuck_batches,
+    )
+    from server.input_guard import (
+        GUARDRAIL_DECLINE,
+        is_jailbreak_attempt,
+        wrap_user_message,
+    )
 
 API_BASE = os.environ.get("CHAT_API_BASE", "http://127.0.0.1:3001")
 MCP_ALLOWED_USERS = [
@@ -78,7 +122,12 @@ class EnforcementAuthMiddleware:
                 identity = {"username": MCP_USER}
             else:
                 try:
-                    identity = identity_from_bearer(auth_header)
+                    # JWKS fetch does synchronous network I/O — keep it off
+                    # the event loop so a slow/hung IdP can't freeze every
+                    # concurrent request.
+                    identity = await asyncio.to_thread(
+                        identity_from_bearer, auth_header
+                    )
                 except RuntimeError:
                     # Transient JWKS failure — treat as unauthenticated rather
                     # than crashing the request handler.
@@ -99,6 +148,7 @@ class EnforcementAuthMiddleware:
 
 _token_lock = threading.Lock()
 _token_cache = {"value": "", "exp": 0}
+_token_refresh_lock = asyncio.Lock()
 
 
 def _decode_exp(token):
@@ -111,35 +161,46 @@ def _decode_exp(token):
         return 0
 
 
-def _auth_headers():
+def _token_usable():
+    """True when the cached token is still fresh enough to bother with."""
+    now = time.time()
+    exp = _token_cache["exp"]
+    return bool(
+        _token_cache["value"]
+        and (
+            (exp and now < exp - TOKEN_REFRESH_MARGIN)
+            or (not exp and now < TOKEN_REFRESH_MARGIN)
+        )
+    )
+
+
+async def _auth_headers():
     """Bearer headers holding a fresh Authentik access token for MCP_USER.
 
-    Re-grants via the OIDC password grant shortly before expiry, mirroring
-    the self-chat agent token lifecycle.
+    The password-grant refresh runs in a worker thread and never holds a
+    lock across the network call: one slow/hung IdP must not stall other
+    tool calls (a threading.Lock held over I/O here used to wedge the whole
+    gateway whenever the upstream was unreachable).
     """
     if not MCP_USER or not MCP_USER_PASSWORD:
         raise RuntimeError(
             "MCP_USER / MCP_USER_PASSWORD not set — cannot authenticate to the API"
         )
-    global _token_cache
-    with _token_lock:
-        now = time.time()
-        exp = _token_cache["exp"]
-        fresh = _token_cache["value"] and (
-            exp
-            and now < exp - TOKEN_REFRESH_MARGIN
-            or not exp
-            and now < TOKEN_REFRESH_MARGIN
-        )
-        if not fresh:
-            token = oidc_password_grant(MCP_USER, MCP_USER_PASSWORD)
-            _token_cache = {"value": token, "exp": _decode_exp(token)}
-        return {"Authorization": f"Bearer {_token_cache['value']}"}
+    if not _token_usable():
+        async with _token_refresh_lock:
+            if not _token_usable():
+                token = await asyncio.to_thread(
+                    oidc_password_grant, MCP_USER, MCP_USER_PASSWORD
+                )
+                with _token_lock:
+                    _token_cache["value"] = token
+                    _token_cache["exp"] = _decode_exp(token)
+    return {"Authorization": f"Bearer {_token_cache['value']}"}
 
 
 async def _call(method: str, path: str, **kw) -> str:
     try:
-        headers = _auth_headers()
+        headers = await _auth_headers()
     except Exception as e:
         return json.dumps({"error": f"MCP upstream auth failed: {e}"})
     async with httpx.AsyncClient() as client:
@@ -159,7 +220,7 @@ async def _call_image(path: str):
     text.
     """
     try:
-        headers = _auth_headers()
+        headers = await _auth_headers()
     except Exception as e:
         return None, json.dumps({"error": f"MCP upstream auth failed: {e}"})
     async with httpx.AsyncClient() as client:
@@ -241,7 +302,20 @@ async def create_session(system_prompt: str = "", system_prompts: list = None) -
     the first message into it, pass this session_id to send_chat_message.
     Creating a session does NOT automatically switch any UI state — it is a
     pure data operation.
+
+    GUARDRAIL: system prompts are screened by the input guardrail; a prompt
+    that tries to disable safety rules is declined and no session is created.
     """
+    if (system_prompt and is_jailbreak_attempt(system_prompt)) or any(
+        isinstance(sp, dict) and is_jailbreak_attempt(str(sp.get("prompt", "")))
+        or isinstance(sp, str) and is_jailbreak_attempt(sp)
+        for sp in (system_prompts or [])
+    ):
+        return json.dumps({
+            "declined": True,
+            "response": GUARDRAIL_DECLINE,
+            "detail": "system_prompt blocked by MCP input guardrail",
+        })
     payload = {}
     if system_prompt:
         payload["system_prompt"] = system_prompt
@@ -327,14 +401,26 @@ async def send_chat_message(
 
     Returns JSON: {"task_id": "<uuid>", "wait_hint": "<polling guidance>"}.
 
+    GUARDRAIL: messages matching known injection patterns ("ignore previous
+    instructions", "jailbreak", ...) are declined locally with
+    {"declined": true} — no task is created. Everything else is forwarded
+    wrapped in the server-side safety frame; the model may answer borderline
+    content itself with "Request declined." — treat that as a normal reply.
+
     REQUIRED follow-up: poll get_message_status(task_id) until the status is
     a terminal value ("done", "error" or "cancelled"), then fetch the reply
     with get_session_messages(session_id). Never assume the answer exists
     right after this call.
     """
+    if is_jailbreak_attempt(message):
+        return json.dumps({
+            "declined": True,
+            "response": GUARDRAIL_DECLINE,
+            "detail": "message blocked by MCP input guardrail",
+        })
     payload = {
         "session_id": session_id,
-        "message": message,
+        "message": wrap_user_message(message),
         "research": research,
         "cpu": cpu,
         "no_tools": no_tools,
@@ -434,22 +520,28 @@ async def get_message_status(task_id: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Bulk processing — batch chat prompts.
 #
-# start_chat_batch enqueues N prompts and returns a batch_id immediately; a
-# background asyncio task works through them ONE AT A TIME (the GPU lane has a
-# single LLM worker and the lane queue caps at 5, so firing in parallel would
-# just 503). Items finish in waves; get_batch_status reports progress plus
+# start_chat_batch enqueues N prompts and returns a batch_id immediately. The
+# batch is persisted to SQLite (server/batches_db.py) with a status flag —
+# PENDING → WORKING → COMPLETED|ERROR — and a SINGLE background worker drains
+# the queue one batch at a time (no per-request asyncio task; concurrent
+# batches simply queue up). ERROR means every item failed; partial failures
+# still close as COMPLETED with failed_indexes listing the dead items. Within a batch, items run ONE AT A TIME too: the GPU lane
+# has a single LLM worker and its queue caps at 5, so firing in parallel would
+# just 503. Items finish in waves; get_batch_status reports progress plus
 # new_indexes (terminal replies never fetched yet), and every successful
 # get_batch_results fetch marks its items collected so later polls only show
 # genuinely new work. The flow is bidirectional: submit_batch_results lets
 # the client attach its own per-item outcomes (grades, notes, anything) back
 # onto the batch in ONE call, riding out again via get_batch_results.
+# Batches survive gateway restarts: WORKING rows found at boot are re-queued.
 # ─────────────────────────────────────────────────────────────────────────────
 
-BATCH_MAX_ITEMS = 50          # hard cap per batch
-BATCH_POLL_INTERVAL = 15      # seconds between /api/status polls per item
-BATCH_ITEM_TIMEOUT = 2400     # seconds before one item is abandoned
-BATCH_CHAT_SUBMIT_RETRIES = 3 # retries when the lane queue answers 503
-_BATCHES: dict = {}
+BATCH_MAX_ITEMS = 50            # hard cap per batch
+BATCH_POLL_INTERVAL = 15        # seconds between /api/status polls per item
+BATCH_ITEM_TIMEOUT = 2400       # seconds before one item is abandoned
+BATCH_CHAT_SUBMIT_RETRIES = 3   # retries when the lane queue answers 503
+BATCH_KEEP = 50                 # most recent batches kept in the DB
+BATCH_WORKER_IDLE_SLEEP = 2     # seconds between DB polls when queue is empty
 
 
 def _batch_summary(batch_id, b):
@@ -461,6 +553,7 @@ def _batch_summary(batch_id, b):
     finished = counts["done"] + counts["error"]
     return {
         "batch_id": batch_id,
+        "status": b["status"],
         "total": total,
         "progress": f"{finished} out of {total} items completed",
         "percent_complete": round(finished * 100 / total) if total else 100,
@@ -485,19 +578,23 @@ async def _batch_create_session(system_prompt):
 
 
 async def _run_batch(batch_id):
-    b = _BATCHES.get(batch_id)
+    b = batch_get(batch_id)
     if not b:
         return
     shared_sid = b["session_id"]
     for it in b["items"]:
-        it["status"] = "running"
+        if it["status"] in ("done", "error"):
+            continue
+        item_update(batch_id, it["index"], status="running")
         try:
-            sid = shared_sid or await _batch_create_session(b["system_prompt"])
+            sid = it["session_id"] or shared_sid or await _batch_create_session(b["system_prompt"])
             if not sid:
-                it["status"] = "error"
-                it["error"] = "could not create session"
+                item_update(
+                    batch_id, it["index"], status="error",
+                    error="could not create session",
+                )
                 continue
-            it["session_id"] = sid
+            item_update(batch_id, it["index"], session_id=sid)
 
             task_id = ""
             for attempt in range(BATCH_CHAT_SUBMIT_RETRIES):
@@ -506,7 +603,7 @@ async def _run_batch(batch_id):
                     "/api/chat",
                     json={
                         "session_id": sid,
-                        "message": it["prompt"],
+                        "message": wrap_user_message(it["prompt"]),
                         "research": b["research"],
                         "cpu": b["cpu"],
                         "no_tools": b["no_tools"],
@@ -524,6 +621,7 @@ async def _run_batch(batch_id):
                 if not busy or attempt == BATCH_CHAT_SUBMIT_RETRIES - 1:
                     raise RuntimeError(raw[:300])
                 await asyncio.sleep(20)
+            item_update(batch_id, it["index"], task_id=task_id)
 
             deadline = time.time() + BATCH_ITEM_TIMEOUT
             final_status = ""
@@ -542,8 +640,10 @@ async def _run_batch(batch_id):
                 raise RuntimeError(f"timed out after {BATCH_ITEM_TIMEOUT}s")
 
             if final_status != "done":
-                it["status"] = "error"
-                it["error"] = f"task ended as '{final_status}'"
+                item_update(
+                    batch_id, it["index"], status="error",
+                    error=f"task ended as '{final_status}'",
+                )
                 continue
 
             res = await _call("GET", f"/api/sessions/{sid}/messages")
@@ -558,12 +658,49 @@ async def _run_batch(batch_id):
                         break
             except (ValueError, TypeError, AttributeError):
                 pass
-            it["reply"] = reply
-            it["task_id"] = task_id
-            it["status"] = "done"
+            item_update(
+                batch_id, it["index"], status="done", reply=reply,
+            )
         except Exception as e:
-            it["status"] = "error"
-            it["error"] = str(e)[:300]
+            item_update(
+                batch_id, it["index"], status="error", error=str(e)[:300]
+            )
+
+
+async def _batch_worker():
+    """Single queue drainer: claims PENDING batches from SQLite one at a
+    time and runs them to completion. Replaces the old spawn-a-task-per-
+    request model; concurrent submissions simply wait their turn."""
+    print("[batches] worker started — draining SQLite queue", flush=True)
+    while True:
+        batch_id = ""
+        try:
+            batch_id = claim_next_pending()
+        except Exception as e:
+            print(f"[batches] claim failed: {e}", flush=True)
+        if not batch_id:
+            await asyncio.sleep(BATCH_WORKER_IDLE_SLEEP)
+            continue
+        ahead = pending_count()
+        print(
+            f"[batches] WORKING on {batch_id} ({ahead} still PENDING)", flush=True
+        )
+        try:
+            await _run_batch(batch_id)
+        except Exception as e:
+            # Never let one bad batch wedge the queue: fail its open items
+            # so the batch can be closed out and the worker moves on.
+            print(f"[batches] {batch_id} crashed: {e}", flush=True)
+            try:
+                fail_open_items(batch_id, f"worker crash: {e}")
+            except Exception:
+                pass
+        finally:
+            try:
+                finish_batch(batch_id)
+                print(f"[batches] COMPLETED {batch_id}", flush=True)
+            except Exception:
+                pass
 
 
 @mcp.tool()
@@ -574,13 +711,18 @@ async def start_chat_batch(
     research: bool = False,
     cpu: bool = False,
     no_tools: bool = False,
+    session_ids: list = None,
 ) -> str:
     """Submit MANY chat prompts at once and get a batch_id back immediately.
 
-    Each prompt is processed SEQUENTIALLY through the normal chat pipeline
-    (tools, research mode and sampling all behave exactly like
-    send_chat_message), so a batch of N messages takes roughly N × single-turn
-    time. This tool never blocks on generation.
+    The batch is persisted to a SQLite queue and picked up by a single
+    background worker that processes batches (and the items inside them)
+    SEQUENTIALLY through the normal chat pipeline (tools, research mode and
+    sampling all behave exactly like send_chat_message), so a batch of N
+    messages takes roughly N × single-turn time. If other batches are
+    already PENDING, this one waits its turn — check "status" /
+    "queue_position" via get_batch_status. This tool never blocks on
+    generation.
 
     Args:
       prompts: list of message strings to process, e.g.
@@ -592,9 +734,23 @@ async def start_chat_batch(
       system_prompt: optional persona/instructions applied to created sessions.
       research / cpu / no_tools: same meaning as send_chat_message, applied to
         every item.
+      session_ids: optional list, SAME length and order as prompts.
+        prompts[i] then runs INSIDE the existing conversation session_ids[i]
+        instead of a fresh session — this is how a "round 2" batch continues
+        many round-1 chats in one call. Get each prior item's session_id
+        from get_batch_results on the base batch. Incompatible with
+        shared_session and system_prompt; an unknown id surfaces later as
+        that item's per-item error (indexes stay stable).
 
     Returns JSON:
-      {"batch_id": "<id>", "total": <n>, "note": "..."}.
+      {"batch_id": "<id>", "total": <n>, "status": "PENDING",
+       "queue_position": <pending batches ahead>,
+       "guardrail_blocked_indexes": [..], "note": "..."}.
+
+    GUARDRAIL: prompts matching known injection patterns are rejected
+    upfront — they appear in guardrail_blocked_indexes and as error items
+    (indexes stay stable); if EVERY prompt is blocked, the whole batch is
+    declined and no batch is created.
 
     TIMING — items run SEQUENTIALLY, so budget generously:
       standard text batch ......... ~2 min PER ITEM
@@ -621,6 +777,36 @@ async def start_chat_batch(
         return json.dumps({
             "error": f"too many prompts ({len(prompts)}); max {BATCH_MAX_ITEMS}"
         })
+    if session_ids is not None:
+        if shared_session:
+            return json.dumps({"error": "session_ids cannot be combined with shared_session"})
+        if system_prompt:
+            return json.dumps({"error": "session_ids cannot be combined with system_prompt (bound sessions keep their original persona)"})
+        if not isinstance(session_ids, list) or len(session_ids) != len(prompts):
+            return json.dumps({
+                "error": f"session_ids must be a list aligned with prompts ({len(prompts)} entries, same order)"
+            })
+        bad = [i for i, s in enumerate(session_ids) if not isinstance(s, str) or not s.strip()]
+        if bad:
+            return json.dumps({
+                "error": "session_ids contains empty/non-string entries",
+                "bad_indexes": bad,
+            })
+    if is_jailbreak_attempt(system_prompt or ""):
+        return json.dumps({
+            "declined": True,
+            "response": GUARDRAIL_DECLINE,
+            "detail": "system_prompt blocked by MCP input guardrail",
+        })
+    blocked = [i for i, p in enumerate(prompts) if is_jailbreak_attempt(p)]
+    kept = [p for i, p in enumerate(prompts) if not is_jailbreak_attempt(p)]
+    if not kept:
+        return json.dumps({
+            "declined": True,
+            "response": GUARDRAIL_DECLINE,
+            "detail": "every prompt was blocked by the MCP input guardrail",
+            "blocked_indexes": blocked,
+        })
 
     session_id = ""
     if shared_session:
@@ -629,36 +815,40 @@ async def start_chat_batch(
             return json.dumps({"error": "could not create shared session"})
 
     batch_id = uuid.uuid4().hex[:12]
-    _BATCHES[batch_id] = {
-        "created": int(time.time()),
-        "system_prompt": system_prompt,
-        "session_id": session_id,
-        "research": research,
-        "cpu": cpu,
-        "no_tools": no_tools,
-        "items": [
-            {"index": i, "prompt": p, "session_id": "", "task_id": "",
-             "status": "queued", "reply": "", "error": ""}
-            for i, p in enumerate(prompts)
-        ],
-    }
-    asyncio.create_task(_run_batch(batch_id))
+    batch_insert(
+        batch_id, system_prompt, session_id, research, cpu, no_tools, prompts,
+        item_session_ids=session_ids,
+    )
+    prune_batches(keep=BATCH_KEEP)
+    for i in blocked:
+        item_update(
+            batch_id,
+            i,
+            status="error",
+            error=f"{GUARDRAIL_DECLINE} (blocked by MCP input guardrail)",
+        )
 
-    # Housekeeping: keep only the 20 most recent batches.
-    if len(_BATCHES) > 20:
-        for k in sorted(_BATCHES, key=lambda k: _BATCHES[k]["created"])[:-20]:
-            del _BATCHES[k]
+    ahead = queue_position(batch_id)
 
     per_item_min = 7 if (research or not no_tools) else 2
-    est_total = len(prompts) * per_item_min
+    est_total = len(kept) * per_item_min
     return json.dumps({
         "batch_id": batch_id,
         "total": len(prompts),
-        "mode": "shared_session" if shared_session else "per_item_sessions",
+        "status": BATCH_PENDING,
+        "queue_position": ahead,
+        "guardrail_blocked_indexes": blocked,
+        "mode": (
+            "shared_session" if shared_session
+            else ("bound_sessions" if session_ids else "per_item_sessions")
+        ),
         "est_total_minutes": est_total,
         "note": (
-            f"{len(prompts)} prompts queued SEQUENTIALLY (~{per_item_min} min "
-            f"per item, ≈{est_total} min total). Do NOT poll immediately: "
+            f"{len(kept)} of {len(prompts)} prompts queued SEQUENTIALLY "
+            f"(~{per_item_min} min per item, ≈{est_total} min total"
+            + (f"; {len(blocked)} prompt(s) blocked by guardrail" if blocked else "")
+            + (f"; behind {ahead} earlier batch(es)" if ahead else "")
+            + "). Do NOT poll immediately: "
             f"sleep ~30 minutes, then call get_batch_status('{batch_id}') — "
             "it returns new_indexes (ids only, no text). Fetch those replies "
             f"with get_batch_results('{batch_id}', [ids]) — they are marked "
@@ -682,7 +872,8 @@ async def get_batch_status(batch_id: str) -> str:
 
     Returns JSON:
       {
-        "batch_id": ..., "total": n,
+        "batch_id": ..., "status": "PENDING"|"WORKING"|"COMPLETED"|"ERROR",
+        "total": n,
         "progress": "15 out of 20 items completed",
         "percent_complete": 75,
         "done": x, "error": y, "running": r, "queued": q,
@@ -690,17 +881,19 @@ async def get_batch_status(batch_id: str) -> str:
         "failed_indexes": [7],
         "new_indexes": [3, 4, 7],   ← terminal AND never fetched yet
         "results_submitted": 5,     ← items carrying your submitted result
+        "queue_position": 0,        ← PENDING only: batches ahead of this one
         "note": "..."
       }
-    The batch is finished only at percent_complete == 100. Each polling
-    wave: fetch whatever appears in new_indexes via get_batch_results —
-    fetched items are marked collected and drop OUT of new_indexes on later
-    polls, so you never re-process old replies. What you do with each reply
-    (grading, summarising, forwarding) is up to you; optionally push your
-    per-item outcome back with submit_batch_results.
+    ERROR means EVERY item failed; if some succeeded the batch is COMPLETED
+    and its failures show up in failed_indexes. The batch is finished only
+    at percent_complete == 100 (status COMPLETED or ERROR). Each polling wave: fetch whatever appears in new_indexes via
+    get_batch_results — fetched items are marked collected and drop OUT of
+    new_indexes on later polls, so you never re-process old replies. What
+    you do with each reply (grading, summarising, forwarding) is up to you;
+    optionally push your per-item outcome back with submit_batch_results.
     Unknown ids yield {"error": "unknown batch_id"}.
     """
-    b = _BATCHES.get(batch_id)
+    b = batch_get(batch_id)
     if not b:
         return json.dumps({"error": "unknown batch_id"})
     out = _batch_summary(batch_id, b)
@@ -715,13 +908,22 @@ async def get_batch_status(batch_id: str) -> str:
         if it["status"] in ("done", "error") and "collected_at" not in it
     ]
     out["results_submitted"] = sum(1 for it in b["items"] if "submitted" in it)
-    out["note"] = (
-        "Status only — no reply text. For each NEW wave: "
-        f"get_batch_results('{batch_id}', new_indexes) fetches those replies "
-        "(and marks them collected). Attach your own outcomes — grades, "
-        "notes, anything — with one submit_batch_results("
-        f"'{batch_id}', results) call."
-    )
+    if b["status"] == BATCH_PENDING:
+        out["queue_position"] = queue_position(batch_id)
+    if b["status"] == BATCH_ERROR:
+        out["note"] = (
+            "EVERY item in this batch failed — see failed_indexes and the "
+            f"per-item 'error' text via get_batch_results('{batch_id}', "
+            "failed_indexes). Nothing was collected; do not re-poll."
+        )
+    else:
+        out["note"] = (
+            "Status only — no reply text. For each NEW wave: "
+            f"get_batch_results('{batch_id}', new_indexes) fetches those replies "
+            "(and marks them collected). Attach your own outcomes — grades, "
+            "notes, anything — with one submit_batch_results("
+            f"'{batch_id}', results) call."
+        )
     return json.dumps(out)
 
 
@@ -757,7 +959,7 @@ async def get_batch_results(
     in which case they appear with status "running"/"queued" and no reply
     and are NOT marked collected. Fetch incrementally — never wait for 100%.
     """
-    b = _BATCHES.get(batch_id)
+    b = batch_get(batch_id)
     if not b:
         return json.dumps({"error": "unknown batch_id"})
     if indexes is None:
@@ -780,6 +982,7 @@ async def get_batch_results(
             continue
         if it["status"] in ("done", "error") and "collected_at" not in it:
             it["collected_at"] = now
+            item_update(batch_id, it["index"], collected_at=now)
         entry = {
             "index": it["index"],
             "status": it["status"],
@@ -839,7 +1042,7 @@ async def submit_batch_results(batch_id: str, results: list) -> str:
     usable "index" or missing "result" are rejected individually and
     reported back.
     """
-    b = _BATCHES.get(batch_id)
+    b = batch_get(batch_id)
     if not b:
         return json.dumps({"error": "unknown batch_id"})
     if not isinstance(results, list) or not results:
@@ -864,12 +1067,17 @@ async def submit_batch_results(batch_id: str, results: list) -> str:
         if "result" not in entry:
             rejected.append({"index": idx, "error": "missing 'result'"})
             continue
-        by_idx[idx]["submitted"] = {
-            "result": entry["result"],
-            "submitted_at": int(time.time()),
-        }
+        item_update(
+            batch_id,
+            idx,
+            submitted_result=json.dumps(entry["result"]),
+            submitted_at=int(time.time()),
+        )
         accepted.append(idx)
-    total_submitted = sum(1 for it in b["items"] if "submitted" in it)
+    pre_submitted = {
+        it["index"] for it in b["items"] if "submitted" in it
+    }
+    total_submitted = len(pre_submitted | set(accepted))
     return json.dumps({
         "batch_id": batch_id,
         "accepted": accepted,
@@ -1057,11 +1265,30 @@ async def oauth_protected_resource(request):
 
 mcp_app = mcp.streamable_http_app()
 
+_worker_task = None
+
 
 @asynccontextmanager
 async def lifespan(app):
-    async with mcp_app.router.lifespan_context(mcp_app):
-        yield
+    global _worker_task
+    init_batches_db()
+    requeued = requeue_stuck_batches()
+    if requeued:
+        print(
+            f"[batches] requeued {requeued} WORKING batch(es) from previous run",
+            flush=True,
+        )
+    _worker_task = asyncio.create_task(_batch_worker())
+    try:
+        async with mcp_app.router.lifespan_context(mcp_app):
+            yield
+    finally:
+        if _worker_task:
+            _worker_task.cancel()
+            try:
+                await _worker_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = Starlette(

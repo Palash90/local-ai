@@ -17,6 +17,7 @@ function shareTokenFromPath() {
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(false)
+  const [authChecked, setAuthChecked] = useState(false)
   const [publicShareToken, setPublicShareToken] = useState(() => shareTokenFromPath())
   const [username, setUsername] = useState('')
   const [sessions, setSessions] = useState([])
@@ -67,13 +68,18 @@ export default function App() {
         } else {
           setAuthenticated(false)
         }
+        setAuthChecked(true)
       })
-      .catch(() => setAuthenticated(false))
+      .catch(() => {
+        setAuthenticated(false)
+        setAuthChecked(true)
+      })
   }, [])
 
   useEffect(() => {
     const handler = () => {
       setAuthenticated(false);
+      setAuthChecked(true);
       setUsername('');
       setSessions([]);
       sessionRef.current = null; setCurrentSessionId(null);
@@ -373,6 +379,23 @@ export default function App() {
           setPublicShareToken(null)
         }}
       />
+    )
+  }
+
+  if (authChecked && !authenticated) {
+    return (
+      <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0f0f1a' }}>
+        <div style={{ maxWidth: 420, margin: 16, padding: 32, textAlign: 'center', background: '#17172b', border: '1px solid #2a2a40', borderRadius: 12 }}>
+          <h2 style={{ marginBottom: 12 }}>Sign-in required</h2>
+          <p style={{ color: '#9a9ab0', lineHeight: 1.5, marginBottom: 20 }}>
+            This app authenticates through Authentik behind nginx and
+            cannot be used directly on port 3001.
+          </p>
+          <a href="https://home.palashkantikundu.in/ai/" style={{ color: '#8b7cff', textDecoration: 'none', fontWeight: 600 }}>
+            Open via home.palashkantikundu.in &rarr;
+          </a>
+        </div>
+      </div>
     )
   }
 
