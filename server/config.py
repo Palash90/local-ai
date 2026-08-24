@@ -225,7 +225,7 @@ os.makedirs(LLAMA_SLOT_SAVE_DIR, exist_ok=True)
 LLAMA_QWEN_NGL = "0"
 LLAMA_GEMMA_NGL = "99"
 LLAMA_SERVER_ARGS = [
-    "--host", "0.0.0.0",
+    "--host", "127.0.0.1",
     "--port", "8081",
     "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
     "--jinja",
@@ -267,7 +267,7 @@ LLAMA_SERVER_ARGS = [
 # runs on its own port (8079) CONCURRENTLY with the GPU server on 8081, so the
 # two are started and stopped independently (see restart_llama_server).
 LLAMA_SERVER_ARGS_CPU = [
-    "--host", "0.0.0.0",
+    "--host", "127.0.0.1",
     "--port", "8079",
     "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
     "--jinja",
