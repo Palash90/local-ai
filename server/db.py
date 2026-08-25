@@ -42,6 +42,7 @@ _LEGACY_FILES = {
 # ---------------------------------------------------------------------------
 
 def _create_tables(conn):
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS tasks (
@@ -115,13 +116,37 @@ def _create_tables(conn):
         )
         """
     )
-    # Column may already exist on databases created before this migration.
-    try:
-        conn.execute(
-            "ALTER TABLE mcp_batch_items ADD COLUMN guardrail_blocked INTEGER DEFAULT 0"
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mcp_tasks (
+            task_id TEXT PRIMARY KEY,
+            session_id TEXT DEFAULT '',
+            message TEXT DEFAULT '',
+            status TEXT DEFAULT 'queued',
+            reply TEXT DEFAULT '',
+            mode TEXT DEFAULT 'gpu',
+            research INTEGER DEFAULT 0,
+            cpu INTEGER DEFAULT 0,
+            no_tools INTEGER DEFAULT 0,
+            verification_level TEXT DEFAULT '',
+            failure_reason TEXT DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
         )
-    except Exception:
-        pass
+        """
+    )
+    # Columns may already exist on databases created before these migrations.
+    for col, typedef in [
+        ("guardrail_blocked", "INTEGER DEFAULT 0"),
+        ("verification_level", "TEXT DEFAULT ''"),
+        ("failure_reason", "TEXT DEFAULT ''"),
+    ]:
+        try:
+            conn.execute(
+                f"ALTER TABLE mcp_batch_items ADD COLUMN {col} {typedef}"
+            )
+        except sqlite3.OperationalError:
+            pass
     # Tracks one-time bookkeeping such as the legacy migration.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _db_meta (key TEXT PRIMARY KEY, value TEXT)"

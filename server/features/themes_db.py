@@ -87,49 +87,55 @@ def theme_log_create(
         details_obj = {}
     h = combo_hash(genre, mood, role, persona, details_obj, level)
 
-    existing = db.fetch_one(
-        "SELECT * FROM theme_log WHERE scope=? AND combo_hash=?",
-        (scope, h),
-    )
-    if existing:
-        updates = {}
-        if theme and theme != existing.get("theme"):
-            updates["theme"] = theme
-        if status and existing.get("status") != status:
-            updates["status"] = status
-        if updates:
-            updates["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            set_clause = ", ".join(f"{k}=?" for k in updates)
-            db.run(
-                f"UPDATE theme_log SET {set_clause} WHERE id=?",
-                tuple(updates.values()) + (existing["id"],),
-            )
-            existing = db.fetch_one(
-                "SELECT * FROM theme_log WHERE id=?", (existing["id"],)
-            )
-        return existing, True
+    def _tx(conn):
+        existing = conn.execute(
+            "SELECT * FROM theme_log WHERE scope=? AND combo_hash=?",
+            (scope, h),
+        ).fetchone()
+        if existing:
+            existing = dict(existing)
+            updates = {}
+            if theme and theme != existing.get("theme"):
+                updates["theme"] = theme
+            if status and existing.get("status") != status:
+                updates["status"] = status
+            if updates:
+                updates["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                set_clause = ", ".join(f"{k}=?" for k in updates)
+                conn.execute(
+                    f"UPDATE theme_log SET {set_clause} WHERE id=?",
+                    tuple(updates.values()) + (existing["id"],),
+                )
+                conn.commit()
+                existing = dict(conn.execute(
+                    "SELECT * FROM theme_log WHERE id=?", (existing["id"],)
+                ).fetchone())
+            return existing, True
 
-    tid = str(uuid.uuid4())
-    now = datetime.now().isoformat(timespec="seconds")
-    db.run(
-        "INSERT INTO theme_log (id, scope, user_id, genre, mood, role, persona, details, combo_hash, theme, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            tid,
-            scope,
-            user_id or "",
-            genre or "",
-            mood or "",
-            role or "",
-            persona or "",
-            details,
-            h,
-            theme or "",
-            status or "active",
-            now,
-            now,
-        ),
-    )
-    return db.fetch_one("SELECT * FROM theme_log WHERE id=?", (tid,)), False
+        tid = str(uuid.uuid4())
+        now = datetime.now().isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO theme_log (id, scope, user_id, genre, mood, role, persona, details, combo_hash, theme, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                tid,
+                scope,
+                user_id or "",
+                genre or "",
+                mood or "",
+                role or "",
+                persona or "",
+                details,
+                h,
+                theme or "",
+                status or "active",
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return dict(conn.execute("SELECT * FROM theme_log WHERE id=?", (tid,)).fetchone()), False
+
+    return db.with_connection(_tx)
 
 
 def theme_log_complete(tid):

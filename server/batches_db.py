@@ -74,6 +74,8 @@ def batch_get(batch_id):
             "reply": r["reply"],
             "error": r["error"],
             "guardrail_blocked": r["guardrail_blocked"],
+            "verification_level": r["verification_level"],
+            "failure_reason": r["failure_reason"],
         }
         if r["collected_at"] is not None:
             it["collected_at"] = r["collected_at"]
@@ -148,6 +150,8 @@ def item_update(batch_id, idx, **fields):
         "submitted_result",
         "submitted_at",
         "guardrail_blocked",
+        "verification_level",
+        "failure_reason",
     }
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:

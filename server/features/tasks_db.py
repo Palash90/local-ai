@@ -10,6 +10,8 @@ from datetime import datetime
 
 import server.db as db
 
+_MISSING = object()  # Sentinel: distinguish "not provided" from "explicitly None"
+
 
 def _init_tasks_db():
     """Ensure the unified DB (and thus the tasks table) exists."""
@@ -60,7 +62,7 @@ def task_create(
 
 
 def task_update(tid, user_id, **kwargs):
-    fields = {k: v for k, v in kwargs.items() if v is not None}
+    fields = {k: v for k, v in kwargs.items() if v is not _MISSING}
     if not fields:
         return None
     fields["updated_at"] = datetime.now().isoformat()
@@ -126,12 +128,12 @@ def handle_task_tool(user_id, args):
             t = task_update(
                 tid,
                 user_id,
-                title=args.get("title"),
-                description=args.get("description"),
-                priority=args.get("priority"),
-                status=args.get("status"),
-                due_date=args.get("due_date"),
-                reminder_at=args.get("reminder_at"),
+                title=args.get("title", _MISSING),
+                description=args.get("description", _MISSING),
+                priority=args.get("priority", _MISSING),
+                status=args.get("status", _MISSING),
+                due_date=args.get("due_date", _MISSING),
+                reminder_at=args.get("reminder_at", _MISSING),
             )
             if t:
                 return json.dumps({"ok": True, "task": t})
