@@ -216,6 +216,176 @@ def _parse_verdict(content):
     return False
 
 
+_JUDGE_MODEL_CACHE = {}
+_JUDGE_MIN_TIMEOUT = 90
+
+
+def _chat_model_id():
+    """Model id the chat pipeline itself uses (from server/config.py)."""
+    try:
+        from server.config import MODEL_ID
+        return MODEL_ID or ""
+    except ImportError:
+        pass
+    try:
+        from config import MODEL_ID
+        return MODEL_ID or ""
+    except ImportError:
+        return ""
+
+
+def _judge_candidates(base_url):
+    """Ordered list of model ids to try for judging on ``base_url``.
+
+    Constraints discovered the hard way:
+    - Newer llama.cpp builds REJECT completions without a 'model' field
+      (HTTP 400 'model name is missing').
+    - The :8081 server runs in --models-dir (multi-model) mode where each
+      completion LOADS its named model on demand — and loads DO NOT evict
+      other models first. Judging with an arbitrary/different model than
+      whatever is resident caused VRAM exhaustion (CUDA OOM) that took down
+      the chat model itself.
+
+    So the order below never allocates when avoidable:
+      1. GUARD_LLM_MODEL env override
+      2. a model ALREADY LOADED on the endpoint (zero VRAM churn)
+      3. the chat model id (warms exactly what generation will use next)
+      4. whatever else the endpoint lists
+    The winner is cached per endpoint; failures fall through to the next
+    candidate and clear the cache so it is re-probed later.
+    """
+    ids, loaded = [], []
+    try:
+        import requests
+        r = requests.get(f"{base_url.rstrip('/')}/v1/models", timeout=5)
+        if r.status_code == 200:
+            for d in r.json().get("data") or []:
+                mid = d.get("id", "") or ""
+                if not mid:
+                    continue
+                ids.append(mid)
+                if (d.get("status") or {}).get("value") == "loaded":
+                    loaded.append(mid)
+    except Exception:
+        pass
+
+    out = []
+    forced = os.environ.get("GUARD_LLM_MODEL", "").strip()
+    if forced:
+        out.append(forced)
+    out.extend(m for m in loaded if m not in out)
+    chat = _chat_model_id()
+    if chat and chat not in out:
+        out.append(chat)
+    out.extend(m for m in ids if m not in out)
+    return out
+
+
+def _judge_max_tokens():
+    """Token budget for a judge call. Thinking models spend their budget on
+    reasoning BEFORE emitting the verdict word, so a tiny cap yields an empty
+    content field and a meaningless SAFE. 400 covers gemma-style thinking;
+    tune via GUARD_LLM_MAX_TOKENS."""
+    try:
+        return int(os.environ.get("GUARD_LLM_MAX_TOKENS", "400"))
+    except ValueError:
+        return 400
+
+
+def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
+               max_chars=2000):
+    """Shared judge plumbing: POST the classify prompt, log exactly what was
+    passed and what came back, apply fail-open/fail-closed policy.
+
+    Tries candidate models in order (see :func:`_judge_candidates`) and
+    caches whichever one answers, so steady-state calls hit a single model
+    with zero load/unload churn. Returns True only for an affirmative
+    HARMFUL verdict.
+    """
+    if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
+        # Must cover a COLD model load (~25s) plus thinking-model inference;
+        # a tight timeout here would fail-closed-block benign traffic after
+        # every idle unload. Mirrors SAMPLING_ROUTER_TIMEOUT=90 in config.py.
+        try:
+            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
+        except ValueError:
+            timeout = _JUDGE_MIN_TIMEOUT
+    text = (text or "").strip()
+    if not text:
+        return False
+    print(
+        f"[guardrail][{label}] -> {base_url} fail_closed={fail_closed} "
+        f"text={text[:160]!r}"
+    )
+    try:
+        import requests
+    except Exception as e:
+        print(f"[guardrail][{label}] requests unavailable: {e}")
+        return fail_closed
+
+    cached = _JUDGE_MODEL_CACHE.get(base_url)
+    candidates = list(cached) if isinstance(cached, list) else (
+        [cached] if cached else None
+    ) or _judge_candidates(base_url)
+
+    max_tokens = _judge_max_tokens()
+    last_err = ""
+    for cand in candidates:
+        payload = {
+            "model": cand,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text[:max_chars]},
+            ],
+            "temperature": 0,
+            "max_tokens": max_tokens,
+            "cache_prompt": False,
+            "stream": False,
+        }
+        try:
+            r = requests.post(
+                f"{base_url.rstrip('/')}/v1/chat/completions",
+                json=payload,
+                timeout=timeout,
+            )
+        except Exception as e:
+            # Endpoint itself down — other model ids won't help.
+            print(
+                f"[guardrail][{label}] call failed: {e} — treating as "
+                f"{'HARMFUL (fail-closed)' if fail_closed else 'SAFE (fail-open)'}"
+            )
+            return fail_closed
+        if r.status_code == 200:
+            msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
+            content = msg.get("content") or ""
+            verdict = _parse_verdict(content)
+            raw = repr(content.strip())
+            if not content.strip():
+                # Thinking models may exhaust the budget mid-reasoning; show
+                # the reasoning tail so the log explains the empty verdict.
+                reasoning = msg.get("reasoning_content") or ""
+                raw += f" reasoning_tail={reasoning[-120:]!r}"
+            print(
+                f"[guardrail][{label}] model={cand} "
+                f"verdict={'HARMFUL' if verdict else 'SAFE'} raw={raw}"
+            )
+            _JUDGE_MODEL_CACHE[base_url] = [cand] + [
+                c for c in candidates if c != cand
+            ]
+            return verdict
+        last_err = f"HTTP {r.status_code}: {r.text[:150]}"
+        print(f"[guardrail][{label}] model={cand} rejected — {last_err}")
+
+    # Every candidate failed; forget the ordering so it is re-probed later.
+    _JUDGE_MODEL_CACHE.pop(base_url, None)
+    print(
+        f"[guardrail][{label}] all {len(candidates)} judge model(s) failed "
+        f"({last_err}) — treating as "
+        f"{'HARMFUL (fail-closed)' if fail_closed else 'SAFE (fail-open)'}"
+    )
+    return fail_closed
+
+
 def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=False):
     """Return True if an LLM judge classifies generated ``text`` as harmful
     how-to content.
@@ -226,38 +396,14 @@ def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=Fal
     caught even when the prompt itself dodged the input filters. Synchronous;
     ``fail_closed`` mirrors :func:`llm_classify_harmful`.
     """
-    text = (text or "").strip()
-    if not text:
-        return False
     if base_url is None:
         base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8081")
     if not base_url:
         return False
-    try:
-        import requests
-        r = requests.post(
-            f"{base_url.rstrip('/')}/v1/chat/completions",
-            json={
-                "messages": [
-                    {"role": "system", "content": JUDGE_OUTPUT_SYSTEM},
-                    {"role": "user", "content": text[:4000]},
-                ],
-                "temperature": 0,
-                "max_tokens": 8,
-                "cache_prompt": False,
-                "stream": False,
-            },
-            timeout=timeout,
-        )
-        if r.status_code != 200:
-            print(f"[guardrail] output judge HTTP {r.status_code} — "
-                  f"treating as {'HARMFUL (fail-closed)' if fail_closed else 'SAFE (fail-open)'}")
-            return fail_closed
-        content = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        return _parse_verdict(content)
-    except Exception as e:
-        print(f"[guardrail] output judge call failed: {e}")
-        return fail_closed
+    return _run_judge(
+        "output-judge", JUDGE_OUTPUT_SYSTEM, text, base_url, timeout,
+        fail_closed, max_chars=4000,
+    )
 
 
 def llm_classify_harmful(text, base_url=None, timeout=20, fail_closed=False):
@@ -267,46 +413,14 @@ def llm_classify_harmful(text, base_url=None, timeout=20, fail_closed=False):
     judge is unreachable or errors: when True the request is treated as
     harmful (blocked) so a missing/unavailable judge can never silently let
     dangerous traffic through; when False it degrades to the pattern layer.
-
-    Set ``fail_closed=True`` in the MCP gateway whenever a judge endpoint is
-    actually configured — the judge is the primary defence for non-English
-    and paraphrased prompts, so its outages must fail safe, not open.
     """
-    text = (text or "").strip()
-    if not text:
-        return False
     if base_url is None:
         base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8081")
     if not base_url:
         return False
-    try:
-        import requests
-        r = requests.post(
-            f"{base_url.rstrip('/')}/v1/chat/completions",
-            json={
-                "messages": [
-                    {"role": "system", "content": JUDGE_SYSTEM},
-                    {"role": "user", "content": text[:2000]},
-                ],
-                "temperature": 0,
-                "max_tokens": 8,
-                "cache_prompt": False,
-                "stream": False,
-            },
-            timeout=timeout,
-        )
-        if r.status_code != 200:
-            print(f"[guardrail] judge HTTP {r.status_code} — "
-                  f"treating as {'HARMFUL (fail-closed)' if fail_closed else 'SAFE (fail-open)'}")
-            return fail_closed
-        content = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        verdict = _parse_verdict(content)
-        if verdict:
-            print(f"[guardrail] judge flagged input as HARMFUL (reply: {content[:40]!r})")
-        return verdict
-    except Exception as e:
-        print(f"[guardrail] judge call failed: {e}")
-        return fail_closed
+    return _run_judge(
+        "input-judge", JUDGE_SYSTEM, text, base_url, timeout, fail_closed,
+    )
 
 
 _SAFETY_FRAME = """You are a helpful assistant.
