@@ -12,7 +12,6 @@ import requests
 from server.features.state import M
 from server.features.users import _safe_username
 
-
 # LLM-selectable framing presets for generate_image. All values are divisible
 # by 8 (latent-safe for EmptySD3LatentImage) and stay near the ~2 MP budget of
 # the default 1920x1080, so VRAM usage and generation time are stable no matter
@@ -70,7 +69,9 @@ def free_comfyui_vram():
     return False
 
 
-def generate_image(prompt, task_id, negative_prompt="", model="z_image", aspect_ratio="landscape"):
+def generate_image(
+    prompt, task_id, negative_prompt="", model="z_image", aspect_ratio="landscape"
+):
     print(f"\n[image] Generating image for task {task_id} with the prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image generation...")
     # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
@@ -210,7 +211,9 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image", aspect_
             for _ in range(300):
                 time.sleep(1)
                 try:
-                    hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
+                    hr = requests.get(
+                        f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10
+                    )
                     hist = hr.json()
 
                     if prompt_id in hist:
@@ -229,12 +232,16 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image", aspect_
                     pass
             if found_file:
                 with M._data_lock:
-                    cancelled = bool(M.tasks.get(task_id, {}).get("status") == "cancelled")
+                    cancelled = bool(
+                        M.tasks.get(task_id, {}).get("status") == "cancelled"
+                    )
                 if cancelled:
                     try:
                         if os.path.exists(found_file):
                             os.remove(found_file)
-                            print(f"[image] Deleted orphaned image for cancelled task {task_id}: {found_file}")
+                            print(
+                                f"[image] Deleted orphaned image for cancelled task {task_id}: {found_file}"
+                            )
                     except OSError:
                         pass
                     result = json.dumps({"error": "Cancelled — session was deleted"})
@@ -250,7 +257,9 @@ def generate_image(prompt, task_id, negative_prompt="", model="z_image", aspect_
                         }
                     )
             else:
-                print(f"[generate_image] TIMEOUT for task {task_id} after 300s")  # DEBUG
+                print(
+                    f"[generate_image] TIMEOUT for task {task_id} after 300s"
+                )  # DEBUG
                 result = json.dumps({"error": "Image generation timeout"})
     except Exception as e:
         result = json.dumps({"error": str(e)})
@@ -344,6 +353,7 @@ def edit_image(
     cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
 
     workflow = {
+        # 1. Load Models & Encoders
         "62": {
             "class_type": "CLIPLoader",
             "inputs": {"clip_name": cfg["clip1"], "type": "lumina2"},
@@ -366,24 +376,27 @@ def edit_image(
             "inputs": {"shift": 3, "model": ["66", 0]},
         },
         "5_load": {"class_type": "LoadImage", "inputs": {"image": input_filename}},
-        "5_scale": {
-            "class_type": "ImageScaleToTotalPixels",
+        # 3. Standard VAE Encode (Encodes the full image cleanly without corruption)
+        "5_vae_encode": {
+            "class_type": "VAEEncode",
             "inputs": {
-                "image": ["5_load", 0],
-                "megapixels": 1.049,  # ~1024x1024
-                "upscale_method": "bicubic",
-                "resolution_steps": 1,
+                "pixels": ["5_load", 0],
+                "vae": ["63", 0],
             },
         },
-        # Standard VAEEncode instead of VAEEncodeForInpaint
-        "5_encode": {
-            "class_type": "VAEEncode",
-            "inputs": {"pixels": ["5_scale", 0], "vae": ["63", 0]},
+        # 4. Attach Mask directly to Latent space (Prevents grey-out issue)
+        "5_set_mask": {
+            "class_type": "SetLatentNoiseMask",
+            "inputs": {
+                "samples": ["5_vae_encode", 0],
+                "mask": ["5_load", 1],  # LoadImage mask output
+            },
         },
+        # 5. KSampler
         "70": {
             "class_type": "KSampler",
             "inputs": {
-                "seed": random.randint(0, 2**31),
+                "seed": random.randint(0, 2**31 - 1),
                 "steps": 8,
                 "cfg": 1.0,
                 "sampler_name": "res_multistep",
@@ -392,7 +405,7 @@ def edit_image(
                 "model": ["69", 0],
                 "positive": ["67", 0],
                 "negative": ["71", 0],
-                "latent_image": ["5_encode", 0],
+                "latent_image": ["5_set_mask", 0],
             },
         },
         "65": {
@@ -404,6 +417,7 @@ def edit_image(
             "inputs": {"filename_prefix": prefix, "images": ["65", 0]},
         },
     }
+
     with M._data_lock:
         M.model_status = "image_active"
         M.tasks[task_id]["gen_prompt"] = prompt
@@ -427,7 +441,9 @@ def edit_image(
             for _ in range(300):
                 time.sleep(1)
                 try:
-                    hr = requests.get(f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10)
+                    hr = requests.get(
+                        f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10
+                    )
                     hist = hr.json()
                     if prompt_id in hist:
                         outputs = hist[prompt_id].get("outputs", {})
@@ -445,12 +461,16 @@ def edit_image(
 
             if found_file:
                 with M._data_lock:
-                    cancelled = bool(M.tasks.get(task_id, {}).get("status") == "cancelled")
+                    cancelled = bool(
+                        M.tasks.get(task_id, {}).get("status") == "cancelled"
+                    )
                 if cancelled:
                     try:
                         if os.path.exists(found_file):
                             os.remove(found_file)
-                            print(f"[image] Deleted orphaned edited image for cancelled task {task_id}: {found_file}")
+                            print(
+                                f"[image] Deleted orphaned edited image for cancelled task {task_id}: {found_file}"
+                            )
                     except OSError:
                         pass
                     result = json.dumps({"error": "Cancelled — session was deleted"})

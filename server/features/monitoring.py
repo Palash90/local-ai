@@ -494,7 +494,7 @@ def _connection_manager():
     while True:
         try:
             payload = _send_heartbeat()
-            print(f"[+] heartbeat sent: {payload}")
+            # print(f"[+] heartbeat sent: {payload}")
         except Exception as e:
             print(f"[-] GCP unreachable ({M.HEARTBEAT_URL}): {e}")
 
