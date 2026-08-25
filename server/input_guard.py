@@ -49,22 +49,38 @@ def _normalize(text: str) -> str:
 
 
 # ── Encrypted file loader ────────────────────────────────────────────────────
-_SURFACE_DIR = Path(os.environ.get(
-    "SURFACE_ATTACKS_DIR",
-    Path(__file__).resolve().parent.parent / "prompts" / "surface_attacks",
-))
-_FERNET = None
-_key = os.environ.get("SURFACE_ATTACKS_KEY", "").strip()
-if _key:
-    try:
-        from cryptography.fernet import Fernet
-        _FERNET = Fernet(_key.encode() if isinstance(_key, str) else _key)
-        log.info("[guardrail] Fernet decryption enabled for %s", _SURFACE_DIR)
-    except Exception as exc:
-        log.warning("[guardrail] bad SURFACE_ATTACKS_KEY, falling back to plaintext: %s", exc)
-        _FERNET = None
-else:
-    log.info("[guardrail] SURFACE_ATTACKS_KEY not set — reading plaintext .txt from %s", _SURFACE_DIR)
+# Lazy initialisation: env vars are read on first call, not at import time,
+# so dotenv / systemd EnvironmentFile has time to populate os.environ before
+# we touch it.
+
+_fernet = None
+_surface_dir = None
+_patterns_cache: dict[str, list[str]] = {}
+_prompts_cache: dict[str, str] = {}
+
+
+def _ensure_fernet():
+    """Initialise Fernet + surface dir once, on first use."""
+    global _fernet, _surface_dir
+    if _surface_dir is not None:
+        return  # already initialised
+
+    _surface_dir = Path(os.environ.get(
+        "SURFACE_ATTACKS_DIR",
+        Path(__file__).resolve().parent.parent / "prompts" / "surface_attacks",
+    ))
+
+    key = os.environ.get("SURFACE_ATTACKS_KEY", "").strip()
+    if key:
+        try:
+            from cryptography.fernet import Fernet
+            _fernet = Fernet(key.encode() if isinstance(key, str) else key)
+            log.info("[guardrail] Fernet decryption enabled for %s", _surface_dir)
+        except Exception as exc:
+            log.warning("[guardrail] bad SURFACE_ATTACKS_KEY, falling back to plaintext: %s", exc)
+            _fernet = None
+    else:
+        log.info("[guardrail] SURFACE_ATTACKS_KEY not set — reading plaintext .txt from %s", _surface_dir)
 
 
 def _load_raw(name: str) -> bytes:
@@ -74,11 +90,12 @@ def _load_raw(name: str) -> bytes:
     back to ``<name>`` (plaintext).  Raises ``FileNotFoundError`` if neither
     exists.
     """
-    enc = _SURFACE_DIR / f"{name}.enc"
-    plain = _SURFACE_DIR / name
+    _ensure_fernet()
+    enc = _surface_dir / f"{name}.enc"
+    plain = _surface_dir / name
 
-    if _FERNET and enc.exists():
-        return _FERNET.decrypt(enc.read_bytes())
+    if _fernet and enc.exists():
+        return _fernet.decrypt(enc.read_bytes())
 
     if plain.exists():
         return plain.read_bytes()
@@ -89,23 +106,51 @@ def _load_raw(name: str) -> bytes:
     )
 
 
-def _load_patterns(name: str) -> list[str]:
-    """Load a pattern list — one pattern per line — from ``SURFACE_ATTACKS_DIR``."""
-    text = _load_raw(name).decode("utf-8")
-    return [line.strip() for line in text.splitlines() if line.strip()]
+def _get_patterns(name: str) -> list[str]:
+    """Load (and cache) a pattern list — one pattern per line."""
+    if name not in _patterns_cache:
+        text = _load_raw(name).decode("utf-8")
+        _patterns_cache[name] = [line.strip() for line in text.splitlines() if line.strip()]
+    return _patterns_cache[name]
 
 
-def _load_prompt(name: str) -> str:
-    """Load a prompt text file from ``SURFACE_ATTACKS_DIR``, stripping trailing whitespace."""
-    return _load_raw(name).decode("utf-8").rstrip("\n")
+def _get_prompt(name: str) -> str:
+    """Load (and cache) a prompt text file, stripping trailing whitespace."""
+    if name not in _prompts_cache:
+        _prompts_cache[name] = _load_raw(name).decode("utf-8").rstrip("\n")
+    return _prompts_cache[name]
 
 
-INJECTION_PATTERNS = _load_patterns("injection_patterns.txt")
+# ── Lazy accessors (used by mcp_gateway + internal functions) ────────────────
+
+def _injection_patterns():
+    return _get_patterns("injection_patterns.txt")
+
+def _harmful_request_patterns():
+    return _get_patterns("harmful_request_patterns.txt")
+
+def _harmful_output_patterns():
+    return _get_patterns("harmful_output_patterns.txt")
+
+def _strict_output_patterns():
+    return _get_patterns("strict_output_patterns.txt")
+
+def _judge_system():
+    return _get_prompt("judge_input.txt")
+
+def _judge_output_system():
+    return _get_prompt("judge_output.txt")
+
+def _strict_judge_system():
+    return _get_prompt("judge_strict.txt")
+
+def _safety_frame():
+    return _get_prompt("safety_frame.txt")
 
 
 def is_jailbreak_attempt(message: str) -> bool:
     msg_lower = (message or "").lower()
-    return any(pattern in msg_lower for pattern in INJECTION_PATTERNS)
+    return any(pattern in msg_lower for pattern in _injection_patterns())
 
 
 # ── Harmful-content guardrail ────────────────────────────────────────────────
@@ -119,20 +164,11 @@ def is_jailbreak_attempt(message: str) -> bool:
 # first line of defence, not a substitute for real content moderation. Tune the
 # lists below as needed.
 
-HARMFUL_REQUEST_PATTERNS = _load_patterns("harmful_request_patterns.txt")
-
-# Scanning model output can use a slightly broader net, since the model may
-# have complied and written step-by-step instructions without echoing the
-# exact request phrasing.
-HARMFUL_OUTPUT_PATTERNS = _load_patterns("harmful_output_patterns.txt")
-
-STRICT_OUTPUT_PATTERNS = _load_patterns("strict_output_patterns.txt")
-
 
 def is_harmful_request(message: str) -> bool:
     """True if the inbound user text is an explicit harmful-manufacture request."""
     msg = _normalize(message)
-    return any(pattern in msg for pattern in HARMFUL_REQUEST_PATTERNS)
+    return any(pattern in msg for pattern in _harmful_request_patterns())
 
 
 def is_harmful_content(text: str) -> bool:
@@ -143,7 +179,7 @@ def is_harmful_content(text: str) -> bool:
     reliably catches the common compliance cases (e.g. gasoline-bomb walkthroughs).
     """
     txt = _normalize(text)
-    return any(pattern in txt for pattern in HARMFUL_OUTPUT_PATTERNS)
+    return any(pattern in txt for pattern in _harmful_output_patterns())
 
 
 def is_strict_output_blocked(text: str) -> bool:
@@ -155,7 +191,7 @@ def is_strict_output_blocked(text: str) -> bool:
     downstream LLM judge is the final arbiter.
     """
     txt = _normalize(text)
-    return any(pattern in txt for pattern in STRICT_OUTPUT_PATTERNS)
+    return any(pattern in txt for pattern in _strict_output_patterns())
 
 
 # ── LLM safety judge ────────────────────────────────────────────────────────
@@ -168,13 +204,6 @@ def is_strict_output_blocked(text: str) -> bool:
 # Configure via GUARD_LLM_BASE (defaults to the local llama-server). If unset
 # or the call fails, the judge is a no-op and the pattern layer remains the
 # only defence.
-JUDGE_SYSTEM = _load_prompt("judge_input.txt")
-
-# Output variant: the text under examination is MODEL-GENERATED content, not a
-# user request. We only want to flag text that actually hands over actionable
-# how-to detail (steps, recipes, procedures) — not mere mentions of the topic
-# in historical, fictional, educational, medical, or news framing.
-JUDGE_OUTPUT_SYSTEM = _load_prompt("judge_output.txt")
 
 # Verdict parsing: local models routinely ignore the 'exactly one word'
 # instruction and reply with phrases like "Not harmful", "Safe — no harmful
@@ -387,7 +416,7 @@ def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=Fal
     if not base_url:
         return False
     return _run_judge(
-        "output-judge", JUDGE_OUTPUT_SYSTEM, text, base_url, timeout,
+        "output-judge", _judge_output_system(), text, base_url, timeout,
         fail_closed, max_chars=4000,
     )
 
@@ -398,7 +427,6 @@ def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=Fal
 # fail-closed: if the judge model is unreachable or errors, the output is
 # BLOCKED.  The goal is zero-tolerance: nothing inappropriate, illegal,
 # sexual, violent, graphic, or leaking internal state ever reaches the client.
-STRICT_JUDGE_SYSTEM = _load_prompt("judge_strict.txt")
 
 _VERDICT_BLOCKED = {"BLOCKED", "UNSAFE", "HARMFUL", "REJECTED", "DENIED", "REFUSED"}
 
@@ -465,7 +493,7 @@ def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
         payload = {
             "model": cand,
             "messages": [
-                {"role": "system", "content": STRICT_JUDGE_SYSTEM},
+                {"role": "system", "content": _strict_judge_system()},
                 {"role": "user", "content": text[:6000]},
             ],
             "temperature": 0,
@@ -525,15 +553,12 @@ def llm_classify_harmful(text, base_url=None, timeout=20, fail_closed=False):
     if not base_url:
         return False
     return _run_judge(
-        "input-judge", JUDGE_SYSTEM, text, base_url, timeout, fail_closed,
+        "input-judge", _judge_system(), text, base_url, timeout, fail_closed,
     )
 
 
-_SAFETY_FRAME = _load_prompt("safety_frame.txt")
-
-
 def wrap_user_message(user_message: str) -> str:
-    return _SAFETY_FRAME.format(
+    return _safety_frame().format(
         decline=GUARDRAIL_DECLINE,
         refusal=MODEL_REFUSAL,
         user_message=user_message if isinstance(user_message, str) else "",
