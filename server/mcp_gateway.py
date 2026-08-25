@@ -46,10 +46,12 @@ try:
         GUARDRAIL_DECLINE,
         HARMFUL_DECLINE,
         is_harmful_content,
+        is_strict_output_blocked,
         llm_classify_harmful,
         llm_classify_harmful_output,
         is_harmful_request,
         is_jailbreak_attempt,
+        mcp_output_judge,
         wrap_user_message,
     )
 except ImportError:
@@ -76,10 +78,12 @@ except ImportError:
         GUARDRAIL_DECLINE,
         HARMFUL_DECLINE,
         is_harmful_content,
+        is_strict_output_blocked,
         llm_classify_harmful,
         llm_classify_harmful_output,
         is_harmful_request,
         is_jailbreak_attempt,
+        mcp_output_judge,
         wrap_user_message,
     )
 
@@ -485,6 +489,7 @@ async def get_session_messages(session_id: str) -> str:
         return raw
     blocked = False
     judged = 0
+    strict_judged = 0
     if isinstance(data, dict):
         for msg in data.get("messages", []):
             if msg.get("role") != "assistant":
@@ -497,13 +502,7 @@ async def get_session_messages(session_id: str) -> str:
             if not scan:
                 continue
             harmful = is_harmful_content(scan)
-            # Cap judge invocations per read: pattern matching already covers
-            # older turns; the LLM judge is a backstop for recent replies.
             if not harmful and len(scan) > 50 and judged < 5:
-                # Pattern layer missed it (novel phrasing); let the LLM judge
-                # inspect the model's own output before we hand it back. This
-                # path is FAIL-OPEN on judge error: a missing judge must never
-                # redact legitimate replies, only an explicit HARMFUL verdict.
                 harmful = await asyncio.to_thread(
                     llm_classify_harmful_output, scan, None, 20, False
                 )
@@ -513,6 +512,34 @@ async def get_session_messages(session_id: str) -> str:
                 msg["content"] = HARMFUL_DECLINE
                 msg["_guardrail_blocked"] = True
                 blocked = True
+                continue
+            # ── Strict output judge (final end-of-pipe gate) ────────────
+            # After the existing harmful-content checks, run the strictest
+            # possible judge: pattern match for ALL prohibited categories
+            # (sexual, violent, gore, death, suicide, murder, graphic,
+            # illegal) plus prompt/input/system-prompt leaking.  If any
+            # pattern matches, immediately decline — no LLM judge needed.
+            # If patterns miss, still call the LLM judge (fail-closed) as
+            # the final arbiter.  This catches edge cases the existing
+            # output judge misses (e.g. subtle sexual content, prompt
+            # leaking, or content that is harmful but not how-to related).
+            if strict_judged < 3:
+                if is_strict_output_blocked(scan):
+                    print(f"[guardrail][strict] pattern-blocked assistant message in session {session_id}")
+                    msg["content"] = HARMFUL_DECLINE
+                    msg["_guardrail_blocked"] = True
+                    blocked = True
+                    continue
+                strict_harmful = await asyncio.to_thread(
+                    mcp_output_judge, scan, None, 90, True
+                )
+                strict_judged += 1
+                if strict_harmful:
+                    print(f"[guardrail][strict] judge-blocked assistant message in session {session_id}")
+                    msg["content"] = HARMFUL_DECLINE
+                    msg["_guardrail_blocked"] = True
+                    blocked = True
+                    continue
     if blocked:
         return json.dumps(data)
     return raw
@@ -584,13 +611,16 @@ async def send_chat_message(
     with get_session_messages(session_id). Never assume the answer exists
     right after this call.
     """
+    print(f"[MCP MESSAGE REQUEST]: {message}")
     if is_jailbreak_attempt(message):
+        print(f"[JAILBREAK DETECTED FOR]: {message}")
         return json.dumps({
             "declined": True,
             "response": GUARDRAIL_DECLINE,
             "detail": "message blocked by MCP input guardrail",
         })
     if is_harmful_request(message):
+        print(f"[HARMFUL INTENT DETECTED FOR]: {message}")
         return json.dumps({
             "declined": True,
             "response": HARMFUL_DECLINE,
@@ -600,6 +630,7 @@ async def send_chat_message(
     # verdict so non-English (e.g. French/Spanish) and paraphrased requests are
     # also caught before any real generation happens. Runs on the raw message.
     if await asyncio.to_thread(llm_classify_harmful, message, None, 20, JUDGE_FAIL_CLOSED):
+        print(f"[LLM VERIFIED HARMFUL INTENT DETECTED FOR]: {message}")
         return json.dumps({
             "declined": True,
             "response": HARMFUL_DECLINE,
@@ -861,6 +892,24 @@ async def _run_batch(batch_id):
                 if harmful:
                     print(
                         f"[guardrail] redacted harmful batch reply "
+                        f"(batch {batch_id}, item {it['index']})"
+                    )
+                    reply = HARMFUL_DECLINE
+                    item_update(
+                        batch_id, it["index"], status="done",
+                        reply=reply, guardrail_blocked=1,
+                    )
+                    continue
+                # ── Strict output judge (final end-of-pipe gate) ─────────
+                # After the existing harmful-content checks, run the strictest
+                # possible judge covering ALL prohibited categories plus
+                # prompt/input/system-prompt leaking.  Fail-closed: if the
+                # judge is down, the reply is blocked.
+                if is_strict_output_blocked(reply) or await asyncio.to_thread(
+                    mcp_output_judge, reply, None, 90, True
+                ):
+                    print(
+                        f"[guardrail][strict] blocked batch reply "
                         f"(batch {batch_id}, item {it['index']})"
                     )
                     reply = HARMFUL_DECLINE
@@ -1214,8 +1263,17 @@ async def get_batch_results(
             # Defensive redaction: in case a reply slipped the worker's output
             # scan (e.g. stored by an older build), never hand harmful content
             # back to the client.
-            if reply and it.get("guardrail_blocked") != 1 and is_harmful_content(reply):
-                reply = HARMFUL_DECLINE
+            if reply and it.get("guardrail_blocked") != 1:
+                if is_harmful_content(reply):
+                    reply = HARMFUL_DECLINE
+                elif is_strict_output_blocked(reply):
+                    reply = HARMFUL_DECLINE
+                else:
+                    strict_blocked = await asyncio.to_thread(
+                        mcp_output_judge, reply, None, 90, True
+                    )
+                    if strict_blocked:
+                        reply = HARMFUL_DECLINE
             entry["reply"] = reply
             entry["session_id"] = it["session_id"]
         elif it["status"] == "error":

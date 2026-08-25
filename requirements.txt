@@ -5,3 +5,4 @@ PyJWT
 Markdown
 mcp[cli]
 websockets
+cryptography
