@@ -14,68 +14,35 @@ Two dimensions are tracked:
 Within a self-chat window every participant (kolpo, kaya, editor, moderator)
 shares a single scope (``"self-chat"``) so the theme stays coordinated between
 the users of that window while regular per-user chats stay isolated.
+
+Storage is the unified local-ai database (server/db.py): the ``theme_log`` table
+lives alongside tasks and the MCP batch tables in one file.
 """
 
 import hashlib
 import json
-import sqlite3
-import threading
 import uuid
 from datetime import datetime
 
-from server.features.state import M
-
-_themes_db_lock = threading.Lock()
-
-
-def _db_run(query, params=()):
-    with _themes_db_lock:
-        conn = sqlite3.connect(M.THEMES_DB)
-        try:
-            cur = conn.execute(query, params)
-            conn.commit()
-            return cur.rowcount
-        finally:
-            conn.close()
-
-
-def _db_fetch(query, params=()):
-    with _themes_db_lock:
-        conn = sqlite3.connect(M.THEMES_DB)
-        conn.row_factory = sqlite3.Row
-        try:
-            cur = conn.execute(query, params)
-            return [dict(r) for r in cur.fetchall()]
-        finally:
-            conn.close()
-
-
-def _db_fetch_one(query, params=()):
-    rows = _db_fetch(query, params)
-    return rows[0] if rows else None
+import server.db as db
 
 
 def _init_themes_db():
-    _db_run(
-        """
-        CREATE TABLE IF NOT EXISTS theme_log (
-            id TEXT PRIMARY KEY,
-            scope TEXT NOT NULL,
-            user_id TEXT DEFAULT '',
-            genre TEXT DEFAULT '',
-            mood TEXT DEFAULT '',
-            role TEXT DEFAULT '',
-            persona TEXT DEFAULT '',
-            details TEXT DEFAULT '{}',
-            combo_hash TEXT NOT NULL,
-            theme TEXT DEFAULT '',
-            status TEXT DEFAULT 'active',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(scope, combo_hash)
-        )
-        """
-    )
+    """Ensure the unified DB (and thus the theme_log table) exists."""
+    db.ensure_init()
+
+
+# Thin wrappers kept for back-compat with callers that imported the helpers.
+def _db_run(query, params=()):
+    return db.run(query, params)
+
+
+def _db_fetch(query, params=()):
+    return db.fetch(query, params)
+
+
+def _db_fetch_one(query, params=()):
+    return db.fetch_one(query, params)
 
 
 def combo_hash(genre, mood, role, persona, details=None, level="round"):
@@ -120,7 +87,7 @@ def theme_log_create(
         details_obj = {}
     h = combo_hash(genre, mood, role, persona, details_obj, level)
 
-    existing = _db_fetch_one(
+    existing = db.fetch_one(
         "SELECT * FROM theme_log WHERE scope=? AND combo_hash=?",
         (scope, h),
     )
@@ -133,18 +100,18 @@ def theme_log_create(
         if updates:
             updates["updated_at"] = datetime.now().isoformat(timespec="seconds")
             set_clause = ", ".join(f"{k}=?" for k in updates)
-            _db_run(
+            db.run(
                 f"UPDATE theme_log SET {set_clause} WHERE id=?",
                 tuple(updates.values()) + (existing["id"],),
             )
-            existing = _db_fetch_one(
+            existing = db.fetch_one(
                 "SELECT * FROM theme_log WHERE id=?", (existing["id"],)
             )
         return existing, True
 
     tid = str(uuid.uuid4())
     now = datetime.now().isoformat(timespec="seconds")
-    _db_run(
+    db.run(
         "INSERT INTO theme_log (id, scope, user_id, genre, mood, role, persona, details, combo_hash, theme, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             tid,
@@ -162,18 +129,18 @@ def theme_log_create(
             now,
         ),
     )
-    return _db_fetch_one("SELECT * FROM theme_log WHERE id=?", (tid,)), False
+    return db.fetch_one("SELECT * FROM theme_log WHERE id=?", (tid,)), False
 
 
 def theme_log_complete(tid):
-    existing = _db_fetch_one("SELECT * FROM theme_log WHERE id=?", (tid,))
+    existing = db.fetch_one("SELECT * FROM theme_log WHERE id=?", (tid,))
     if not existing:
         return None
-    _db_run(
+    db.run(
         "UPDATE theme_log SET status='completed', updated_at=? WHERE id=?",
         (datetime.now().isoformat(timespec="seconds"), tid),
     )
-    return _db_fetch_one("SELECT * FROM theme_log WHERE id=?", (tid,))
+    return db.fetch_one("SELECT * FROM theme_log WHERE id=?", (tid,))
 
 
 def theme_log_list(scope=None, all_scopes=False, status=None, limit=50):
@@ -191,7 +158,7 @@ def theme_log_list(scope=None, all_scopes=False, status=None, limit=50):
     except (TypeError, ValueError):
         limit = 50
     params.append(limit)
-    return _db_fetch(
+    return db.fetch(
         f"SELECT * FROM theme_log {clause} ORDER BY created_at DESC LIMIT ?",
         params,
     )
@@ -204,7 +171,7 @@ def theme_log_check(scope, genre="", mood="", role="", persona="", details=None,
         except (TypeError, ValueError):
             details = {}
     h = combo_hash(genre, mood, role, persona, details or {}, level)
-    return _db_fetch_one(
+    return db.fetch_one(
         "SELECT * FROM theme_log WHERE scope=? AND combo_hash=?",
         (scope, h),
     )
@@ -217,7 +184,7 @@ def theme_log_stats(scope=None, all_scopes=False):
         where.append("scope=?")
         params.append(scope)
     clause = ("WHERE " + " AND ".join(where)) if where else ""
-    rows = _db_fetch(
+    rows = db.fetch(
         f"SELECT scope, status, COUNT(*) AS count FROM theme_log {clause} GROUP BY scope, status ORDER BY scope",
         params,
     )

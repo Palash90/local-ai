@@ -312,8 +312,9 @@ SHARES_FILE = os.path.join(FILES_DIR, "shares.json")
 IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
-TASKS_DB = os.path.expanduser("~/local-ai-files/tasks.db")
-THEMES_DB = os.path.expanduser("~/local-ai-files/themes.db")
+# Unified SQLite database: tasks, theme_log and MCP batches all live in this
+# one file (see server/db.py). Override at runtime with LOCAL_AI_DB.
+APP_DB = os.path.expanduser("~/local-ai-files/local_ai.db")
 IMAGE_TOKEN_COST = 1200
 AUDIO_TOKEN_COST = 800
 PER_MESSAGE_OVERHEAD = 4

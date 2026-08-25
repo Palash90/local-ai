@@ -64,8 +64,6 @@ from server.config import (  # noqa: F401
     SESSIONS_FILE,
     SHARE_BASE_URL,
     SHARES_FILE,
-    TASKS_DB,
-    THEMES_DB,
     TOOL_FREE_AGENTS,
     TOOLS,
     TOOLS_DETAILED,

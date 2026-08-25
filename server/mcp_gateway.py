@@ -44,6 +44,11 @@ try:
     )
     from server.input_guard import (
         GUARDRAIL_DECLINE,
+        HARMFUL_DECLINE,
+        is_harmful_content,
+        llm_classify_harmful,
+        llm_classify_harmful_output,
+        is_harmful_request,
         is_jailbreak_attempt,
         wrap_user_message,
     )
@@ -69,11 +74,25 @@ except ImportError:
     )
     from server.input_guard import (
         GUARDRAIL_DECLINE,
+        HARMFUL_DECLINE,
+        is_harmful_content,
+        llm_classify_harmful,
+        llm_classify_harmful_output,
+        is_harmful_request,
         is_jailbreak_attempt,
         wrap_user_message,
     )
 
 API_BASE = os.environ.get("CHAT_API_BASE", "http://127.0.0.1:3001")
+
+# The LLM safety judge is the primary defence for non-English and paraphrased
+# harmful prompts, so when it is configured its outages must fail CLOSED
+# (block) rather than open. Default is fail-closed; set GUARD_FAIL_CLOSED=0 to
+# revert to fail-open (degrade to the pattern layer) if you prefer availability
+# over strict safety when the judge model is down.
+JUDGE_FAIL_CLOSED = os.environ.get("GUARD_FAIL_CLOSED", "1").lower() not in (
+    "0", "false", "no",
+)
 MCP_ALLOWED_USERS = [
     u.strip() for u in os.environ.get("MCP_ALLOWED_USERS", "").split(",") if u.strip()
 ]
@@ -212,6 +231,101 @@ async def _call(method: str, path: str, **kw) -> str:
         return r.text
 
 
+# Sessions we've already auto-renamed (once a response is received) so we
+# don't clobber a name the user set manually, and don't rename on every poll.
+_auto_renamed = set()
+
+
+def _is_default_name(name: str, system_prompt: str) -> bool:
+    """True when a session name is still an unhelpful placeholder.
+
+    Covers the literal defaults ("New Chat", "") as well as a name that is
+    just the session's own system prompt (e.g. "You are an intelligent..."),
+    which is what MCP-created sessions tend to show.
+    """
+    name = (name or "").strip()
+    if name in ("", "New Chat"):
+        return True
+    sp = (system_prompt or "").strip()
+    if sp and (name == sp or name.startswith(sp[:40])):
+        return True
+    return False
+
+
+def _extract_text(content) -> str:
+    """Pull plain text out of a message content field (str or parts list)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    out.append(part.get("text", ""))
+                elif "text" in part:
+                    out.append(str(part.get("text", "")))
+        return "\n".join(p for p in out if p)
+    return ""
+
+
+async def _maybe_auto_rename(session_id: str) -> None:
+    """Give a still-unnamed MCP session a meaningful title from its first
+    exchange. Called once the first response for the session is received."""
+    if not session_id or session_id in _auto_renamed:
+        return
+    try:
+        res = await _call("GET", "/api/sessions")
+        raw = res.text if hasattr(res, "text") else res
+        try:
+            sessions = json.loads(raw)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(sessions, list):
+            return
+        sess = next((s for s in sessions if s.get("session_id") == session_id), None)
+        if not sess:
+            return
+        name = sess.get("name", "")
+        system_prompt = sess.get("system_prompt", "")
+        if not _is_default_name(name, system_prompt):
+            _auto_renamed.add(session_id)
+            return
+
+        res = await _call("GET", f"/api/sessions/{session_id}/messages")
+        raw = res.text if hasattr(res, "text") else res
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return
+        messages = data.get("messages", []) if isinstance(data, dict) else []
+        title = ""
+        for m in messages:
+            if m.get("role") == "user":
+                txt = _extract_text(m.get("content", "")).strip()
+                # Skip the synthesized audio placeholder.
+                if txt and txt != "\U0001F3A4 Audio message":
+                    title = txt
+                    break
+        if not title:
+            for m in messages:
+                if m.get("role") == "assistant":
+                    txt = _extract_text(m.get("content", "")).strip()
+                    if txt:
+                        title = txt
+                        break
+        if not title:
+            return
+        title = title.replace("\n", " ").strip()
+        if len(title) > 60:
+            title = title[:60].rstrip() + "..."
+        if not title:
+            return
+        await _call("PUT", f"/api/sessions/{session_id}", json={"name": title})
+        _auto_renamed.add(session_id)
+    except Exception:
+        pass
+
+
 async def _call_image(path: str):
     """Fetch binary image data from the API, returning (Image|None, error|None).
 
@@ -306,16 +420,36 @@ async def create_session(system_prompt: str = "", system_prompts: list = None) -
     GUARDRAIL: system prompts are screened by the input guardrail; a prompt
     that tries to disable safety rules is declined and no session is created.
     """
-    if (system_prompt and is_jailbreak_attempt(system_prompt)) or any(
+    sp_jail = (system_prompt and is_jailbreak_attempt(system_prompt)) or any(
         isinstance(sp, dict) and is_jailbreak_attempt(str(sp.get("prompt", "")))
         or isinstance(sp, str) and is_jailbreak_attempt(sp)
         for sp in (system_prompts or [])
-    ):
+    )
+    sp_harm = (system_prompt and is_harmful_request(system_prompt)) or any(
+        isinstance(sp, dict) and is_harmful_request(str(sp.get("prompt", "")))
+        or isinstance(sp, str) and is_harmful_request(sp)
+        for sp in (system_prompts or [])
+    )
+    if sp_jail or sp_harm:
         return json.dumps({
             "declined": True,
             "response": GUARDRAIL_DECLINE,
             "detail": "system_prompt blocked by MCP input guardrail",
         })
+    sp_texts = [system_prompt] if system_prompt else []
+    sp_texts += [
+        str(sp.get("prompt", "")) if isinstance(sp, dict) else str(sp)
+        for sp in (system_prompts or [])
+    ]
+    for sp in sp_texts:
+        if sp and await asyncio.to_thread(
+            llm_classify_harmful, sp, None, 20, JUDGE_FAIL_CLOSED
+        ):
+            return json.dumps({
+                "declined": True,
+                "response": GUARDRAIL_DECLINE,
+                "detail": "system_prompt blocked by MCP LLM safety judge",
+            })
     payload = {}
     if system_prompt:
         payload["system_prompt"] = system_prompt
@@ -343,7 +477,45 @@ async def get_session_messages(session_id: str) -> str:
     unknown or belongs to another user. Use after get_message_status reports
     "done" to read the assistant's reply (it is the last message).
     """
-    return await _call("GET", f"/api/sessions/{session_id}/messages")
+    res = await _call("GET", f"/api/sessions/{session_id}/messages")
+    raw = res.text if hasattr(res, "text") else res
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return raw
+    blocked = False
+    judged = 0
+    if isinstance(data, dict):
+        for msg in data.get("messages", []):
+            if msg.get("role") != "assistant":
+                continue
+            if msg.get("_guardrail_blocked"):
+                blocked = True
+                continue
+            content = msg.get("content", "")
+            scan = content if isinstance(content, str) else json.dumps(content)
+            if not scan:
+                continue
+            harmful = is_harmful_content(scan)
+            # Cap judge invocations per read: pattern matching already covers
+            # older turns; the LLM judge is a backstop for recent replies.
+            if not harmful and len(scan) > 50 and judged < 5:
+                # Pattern layer missed it (novel phrasing); let the LLM judge
+                # inspect the model's own output before we hand it back. This
+                # path is FAIL-OPEN on judge error: a missing judge must never
+                # redact legitimate replies, only an explicit HARMFUL verdict.
+                harmful = await asyncio.to_thread(
+                    llm_classify_harmful_output, scan, None, 20, False
+                )
+                judged += 1
+            if harmful:
+                print(f"[guardrail] redacted harmful assistant message in session {session_id}")
+                msg["content"] = HARMFUL_DECLINE
+                msg["_guardrail_blocked"] = True
+                blocked = True
+    if blocked:
+        return json.dumps(data)
+    return raw
 
 
 @mcp.tool()
@@ -417,6 +589,21 @@ async def send_chat_message(
             "declined": True,
             "response": GUARDRAIL_DECLINE,
             "detail": "message blocked by MCP input guardrail",
+        })
+    if is_harmful_request(message):
+        return json.dumps({
+            "declined": True,
+            "response": HARMFUL_DECLINE,
+            "detail": "message blocked by MCP harmful-content guardrail",
+        })
+    # LLM safety judge: pre-call the inference engine for a single HARMFUL/SAFE
+    # verdict so non-English (e.g. French/Spanish) and paraphrased requests are
+    # also caught before any real generation happens. Runs on the raw message.
+    if await asyncio.to_thread(llm_classify_harmful, message, None, 20, JUDGE_FAIL_CLOSED):
+        return json.dumps({
+            "declined": True,
+            "response": HARMFUL_DECLINE,
+            "detail": "message blocked by MCP LLM safety judge",
         })
     payload = {
         "session_id": session_id,
@@ -512,6 +699,11 @@ async def get_message_status(task_id: str) -> str:
             )
         elif status == "done":
             obj["next_action"] = "Generation complete. Call get_session_messages to read the response."
+            sid = obj.get("session_id")
+            if sid:
+                # Give the session a meaningful title from its first exchange
+                # so MCP-created sessions stop showing the system prompt.
+                await _maybe_auto_rename(sid)
         return json.dumps(obj)
 
     return raw_text
@@ -658,6 +850,25 @@ async def _run_batch(batch_id):
                         break
             except (ValueError, TypeError, AttributeError):
                 pass
+            # ── Output guardrail ──────────────────────────────────────────────
+            # The model may have complied with a harmful request that dodged the
+            # input filters; scan its reply (pattern + LLM judge) and redact
+            # before the reply is ever persisted or returned to the client.
+            if reply:
+                harmful = is_harmful_content(reply) or await asyncio.to_thread(
+                    llm_classify_harmful_output, reply, None, 20, False
+                )
+                if harmful:
+                    print(
+                        f"[guardrail] redacted harmful batch reply "
+                        f"(batch {batch_id}, item {it['index']})"
+                    )
+                    reply = HARMFUL_DECLINE
+                    item_update(
+                        batch_id, it["index"], status="done",
+                        reply=reply, guardrail_blocked=1,
+                    )
+                    continue
             item_update(
                 batch_id, it["index"], status="done", reply=reply,
             )
@@ -798,8 +1009,18 @@ async def start_chat_batch(
             "response": GUARDRAIL_DECLINE,
             "detail": "system_prompt blocked by MCP input guardrail",
         })
-    blocked = [i for i, p in enumerate(prompts) if is_jailbreak_attempt(p)]
-    kept = [p for i, p in enumerate(prompts) if not is_jailbreak_attempt(p)]
+    blocked = [i for i, p in enumerate(prompts)
+               if is_jailbreak_attempt(p) or is_harmful_request(p)]
+    # LLM safety judge on the prompts the cheap patterns didn't already catch.
+    for i, p in enumerate(prompts):
+        if i in blocked:
+            continue
+        if p and await asyncio.to_thread(
+            llm_classify_harmful, p, None, 20, JUDGE_FAIL_CLOSED
+        ):
+            blocked.append(i)
+    blocked = sorted(set(blocked))
+    kept = [p for i, p in enumerate(prompts) if i not in blocked]
     if not kept:
         return json.dumps({
             "declined": True,
@@ -989,7 +1210,13 @@ async def get_batch_results(
             "prompt": it["prompt"],
         }
         if it["status"] == "done":
-            entry["reply"] = it["reply"]
+            reply = it.get("reply", "")
+            # Defensive redaction: in case a reply slipped the worker's output
+            # scan (e.g. stored by an older build), never hand harmful content
+            # back to the client.
+            if reply and it.get("guardrail_blocked") != 1 and is_harmful_content(reply):
+                reply = HARMFUL_DECLINE
+            entry["reply"] = reply
             entry["session_id"] = it["session_id"]
         elif it["status"] == "error":
             entry["error"] = it["error"]
