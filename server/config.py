@@ -317,6 +317,36 @@ LLAMA_SERVER_ARGS_CPU = [
     "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
 ]
 
+
+LLAMA_BASE_MCP = "http://localhost:8082"
+LLAMA_URL_MCP = f"{LLAMA_BASE_MCP}/v1/chat/completions"
+MODEL_ID_MCP = "gemma-4-E2B-it-Q4_K_M"
+MCP_USER = os.environ.get("MCP_USER", "")
+
+LLAMA_SERVER_ARGS_MCP = [
+    "--host", "127.0.0.1",
+    "--port", "8082",
+    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    "--jinja",
+    "--n-gpu-layers", "0",
+    "-fa", "off",
+    "--ctx-size", "16384",
+    "-ctk", "q8_0",
+    "--no-mmproj-offload",
+    "-t", "4",
+    "-tb", "4",
+    "--cache-reuse", "256",
+    "--reasoning-budget", str(REASONING_BUDGET),
+    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+    "--temp", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64",
+    "--min-p", "0.0",
+    "--repeat-penalty", "1.0",
+    "--device", "none",
+    "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
+]
+
 FILES_DIR = os.path.expanduser("~/local-ai-files")
 SESSIONS_DIR = os.path.join(FILES_DIR, "session")
 SESSIONS_FILE = os.path.join(SESSIONS_DIR, "sessions.json")

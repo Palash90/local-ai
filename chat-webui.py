@@ -43,6 +43,7 @@ from server.config import (  # noqa: F401
     LLAMA_QWEN_NGL,
     LLAMA_SERVER_ARGS,
     LLAMA_SERVER_ARGS_CPU,
+    LLAMA_SERVER_ARGS_MCP,
     LLAMA_SERVER_PATH,
     LLAMA_SLOT_SAVE_DIR,
     LLAMA_URL,
@@ -50,6 +51,8 @@ from server.config import (  # noqa: F401
     MAX_OUTPUT_TOKENS,
     MODEL_ID,
     MODEL_ID_CPU,
+    MODEL_ID_MCP,
+    MCP_USER,
     PER_MESSAGE_OVERHEAD,
     PORT,
     PROMPT_PATH,
@@ -104,6 +107,7 @@ from server.features.state import (  # noqa: E402
     _client_location,
     _cpu_last_llm_use,
     _cpu_model_status,
+    _mcp_model_status,
     _current_task_ids,
     _data_lock,
     _effective_contexts,
@@ -321,6 +325,7 @@ if __name__ == "__main__":
     # UI user wait behind it.
     threading.Thread(target=_queue_worker, args=("gpu",), daemon=True).start()
     threading.Thread(target=_queue_worker, args=("cpu",), daemon=True).start()
+    threading.Thread(target=_queue_worker, args=("mcp",), daemon=True).start()
     threading.Thread(target=_image_worker, daemon=True).start()
     threading.Thread(target=_idle_unload_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()

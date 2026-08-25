@@ -24,7 +24,7 @@ from server.features.state import M
 # Rotating KV-checkpoint filename per lane (slot 0 is the only slot — both
 # servers run with the default --parallel 1). Kept constant so each
 # save overwrites the previous snapshot instead of filling the disk.
-_SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv"}
+_SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv", "mcp": "mcp_slot0.kv"}
 
 
 def slot_checkpoint_file(mode="gpu"):
@@ -180,17 +180,6 @@ def consult_expert_model(prompt: str, mode: str = "cpu", **kwargs):
 
 
 def task_mode(task_id):
-    """Return the llama-server mode a task must run on.
-
-    Tasks posted by agent users (self-chat: editor, moderator, ...) run on the
-    server selected by ``SELF_CHAT_MODE`` (``"cpu"`` or ``"gpu"``); tasks from
-    interactive users always use the GPU server. A per-task ``mode`` override
-    (set at /api/chat admission, e.g. by ``self-chat.py --gpu``) wins over the
-    global flag for agent tasks. An interactive user who explicitly opted into
-    the CPU lane for a research task (task marked ``cpu``) always runs on the
-    CPU server. When ``FORCE_GPU_LANE`` is set (test-time), every non-flagged
-    task — agent or not — runs on the GPU lane.
-    """
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
@@ -198,6 +187,8 @@ def task_mode(task_id):
         user = t.get("_user", "")
         mode = t.get("mode")
         cpu_flagged = bool(t.get("cpu"))
+    if M.MCP_USER and user == M.MCP_USER:
+        return "mcp"
     if cpu_flagged:
         return "cpu"
     if M.FORCE_GPU_LANE:
@@ -208,32 +199,44 @@ def task_mode(task_id):
 
 
 def server_base(mode):
-    """Base URL of the llama-server for ``mode`` (defaults to the GPU server)."""
-    return M.LLAMA_BASE_CPU if mode == "cpu" else M.LLAMA_BASE
+    if mode == "cpu":
+        return M.LLAMA_BASE_CPU
+    if mode == "mcp":
+        return M.LLAMA_BASE_MCP
+    return M.LLAMA_BASE
 
 
 def server_url(mode):
-    """Chat-completions URL of the llama-server for ``mode``."""
-    return M.LLAMA_URL_CPU if mode == "cpu" else M.LLAMA_URL
+    if mode == "cpu":
+        return M.LLAMA_URL_CPU
+    if mode == "mcp":
+        return M.LLAMA_URL_MCP
+    return M.LLAMA_URL
 
 
 def server_model_id(mode):
-    """Model filename the llama-server for ``mode`` should load."""
     if mode == "cpu":
         return M.MODEL_ID_CPU or M.MODEL_ID
+    if mode == "mcp":
+        return M.MODEL_ID_MCP
     return M.MODEL_ID
 
 
 def server_status(mode):
-    """Model status of the llama-server for ``mode`` ("unloaded", "loading",
-    "chat_loaded", "unloading", ...)."""
     with M._data_lock:
-        return M._cpu_model_status if mode == "cpu" else M.model_status
+        if mode == "cpu":
+            return M._cpu_model_status
+        if mode == "mcp":
+            return M._mcp_model_status
+        return M.model_status
 
 
 def server_last_use(mode):
-    """Idle timestamp of the llama-server for ``mode``."""
-    return M._cpu_last_llm_use if mode == "cpu" else M._last_llm_use
+    if mode == "cpu":
+        return M._cpu_last_llm_use
+    if mode == "mcp":
+        return M._mcp_last_llm_use
+    return M._last_llm_use
 
 
 def active_model_id(mode="gpu"):
@@ -258,9 +261,8 @@ def is_llama_alive(base=None):
 def unload_llama_model(mode="gpu"):
     """Unload the model from the llama-server for ``mode``."""
     with M._model_transition_lock:
-        with M._data_lock:
-            if (M._cpu_model_status if mode == "cpu" else M.model_status) == "unloaded":
-                return True
+        if M.server_status(mode) == "unloaded":
+            return True
 
         print(f"[llama] Requesting {mode} model unload from VRAM/RAM...")
         # Checkpoint the KV cache BEFORE it is destroyed by the unload, so the
@@ -268,10 +270,12 @@ def unload_llama_model(mode="gpu"):
         # re-prefilling the whole conversation. This must happen while the
         # model still reads "chat_loaded" — save_slot_checkpoint skips
         # anything else — hence before the "unloading" transition below.
-        M.save_slot_checkpoint(mode)
+        
         with M._data_lock:
             if mode == "cpu":
                 M._cpu_model_status = "unloading"
+            elif mode == "mcp":
+                M._mcp_model_status = "unloading"
             else:
                 M.model_status = "unloading"
 
@@ -298,6 +302,8 @@ def unload_llama_model(mode="gpu"):
         with M._data_lock:
             if mode == "cpu":
                 M._cpu_model_status = "chat_loaded" if alive else "unloaded"
+            elif mode == "mcp":
+                M._mcp_model_status = "chat_loaded" if alive else "unloaded"
             else:
                 M.model_status = "chat_loaded" if alive else "unloaded"
         return False
@@ -313,13 +319,14 @@ def load_llama_model(mode="gpu"):
     with M._data_lock:
         # Only a fresh load benefits from a restore: if the model is already
         # running, its live KV is newer than any snapshot on disk.
-        was_unloaded = (
-            M._cpu_model_status if mode == "cpu" else M.model_status
-        ) == "unloaded"
-        if mode == "cpu":
-            M._cpu_model_status = "loading"
-        else:
-            M.model_status = "loading"
+        was_unloaded = M.server_status(mode) == "unloaded"
+        with M._data_lock:
+            if mode == "cpu":
+                M._cpu_model_status = "loading"
+            elif mode == "mcp":
+                M._mcp_model_status = "loading"
+            else:
+                M.model_status = "loading"
     model_id = M.server_model_id(mode)
     base = M.server_base(mode)
     print(f"[llama] Sending load request for model '{model_id}' to {base}...")
@@ -338,8 +345,6 @@ def load_llama_model(mode="gpu"):
                         else:
                             M.model_status = "chat_loaded"
                             M._last_llm_use = time.time()  # Reset idle timer upon loading
-                    # Resume from the pre-unload KV checkpoint (no-op when
-                    # there is none or the load wasn't a reload).
                     if was_unloaded:
                         M.restore_slot_checkpoint(mode)
                     return True
@@ -355,9 +360,12 @@ def load_llama_model(mode="gpu"):
             if mode == "cpu":
                 M._cpu_model_status = "chat_loaded"
                 M._cpu_last_llm_use = time.time()
+            elif mode == "mcp":
+                M._mcp_model_status = "chat_loaded"
+                M._mcp_last_llm_use = time.time()
             else:
                 M.model_status = "chat_loaded"
-                M._last_llm_use = time.time()  # Reset idle timer upon loading
+                M._last_llm_use = time.time()
         if was_unloaded:
             M.restore_slot_checkpoint(mode)
         return True
@@ -365,6 +373,8 @@ def load_llama_model(mode="gpu"):
     with M._data_lock:
         if mode == "cpu":
             M._cpu_model_status = "unloaded"
+        elif mode == "mcp":
+            M._mcp_model_status = "unloaded"
         else:
             M.model_status = "unloaded"
     return False

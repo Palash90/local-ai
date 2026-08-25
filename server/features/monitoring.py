@@ -19,7 +19,7 @@ import requests
 
 from server.features.state import M
 
-_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079"}
+_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "mcp": "8082"}
 
 
 def model_status_snapshot():
@@ -83,7 +83,7 @@ def kill_comfyui():
 
 def _start_llama_process(args, mode="gpu"):
     """Launch a llama-server with the given argument list and wait for health."""
-    base = M.LLAMA_BASE_CPU if mode == "cpu" else M.LLAMA_BASE
+    base = M.server_base(mode)
     log_dir = os.path.expanduser("~/local-ai-files")
     llm_log = open(os.path.join(log_dir, f"{mode}-llama-server.log"), "a")
     subprocess.Popen(
@@ -116,15 +116,21 @@ def restart_llama_server(mode):
     with M._data_lock:
         if mode == "cpu":
             M._cpu_model_status = "unloaded"
+        elif mode == "mcp":
+            M._mcp_model_status = "unloaded"
         else:
             M.model_status = "unloaded"
+    args = {
+        "gpu": M.LLAMA_SERVER_ARGS,
+        "cpu": M.LLAMA_SERVER_ARGS_CPU,
+        "mcp": M.LLAMA_SERVER_ARGS_MCP,
+    }[mode]
     args = M.LLAMA_SERVER_ARGS if mode == "gpu" else M.LLAMA_SERVER_ARGS_CPU
     _start_llama_process(args, mode)
 
 
 def ensure_llama_server(mode):
-    """Make sure the llama-server for ``mode`` is running, starting it if not."""
-    base = M.LLAMA_BASE_CPU if mode == "cpu" else M.LLAMA_BASE
+    base = M.server_base(mode)
     if M.is_llama_alive(base):
         return
     print(f"[llama] {mode} llama-server not reachable — starting...")
@@ -161,6 +167,12 @@ def _cpu_lane_needed():
         return len(M._task_queues["cpu"]) > 0 or M._current_task_ids["cpu"] is not None
 
 
+def _mcp_lane_needed():
+    """True if the MCP lane has (or is about to have) work."""
+    with M._queue_locks["mcp"]:
+        return len(M._task_queues["mcp"]) > 0 or M._current_task_ids["mcp"] is not None
+
+
 def restart_servers():
     print("Restarting servers")
     M.kill_llama_server()
@@ -186,12 +198,16 @@ def restart_servers():
     with M._data_lock:
         M.model_status = "unloaded"
         M._cpu_model_status = "unloaded"
+        M._mcp_model_status = "unloaded"
     _start_llama_process(M.LLAMA_SERVER_ARGS, "gpu")
-    # The CPU self-chat server only comes up on demand (first agent task).
     if _cpu_lane_needed():
         _start_llama_process(M.LLAMA_SERVER_ARGS_CPU, "cpu")
     else:
         print("[llama] Skipping CPU llama-server start (no agent lane activity)")
+    if _mcp_lane_needed():
+        _start_llama_process(M.LLAMA_SERVER_ARGS_MCP, "mcp")
+    else:
+        print("[llama] Skipping MCP llama-server start (no MCP lane activity)")
 
 
 def ensure_comfyui_running():
@@ -242,12 +258,11 @@ def _idle_unload_loop():
         # idle for > 300s. This is checked per-lane (not combined) so a busy
         # CPU self-chat agent can't keep the idle GPU model pinned in VRAM,
         # and vice versa.
-        for mode in ("gpu", "cpu"):
+        for mode in ("gpu", "cpu", "mcp"):
             with M._queue_locks[mode]:
                 queue_active = len(M._task_queues[mode]) > 0 or M._current_task_ids[mode] is not None
-            with M._data_lock:
-                ms = M._cpu_model_status if mode == "cpu" else M.model_status
-                lu = M._cpu_last_llm_use if mode == "cpu" else M._last_llm_use
+            ms = M.server_status(mode)
+            lu = M.server_last_use(mode)
             if ms == "chat_loaded" and (time.time() - lu > 300) and not queue_active:
                 print(f"[idle] No {mode} LLM activity for 300s, releasing model weights...")
                 M.unload_llama_model(mode)
@@ -257,7 +272,10 @@ def _reminder_loop():
     while True:
         try:
             now = datetime.now().isoformat()
-            due = M._db_fetch("SELECT * FROM tasks WHERE reminder_at IS NOT NULL AND reminder_at <= ? AND reminded=0 AND status NOT IN ('completed','cancelled')", (now,))
+            due = M._db_fetch(
+                "SELECT * FROM tasks WHERE reminder_at IS NOT NULL AND reminder_at <= ? AND reminded=0 AND status NOT IN ('completed','cancelled')",
+                (now,),
+            )
             for task in due:
                 print(f"[reminder] Task '{task['title']}'. User: {task['user_id']}")
                 M._db_run("UPDATE tasks SET reminded=1 WHERE id=?", (task["id"],))
@@ -271,7 +289,7 @@ def _evacuate_ram():
     print("[ram] Emergency RAM evacuation")
     # RAM pressure is whole-box, so both lanes (GPU/UI and CPU/agent) get
     # their in-flight task requeued to the front of their own lane.
-    for mode in ("gpu", "cpu"):
+    for mode in ("gpu", "cpu", "mcp"):
         with M._queue_locks[mode]:
             tid = M._current_task_ids[mode]
             if tid:
@@ -298,7 +316,9 @@ def _evacuate_ram():
         time.sleep(5)
         ram = M.get_ram_usage()
         if ram is not None and ram <= M.RAM_RESUME_THRESHOLD:
-            print(f"[ram] RAM {ram:.0f}% ≤ {M.RAM_RESUME_THRESHOLD}%, restarting servers")
+            print(
+                f"[ram] RAM {ram:.0f}% ≤ {M.RAM_RESUME_THRESHOLD}%, restarting servers"
+            )
             break
     M.restart_servers()
     M._ram_evacuating = False

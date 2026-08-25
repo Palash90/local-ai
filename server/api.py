@@ -32,6 +32,7 @@ from server.config import (
     COMFYUI_OUTPUT,
     FORCE_GPU_LANE,
     IMG_PATH,
+    MCP_USER,
     SELF_CHAT_MODE,
     UPLOADS_DIR,
 )
@@ -814,6 +815,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             elif FORCE_GPU_LANE and not cpu_flagged:
                 # Test-time override: never admit anything to the CPU lane.
                 mode = "gpu"
+            if MCP_USER and user == MCP_USER:
+                mode = "mcp"
             entry["mode"] = mode
             with _queue_locks[mode]:
                 if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:

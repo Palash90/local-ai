@@ -148,11 +148,14 @@ def _finalize_task(task_id, sid, msg_content, body):
         if sid in M.sessions:
             M.sessions[sid].append(msg_entry)
             M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
+
         if mode == "gpu":
             M._last_tps = predicted_per_second
-            M._last_llm_use = time.time()  # Reset GPU idle timer when task finishes
+            M._last_llm_use = time.time()
+        elif mode == "cpu":
+            M._cpu_last_llm_use = time.time()
         else:
-            M._cpu_last_llm_use = time.time()  # Reset CPU idle timer when task finishes
+            M._mcp_last_llm_use = time.time()
     M.save_sessions()
     with M._data_lock:
         if task_id in M.tasks:
@@ -232,6 +235,8 @@ def _event_loop():
             with M._data_lock:
                 if mode == "cpu":
                     M._cpu_last_llm_use = time.time()
+                elif mode == "mcp":
+                    M._mcp_last_llm_use = time.time()
                 else:
                     M._last_llm_use = time.time()
             if msg.get("tool_calls"):
