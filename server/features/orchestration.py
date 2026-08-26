@@ -192,11 +192,12 @@ def _finalize_task(task_id, sid, msg_content, body):
             from server.input_guard import is_strict_output_blocked
 
             reply_text = msg_content or ""
-            print(f"[guardrail][L3] verifying output for task {task_id}, len={len(reply_text)}")
+            print(f"[guardrail][L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}")
+            print(f"[guardrail][L3] msg_content={repr(reply_text[:500])}")
 
             print(f"[guardrail][L3] checking strict output blocks")
             if is_strict_output_blocked(reply_text):
-                print(f"[guardrail][L3] BLOCKED: strict output filter triggered")
+                print(f"[guardrail][L3] BLOCKED: strict output filter triggered on text: {repr(reply_text[:200])}")
                 mcp_task_update(task_id, status="done", reply=reply_text,
                               verification_level="LEVEL 3 OUTPUT VERIFICATION FAILED",
                               failure_reason="Output blocked by strict filter")

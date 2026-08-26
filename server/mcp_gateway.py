@@ -474,7 +474,7 @@ async def list_sessions() -> str:
 
 @mcp.tool()
 async def create_session(system_prompt: str = "", system_prompts: list = None) -> str:
-    """Create a brand-new empty chat session and return its id."""
+    """Create a brand-new empty chat session. System prompts may be blocked by guardrails (returns declined=True if rejected)."""
     sp_jail = (system_prompt and is_jailbreak_attempt(system_prompt)) or any(
         isinstance(sp, dict) and is_jailbreak_attempt(str(sp.get("prompt", "")))
         or isinstance(sp, str) and is_jailbreak_attempt(sp)
@@ -539,7 +539,7 @@ async def send_chat_message(
     cpu: bool = False,
     no_tools: bool = False,
 ) -> str:
-    """Submit a user message into a chat session for ASYNC processing."""
+    """Submit a user message for async processing. Runs L1/L2 guardrails (code-level + LLM). Returns declined=True if blocked; otherwise returns task_id to poll with get_message_status."""
     print(f"[MCP] send_chat_message called for session {session_id}, msg_len={len(message)}")
 
     print(f"[guardrail][L1] checking jailbreak...")
@@ -609,7 +609,7 @@ async def send_chat_message(
 
 @mcp.tool()
 async def get_message_status(task_id: str) -> str:
-    """Check the processing state of one submitted chat message."""
+    """Check the processing state of a submitted message. Returns status (queued/working/done/error), reply, verification_level (L1/L2/L3 pass/fail), and failure_reason if blocked."""
     from server.features.state import M
     row = mcp_task_get(task_id)
     if row is None:
