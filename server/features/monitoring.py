@@ -125,7 +125,6 @@ def restart_llama_server(mode):
         "cpu": M.LLAMA_SERVER_ARGS_CPU,
         "mcp": M.LLAMA_SERVER_ARGS_MCP,
     }[mode]
-    args = M.LLAMA_SERVER_ARGS if mode == "gpu" else M.LLAMA_SERVER_ARGS_CPU
     _start_llama_process(args, mode)
 
 
@@ -264,7 +263,7 @@ def _idle_unload_loop():
         # idle for > 300s. This is checked per-lane (not combined) so a busy
         # CPU self-chat agent can't keep the idle GPU model pinned in VRAM,
         # and vice versa.
-        for mode in ("gpu", "cpu", "mcp"):
+        for mode in ("gpu", "cpu"):
             with M._queue_locks[mode]:
                 queue_active = len(M._task_queues[mode]) > 0 or M._current_task_ids[mode] is not None
             ms = M.server_status(mode)
@@ -295,7 +294,7 @@ def _evacuate_ram():
     print("[ram] Emergency RAM evacuation")
     # RAM pressure is whole-box, so both lanes (GPU/UI and CPU/agent) get
     # their in-flight task requeued to the front of their own lane.
-    for mode in ("gpu", "cpu", "mcp"):
+    for mode in ("gpu", "cpu"):
         with M._queue_locks[mode]:
             tid = M._current_task_ids[mode]
             if tid:

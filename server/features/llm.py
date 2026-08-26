@@ -60,7 +60,12 @@ def save_slot_checkpoint(mode="gpu"):
     optimization existed.
     """
     with M._data_lock:
-        ms = M._cpu_model_status if mode == "cpu" else M.model_status
+        if mode == "cpu":
+            ms = M._cpu_model_status
+        elif mode == "mcp":
+            ms = M._mcp_model_status
+        else:
+            ms = M.model_status
         dirty = M._slot_kv_dirty.get(mode, False)
         cp = M._slot_checkpoints.get(mode)
     if ms != "chat_loaded":
@@ -167,7 +172,7 @@ def consult_expert_model(prompt: str, mode: str = "cpu", **kwargs):
     import time
 
     # Pause CPU execution if a human user is active
-    if mode == "cpu":
+    if mode in ("cpu", "mcp"):
         while _human_priority_active():
             time.sleep(1.0)
 
@@ -288,6 +293,8 @@ def unload_llama_model(mode="gpu"):
                 with M._data_lock:
                     if mode == "cpu":
                         M._cpu_model_status = "unloaded"
+                    elif mode == "mcp":
+                        M._mcp_model_status = "unloaded"
                     else:
                         M.model_status = "unloaded"
                 return True
@@ -343,9 +350,12 @@ def load_llama_model(mode="gpu"):
                         if mode == "cpu":
                             M._cpu_model_status = "chat_loaded"
                             M._cpu_last_llm_use = time.time()
+                        elif mode == "mcp":
+                            M._mcp_model_status = "chat_loaded"
+                            M._mcp_last_llm_use = time.time()
                         else:
                             M.model_status = "chat_loaded"
-                            M._last_llm_use = time.time()  # Reset idle timer upon loading
+                            M._last_llm_use = time.time()
                     if was_unloaded:
                         M.restore_slot_checkpoint(mode)
                     return True
@@ -604,7 +614,12 @@ def _start_llm_round(task_id, sid, round_num):
     mode = M.task_mode(task_id)
     M.ensure_llama_server(mode)
     with M._data_lock:
-        ms = M._cpu_model_status if mode == "cpu" else M.model_status
+        if mode == "cpu":
+            ms = M._cpu_model_status
+        elif mode == "mcp":
+            ms = M._mcp_model_status
+        else:
+            ms = M.model_status
     if ms != "chat_loaded":
         M.load_llama_model(mode)
     with M._data_lock:

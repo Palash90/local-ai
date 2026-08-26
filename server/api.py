@@ -446,8 +446,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 self.send_error(404)
         elif self.path.startswith("/v1/"):
-            from server.openai_api import handle_list_models, handle_retrieve_model
-            if self.path == "/v1/models":
+            from server.openai_api import handle_list_models, handle_retrieve_model, handle_v1_root
+            if self.path in ("/v1/", "/v1"):
+                handle_v1_root(self)
+            elif self.path == "/v1/models":
                 handle_list_models(self)
             elif self.path.startswith("/v1/models/"):
                 model_id = self.path.split("/v1/models/", 1)[1].rstrip("/")

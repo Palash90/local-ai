@@ -237,7 +237,7 @@ LLAMA_GEMMA_NGL = "99"
 # Started by the MCP gateway on first batch and auto-unloaded after
 # VERIFY_IDLE_TIMEOUT seconds of inactivity to free RAM.
 # ─────────────────────────────────────────────────────────────────────────────
-VERIFY_PORT = int(os.environ.get("VERIFY_PORT", "8082"))
+VERIFY_PORT = int(os.environ.get("VERIFY_PORT", "8083"))
 VERIFY_MODEL = os.environ.get("VERIFY_MODEL", "gemma-4-E2B-it-Q4_K_M")
 VERIFY_CONTEXT_SIZE = int(os.environ.get("VERIFY_CONTEXT_SIZE", "8192"))
 VERIFY_IDLE_TIMEOUT = int(os.environ.get("VERIFY_IDLE_TIMEOUT", "300"))
@@ -250,7 +250,7 @@ LLAMA_SERVER_ARGS = [
     # GPU / VRAM & Performance
     "-ngl", LLAMA_GEMMA_NGL,
     "-fa", "on",
-    "--ctx-size", "65536",       # 24K context for interactive UI chat
+    "--ctx-size", "24576",       # 24K context for interactive UI chat
     "-ctk", "q8_0",
     "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q8_0
     "--no-mmproj-offload",

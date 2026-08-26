@@ -417,7 +417,7 @@ def _queue_worker(mode):
     queue_cond = M._queue_conds[mode]
     task_queue = M._task_queues[mode]
     while True:
-        if mode == "cpu":
+        if mode in ("cpu", "mcp"):
             # If a human is currently active in the UI, hold off agent tasks
             while _human_priority_active():
                 time.sleep(1.0)
@@ -443,7 +443,7 @@ def _queue_worker(mode):
                         }
                 queue_cond.wait(5)
                 continue
-            if mode == "cpu" and M._human_priority_active():
+            if mode in ("cpu", "mcp") and M._human_priority_active():
                 for qitem in task_queue:
                     tid = qitem["task_id"]
                     if tid in M.tasks:

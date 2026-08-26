@@ -4,13 +4,13 @@ Provides ``/v1/chat/completions`` and ``/v1/models`` on the same port as the
 chat UI (3001).  Authentication uses a static ``OPENAI_API_KEY`` from the
 environment, sent as ``Authorization: Bearer <key>``.
 
-The handler functions receive the ``Handler`` instance from
-:class:`server.api.Handler` and use its ``send_json``, ``_safe_write``,
-``send_response``, ``send_header``, ``end_headers`` helpers for output.
+Chat completions are routed through the existing chat pipeline (system prompt,
+tool calling, multi-round orchestration, session management) rather than being
+proxied raw to llama-server.
 """
 
-import hmac
 import json
+import threading
 import time
 import uuid
 
@@ -46,13 +46,27 @@ def _require_api_key(handler):
         )
         return None
     token = auth[len("Bearer "):].strip()
-    if not hmac.compare_digest(token, OPENAI_API_KEY):
+    if not __import__("hmac").compare_digest(token, OPENAI_API_KEY):
         handler.send_json(
             {"error": {"message": "Invalid API key", "type": "invalid_request_error"}},
             status=401,
         )
         return None
     return {"key": token}
+
+
+# ---------------------------------------------------------------------------
+# GET /v1
+# ---------------------------------------------------------------------------
+
+def handle_v1_root(handler):
+    """Return a basic API info response for GET /v1/."""
+    if _require_api_key(handler) is None:
+        return
+    handler.send_json({
+        "object": "list",
+        "data": [{"id": "chat", "object": "model"}],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -148,16 +162,83 @@ def handle_retrieve_model(handler, model_id):
 # POST /v1/chat/completions
 # ---------------------------------------------------------------------------
 
-def handle_chat_completions(handler):
-    """Proxy a chat completion request to llama-server with full SSE streaming.
+_API_USER = "_openai_api"
 
-    Supports:
-    * ``stream: true`` (default) — SSE delta chunks matching the OpenAI spec.
-    * ``stream: false`` — single JSON response.
-    * Vision messages (``image_url`` content parts) forwarded to multimodal
-      llama-server builds.
-    * Tool calling responses forwarded as-is (llama-server emits OpenAI-
-      compatible ``tool_calls`` deltas).
+# Dedicated session prefix for API calls so they never collide with browser
+# sessions.  Each ``model`` field value maps to its own session so different
+# models maintain separate conversation histories.
+_api_sessions = {}
+_api_sessions_lock = threading.Lock()
+
+
+def _get_api_session(sid):
+    """Return (or create) the internal session list for an API session id."""
+    with M._data_lock:
+        if sid not in M.sessions:
+            M.sessions[sid] = []
+            M.sessions_meta[sid] = {
+                "name": "API Chat",
+                "created": time.time(),
+                "updated": time.time(),
+                "user_id": _API_USER,
+            }
+        return M.sessions[sid]
+
+
+def _messages_to_session(messages):
+    """Convert an OpenAI messages array into session-format entries.
+
+    The messages may include ``system``, ``user``, ``assistant`` and ``tool``
+    roles.  Images embedded as ``image_url`` content parts are forwarded as-is
+    (llama-server supports multimodal when an mmproj is loaded).
+    """
+    entries = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content")
+        entry = {"role": role}
+
+        if role == "tool":
+            entry["tool_call_id"] = m.get("tool_call_id", "")
+            entry["content"] = content or ""
+        elif role == "assistant":
+            if content:
+                entry["content"] = content
+            if m.get("tool_calls"):
+                entry["tool_calls"] = m["tool_calls"]
+        elif role == "system":
+            entry["content"] = content or ""
+        else:
+            # user message — may be a string or an array of content parts
+            entry["content"] = content or ""
+
+        entries.append(entry)
+    return entries
+
+
+def _poll_task(task_id, timeout_s=600):
+    """Block until the task reaches a terminal state, returning the task dict."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        with M._data_lock:
+            t = M.tasks.get(task_id, {})
+        status = t.get("status", "unknown")
+        if status in ("done", "error", "cancelled"):
+            return t
+        time.sleep(0.3)
+    return {"status": "error", "error": "Timeout waiting for response"}
+
+
+def handle_chat_completions(handler):
+    """Submit a chat completion through the existing pipeline.
+
+    The request is routed through the system prompt, tool calling loop, and
+    session management just like the browser UI.  The final response is
+    returned in OpenAI format.
+
+    Supports ``stream: true`` (SSE) and ``stream: false`` (single JSON).
+    Streaming wraps the final response as SSE chunks — intermediate tool
+    rounds are executed silently.
     """
     if _require_api_key(handler) is None:
         return
@@ -183,84 +264,144 @@ def handle_chat_completions(handler):
     stream = body.get("stream", True)
     model = body.get("model") or MODEL_ID or "local-model"
 
-    # Build the llama-server payload.  We forward most fields directly so that
-    # llama-server features (temperature, top_p, tools, etc.) work unchanged.
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": stream,
+    # ── Build the user message for the pipeline ─────────────────────────
+    # The last user message becomes the "new" message submitted to the queue.
+    # All preceding messages are injected into the session as history so the
+    # pipeline (and tools) see the full conversation.
+    last_user_idx = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            last_user_idx = i
+            break
+
+    if last_user_idx is None:
+        handler.send_json(
+            {"error": {"message": "No user message found in messages array", "type": "invalid_request_error"}},
+            status=400,
+        )
+        return
+
+    # Extract the text content from the last user message (may be multimodal)
+    last_user = messages[last_user_idx]
+    user_content = last_user.get("content", "")
+    user_image = None
+    if isinstance(user_content, list):
+        # Multimodal: extract text and image
+        text_parts = []
+        for part in user_content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    text_parts.append(part.get("text", ""))
+                elif part.get("type") == "image_url":
+                    img_url = part.get("image_url", {})
+                    user_image = img_url.get("url") if isinstance(img_url, dict) else img_url
+        user_text = "\n".join(text_parts) if text_parts else str(user_content)
+    else:
+        user_text = str(user_content)
+
+    # ── Create an API session and populate history ──────────────────────
+    session_id = f"api_{uuid.uuid4().hex[:12]}"
+
+    # Create the session entry so the pipeline can find it
+    with _api_sessions_lock:
+        _api_sessions[session_id] = True
+
+    with M._data_lock:
+        M.sessions[session_id] = []
+        M.sessions_meta[session_id] = {
+            "name": "API Chat",
+            "created": time.time(),
+            "updated": time.time(),
+            "user_id": _API_USER,
+        }
+
+    # Inject all preceding messages as conversation history
+    history_entries = _messages_to_session(messages[:last_user_idx])
+    if history_entries:
+        with M._data_lock:
+            M.sessions[session_id] = history_entries
+
+    # ── Determine lane mode ─────────────────────────────────────────────
+    # API users go to the GPU lane like interactive UI users.
+    mode = "gpu"
+
+    # ── Queue the task ──────────────────────────────────────────────────
+    task_id = str(uuid.uuid4())
+    entry = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "message": user_text,
+        "image": user_image,
+        "audio": None,
+        "user": _API_USER,
+        "client_timestamp": None,
+        "research": False,
+        "cpu": False,
+        "no_tools": False,
+        "mode": mode,
     }
-    # Forward optional OpenAI parameters that llama-server understands
-    for key in (
-        "temperature", "top_p", "top_k", "min_p", "max_tokens",
-        "stop", "tools", "tool_choice", "frequency_penalty",
-        "presence_penalty", "seed", "logprobs", "top_logprobs",
-        "reasoning_budget",
-    ):
-        if key in body:
-            payload[key] = body[key]
 
-    # Use the GPU server by default
-    target_base = LLAMA_BASE
+    with M._data_lock:
+        M.tasks[task_id] = {
+            "status": "queued",
+            "message": "Waiting in line...",
+            "session_id": session_id,
+            "mode": mode,
+            "_user": _API_USER,
+        }
 
-    # If the requested model matches the CPU model, route there
-    if MODEL_ID_CPU and model == MODEL_ID_CPU:
-        target_base = LLAMA_BASE_CPU
+    with M._queue_locks[mode]:
+        if len(M._task_queues[mode]) >= M.MAX_QUEUE_SIZE:
+            handler.send_json(
+                {"error": {"message": "Server busy", "type": "server_error"}},
+                status=503,
+            )
+            return
+        M._task_queues[mode].append(entry)
+        M._queue_conds[mode].notify()
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
-    try:
-        r = requests.post(
-            f"{target_base}/v1/chat/completions",
-            json=payload,
-            stream=True,
-            timeout=600,
-        )
-    except requests.ConnectionError:
+    # ── Wait for the pipeline to finish ─────────────────────────────────
+    result = _poll_task(task_id, timeout_s=600)
+
+    status = result.get("status", "error")
+    if status == "error":
+        err_msg = result.get("error", "Unknown error")
         handler.send_json(
-            {"error": {"message": "llama-server is not running", "type": "server_error"}},
-            status=503,
-        )
-        return
-    except requests.Timeout:
-        handler.send_json(
-            {"error": {"message": "llama-server timed out", "type": "server_error"}},
-            status=504,
+            {"error": {"message": str(err_msg), "type": "server_error"}},
+            status=500,
         )
         return
 
-    if r.status_code != 200:
-        err_text = r.text[:500] if r.text else f"HTTP {r.status_code}"
-        handler.send_json(
-            {"error": {"message": f"llama-server error: {err_text}", "type": "server_error"}},
-            status=r.status_code,
-        )
-        return
+    response_text = result.get("response", "")
+    reasoning = result.get("reasoning", "")
+    usage = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        if key in result:
+            usage[key] = result[key]
 
+    # ── Stream or return the response ───────────────────────────────────
     if not stream:
-        # ── Non-streaming response ──────────────────────────────────────
-        try:
-            data = r.json()
-        except Exception:
-            handler.send_json(
-                {"error": {"message": "Invalid response from llama-server", "type": "server_error"}},
-                status=500,
-            )
-            return
-        # Ensure OpenAI-compatible envelope
-        data.setdefault("id", completion_id)
-        data.setdefault("object", "chat.completion")
-        data.setdefault("created", created)
-        data.setdefault("model", model)
-        # Normalize choices if llama-server returned a slightly different shape
-        for choice in data.get("choices", []):
-            choice.setdefault("index", 0)
-            choice.setdefault("finish_reason", "stop")
-        handler.send_json(data)
+        handler.send_json({
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_text,
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": usage,
+        })
         return
 
-    # ── Streaming SSE response ───────────────────────────────────────────
+    # ── Streaming: wrap the final response as SSE chunks ────────────────
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
     handler.send_header("Cache-Control", "no-cache")
@@ -268,36 +409,40 @@ def handle_chat_completions(handler):
     handler.send_header("X-Accel-Buffering", "no")
     handler.end_headers()
 
-    r.encoding = "utf-8"
     try:
-        for line in r.iter_lines(decode_unicode=True):
-            if not line:
-                continue
-            # llama-server sends "data: {...}" or "data: [DONE]"
-            if line.startswith("data: "):
-                data_str = line[6:]
-                if data_str.strip() == "[DONE]":
-                    handler._safe_write(b"data: [DONE]\n\n")
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                # Ensure required envelope fields
-                chunk.setdefault("id", completion_id)
-                chunk.setdefault("object", "chat.completion.chunk")
-                chunk.setdefault("created", created)
-                chunk.setdefault("model", model)
-                # Ensure choices array has index
-                for choice in chunk.get("choices", []):
-                    choice.setdefault("index", 0)
-                wire = f"data: {json.dumps(chunk)}\n\n"
-                handler._safe_write(wire.encode("utf-8"))
-            else:
-                # Pass through any non-data lines (e.g. comments) unchanged
-                handler._safe_write((line + "\n\n").encode("utf-8"))
+        # First chunk: role
+        role_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+        }
+        handler._safe_write(f"data: {json.dumps(role_chunk)}\n\n".encode("utf-8"))
+
+        # Content chunks: split into ~20 char pieces for a smooth stream feel
+        chunk_size = 20
+        for i in range(0, len(response_text), chunk_size):
+            piece = response_text[i:i + chunk_size]
+            content_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
+            }
+            handler._safe_write(f"data: {json.dumps(content_chunk)}\n\n".encode("utf-8"))
+
+        # Final chunk
+        finish_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": usage,
+        }
+        handler._safe_write(f"data: {json.dumps(finish_chunk)}\n\n".encode("utf-8"))
+        handler._safe_write(b"data: [DONE]\n\n")
     except (BrokenPipeError, ConnectionResetError):
-        # Client disconnected — stop streaming
         pass
-    finally:
-        r.close()
