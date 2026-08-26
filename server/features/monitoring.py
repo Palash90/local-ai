@@ -19,7 +19,7 @@ import requests
 
 from server.features.state import M
 
-_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8082"}
+_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8083"}
 
 
 def model_status_snapshot():

@@ -216,26 +216,35 @@ def _messages_to_session(messages):
     return entries
 
 
-def _poll_task(task_id, timeout_s=600, status_callback=None):
+def _poll_task(task_id, timeout_s=600, status_callback=None, keepalive_interval=10):
     """Block until the task reaches a terminal state, returning the task dict.
 
-    If status_callback is provided, it's called with (status, message) on each change.
+    If status_callback is provided, it's called with (status, message) whenever
+    the status changes AND at least every ``keepalive_interval`` seconds even if
+    it hasn't — OpenAI-compatible HTTP clients (e.g. Node's undici, used by
+    several VS Code extensions) abort a request if no bytes arrive for ~300s,
+    so during long model-load / queueing / reasoning pauses we still need to
+    push *something* down the wire to keep the connection alive.
     """
     deadline = time.time() + timeout_s
     last_status = None
+    last_ping = 0.0
     while time.time() < deadline:
         with M._data_lock:
             t = M.tasks.get(task_id, {})
         status = t.get("status", "unknown")
         message = t.get("message", "")
 
-        if status != last_status:
-            print(f"[poll] Task {task_id} status changed: {last_status} → {status}, message={message}")
+        now = time.time()
+        if status != last_status or (now - last_ping) >= keepalive_interval:
+            if status != last_status:
+                print(f"[poll] Task {task_id} status changed: {last_status} → {status}, message={message}")
             if status_callback:
                 try:
                     status_callback(status, message)
                 except Exception as e:
                     print(f"[poll] Status callback error: {e}")
+            last_ping = now
             last_status = status
 
         if status in ("done", "error", "cancelled"):
@@ -355,6 +364,7 @@ def handle_chat_completions(handler):
         "research": False,
         "cpu": False,
         "no_tools": True,
+        "openai_lane": True,
         "mode": mode,
         "skip_ensure_llama": True,
     }
@@ -381,149 +391,112 @@ def handle_chat_completions(handler):
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
-    # ── For streaming, send headers first so we can stream status updates ─
+    # ── Streaming: send headers immediately, then keep the connection alive
+    # with periodic SSE pings while the task is queued/processing. Without
+    # this, OpenAI-compatible clients (VS Code extensions built on Node's
+    # undici, which aborts a request after ~300s of silence) give up long
+    # before a queued or slow (model-load, long reasoning) response is ready
+    # — even though our server eventually finishes fine.
     if stream:
-        print(f"[openai_api] Task {task_id} starting stream (headers sent)")
-        # Disable Nagle's algorithm (TCP_NODELAY) to force immediate transmission
-        try:
-            handler.connection.setsockopt(1, 6, 1)  # IPPROTO_TCP=1, TCP_NODELAY=6
-        except Exception as e:
-            print(f"[openai_api] Warning: Could not set TCP_NODELAY: {e}")
+        print(f"[openai_api] Task {task_id} starting SSE stream")
+        handler.close_connection = True
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream")
         handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("Connection", "keep-alive")
+        handler.send_header("Connection", "close")
         handler.send_header("X-Accel-Buffering", "no")
         handler.end_headers()
 
-        def stream_status(status, message):
-            """Stream status updates as they change."""
-            status_chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{"index": 0, "delta": {"content": f"[{message}]"}, "finish_reason": None}],
-            }
+        def write_sse(raw_line):
+            """Write one raw SSE line/frame; return False if the client is gone."""
             try:
-                data = f"data: {json.dumps(status_chunk)}\n\n".encode("utf-8")
-                # Write directly to socket and force flush
-                handler.connection.sendall(data)
-                # Force TCP buffer drain: set SO_SNDBUF to 0 temporarily
-                import socket as socket_module
-                try:
-                    orig_sndbuf = handler.connection.getsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF)
-                    handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, 1)
-                    handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, orig_sndbuf)
-                except Exception:
-                    pass
-            except Exception as e:
-                print(f"[openai_api] Status stream error: {e}")
-    else:
-        stream_status = None
+                handler.wfile.write(raw_line.encode("utf-8"))
+                handler.wfile.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                print(f"[openai_api] Task {task_id} client disconnected: {e}")
+                return False
 
-    # ── Wait for the pipeline to finish ─────────────────────────────────
-    print(f"[openai_api] Task {task_id} polling for response...")
-    result = _poll_task(task_id, timeout_s=600, status_callback=stream_status)
+        # Send the role chunk immediately so clients register the stream as started.
+        write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n")
+
+        def status_ping(status, message):
+            if status == "done":
+                return
+            # SSE comment line (":" prefix) — ignored by JSON/data parsers but
+            # still counts as "bytes received" to reset the client's idle timer.
+            write_sse(f": {status} — {message}\n\n")
+
+        result = _poll_task(task_id, timeout_s=600, status_callback=status_ping)
+    else:
+        result = _poll_task(task_id, timeout_s=600)
 
     status = result.get("status", "error")
     print(f"[openai_api] Task {task_id} completed with status={status}")
+
     if status == "error":
         err_msg = result.get("error", "Unknown error")
         print(f"[openai_api] Task {task_id} error: {err_msg}")
-        handler.send_json(
-            {"error": {"message": str(err_msg), "type": "server_error"}},
-            status=500,
-        )
+        if stream:
+            write_sse(f"data: {json.dumps({'error': {'message': str(err_msg), 'type': 'server_error'}})}\n\n")
+            write_sse("data: [DONE]\n\n")
+        else:
+            handler.send_json(
+                {"error": {"message": str(err_msg), "type": "server_error"}},
+                status=500,
+            )
         return
 
     response_text = result.get("response", "")
-    reasoning = result.get("reasoning", "")
     usage = {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
         if key in result:
             usage[key] = result[key]
 
-    print(f"[openai_api] Task {task_id} response_len={len(response_text)}, response_repr={repr(response_text)}, reasoning_len={len(reasoning)}, has_tools={'_tools_used' in result}")
+    tool_calls = None
+    sid = result.get("session_id")
+    if sid:
+        with M._data_lock:
+            session = M.sessions.get(sid, [])
+            if session:
+                for msg in reversed(session):
+                    if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                        tool_calls = msg.get("tool_calls")
+                        break
 
-    # ── Stream or return the response ───────────────────────────────────
+    print(f"[openai_api] Task {task_id} response_len={len(response_text)}, tool_calls={len(tool_calls) if tool_calls else 0}")
+
     if not stream:
-        response_json = {
+        message = {"role": "assistant"}
+        if response_text:
+            message["content"] = response_text
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        handler.send_json({
             "id": completion_id,
             "object": "chat.completion",
             "created": created,
             "model": model,
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": response_text,
-                },
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": "tool_calls" if tool_calls else "stop",
             }],
             "usage": usage,
-        }
-        print(f"[openai_api] Task {task_id} BEFORE send_json, response ready")
-        handler.send_json(response_json)
-        print(f"[openai_api] Task {task_id} AFTER send_json, response sent")
+        })
         return
 
-    # ── Streaming: wrap the final response as SSE chunks ────────────────
-    print(f"[openai_api] Task {task_id} sending final response stream, response_text={len(response_text)} chars")
-
-    try:
-        import socket as socket_module
-
-        # First chunk: role
-        role_chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-        }
-        print(f"[openai_api] Task {task_id} writing role chunk")
-        handler.connection.sendall(f"data: {json.dumps(role_chunk)}\n\n".encode("utf-8"))
-        # Force flush by toggling SO_SNDBUF
-        try:
-            orig_sndbuf = handler.connection.getsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF)
-            handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, 1)
-            handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, orig_sndbuf)
-        except Exception:
-            pass
-
-        # Content chunks: split into ~20 char pieces for a smooth stream feel
+    if tool_calls:
+        for tc in tool_calls:
+            if not write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {'tool_calls': [tc]}, 'finish_reason': None}]})}\n\n"):
+                return
+    else:
         chunk_size = 20
         for i in range(0, len(response_text), chunk_size):
             piece = response_text[i:i + chunk_size]
-            content_chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
-            }
-            handler.connection.sendall(f"data: {json.dumps(content_chunk)}\n\n".encode("utf-8"))
+            if not write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {'content': piece}, 'finish_reason': None}]})}\n\n"):
+                return
 
-        # Final chunk
-        finish_chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            "usage": usage,
-        }
-        print(f"[openai_api] Task {task_id} writing finish chunk")
-        handler.connection.sendall(f"data: {json.dumps(finish_chunk)}\n\n".encode("utf-8"))
-        handler.connection.sendall(b"data: [DONE]\n\n")
-        # Final flush
-        try:
-            orig_sndbuf = handler.connection.getsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF)
-            handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, 1)
-            handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, orig_sndbuf)
-        except Exception:
-            pass
-        print(f"[openai_api] Task {task_id} stream complete")
-    except (BrokenPipeError, ConnectionResetError) as e:
-        print(f"[openai_api] Task {task_id} stream write error: {e}")
+    write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls' if tool_calls else 'stop'}], 'usage': usage})}\n\n")
+    write_sse("data: [DONE]\n\n")
+    print(f"[openai_api] Task {task_id} stream complete")

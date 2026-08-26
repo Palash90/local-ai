@@ -323,14 +323,14 @@ LLAMA_SERVER_ARGS_CPU = [
 ]
 
 
-LLAMA_BASE_GUARDRAIL = "http://localhost:8082"
+LLAMA_BASE_GUARDRAIL = "http://localhost:8083"
 LLAMA_URL_GUARDRAIL = f"{LLAMA_BASE_GUARDRAIL}/v1/chat/completions"
 MODEL_ID_GUARDRAIL = "gemma-4-E2B-it-Q4_K_M"
 MCP_USER = os.environ.get("MCP_USER", "")
 
 LLAMA_SERVER_ARGS_GUARDRAIL = [
     "--host", "127.0.0.1",
-    "--port", "8082",
+    "--port", "8083",
     "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
     "--jinja",
     "--n-gpu-layers", "0",

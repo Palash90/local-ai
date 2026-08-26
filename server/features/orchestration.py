@@ -189,8 +189,23 @@ def _finalize_task(task_id, sid, msg_content, body):
     if mode == "guardrail":
         try:
             from server.mcp_tasks_db import mcp_task_update
-            mcp_task_update(task_id, status="done", reply=msg_content or "")
-        except Exception:
+            from server.input_guard import is_strict_output_blocked
+
+            reply_text = msg_content or ""
+            print(f"[guardrail][L3] verifying output for task {task_id}, len={len(reply_text)}")
+
+            print(f"[guardrail][L3] checking strict output blocks")
+            if is_strict_output_blocked(reply_text):
+                print(f"[guardrail][L3] BLOCKED: strict output filter triggered")
+                mcp_task_update(task_id, status="done", reply=reply_text,
+                              verification_level="LEVEL 3 OUTPUT VERIFICATION FAILED",
+                              failure_reason="Output blocked by strict filter")
+            else:
+                print(f"[guardrail][L3] PASSED: output approved by strict filter")
+                mcp_task_update(task_id, status="done", reply=reply_text,
+                              verification_level="LEVEL 3 OUTPUT VERIFICATION PASSED")
+        except Exception as e:
+            print(f"[guardrail][L3] error during output verification: {e}")
             pass
 
 
@@ -231,9 +246,12 @@ def _event_loop():
                     "research": bool(data.get("research")),
                     "cpu": bool(data.get("cpu")),
                     "no_tools": bool(data.get("no_tools")),
+                    "openai_lane": bool(data.get("openai_lane")),
                     "_started_at": t.get("_started_at"),
                     "skip_ensure_llama": bool(data.get("skip_ensure_llama")),
                 }
+                if data.get("openai_lane"):
+                    print(f"[openai] processing OpenAI lane request for task {task_id}")
             # (The owning lane's _current_task_ids[mode] was already set by
             # _queue_worker before this "start" event was posted.)
             M._prepare_session(task_id, sid, user_message, image_b64, audio_b64, client_ts)
@@ -264,11 +282,15 @@ def _event_loop():
                         if rc:
                             tt["reasoning"] = rc
                 pending = len(msg["tool_calls"])
-                print(f"[llm_ok] Round {round_num}: LLM requested {pending} tool(s) for task {task_id}")  # DEBUG
+                is_openai = t.get("openai_lane")
+                print(f"[llm_ok] Round {round_num}: LLM requested {pending} tool(s) for task {task_id}" + (" (OpenAI lane: client will execute)" if is_openai else ""))  # DEBUG
                 with M._data_lock:
                     tt = M.tasks.get(task_id)
                     if tt:
-                        tt["_state"] = "tools_running"
+                        if is_openai:
+                            tt["_state"] = "client_tool_calls_pending"
+                        else:
+                            tt["_state"] = "tools_running"
                         tt["_pending_tools"] = pending
                 with M._data_lock:
                     if sid in M.sessions:
@@ -280,17 +302,20 @@ def _event_loop():
                         M.sessions[sid].append(assistant_msg)
                         M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
                 M.save_sessions()
-                tool_mode = M.task_mode(task_id)
-                for i, tc in enumerate(msg["tool_calls"]):
-                    M._tool_pools[tool_mode].submit(
-                        M._tool_worker,
-                        task_id,
-                        sid,
-                        tc,
-                        t.get("_original_image"),
-                        round_num,
-                        i,
-                    )
+                if not is_openai:
+                    tool_mode = M.task_mode(task_id)
+                    for i, tc in enumerate(msg["tool_calls"]):
+                        M._tool_pools[tool_mode].submit(
+                            M._tool_worker,
+                            task_id,
+                            sid,
+                            tc,
+                            t.get("_original_image"),
+                            round_num,
+                            i,
+                        )
+                else:
+                    print(f"[openai] skipping server-side tool execution; tool_calls sent to client")
             else:
                 print(f"[llm_ok] Round {round_num}: LLM generated final response (no tool calls) for task {task_id}")  # DEBUG
                 print(f"[llm_ok] Message structure: content={repr(msg.get('content'))}, reasoning={repr(msg.get('reasoning_content'))}")
@@ -511,6 +536,7 @@ def _mcp_db_worker():
         row = rows[0]
         task_id = row["task_id"]
         mode = row.get("mode") or "guardrail"
+        print(f"[mcp-db] found queued task {task_id}, marking as working", flush=True)
         mcp_task_update(task_id, status="working")
         entry = {
             "task_id": task_id,
@@ -535,6 +561,7 @@ def _mcp_db_worker():
                 "cpu": bool(row.get("cpu")),
                 "no_tools": bool(row.get("no_tools")),
             }
+        print(f"[mcp-db] posting start event for task {task_id}", flush=True)
         M._event_post(
             "start",
             task_id,
@@ -548,9 +575,11 @@ def _mcp_db_worker():
             cpu=bool(row.get("cpu")),
             no_tools=bool(row.get("no_tools")),
         )
+        print(f"[mcp-db] waiting for task {task_id} to complete", flush=True)
         while True:
             with M._data_lock:
                 st = M.tasks.get(task_id, {}).get("status")
             if st in ("done", "error", "cancelled"):
+                print(f"[mcp-db] task {task_id} completed with status={st}", flush=True)
                 break
             time.sleep(0.5)

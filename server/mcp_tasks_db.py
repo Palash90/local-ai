@@ -22,7 +22,8 @@ def mcp_task_insert(task_id, session_id, message, mode="gpu",
     """Write the initial record for an MCP chat task."""
     _ensure_db()
     now = int(time.time())
-    db.run(
+    print(f"[mcp_db] inserting task {task_id}: session={session_id}, research={research}, cpu={cpu}, no_tools={no_tools}")
+    result = db.run(
         "INSERT INTO mcp_tasks"
         " (task_id, session_id, message, status, mode, research, cpu, no_tools,"
         "  created_at, updated_at)"
@@ -40,6 +41,7 @@ def mcp_task_insert(task_id, session_id, message, mode="gpu",
             now,
         ),
     )
+    print(f"[mcp_db] insert completed for task {task_id}, result={result}")
 
 
 def mcp_task_update(task_id, **fields):
@@ -69,15 +71,19 @@ def mcp_task_list(limit=50, status=None):
     """List recent MCP tasks, newest first."""
     _ensure_db()
     if status:
-        return db.fetch(
+        result = db.fetch(
             "SELECT * FROM mcp_tasks WHERE status=? "
             "ORDER BY created_at DESC LIMIT ?",
             (status, limit),
         )
-    return db.fetch(
+        if result:
+            print(f"[mcp_db] found {len(result)} tasks with status={status}")
+        return result
+    result = db.fetch(
         "SELECT * FROM mcp_tasks ORDER BY created_at DESC LIMIT ?",
         (limit,),
     )
+    return result
 
 
 def mcp_task_delete(task_id):

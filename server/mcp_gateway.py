@@ -391,10 +391,12 @@ async def _run_llm_verify(message: str, judge_system_prompt: str,
 
     text = (message or "").strip()
     if not text:
+        print(f"[guardrail][L2] empty message, auto-passing")
         return True, ""
 
-    # Ensure the guardrail lane's llama-server is running before sending requests.
+    print(f"[guardrail][L2] ensuring {task_lane} server is running")
     M.ensure_llama_server(task_lane)
+    print(f"[guardrail][L2] {task_lane} server ready")
 
     payload = {
         "model": M.server_model_id(task_lane),
@@ -406,6 +408,7 @@ async def _run_llm_verify(message: str, judge_system_prompt: str,
         "max_tokens": 400,
         "stream": False,
     }
+    print(f"[guardrail][L2] calling {task_lane} LLM server at {M.server_url(task_lane)}")
     try:
         async with httpx.AsyncClient() as client:
             r = await client.post(
@@ -413,9 +416,10 @@ async def _run_llm_verify(message: str, judge_system_prompt: str,
                 json=payload,
                 timeout=VERIFY_TIMEOUT,
             )
+        print(f"[guardrail][L2] got HTTP {r.status_code} from {task_lane} server")
         if r.status_code != 200:
             print(
-                f"[verify] HTTP {r.status_code} from {task_lane} server at "
+                f"[guardrail][L2] HTTP {r.status_code} from {task_lane} server at "
                 f"{M.server_base(task_lane)} — treating as HARMFUL (fail-closed)"
             )
             return False, f"LLM judge unavailable (HTTP {r.status_code})"
@@ -423,19 +427,23 @@ async def _run_llm_verify(message: str, judge_system_prompt: str,
             r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
         )
     except Exception as e:
-        print(f"[verify] call to {task_lane} lane failed: {e} — treating as HARMFUL (fail-closed)")
+        print(f"[guardrail][L2] call to {task_lane} lane failed: {e} — treating as HARMFUL (fail-closed)")
         return False, f"LLM judge unavailable ({e})"
 
     if not reply:
+        print(f"[guardrail][L2] empty response from {task_lane}")
         return False, "LLM judge unavailable (empty response)"
 
-    print(f"[verify] raw verdict from {task_lane}: {reply.strip()[:200]}")
+    print(f"[guardrail][L2] raw verdict: {reply.strip()[:200]}")
     words = set(w for w in _re.findall(r"[A-Za-z']+", reply.upper())[:10])
     blocked_tokens = {"BLOCKED", "UNSAFE", "HARMFUL", "REJECTED", "DENIED", "REFUSED"}
     if words & blocked_tokens and _parse_strict_verdict(reply):
+        print(f"[guardrail][L2] BLOCKED: found blocked token + strict verdict")
         return False, f"LLM judge: {reply.strip()[:200]}"
     if _parse_verdict(reply):
+        print(f"[guardrail][L2] BLOCKED: verdict triggered")
         return False, f"LLM judge: {reply.strip()[:200]}"
+    print(f"[guardrail][L2] PASSED: message approved by LLM judge")
     return True, ""
 
 
@@ -532,13 +540,51 @@ async def send_chat_message(
     no_tools: bool = False,
 ) -> str:
     """Submit a user message into a chat session for ASYNC processing."""
-    print(f"[MCP MESSAGE REQUEST]: {message}")
-    task_id = str(uuid.uuid4())
+    print(f"[MCP] send_chat_message called for session {session_id}, msg_len={len(message)}")
 
+    print(f"[guardrail][L1] checking jailbreak...")
+    if is_jailbreak_attempt(message):
+        reason = "jailbreak pattern detected"
+        print(f"[guardrail][L1] REJECTED: {reason}")
+        return json.dumps({
+            "declined": True,
+            "reason": reason,
+            "detail": "message blocked by L1 guardrail",
+        })
+    print(f"[guardrail][L1] jailbreak check passed")
+
+    print(f"[guardrail][L1] checking harmful request...")
+    if is_harmful_request(message):
+        reason = "harmful request pattern detected"
+        print(f"[guardrail][L1] REJECTED: {reason}")
+        return json.dumps({
+            "declined": True,
+            "reason": reason,
+            "detail": "message blocked by L1 guardrail",
+        })
+    print(f"[guardrail][L1] harmful check passed")
+
+    print(f"[guardrail][L2] running LLM verification on guardrail lane...")
+    from server.input_guard import _judge_system
+    passed, reason = await _run_llm_verify(
+        message, _judge_system(), task_lane="guardrail"
+    )
+    if not passed:
+        print(f"[guardrail][L2] REJECTED: {reason}")
+        return json.dumps({
+            "declined": True,
+            "reason": reason,
+            "detail": "message blocked by L2 LLM verification",
+        })
+    print(f"[guardrail][L2] LLM verification passed")
+
+    task_id = str(uuid.uuid4())
+    print(f"[MCP] inserting task {task_id} into db for session {session_id}")
     mcp_task_insert(
         task_id, session_id, message,
         research=research, cpu=cpu, no_tools=no_tools,
     )
+    print(f"[MCP] task {task_id} inserted successfully")
 
     if research:
         init_delay = 60
@@ -550,6 +596,7 @@ async def send_chat_message(
         init_delay = 20
         mode_desc = "Standard text generation (est. 40-90s)"
 
+    print(f"[MCP] returning task_id={task_id} to client")
     return json.dumps({
         "task_id": task_id,
         "wait_hint": (
