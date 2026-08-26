@@ -194,6 +194,8 @@ def task_mode(task_id):
         cpu_flagged = bool(t.get("cpu"))
     if cpu_flagged:
         return "cpu"
+    if mode == "mcp":
+        return "mcp"
     if M.FORCE_GPU_LANE:
         return "gpu"
     if user in M._agent_users and mode in ("gpu", "cpu"):
