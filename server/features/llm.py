@@ -640,7 +640,10 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
 
 def _start_llm_round(task_id, sid, round_num):
     mode = M.task_mode(task_id)
-    M.ensure_llama_server(mode)
+    with M._data_lock:
+        task = M.tasks.get(task_id, {})
+    if not task.get("skip_ensure_llama"):
+        M.ensure_llama_server(mode)
     with M._data_lock:
         if mode == "cpu":
             ms = M._cpu_model_status
@@ -657,7 +660,7 @@ def _start_llm_round(task_id, sid, round_num):
         t["_state"] = "llm_waiting"
         t["_round"] = round_num
         messages = list(M.sessions.get(sid, []))
-    print(f"[llm_round] Starting round {round_num} for task {task_id} on {mode} server with {len(messages)} raw messages")  # DEBUG
+    print(f"[llm_round] Starting round {round_num} for task {task_id} on {mode} server with {len(messages)} raw messages")
     M.set_status(
         task_id, "Thinking..." if round_num == 0 else f"Thinking (round {round_num})..."
     )

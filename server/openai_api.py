@@ -337,8 +337,9 @@ def handle_chat_completions(handler):
         "client_timestamp": None,
         "research": False,
         "cpu": False,
-        "no_tools": False,
+        "no_tools": True,
         "mode": mode,
+        "skip_ensure_llama": True,
     }
 
     with M._data_lock:

@@ -339,7 +339,14 @@ if __name__ == "__main__":
     threading.Thread(target=_connection_manager, daemon=True).start()
     threading.Thread(target=run_mcp, daemon=True).start()
     print(f"Chat UI running on http://localhost:{PORT}")
-    s = http.server.HTTPServer((HOST, PORT), Handler)
+    # ThreadingHTTPServer: plain HTTPServer handles one connection at a time on
+    # the main thread, so a long-blocking handler (e.g. the OpenAI-compatible
+    # /v1/chat/completions, which polls synchronously for up to 600s) would
+    # freeze every other client — including the browser UI's status polling —
+    # until it returned. Shared state is already guarded by M._data_lock /
+    # M._queue_locks, so serving each connection on its own thread is safe.
+    s = http.server.ThreadingHTTPServer((HOST, PORT), Handler)
+    s.daemon_threads = True
     try:
         s.serve_forever()
     except KeyboardInterrupt:

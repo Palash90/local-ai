@@ -232,6 +232,7 @@ def _event_loop():
                     "cpu": bool(data.get("cpu")),
                     "no_tools": bool(data.get("no_tools")),
                     "_started_at": t.get("_started_at"),
+                    "skip_ensure_llama": bool(data.get("skip_ensure_llama")),
                 }
             # (The owning lane's _current_task_ids[mode] was already set by
             # _queue_worker before this "start" event was posted.)
@@ -471,6 +472,7 @@ def _queue_worker(mode):
             research=item.get("research"),
             cpu=item.get("cpu"),
             no_tools=item.get("no_tools"),
+            skip_ensure_llama=item.get("skip_ensure_llama"),
         )
         # Wait for this task to finish (status becomes "done", "error" or "cancelled")
         # before dequeuing the next item IN THIS LANE. The other lane's worker
