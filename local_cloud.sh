@@ -327,6 +327,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_buffering off;
+        proxy_read_timeout 300s;
     }
 
     # Authentik SSO Core (matches both /sso and /sso/*)
@@ -353,6 +354,7 @@ server {
         error_page 401 = @ak-sso-ai;
 
         proxy_pass http://127.0.0.1:3001/;
+        proxy_http_version 1.1;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -363,6 +365,7 @@ server {
         proxy_set_header X-Authentik-Email $authentik_email;
         proxy_set_header X-Authentik-Name $authentik_name;
         proxy_set_header X-Authentik-UID $authentik_uid;
+        proxy_read_timeout 300s;
      }
 
     location ^~ /api/public/ {
@@ -371,6 +374,18 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # OpenAI-compatible API (no SSO — uses Bearer token auth)
+    location /v1/ {
+        proxy_pass http://127.0.0.1:3001/v1/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
     }
 
     location /api/ {
@@ -383,6 +398,7 @@ server {
         error_page 401 = @ak-sso-ai;
 
         proxy_pass http://127.0.0.1:3001/api/;
+        proxy_http_version 1.1;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -392,6 +408,8 @@ server {
         proxy_set_header X-Authentik-Email $authentik_email;
         proxy_set_header X-Authentik-Name $authentik_name;
         proxy_set_header X-Authentik-UID $authentik_uid;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
     }
 
     # 2. Chat Stories App

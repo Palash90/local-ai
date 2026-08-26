@@ -46,6 +46,11 @@ HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "http://10.66.66.1:9863/heartbea
 # "http://192.168.1.10:3001/s/<token>" becomes a dead short URL that ends at the
 # colon. Leave empty to keep building links from the browser's own origin.
 SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL", "").strip().rstrip("/")
+
+# OpenAI-compatible API key for /v1/* endpoints.  Set via the OPENAI_API_KEY
+# environment variable (e.g. in .env).  Leave empty to disable the endpoints.
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
 REASONING_BUDGET = 2048
 MAX_OUTPUT_TOKENS = 8192
 
@@ -233,7 +238,7 @@ LLAMA_GEMMA_NGL = "99"
 # VERIFY_IDLE_TIMEOUT seconds of inactivity to free RAM.
 # ─────────────────────────────────────────────────────────────────────────────
 VERIFY_PORT = int(os.environ.get("VERIFY_PORT", "8082"))
-VERIFY_MODEL = os.environ.get("VERIFY_MODEL", "gemma4-e4b-qat")
+VERIFY_MODEL = os.environ.get("VERIFY_MODEL", "gemma-4-E2B-it-Q4_K_M")
 VERIFY_CONTEXT_SIZE = int(os.environ.get("VERIFY_CONTEXT_SIZE", "8192"))
 VERIFY_IDLE_TIMEOUT = int(os.environ.get("VERIFY_IDLE_TIMEOUT", "300"))
 LLAMA_SERVER_ARGS = [
@@ -245,7 +250,7 @@ LLAMA_SERVER_ARGS = [
     # GPU / VRAM & Performance
     "-ngl", LLAMA_GEMMA_NGL,
     "-fa", "on",
-    "--ctx-size", "24576",       # 24K context for interactive UI chat
+    "--ctx-size", "65536",       # 24K context for interactive UI chat
     "-ctk", "q8_0",
     "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q8_0
     "--no-mmproj-offload",

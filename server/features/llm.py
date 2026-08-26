@@ -187,8 +187,6 @@ def task_mode(task_id):
         user = t.get("_user", "")
         mode = t.get("mode")
         cpu_flagged = bool(t.get("cpu"))
-    if M.MCP_USER and user == M.MCP_USER:
-        return "mcp"
     if cpu_flagged:
         return "cpu"
     if M.FORCE_GPU_LANE:
@@ -319,14 +317,17 @@ def load_llama_model(mode="gpu"):
     with M._data_lock:
         # Only a fresh load benefits from a restore: if the model is already
         # running, its live KV is newer than any snapshot on disk.
-        was_unloaded = M.server_status(mode) == "unloaded"
-        with M._data_lock:
-            if mode == "cpu":
-                M._cpu_model_status = "loading"
-            elif mode == "mcp":
-                M._mcp_model_status = "loading"
-            else:
-                M.model_status = "loading"
+        # Read status directly — server_status() would re-acquire _data_lock
+        # (non-reentrant), causing a permanent deadlock.
+        if mode == "cpu":
+            was_unloaded = M._cpu_model_status == "unloaded"
+            M._cpu_model_status = "loading"
+        elif mode == "mcp":
+            was_unloaded = M._mcp_model_status == "unloaded"
+            M._mcp_model_status = "loading"
+        else:
+            was_unloaded = M.model_status == "unloaded"
+            M.model_status = "loading"
     model_id = M.server_model_id(mode)
     base = M.server_base(mode)
     print(f"[llama] Sending load request for model '{model_id}' to {base}...")

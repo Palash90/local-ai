@@ -93,11 +93,10 @@ MAX_TOOL_ROUNDS = {"default": 10, "research": 50}
 # choreography (see _image_queue in images.py) stays globally serialized,
 # since ComfyUI only has one physical GPU to render on regardless of which
 # lane requested the image.
-_task_queues = {"gpu": [], "cpu": [], "mcp": []}
+_task_queues = {"gpu": [], "cpu": []}
 _queue_locks = {
     "gpu": threading.Lock(),
     "cpu": threading.Lock(),
-    "mcp": threading.Lock(),
 }
 _queue_conds = {mode: threading.Condition(lock) for mode, lock in _queue_locks.items()}
 _current_task_ids = {"gpu": None, "cpu": None, "mcp": None}

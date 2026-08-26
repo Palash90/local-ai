@@ -169,8 +169,14 @@ def _cpu_lane_needed():
 
 def _mcp_lane_needed():
     """True if the MCP lane has (or is about to have) work."""
-    with M._queue_locks["mcp"]:
-        return len(M._task_queues["mcp"]) > 0 or M._current_task_ids["mcp"] is not None
+    if M._current_task_ids.get("mcp"):
+        return True
+    try:
+        from server.mcp_tasks_db import mcp_task_list
+        rows = mcp_task_list(limit=1, status="queued")
+        return len(rows) > 0
+    except Exception:
+        return False
 
 
 def restart_servers():

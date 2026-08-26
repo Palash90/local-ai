@@ -445,6 +445,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 )
             else:
                 self.send_error(404)
+        elif self.path.startswith("/v1/"):
+            from server.openai_api import handle_list_models, handle_retrieve_model
+            if self.path == "/v1/models":
+                handle_list_models(self)
+            elif self.path.startswith("/v1/models/"):
+                model_id = self.path.split("/v1/models/", 1)[1].rstrip("/")
+                handle_retrieve_model(self, model_id)
+            else:
+                self.send_json(
+                    {"error": {"message": f"Unknown endpoint: {self.path}", "type": "invalid_request_error"}},
+                    status=404,
+                )
         elif self.path == "/":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -815,8 +827,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             elif FORCE_GPU_LANE and not cpu_flagged:
                 # Test-time override: never admit anything to the CPU lane.
                 mode = "gpu"
-            if MCP_USER and user == MCP_USER:
-                mode = "mcp"
             entry["mode"] = mode
             with _queue_locks[mode]:
                 if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:
@@ -1048,6 +1058,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 print(f"[db] handle_theme_tool error: {e}")
                 self.send_json({"error": f"Database error: {e}"}, status=500)
+        elif self.path == "/v1/chat/completions":
+            from server.openai_api import handle_chat_completions
+            handle_chat_completions(self)
         else:
             self.send_error(404)
 

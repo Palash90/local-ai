@@ -69,18 +69,26 @@ def _task_max_rounds(task_id):
 
 
 def _set_task_error(task_id, error, sid=None):
+    mode = ""
     with M._data_lock:
         if task_id in M.tasks:
             d = M.tasks[task_id]
             elapsed_ms = None
             if d.get("_started_at") is not None:
                 elapsed_ms = int((time.time() - d.get("_started_at")) * 1000)
+            mode = d.get("mode", "")
             M.tasks[task_id] = {
                 "status": "error",
                 "error": str(error),
                 "session_id": d.get("session_id", sid),
                 "_elapsed_ms": elapsed_ms,
             }
+    if mode == "mcp":
+        try:
+            from server.mcp_tasks_db import mcp_task_update
+            mcp_task_update(task_id, status="error", reply=str(error)[:300])
+        except Exception:
+            pass
 
 
 def _delete_task_image(task_id):
@@ -178,6 +186,12 @@ def _finalize_task(task_id, sid, msg_content, body):
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
                 M.tasks[task_id]["_verification_duration"] = verification_duration
+    if mode == "mcp":
+        try:
+            from server.mcp_tasks_db import mcp_task_update
+            mcp_task_update(task_id, status="done", reply=msg_content or "")
+        except Exception:
+            pass
 
 
 def _event_post(ev_type, task_id, **data):
@@ -470,3 +484,70 @@ def _queue_worker(mode):
         with queue_lock:
             M._current_task_ids[mode] = None
             queue_cond.notify_all()
+
+
+MCP_DB_POLL_INTERVAL = 2
+
+
+def _mcp_db_worker():
+    """DB-polling worker for MCP tasks: reads queued tasks from the SQLite
+    ``mcp_tasks`` table, claims them, and feeds them into the shared event
+    loop — replacing the in-memory queue that the gpu/cpu lanes use.
+
+    This runs on its own thread so MCP requests never compete with
+    interactive UI users or self-chat agents for queue slots.
+    """
+    from server.mcp_tasks_db import mcp_task_list, mcp_task_update
+    MCP_USER = os.environ.get("MCP_USER", "")
+    print("[mcp-db] worker started — polling SQLite for queued tasks", flush=True)
+    while True:
+        rows = mcp_task_list(limit=1, status="queued")
+        if not rows:
+            time.sleep(MCP_DB_POLL_INTERVAL)
+            continue
+        row = rows[0]
+        task_id = row["task_id"]
+        mode = row.get("mode") or "mcp"
+        mcp_task_update(task_id, status="working")
+        entry = {
+            "task_id": task_id,
+            "session_id": row["session_id"],
+            "message": row["message"],
+            "image": None,
+            "audio": None,
+            "user": MCP_USER,
+            "client_timestamp": None,
+            "research": bool(row.get("research")),
+            "cpu": bool(row.get("cpu")),
+            "no_tools": bool(row.get("no_tools")),
+            "mode": mode,
+        }
+        with M._data_lock:
+            M.tasks[task_id] = {
+                "status": "queued",
+                "message": "Waiting in line...",
+                "session_id": row["session_id"],
+                "mode": mode,
+                "research": bool(row.get("research")),
+                "cpu": bool(row.get("cpu")),
+                "no_tools": bool(row.get("no_tools")),
+            }
+        M._event_post(
+            "start",
+            task_id,
+            sid=row["session_id"],
+            message=row["message"],
+            image=None,
+            audio=None,
+            user=MCP_USER,
+            client_timestamp=None,
+            research=bool(row.get("research")),
+            cpu=bool(row.get("cpu")),
+            no_tools=bool(row.get("no_tools")),
+        )
+        while True:
+            with M._data_lock:
+                st = M.tasks.get(task_id, {}).get("status")
+            if st in ("done", "error", "cancelled"):
+                break
+            time.sleep(0.5)

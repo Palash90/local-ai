@@ -62,10 +62,6 @@ try:
     )
     from server.features.state import (
         _data_lock as _data_lock,
-        _task_queues,
-        _queue_locks,
-        _queue_conds,
-        MAX_QUEUE_SIZE,
     )
     from server.config import SELF_CHAT_MODE
 except ImportError:
@@ -108,10 +104,6 @@ except ImportError:
     )
     from server.features.state import (
         _data_lock as _data_lock,
-        _task_queues,
-        _queue_locks,
-        _queue_conds,
-        MAX_QUEUE_SIZE,
     )
     from server.config import SELF_CHAT_MODE
 
@@ -476,32 +468,16 @@ async def _run_llm_verify(message: str, judge_system_prompt: str,
 
 
 def _requeue_pending_mcp_tasks():
-    """Reload recovery: re-queues all non-terminal MCP tasks from SQLite into _task_queues."""
+    """Reload recovery: resets non-terminal MCP tasks in SQLite to 'queued' so
+    the DB worker picks them up."""
     rows = mcp_task_list(limit=500)
     requeued_count = 0
     for row in rows:
         if row["status"] in ("queued", "working"):
-            mode = row.get("mode") or SELF_CHAT_MODE
-            entry = {
-                "task_id": row["task_id"],
-                "session_id": row["session_id"],
-                "message": row["message"],
-                "image": None,
-                "audio": None,
-                "user": MCP_USER,
-                "client_timestamp": None,
-                "research": bool(row.get("research")),
-                "cpu": bool(row.get("cpu")),
-                "no_tools": bool(row.get("no_tools")),
-                "mode": mode,
-            }
-            with _queue_locks[mode]:
-                _task_queues[mode].append(entry)
-                _queue_conds[mode].notify()
             mcp_task_update(row["task_id"], status="queued")
             requeued_count += 1
     if requeued_count > 0:
-        print(f"[mcp] requeued {requeued_count} pending MCP task(s) on reload", flush=True)
+        print(f"[mcp] reset {requeued_count} pending MCP task(s) to queued on reload", flush=True)
 
 
 @mcp.tool()
@@ -587,39 +563,10 @@ async def send_chat_message(
     print(f"[MCP MESSAGE REQUEST]: {message}")
     task_id = str(uuid.uuid4())
 
-    mode = SELF_CHAT_MODE
-    if cpu:
-        mode = "cpu"
-    if research:
-        mode = "cpu"
-
     mcp_task_insert(
         task_id, session_id, message,
-        mode=mode, research=research, cpu=cpu, no_tools=no_tools,
+        research=research, cpu=cpu, no_tools=no_tools,
     )
-
-    entry = {
-        "task_id": task_id,
-        "session_id": session_id,
-        "message": message,
-        "image": None,
-        "audio": None,
-        "user": MCP_USER,
-        "client_timestamp": None,
-        "research": bool(research),
-        "cpu": bool(cpu),
-        "no_tools": bool(no_tools),
-        "mode": mode,
-    }
-
-    with _queue_locks[mode]:
-        if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:
-            mcp_task_update(task_id, status="error", reply="Server busy")
-            return json.dumps({"error": "Server busy", "task_id": task_id})
-        _task_queues[mode].append(entry)
-        _queue_conds[mode].notify()
-
-    mcp_task_update(task_id, status="queued")
 
     if research:
         init_delay = 60
@@ -644,6 +591,7 @@ async def send_chat_message(
 @mcp.tool()
 async def get_message_status(task_id: str) -> str:
     """Check the processing state of one submitted chat message."""
+    from server.features.state import M
     row = mcp_task_get(task_id)
     if row is None:
         return json.dumps({"status": "unknown", "error": "task not found"})
@@ -658,6 +606,16 @@ async def get_message_status(task_id: str) -> str:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+    with _data_lock:
+        mem = M.tasks.get(task_id, {})
+    mem_status = mem.get("status", "")
+    if mem_status in ("working", "done", "error"):
+        obj["status"] = mem_status
+    if mem_status == "done":
+        obj["reply"] = mem.get("response", obj.get("reply", ""))
+    elif mem_status == "error":
+        obj["failure_reason"] = mem.get("error", obj.get("failure_reason", ""))
 
     if row["updated_at"] and row["created_at"]:
         obj["elapsed_seconds"] = int(row["updated_at"] - row["created_at"])

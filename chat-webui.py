@@ -268,6 +268,7 @@ from server.features.orchestration import (  # noqa: E402
     _event_post,
     _finalize_task,
     _human_priority_active,
+    _mcp_db_worker,
     _queue_worker,
     _set_task_error,
     _task_max_rounds,
@@ -325,7 +326,7 @@ if __name__ == "__main__":
     # UI user wait behind it.
     threading.Thread(target=_queue_worker, args=("gpu",), daemon=True).start()
     threading.Thread(target=_queue_worker, args=("cpu",), daemon=True).start()
-    threading.Thread(target=_queue_worker, args=("mcp",), daemon=True).start()
+    threading.Thread(target=_mcp_db_worker, daemon=True).start()
     threading.Thread(target=_image_worker, daemon=True).start()
     threading.Thread(target=_idle_unload_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()
