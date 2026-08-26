@@ -309,22 +309,31 @@ def unload_llama_model(mode="gpu"):
                 M.model_status = "unloading"
 
         try:
-            r = requests.post(
-                f"{M.server_base(mode)}/models/unload",
-                json={"model": M.server_model_id(mode)},
-                timeout=30,
-            )
-            if r.status_code == 200:
-                print(f"[llama] {mode} model unloaded")
-                with M._data_lock:
-                    if mode == "cpu":
-                        M._cpu_model_status = "unloaded"
-                    elif mode == "guardrail":
-                        M._guardrail_model_status = "unloaded"
-                    else:
-                        M.model_status = "unloaded"
-                return True
-            print(f"[llama] Unload response: {r.status_code} {r.text[:200]}")
+            url = f"{M.server_base(mode)}/models/unload"
+            model_id = M.server_model_id(mode)
+            print(f"[llama] Unload POST to {url} with model={model_id}")
+            try:
+                r = requests.post(
+                    url,
+                    json={"model": model_id},
+                    timeout=5,
+                )
+                print(f"[llama] Unload response: {r.status_code} {r.text[:200]}")
+                if r.status_code == 200:
+                    print(f"[llama] {mode} model unloaded successfully")
+                    with M._data_lock:
+                        if mode == "cpu":
+                            M._cpu_model_status = "unloaded"
+                        elif mode == "guardrail":
+                            M._guardrail_model_status = "unloaded"
+                        else:
+                            M.model_status = "unloaded"
+                    return True
+                print(f"[llama] Unload failed: {r.status_code}")
+            except requests.Timeout:
+                print(f"[llama] Unload timeout after 5s — endpoint may not exist or server hung")
+            except requests.ConnectionError as ce:
+                print(f"[llama] Unload connection error: {ce}")
         except Exception as e:
             print(f"[llama] Unload error: {e}")
 
@@ -363,15 +372,21 @@ def load_llama_model(mode="gpu"):
             M.model_status = "loading"
     model_id = M.server_model_id(mode)
     base = M.server_base(mode)
-    print(f"[llama] Sending load request for model '{model_id}' to {base}...")
+    url = f"{base}/models/load"
+    t_start = time.time()
+    print(f"[llama] Sending load request for model '{model_id}' to {url}...")
     try:
         r = requests.post(
-            f"{base}/models/load", json={"model": model_id}, timeout=180
+            url, json={"model": model_id}, timeout=180
         )
+        t_load_resp = time.time() - t_start
+        print(f"[llama] Load response: {r.status_code} (took {t_load_resp:.1f}s) {r.text[:200]}")
         if r.status_code in (200, 201):
+            print(f"[llama] {mode} load accepted, waiting for ready...")
             for i in range(30):
                 if M.is_model_ready(base, model_id):
-                    print(f"[llama] {mode} model ready (attempt {i+1})")
+                    t_ready = time.time() - t_start
+                    print(f"[llama] {mode} model ready (attempt {i+1}, total {t_ready:.1f}s)")
                     with M._data_lock:
                         if mode == "cpu":
                             M._cpu_model_status = "chat_loaded"
@@ -383,11 +398,18 @@ def load_llama_model(mode="gpu"):
                             M.model_status = "chat_loaded"
                             M._last_llm_use = time.time()
                     if was_unloaded:
+                        t_restore_start = time.time()
                         M.restore_slot_checkpoint(mode)
+                        t_restore = time.time() - t_restore_start
+                        print(f"[llama] {mode} KV restore took {t_restore:.1f}s")
                     return True
                 time.sleep(2)
         else:
-            print(f"[llama] Load failed ({r.status_code}): {r.text[:200]}")
+            print(f"[llama] Load failed ({r.status_code}): {r.text[:500]}")
+    except requests.Timeout:
+        print(f"[llama] Load timeout after 180s")
+    except requests.ConnectionError as ce:
+        print(f"[llama] Load connection error: {ce}")
     except Exception as e:
         print(f"[llama] Load exception: {e}")
 

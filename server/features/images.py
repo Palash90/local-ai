@@ -74,9 +74,12 @@ def generate_image(
 ):
     print(f"\n[image] Generating image for task {task_id} with the prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image generation...")
-    # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
+    # ComfyUI renders on the GPU, so unload both GPU and guardrail llama-servers.
     # The CPU server (self-chat agents) keeps running untouched.
     M.unload_llama_model("gpu")
+    M.unload_llama_model("guardrail")
+    time.sleep(2)
+    print(f"[image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}")
 
     width, height = _aspect_dims(aspect_ratio)
 
@@ -268,6 +271,7 @@ def generate_image(
         M.free_comfyui_vram()
         M.set_status(task_id, "Loading chat model...")
         M.load_llama_model("gpu")
+        M.load_llama_model("guardrail")
     return result
 
 
@@ -335,9 +339,12 @@ def edit_image(
 
     print(f"\n[image_edit] Editing image for task {task_id} with prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image editing...")
-    # ComfyUI renders on the GPU, so only the GPU llama-server is unloaded.
+    # ComfyUI renders on the GPU, so unload both GPU and guardrail llama-servers.
     # The CPU server (self-chat agents) keeps running untouched.
     M.unload_llama_model("gpu")
+    M.unload_llama_model("guardrail")
+    time.sleep(2)
+    print(f"[edit_image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}")
 
     gen_tag = str(uuid.uuid4())[:8]
     prefix = f"{_safe_username(user)}/edit_{gen_tag}_"
@@ -499,6 +506,7 @@ def edit_image(
         M.free_comfyui_vram()
         M.set_status(task_id, "Loading chat model...")
         M.load_llama_model("gpu")
+        M.load_llama_model("guardrail")
 
     return result
 
