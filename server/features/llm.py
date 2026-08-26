@@ -299,6 +299,7 @@ def unload_llama_model(mode="gpu"):
         # re-prefilling the whole conversation. This must happen while the
         # model still reads "chat_loaded" — save_slot_checkpoint skips
         # anything else — hence before the "unloading" transition below.
+        save_slot_checkpoint()
         
         with M._data_lock:
             if mode == "cpu":
