@@ -24,7 +24,7 @@ from server.features.state import M
 # Rotating KV-checkpoint filename per lane (slot 0 is the only slot — both
 # servers run with the default --parallel 1). Kept constant so each
 # save overwrites the previous snapshot instead of filling the disk.
-_SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv", "mcp": "mcp_slot0.kv"}
+_SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv", "guardrail": "guardrail_slot0.kv"}
 
 
 def slot_checkpoint_file(mode="gpu"):
@@ -62,8 +62,8 @@ def save_slot_checkpoint(mode="gpu"):
     with M._data_lock:
         if mode == "cpu":
             ms = M._cpu_model_status
-        elif mode == "mcp":
-            ms = M._mcp_model_status
+        elif mode == "guardrail":
+            ms = M._guardrail_model_status
         else:
             ms = M.model_status
         dirty = M._slot_kv_dirty.get(mode, False)
@@ -172,7 +172,7 @@ def consult_expert_model(prompt: str, mode: str = "cpu", **kwargs):
     import time
 
     # Pause CPU execution if a human user is active
-    if mode in ("cpu", "mcp"):
+    if mode in ("cpu", "guardrail"):
         while _human_priority_active():
             time.sleep(1.0)
 
@@ -194,8 +194,8 @@ def task_mode(task_id):
         cpu_flagged = bool(t.get("cpu"))
     if cpu_flagged:
         return "cpu"
-    if mode == "mcp":
-        return "mcp"
+    if mode == "guardrail":
+        return "guardrail"
     if M.FORCE_GPU_LANE:
         return "gpu"
     if user in M._agent_users and mode in ("gpu", "cpu"):
@@ -206,24 +206,24 @@ def task_mode(task_id):
 def server_base(mode):
     if mode == "cpu":
         return M.LLAMA_BASE_CPU
-    if mode == "mcp":
-        return M.LLAMA_BASE_MCP
+    if mode == "guardrail":
+        return M.LLAMA_BASE_GUARDRAIL
     return M.LLAMA_BASE
 
 
 def server_url(mode):
     if mode == "cpu":
         return M.LLAMA_URL_CPU
-    if mode == "mcp":
-        return M.LLAMA_URL_MCP
+    if mode == "guardrail":
+        return M.LLAMA_URL_GUARDRAIL
     return M.LLAMA_URL
 
 
 def server_model_id(mode):
     if mode == "cpu":
         return M.MODEL_ID_CPU or M.MODEL_ID
-    if mode == "mcp":
-        return M.MODEL_ID_MCP
+    if mode == "guardrail":
+        return M.MODEL_ID_GUARDRAIL
     return M.MODEL_ID
 
 
@@ -231,16 +231,16 @@ def server_status(mode):
     with M._data_lock:
         if mode == "cpu":
             return M._cpu_model_status
-        if mode == "mcp":
-            return M._mcp_model_status
+        if mode == "guardrail":
+            return M._guardrail_model_status
         return M.model_status
 
 
 def server_last_use(mode):
     if mode == "cpu":
         return M._cpu_last_llm_use
-    if mode == "mcp":
-        return M._mcp_last_llm_use
+    if mode == "guardrail":
+        return M._guardrail_last_llm_use
     return M._last_llm_use
 
 
@@ -252,7 +252,10 @@ def active_model_id(mode="gpu"):
 def is_llama_alive(base=None):
     """True when the llama-server at ``base`` answers /health.
 
-    Defaults to the GPU server so existing callers keep working.
+    Defaults to the GPU server so existing callers keep working. In router
+    mode /health only reports that the router process is up, not that any
+    particular model is actually loaded and serving — use
+    :func:`is_model_ready` to check a specific model's state.
     """
     if base is None:
         base = M.LLAMA_BASE
@@ -261,6 +264,27 @@ def is_llama_alive(base=None):
         return r.status_code == 200
     except Exception:
         return False
+
+
+def is_model_ready(base, model_id):
+    """True when ``model_id`` is actually loaded and serving on the router at
+    ``base`` (``GET /models`` -> ``status.value == "ready"`` for that id).
+
+    /health only proves the router itself is up; a child instance can fail to
+    load (OOM, bad args, ...) and exit while the router stays healthy, which
+    previously made load_llama_model report success for a model that was
+    never actually ready.
+    """
+    try:
+        r = requests.get(f"{base}/models", timeout=5)
+        if r.status_code != 200:
+            return False
+        for m in r.json().get("data", []):
+            if m.get("id") == model_id:
+                return m.get("status", {}).get("value") == "ready"
+    except Exception:
+        pass
+    return False
 
 
 def unload_llama_model(mode="gpu"):
@@ -279,8 +303,8 @@ def unload_llama_model(mode="gpu"):
         with M._data_lock:
             if mode == "cpu":
                 M._cpu_model_status = "unloading"
-            elif mode == "mcp":
-                M._mcp_model_status = "unloading"
+            elif mode == "guardrail":
+                M._guardrail_model_status = "unloading"
             else:
                 M.model_status = "unloading"
 
@@ -295,8 +319,8 @@ def unload_llama_model(mode="gpu"):
                 with M._data_lock:
                     if mode == "cpu":
                         M._cpu_model_status = "unloaded"
-                    elif mode == "mcp":
-                        M._mcp_model_status = "unloaded"
+                    elif mode == "guardrail":
+                        M._guardrail_model_status = "unloaded"
                     else:
                         M.model_status = "unloaded"
                 return True
@@ -309,8 +333,8 @@ def unload_llama_model(mode="gpu"):
         with M._data_lock:
             if mode == "cpu":
                 M._cpu_model_status = "chat_loaded" if alive else "unloaded"
-            elif mode == "mcp":
-                M._mcp_model_status = "chat_loaded" if alive else "unloaded"
+            elif mode == "guardrail":
+                M._guardrail_model_status = "chat_loaded" if alive else "unloaded"
             else:
                 M.model_status = "chat_loaded" if alive else "unloaded"
         return False
@@ -331,9 +355,9 @@ def load_llama_model(mode="gpu"):
         if mode == "cpu":
             was_unloaded = M._cpu_model_status == "unloaded"
             M._cpu_model_status = "loading"
-        elif mode == "mcp":
-            was_unloaded = M._mcp_model_status == "unloaded"
-            M._mcp_model_status = "loading"
+        elif mode == "guardrail":
+            was_unloaded = M._guardrail_model_status == "unloaded"
+            M._guardrail_model_status = "loading"
         else:
             was_unloaded = M.model_status == "unloaded"
             M.model_status = "loading"
@@ -346,15 +370,15 @@ def load_llama_model(mode="gpu"):
         )
         if r.status_code in (200, 201):
             for i in range(30):
-                if M.is_llama_alive(base):
+                if M.is_model_ready(base, model_id):
                     print(f"[llama] {mode} model ready (attempt {i+1})")
                     with M._data_lock:
                         if mode == "cpu":
                             M._cpu_model_status = "chat_loaded"
                             M._cpu_last_llm_use = time.time()
-                        elif mode == "mcp":
-                            M._mcp_model_status = "chat_loaded"
-                            M._mcp_last_llm_use = time.time()
+                        elif mode == "guardrail":
+                            M._guardrail_model_status = "chat_loaded"
+                            M._guardrail_last_llm_use = time.time()
                         else:
                             M.model_status = "chat_loaded"
                             M._last_llm_use = time.time()
@@ -367,15 +391,17 @@ def load_llama_model(mode="gpu"):
     except Exception as e:
         print(f"[llama] Load exception: {e}")
 
-    # Fallback check: verify if the server is alive and responding anyway
-    if M.is_llama_alive(base):
+    # Fallback check: the load request may have failed with "already running"
+    # (another caller raced us to load the same model) — verify the model is
+    # actually ready rather than just assuming so.
+    if M.is_model_ready(base, model_id):
         with M._data_lock:
             if mode == "cpu":
                 M._cpu_model_status = "chat_loaded"
                 M._cpu_last_llm_use = time.time()
-            elif mode == "mcp":
-                M._mcp_model_status = "chat_loaded"
-                M._mcp_last_llm_use = time.time()
+            elif mode == "guardrail":
+                M._guardrail_model_status = "chat_loaded"
+                M._guardrail_last_llm_use = time.time()
             else:
                 M.model_status = "chat_loaded"
                 M._last_llm_use = time.time()
@@ -386,8 +412,8 @@ def load_llama_model(mode="gpu"):
     with M._data_lock:
         if mode == "cpu":
             M._cpu_model_status = "unloaded"
-        elif mode == "mcp":
-            M._mcp_model_status = "unloaded"
+        elif mode == "guardrail":
+            M._guardrail_model_status = "unloaded"
         else:
             M.model_status = "unloaded"
     return False
@@ -618,8 +644,8 @@ def _start_llm_round(task_id, sid, round_num):
     with M._data_lock:
         if mode == "cpu":
             ms = M._cpu_model_status
-        elif mode == "mcp":
-            ms = M._mcp_model_status
+        elif mode == "guardrail":
+            ms = M._guardrail_model_status
         else:
             ms = M.model_status
     if ms != "chat_loaded":

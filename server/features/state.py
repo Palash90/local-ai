@@ -93,13 +93,19 @@ MAX_TOOL_ROUNDS = {"default": 10, "research": 50}
 # choreography (see _image_queue in images.py) stays globally serialized,
 # since ComfyUI only has one physical GPU to render on regardless of which
 # lane requested the image.
-_task_queues = {"gpu": [], "cpu": []}
+_task_queues = {"gpu": [], "cpu": [], "guardrail": []}
 _queue_locks = {
     "gpu": threading.Lock(),
     "cpu": threading.Lock(),
+    "guardrail": threading.Lock(),
 }
 _queue_conds = {mode: threading.Condition(lock) for mode, lock in _queue_locks.items()}
-_current_task_ids = {"gpu": None, "cpu": None, "mcp": None}
+_current_task_ids = {"gpu": None, "cpu": None, "guardrail": None}
+
+# The guardrail lane has no in-memory queue (its tasks are polled from SQLite by
+# _guardrail_db_worker), but monitoring code (idle-unload, RAM evacuation) iterates
+# ("gpu", "cpu", "guardrail") uniformly and indexes into these dicts, so "guardrail" needs
+# a (permanently empty) entry here too.
 
 _event_queue = _queue.Queue()
 # Serializes image generation/editing so VRAM management (llama unload/free/load)
@@ -114,12 +120,12 @@ _image_queue = _queue.Queue()
 _llm_pools = {
     "gpu": ThreadPoolExecutor(max_workers=1),
     "cpu": ThreadPoolExecutor(max_workers=CPU_PARALLEL_SLOTS),
-    "mcp": ThreadPoolExecutor(max_workers=1),
+    "guardrail": ThreadPoolExecutor(max_workers=1),
 }
 _tool_pools = {
     "gpu": ThreadPoolExecutor(max_workers=2),
     "cpu": ThreadPoolExecutor(max_workers=2),
-    "mcp": ThreadPoolExecutor(max_workers=2),
+    "guardrail": ThreadPoolExecutor(max_workers=2),
 }
 
 _location_events = {}
@@ -135,8 +141,8 @@ _last_tps = None
 _last_llm_use = time.time()
 _cpu_last_llm_use = time.time()
 
-_mcp_model_status = "unloaded"
-_mcp_last_llm_use = time.time()
+_guardrail_model_status = "unloaded"
+_guardrail_last_llm_use = time.time()
 
 # KV-cache slot checkpoints per llama-server lane (see llm.py). Maps mode →
 # {"file": str, "model": str, "ts": float, "n_tokens": int} describing the
@@ -146,7 +152,7 @@ _slot_checkpoints = {}
 # Per-lane flag set whenever a completion reaches a llama-server (its slot KV
 # changed) and cleared once that KV is captured by save/restore. Gates whether
 # an unload snapshots the slot again.
-_slot_kv_dirty = {"gpu": False, "cpu": False, "mcp": False}
+_slot_kv_dirty = {"gpu": False, "cpu": False, "guardrail": False}
 _client_location = None
 _overheated = False
 _gpu_temp = None

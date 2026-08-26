@@ -83,7 +83,7 @@ def _set_task_error(task_id, error, sid=None):
                 "session_id": d.get("session_id", sid),
                 "_elapsed_ms": elapsed_ms,
             }
-    if mode == "mcp":
+    if mode == "guardrail":
         try:
             from server.mcp_tasks_db import mcp_task_update
             mcp_task_update(task_id, status="error", reply=str(error)[:300])
@@ -162,8 +162,8 @@ def _finalize_task(task_id, sid, msg_content, body):
             M._last_llm_use = time.time()
         elif mode == "cpu":
             M._cpu_last_llm_use = time.time()
-        else:
-            M._mcp_last_llm_use = time.time()
+        elif mode == "guardrail":
+            M._guardrail_last_llm_use = time.time()
     M.save_sessions()
     with M._data_lock:
         if task_id in M.tasks:
@@ -186,7 +186,7 @@ def _finalize_task(task_id, sid, msg_content, body):
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
                 M.tasks[task_id]["_verification_duration"] = verification_duration
-    if mode == "mcp":
+    if mode == "guardrail":
         try:
             from server.mcp_tasks_db import mcp_task_update
             mcp_task_update(task_id, status="done", reply=msg_content or "")
@@ -249,8 +249,8 @@ def _event_loop():
             with M._data_lock:
                 if mode == "cpu":
                     M._cpu_last_llm_use = time.time()
-                elif mode == "mcp":
-                    M._mcp_last_llm_use = time.time()
+                elif mode == "guardrail":
+                    M._guardrail_last_llm_use = time.time()
                 else:
                     M._last_llm_use = time.time()
             if msg.get("tool_calls"):
@@ -417,7 +417,7 @@ def _queue_worker(mode):
     queue_cond = M._queue_conds[mode]
     task_queue = M._task_queues[mode]
     while True:
-        if mode in ("cpu", "mcp"):
+        if mode in ("cpu", "guardrail"):
             # If a human is currently active in the UI, hold off agent tasks
             while _human_priority_active():
                 time.sleep(1.0)
@@ -443,7 +443,7 @@ def _queue_worker(mode):
                         }
                 queue_cond.wait(5)
                 continue
-            if mode in ("cpu", "mcp") and M._human_priority_active():
+            if mode in ("cpu", "guardrail") and M._human_priority_active():
                 for qitem in task_queue:
                     tid = qitem["task_id"]
                     if tid in M.tasks:
@@ -507,7 +507,7 @@ def _mcp_db_worker():
             continue
         row = rows[0]
         task_id = row["task_id"]
-        mode = row.get("mode") or "mcp"
+        mode = row.get("mode") or "guardrail"
         mcp_task_update(task_id, status="working")
         entry = {
             "task_id": task_id,

@@ -323,6 +323,7 @@ async def _call_image(path: str):
 import subprocess
 
 from server.config import (
+    LLAMA_BASE_GUARDRAIL,
     LLAMA_SERVER_PATH,
     VERIFY_CONTEXT_SIZE,
     VERIFY_IDLE_TIMEOUT,
@@ -336,41 +337,11 @@ _verify_lock = threading.Lock()
 
 
 def _verify_server_url():
-    return f"http://127.0.0.1:{VERIFY_PORT}"
+    return LLAMA_BASE_GUARDRAIL
 
 
 def _ensure_verify_server():
-    global _verify_proc
-    with _verify_lock:
-        if _verify_proc and _verify_proc.poll() is None:
-            _touch_verify()
-            return
-        models_dir = os.path.expanduser("~/local-ai-files/my-models/")
-        slot_dir = os.path.expanduser("~/local-ai-files/kv-slots")
-        cmd = [
-            LLAMA_SERVER_PATH,
-            "--host", "127.0.0.1",
-            "--port", str(VERIFY_PORT),
-            "--model", VERIFY_MODEL,
-            "--models-dir", models_dir,
-            "--ctx-size", str(VERIFY_CONTEXT_SIZE),
-            "--n-gpu-layers", "0",
-            "--threads", "2",
-            "--batch", "512",
-            "--ubatch", "256",
-            "--jinja",
-            "--slot-save-path", slot_dir,
-            "--no-mmproj-offload",
-        ]
-        print(
-            f"[verify] starting verification server on port {VERIFY_PORT} "
-            f"(model={VERIFY_MODEL}, ctx={VERIFY_CONTEXT_SIZE})", flush=True,
-        )
-        _verify_proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        _touch_verify()
-        time.sleep(3)
+    pass
 
 
 def _touch_verify():
@@ -413,8 +384,8 @@ VERIFY_TIMEOUT = 90
 
 
 async def _run_llm_verify(message: str, judge_system_prompt: str,
-                          task_lane: str = "") -> tuple:
-    _ensure_verify_server()
+                          task_lane: str = "guardrail") -> tuple:
+    from server.features.state import M
     from server.input_guard import _parse_verdict, _parse_strict_verdict
     import re as _re
 
@@ -422,42 +393,43 @@ async def _run_llm_verify(message: str, judge_system_prompt: str,
     if not text:
         return True, ""
 
+    # Ensure the guardrail lane's llama-server is running before sending requests.
+    M.ensure_llama_server(task_lane)
+
     payload = {
-        "model": VERIFY_MODEL,
+        "model": M.server_model_id(task_lane),
         "messages": [
             {"role": "system", "content": judge_system_prompt},
             {"role": "user", "content": text[:4000]},
         ],
         "temperature": 0,
         "max_tokens": 400,
-        "cache_prompt": False,
         "stream": False,
     }
     try:
         async with httpx.AsyncClient() as client:
             r = await client.post(
-                f"{_verify_server_url()}/v1/chat/completions",
+                M.server_url(task_lane),
                 json=payload,
                 timeout=VERIFY_TIMEOUT,
             )
         if r.status_code != 200:
             print(
-                f"[verify] HTTP {r.status_code} from verification server — "
-                "treating as HARMFUL (fail-closed)"
+                f"[verify] HTTP {r.status_code} from {task_lane} server at "
+                f"{M.server_base(task_lane)} — treating as HARMFUL (fail-closed)"
             )
             return False, f"LLM judge unavailable (HTTP {r.status_code})"
         reply = (
             r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
         )
     except Exception as e:
-        print(f"[verify] call failed: {e} — treating as HARMFUL (fail-closed)")
+        print(f"[verify] call to {task_lane} lane failed: {e} — treating as HARMFUL (fail-closed)")
         return False, f"LLM judge unavailable ({e})"
 
-    _touch_verify()
     if not reply:
         return False, "LLM judge unavailable (empty response)"
 
-    print(f"[verify] raw verdict: {reply.strip()[:200]}")
+    print(f"[verify] raw verdict from {task_lane}: {reply.strip()[:200]}")
     words = set(w for w in _re.findall(r"[A-Za-z']+", reply.upper())[:10])
     blocked_tokens = {"BLOCKED", "UNSAFE", "HARMFUL", "REJECTED", "DENIED", "REFUSED"}
     if words & blocked_tokens and _parse_strict_verdict(reply):
@@ -731,7 +703,7 @@ async def _run_batch(batch_id):
 
             from server.input_guard import _judge_system
             passed, reason = await _run_llm_verify(
-                prompt, _judge_system(),
+                prompt, _judge_system(), task_lane="guardrail"
             )
             if not passed:
                 print(
@@ -811,7 +783,7 @@ async def _run_batch(batch_id):
             if reply:
                 from server.input_guard import _strict_judge_system
                 passed, reason = await _run_llm_verify(
-                    reply, _strict_judge_system(),
+                    reply, _strict_judge_system(), task_lane="guardrail"
                 )
                 if not passed:
                     print(

@@ -547,7 +547,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return
                 msgs = list(sessions.get(sid, []))
             # Cancel all queued/in-flight tasks for this session so they stop processing
-            for mode in ("gpu", "cpu", "mcp"):
+            for mode in ("gpu", "cpu", "guardrail"):
                 with _queue_locks[mode]:
                     q = _task_queues[mode]
                     q[:] = [item for item in q if item.get("session_id") != sid]
@@ -816,7 +816,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # and honored server-side only when research is set).
             cpu_flagged = entry["cpu"]
             mode = body.get("mode")
-            if mode not in ("gpu", "cpu", "mcp") or user not in _agent_users:
+            if mode not in ("gpu", "cpu", "guardrail") or user not in _agent_users:
                 mode = SELF_CHAT_MODE if user in _agent_users else "gpu"
             if cpu_flagged:
                 mode = "cpu"
@@ -824,7 +824,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # LEVEL 2/3 verification) to pin a request to a specific lane,
             # bypassing FORCE_GPU_LANE and the default routing above.
             explicit_mode = body.get("mode")
-            if explicit_mode in ("gpu", "cpu"):
+            if explicit_mode in ("gpu", "cpu", "guardrail"):
                 mode = explicit_mode
             elif FORCE_GPU_LANE and not cpu_flagged:
                 # Test-time override: never admit anything to the CPU lane.

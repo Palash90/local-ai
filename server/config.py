@@ -323,12 +323,12 @@ LLAMA_SERVER_ARGS_CPU = [
 ]
 
 
-LLAMA_BASE_MCP = "http://localhost:8082"
-LLAMA_URL_MCP = f"{LLAMA_BASE_MCP}/v1/chat/completions"
-MODEL_ID_MCP = "gemma-4-E2B-it-Q4_K_M"
+LLAMA_BASE_GUARDRAIL = "http://localhost:8082"
+LLAMA_URL_GUARDRAIL = f"{LLAMA_BASE_GUARDRAIL}/v1/chat/completions"
+MODEL_ID_GUARDRAIL = "gemma-4-E2B-it-Q4_K_M"
 MCP_USER = os.environ.get("MCP_USER", "")
 
-LLAMA_SERVER_ARGS_MCP = [
+LLAMA_SERVER_ARGS_GUARDRAIL = [
     "--host", "127.0.0.1",
     "--port", "8082",
     "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
@@ -351,6 +351,12 @@ LLAMA_SERVER_ARGS_MCP = [
     "--device", "none",
     "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
 ]
+
+# Backward compatibility aliases
+LLAMA_BASE_MCP = LLAMA_BASE_GUARDRAIL
+LLAMA_URL_MCP = LLAMA_URL_GUARDRAIL
+MODEL_ID_MCP = MODEL_ID_GUARDRAIL
+LLAMA_SERVER_ARGS_MCP = LLAMA_SERVER_ARGS_GUARDRAIL
 
 FILES_DIR = os.path.expanduser("~/local-ai-files")
 SESSIONS_DIR = os.path.join(FILES_DIR, "session")

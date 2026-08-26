@@ -19,7 +19,7 @@ import requests
 
 from server.features.state import M
 
-_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "mcp": "8082"}
+_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8082"}
 
 
 def model_status_snapshot():
@@ -116,14 +116,14 @@ def restart_llama_server(mode):
     with M._data_lock:
         if mode == "cpu":
             M._cpu_model_status = "unloaded"
-        elif mode == "mcp":
-            M._mcp_model_status = "unloaded"
+        elif mode == "guardrail":
+            M._guardrail_model_status = "unloaded"
         else:
             M.model_status = "unloaded"
     args = {
         "gpu": M.LLAMA_SERVER_ARGS,
         "cpu": M.LLAMA_SERVER_ARGS_CPU,
-        "mcp": M.LLAMA_SERVER_ARGS_MCP,
+        "guardrail": M.LLAMA_SERVER_ARGS_GUARDRAIL,
     }[mode]
     _start_llama_process(args, mode)
 
@@ -166,9 +166,9 @@ def _cpu_lane_needed():
         return len(M._task_queues["cpu"]) > 0 or M._current_task_ids["cpu"] is not None
 
 
-def _mcp_lane_needed():
-    """True if the MCP lane has (or is about to have) work."""
-    if M._current_task_ids.get("mcp"):
+def _guardrail_lane_needed():
+    """True if the guardrail lane has (or is about to have) work."""
+    if M._current_task_ids.get("guardrail"):
         return True
     try:
         from server.mcp_tasks_db import mcp_task_list
@@ -176,6 +176,10 @@ def _mcp_lane_needed():
         return len(rows) > 0
     except Exception:
         return False
+
+
+# Backward compatibility alias
+_mcp_lane_needed = _guardrail_lane_needed
 
 
 def restart_servers():
@@ -203,16 +207,16 @@ def restart_servers():
     with M._data_lock:
         M.model_status = "unloaded"
         M._cpu_model_status = "unloaded"
-        M._mcp_model_status = "unloaded"
+        M._guardrail_model_status = "unloaded"
     _start_llama_process(M.LLAMA_SERVER_ARGS, "gpu")
     if _cpu_lane_needed():
         _start_llama_process(M.LLAMA_SERVER_ARGS_CPU, "cpu")
     else:
         print("[llama] Skipping CPU llama-server start (no agent lane activity)")
-    if _mcp_lane_needed():
-        _start_llama_process(M.LLAMA_SERVER_ARGS_MCP, "mcp")
+    if _guardrail_lane_needed():
+        _start_llama_process(M.LLAMA_SERVER_ARGS_GUARDRAIL, "guardrail")
     else:
-        print("[llama] Skipping MCP llama-server start (no MCP lane activity)")
+        print("[llama] Skipping guardrail llama-server start (no guardrail lane activity)")
 
 
 def ensure_comfyui_running():
@@ -263,7 +267,7 @@ def _idle_unload_loop():
         # idle for > 300s. This is checked per-lane (not combined) so a busy
         # CPU self-chat agent can't keep the idle GPU model pinned in VRAM,
         # and vice versa.
-        for mode in ("gpu", "cpu", "mcp"):
+        for mode in ("gpu", "cpu", "guardrail"):
             with M._queue_locks[mode]:
                 queue_active = len(M._task_queues[mode]) > 0 or M._current_task_ids[mode] is not None
             ms = M.server_status(mode)
@@ -294,7 +298,7 @@ def _evacuate_ram():
     print("[ram] Emergency RAM evacuation")
     # RAM pressure is whole-box, so both lanes (GPU/UI and CPU/agent) get
     # their in-flight task requeued to the front of their own lane.
-    for mode in ("gpu", "cpu", "mcp"):
+    for mode in ("gpu", "cpu", "guardrail"):
         with M._queue_locks[mode]:
             tid = M._current_task_ids[mode]
             if tid:

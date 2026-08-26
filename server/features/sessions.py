@@ -330,8 +330,8 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
     with M._data_lock:
         if mode == "cpu":
             ms = M._cpu_model_status
-        elif mode == "mcp":
-            ms = M._mcp_model_status
+        elif mode == "guardrail":
+            ms = M._guardrail_model_status
         else:
             ms = M.model_status
     if ms != "chat_loaded":
