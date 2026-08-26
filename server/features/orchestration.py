@@ -293,6 +293,7 @@ def _event_loop():
                     )
             else:
                 print(f"[llm_ok] Round {round_num}: LLM generated final response (no tool calls) for task {task_id}")  # DEBUG
+                print(f"[llm_ok] Message structure: content={repr(msg.get('content'))}, reasoning={repr(msg.get('reasoning_content'))}")
                 if t.get("research"):
                     M.set_status(task_id, "Verifying sources...")
                     with M._data_lock:

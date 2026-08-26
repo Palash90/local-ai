@@ -216,13 +216,28 @@ def _messages_to_session(messages):
     return entries
 
 
-def _poll_task(task_id, timeout_s=600):
-    """Block until the task reaches a terminal state, returning the task dict."""
+def _poll_task(task_id, timeout_s=600, status_callback=None):
+    """Block until the task reaches a terminal state, returning the task dict.
+
+    If status_callback is provided, it's called with (status, message) on each change.
+    """
     deadline = time.time() + timeout_s
+    last_status = None
     while time.time() < deadline:
         with M._data_lock:
             t = M.tasks.get(task_id, {})
         status = t.get("status", "unknown")
+        message = t.get("message", "")
+
+        if status != last_status:
+            print(f"[poll] Task {task_id} status changed: {last_status} → {status}, message={message}")
+            if status_callback:
+                try:
+                    status_callback(status, message)
+                except Exception as e:
+                    print(f"[poll] Status callback error: {e}")
+            last_status = status
+
         if status in ("done", "error", "cancelled"):
             return t
         time.sleep(0.3)
@@ -263,6 +278,8 @@ def handle_chat_completions(handler):
 
     stream = body.get("stream", True)
     model = body.get("model") or MODEL_ID or "local-model"
+
+    print(f"[openai_api] Received request: stream={stream}, model={model}, messages={len(messages)}")
 
     # ── Build the user message for the pipeline ─────────────────────────
     # The last user message becomes the "new" message submitted to the queue.
@@ -364,12 +381,56 @@ def handle_chat_completions(handler):
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
+    # ── For streaming, send headers first so we can stream status updates ─
+    if stream:
+        print(f"[openai_api] Task {task_id} starting stream (headers sent)")
+        # Disable Nagle's algorithm (TCP_NODELAY) to force immediate transmission
+        try:
+            handler.connection.setsockopt(1, 6, 1)  # IPPROTO_TCP=1, TCP_NODELAY=6
+        except Exception as e:
+            print(f"[openai_api] Warning: Could not set TCP_NODELAY: {e}")
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "keep-alive")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.end_headers()
+
+        def stream_status(status, message):
+            """Stream status updates as they change."""
+            status_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": f"[{message}]"}, "finish_reason": None}],
+            }
+            try:
+                data = f"data: {json.dumps(status_chunk)}\n\n".encode("utf-8")
+                # Write directly to socket and force flush
+                handler.connection.sendall(data)
+                # Force TCP buffer drain: set SO_SNDBUF to 0 temporarily
+                import socket as socket_module
+                try:
+                    orig_sndbuf = handler.connection.getsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF)
+                    handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, 1)
+                    handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, orig_sndbuf)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[openai_api] Status stream error: {e}")
+    else:
+        stream_status = None
+
     # ── Wait for the pipeline to finish ─────────────────────────────────
-    result = _poll_task(task_id, timeout_s=600)
+    print(f"[openai_api] Task {task_id} polling for response...")
+    result = _poll_task(task_id, timeout_s=600, status_callback=stream_status)
 
     status = result.get("status", "error")
+    print(f"[openai_api] Task {task_id} completed with status={status}")
     if status == "error":
         err_msg = result.get("error", "Unknown error")
+        print(f"[openai_api] Task {task_id} error: {err_msg}")
         handler.send_json(
             {"error": {"message": str(err_msg), "type": "server_error"}},
             status=500,
@@ -383,9 +444,11 @@ def handle_chat_completions(handler):
         if key in result:
             usage[key] = result[key]
 
+    print(f"[openai_api] Task {task_id} response_len={len(response_text)}, response_repr={repr(response_text)}, reasoning_len={len(reasoning)}, has_tools={'_tools_used' in result}")
+
     # ── Stream or return the response ───────────────────────────────────
     if not stream:
-        handler.send_json({
+        response_json = {
             "id": completion_id,
             "object": "chat.completion",
             "created": created,
@@ -399,18 +462,18 @@ def handle_chat_completions(handler):
                 "finish_reason": "stop",
             }],
             "usage": usage,
-        })
+        }
+        print(f"[openai_api] Task {task_id} BEFORE send_json, response ready")
+        handler.send_json(response_json)
+        print(f"[openai_api] Task {task_id} AFTER send_json, response sent")
         return
 
     # ── Streaming: wrap the final response as SSE chunks ────────────────
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/event-stream")
-    handler.send_header("Cache-Control", "no-cache")
-    handler.send_header("Connection", "keep-alive")
-    handler.send_header("X-Accel-Buffering", "no")
-    handler.end_headers()
+    print(f"[openai_api] Task {task_id} sending final response stream, response_text={len(response_text)} chars")
 
     try:
+        import socket as socket_module
+
         # First chunk: role
         role_chunk = {
             "id": completion_id,
@@ -419,7 +482,15 @@ def handle_chat_completions(handler):
             "model": model,
             "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
         }
-        handler._safe_write(f"data: {json.dumps(role_chunk)}\n\n".encode("utf-8"))
+        print(f"[openai_api] Task {task_id} writing role chunk")
+        handler.connection.sendall(f"data: {json.dumps(role_chunk)}\n\n".encode("utf-8"))
+        # Force flush by toggling SO_SNDBUF
+        try:
+            orig_sndbuf = handler.connection.getsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF)
+            handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, 1)
+            handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, orig_sndbuf)
+        except Exception:
+            pass
 
         # Content chunks: split into ~20 char pieces for a smooth stream feel
         chunk_size = 20
@@ -432,7 +503,7 @@ def handle_chat_completions(handler):
                 "model": model,
                 "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
             }
-            handler._safe_write(f"data: {json.dumps(content_chunk)}\n\n".encode("utf-8"))
+            handler.connection.sendall(f"data: {json.dumps(content_chunk)}\n\n".encode("utf-8"))
 
         # Final chunk
         finish_chunk = {
@@ -443,7 +514,16 @@ def handle_chat_completions(handler):
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             "usage": usage,
         }
-        handler._safe_write(f"data: {json.dumps(finish_chunk)}\n\n".encode("utf-8"))
-        handler._safe_write(b"data: [DONE]\n\n")
-    except (BrokenPipeError, ConnectionResetError):
-        pass
+        print(f"[openai_api] Task {task_id} writing finish chunk")
+        handler.connection.sendall(f"data: {json.dumps(finish_chunk)}\n\n".encode("utf-8"))
+        handler.connection.sendall(b"data: [DONE]\n\n")
+        # Final flush
+        try:
+            orig_sndbuf = handler.connection.getsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF)
+            handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, 1)
+            handler.connection.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_SNDBUF, orig_sndbuf)
+        except Exception:
+            pass
+        print(f"[openai_api] Task {task_id} stream complete")
+    except (BrokenPipeError, ConnectionResetError) as e:
+        print(f"[openai_api] Task {task_id} stream write error: {e}")

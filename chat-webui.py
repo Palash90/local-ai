@@ -299,7 +299,7 @@ _init_themes_db()
 
 SYS_CONTENT = build_sys_content()
 
-print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)
+# print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)  # Disabled for cleaner logs
 
 set_app_state({name: globals()[name] for name in APP_STATE_NAMES})
 

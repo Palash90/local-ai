@@ -71,13 +71,13 @@ def get_user_context_path(username):
 
 def read_user_context(username):
     path = get_user_context_path(username)
-    print("Context path", path, "for", username)
+    # print("Context path", path, "for", username)  # Disabled for cleaner logs
     if path and os.path.exists(path):
         try:
-            print("Reading", path)
+            # print("Reading", path)  # Disabled for cleaner logs
             with open(path) as f:
                 context = f.read()
-                print(context)
+                # print(context)  # Disabled for cleaner logs
                 return context
         except:
             return ""

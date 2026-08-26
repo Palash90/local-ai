@@ -290,10 +290,10 @@ def prepare_context_for_llm(sid, messages, mode="gpu"):
         with M._effective_contexts_lock:
             M._effective_contexts.pop(sid, None)
         return context
-    print(f"[context] Session {sid} estimate {total} tokens exceeds threshold {M.AUTO_COMPACT_THRESHOLD}; building compressed context for LLM")
+    # print(f"[context] Session {sid} estimate {total} tokens exceeds threshold {M.AUTO_COMPACT_THRESHOLD}; building compressed context for LLM")
     compacted = compact_messages_copy(messages, mode=mode)
     context = trim_messages_for_context(compacted)
-    print(f"[context] Compressed context built; estimate after: {estimate_tokens(context)}")
+    # print(f"[context] Compressed context built; estimate after: {estimate_tokens(context)}")
     with M._effective_contexts_lock:
         M._effective_contexts[sid] = context
     return context
