@@ -247,7 +247,7 @@ graph TD
         DF9["contexts/\nPer-user persistent context"]
         DF10["searxng/\nSearXNG config volume"]
         DF11["uploads/\nUploaded files saved to disk\n(code/docs via /api/extract-file)"]
-        DF12["tasks.db\nSQLite to-do tasks + reminders"]
+        DF12["local_ai.db\nUnified SQLite DB: to-do tasks, theme log + MCP batches"]
     end
 
     subgraph BuildFlags ["Build Flags"]

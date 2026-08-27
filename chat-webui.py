@@ -39,17 +39,22 @@ from server.config import (  # noqa: F401
     IMAGE_TOKEN_COST,
     LLAMA_BASE,
     LLAMA_BASE_CPU,
+    LLAMA_BASE_GUARDRAIL,
     LLAMA_GEMMA_NGL,
     LLAMA_QWEN_NGL,
     LLAMA_SERVER_ARGS,
     LLAMA_SERVER_ARGS_CPU,
+    LLAMA_SERVER_ARGS_GUARDRAIL,
     LLAMA_SERVER_PATH,
     LLAMA_SLOT_SAVE_DIR,
     LLAMA_URL,
     LLAMA_URL_CPU,
+    LLAMA_URL_GUARDRAIL,
     MAX_OUTPUT_TOKENS,
     MODEL_ID,
     MODEL_ID_CPU,
+    MODEL_ID_GUARDRAIL,
+    MCP_USER,
     PER_MESSAGE_OVERHEAD,
     PORT,
     PROMPT_PATH,
@@ -64,8 +69,6 @@ from server.config import (  # noqa: F401
     SESSIONS_FILE,
     SHARE_BASE_URL,
     SHARES_FILE,
-    TASKS_DB,
-    THEMES_DB,
     TOOL_FREE_AGENTS,
     TOOLS,
     TOOLS_DETAILED,
@@ -106,6 +109,8 @@ from server.features.state import (  # noqa: E402
     _client_location,
     _cpu_last_llm_use,
     _cpu_model_status,
+    _guardrail_last_llm_use,
+    _guardrail_model_status,
     _current_task_ids,
     _data_lock,
     _effective_contexts,
@@ -210,6 +215,7 @@ from server.features.llm import (  # noqa: E402
     active_model_id,
     consult_expert_model,
     is_llama_alive,
+    is_model_ready,
     load_llama_model,
     mark_slot_kv_dirty,
     restore_slot_checkpoint,
@@ -246,6 +252,7 @@ from server.features.monitoring import (  # noqa: E402
     _ensure_llama_server_for_task,
     _evacuate_ram,
     _idle_unload_loop,
+    _guardrail_lane_needed,
     _reminder_loop,
     _thermal_monitor,
     _connection_manager,
@@ -266,6 +273,7 @@ from server.features.orchestration import (  # noqa: E402
     _event_post,
     _finalize_task,
     _human_priority_active,
+    _mcp_db_worker,
     _queue_worker,
     _set_task_error,
     _task_max_rounds,
@@ -291,7 +299,7 @@ _init_themes_db()
 
 SYS_CONTENT = build_sys_content()
 
-print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)
+# print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)  # Disabled for cleaner logs
 
 set_app_state({name: globals()[name] for name in APP_STATE_NAMES})
 
@@ -323,6 +331,7 @@ if __name__ == "__main__":
     # UI user wait behind it.
     threading.Thread(target=_queue_worker, args=("gpu",), daemon=True).start()
     threading.Thread(target=_queue_worker, args=("cpu",), daemon=True).start()
+    threading.Thread(target=_mcp_db_worker, daemon=True).start()
     threading.Thread(target=_image_worker, daemon=True).start()
     threading.Thread(target=_idle_unload_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()
@@ -330,7 +339,14 @@ if __name__ == "__main__":
     threading.Thread(target=_connection_manager, daemon=True).start()
     threading.Thread(target=run_mcp, daemon=True).start()
     print(f"Chat UI running on http://localhost:{PORT}")
-    s = http.server.HTTPServer((HOST, PORT), Handler)
+    # ThreadingHTTPServer: plain HTTPServer handles one connection at a time on
+    # the main thread, so a long-blocking handler (e.g. the OpenAI-compatible
+    # /v1/chat/completions, which polls synchronously for up to 600s) would
+    # freeze every other client — including the browser UI's status polling —
+    # until it returned. Shared state is already guarded by M._data_lock /
+    # M._queue_locks, so serving each connection on its own thread is safe.
+    s = http.server.ThreadingHTTPServer((HOST, PORT), Handler)
+    s.daemon_threads = True
     try:
         s.serve_forever()
     except KeyboardInterrupt:

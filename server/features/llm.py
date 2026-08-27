@@ -14,6 +14,7 @@ other one.
 
 import json
 import os
+import subprocess
 import time
 
 import requests
@@ -24,7 +25,7 @@ from server.features.state import M
 # Rotating KV-checkpoint filename per lane (slot 0 is the only slot — both
 # servers run with the default --parallel 1). Kept constant so each
 # save overwrites the previous snapshot instead of filling the disk.
-_SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv"}
+_SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv", "guardrail": "guardrail_slot0.kv"}
 
 
 def slot_checkpoint_file(mode="gpu"):
@@ -60,7 +61,12 @@ def save_slot_checkpoint(mode="gpu"):
     optimization existed.
     """
     with M._data_lock:
-        ms = M._cpu_model_status if mode == "cpu" else M.model_status
+        if mode == "cpu":
+            ms = M._cpu_model_status
+        elif mode == "guardrail":
+            ms = M._guardrail_model_status
+        else:
+            ms = M.model_status
         dirty = M._slot_kv_dirty.get(mode, False)
         cp = M._slot_checkpoints.get(mode)
     if ms != "chat_loaded":
@@ -167,7 +173,7 @@ def consult_expert_model(prompt: str, mode: str = "cpu", **kwargs):
     import time
 
     # Pause CPU execution if a human user is active
-    if mode == "cpu":
+    if mode in ("cpu", "guardrail"):
         while _human_priority_active():
             time.sleep(1.0)
 
@@ -180,17 +186,6 @@ def consult_expert_model(prompt: str, mode: str = "cpu", **kwargs):
 
 
 def task_mode(task_id):
-    """Return the llama-server mode a task must run on.
-
-    Tasks posted by agent users (self-chat: editor, moderator, ...) run on the
-    server selected by ``SELF_CHAT_MODE`` (``"cpu"`` or ``"gpu"``); tasks from
-    interactive users always use the GPU server. A per-task ``mode`` override
-    (set at /api/chat admission, e.g. by ``self-chat.py --gpu``) wins over the
-    global flag for agent tasks. An interactive user who explicitly opted into
-    the CPU lane for a research task (task marked ``cpu``) always runs on the
-    CPU server. When ``FORCE_GPU_LANE`` is set (test-time), every non-flagged
-    task — agent or not — runs on the GPU lane.
-    """
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
@@ -200,6 +195,8 @@ def task_mode(task_id):
         cpu_flagged = bool(t.get("cpu"))
     if cpu_flagged:
         return "cpu"
+    if mode == "guardrail":
+        return "guardrail"
     if M.FORCE_GPU_LANE:
         return "gpu"
     if user in M._agent_users and mode in ("gpu", "cpu"):
@@ -208,32 +205,44 @@ def task_mode(task_id):
 
 
 def server_base(mode):
-    """Base URL of the llama-server for ``mode`` (defaults to the GPU server)."""
-    return M.LLAMA_BASE_CPU if mode == "cpu" else M.LLAMA_BASE
+    if mode == "cpu":
+        return M.LLAMA_BASE_CPU
+    if mode == "guardrail":
+        return M.LLAMA_BASE_GUARDRAIL
+    return M.LLAMA_BASE
 
 
 def server_url(mode):
-    """Chat-completions URL of the llama-server for ``mode``."""
-    return M.LLAMA_URL_CPU if mode == "cpu" else M.LLAMA_URL
+    if mode == "cpu":
+        return M.LLAMA_URL_CPU
+    if mode == "guardrail":
+        return M.LLAMA_URL_GUARDRAIL
+    return M.LLAMA_URL
 
 
 def server_model_id(mode):
-    """Model filename the llama-server for ``mode`` should load."""
     if mode == "cpu":
         return M.MODEL_ID_CPU or M.MODEL_ID
+    if mode == "guardrail":
+        return M.MODEL_ID_GUARDRAIL
     return M.MODEL_ID
 
 
 def server_status(mode):
-    """Model status of the llama-server for ``mode`` ("unloaded", "loading",
-    "chat_loaded", "unloading", ...)."""
     with M._data_lock:
-        return M._cpu_model_status if mode == "cpu" else M.model_status
+        if mode == "cpu":
+            return M._cpu_model_status
+        if mode == "guardrail":
+            return M._guardrail_model_status
+        return M.model_status
 
 
 def server_last_use(mode):
-    """Idle timestamp of the llama-server for ``mode``."""
-    return M._cpu_last_llm_use if mode == "cpu" else M._last_llm_use
+    if mode == "cpu":
+        return M._cpu_last_llm_use
+    if mode == "guardrail":
+        return M._guardrail_last_llm_use
+    return M._last_llm_use
 
 
 def active_model_id(mode="gpu"):
@@ -244,7 +253,10 @@ def active_model_id(mode="gpu"):
 def is_llama_alive(base=None):
     """True when the llama-server at ``base`` answers /health.
 
-    Defaults to the GPU server so existing callers keep working.
+    Defaults to the GPU server so existing callers keep working. In router
+    mode /health only reports that the router process is up, not that any
+    particular model is actually loaded and serving — use
+    :func:`is_model_ready` to check a specific model's state.
     """
     if base is None:
         base = M.LLAMA_BASE
@@ -255,11 +267,79 @@ def is_llama_alive(base=None):
         return False
 
 
+def is_model_ready(base, model_id):
+    """True when ``model_id`` is actually loaded and serving on the router at
+    ``base`` (``GET /models`` -> ``status.value == "ready"`` for that id).
+
+    /health only proves the router itself is up; a child instance can fail to
+    load (OOM, bad args, ...) and exit while the router stays healthy, which
+    previously made load_llama_model report success for a model that was
+    never actually ready.
+    """
+    try:
+        r = requests.get(f"{base}/models", timeout=5)
+        if r.status_code != 200:
+            return False
+        for m in r.json().get("data", []):
+            if m.get("id") == model_id:
+                return m.get("status", {}).get("value") == "ready"
+    except Exception:
+        pass
+    return False
+
+
+def _wait_vram_freed(threshold_mb=500, timeout=30):
+    """Poll nvidia-smi until GPU memory usage drops below ``threshold_mb``.
+
+    The llama-server POST /models/unload returns 200 before VRAM is actually
+    released (async cudaFree). This blocks until the GPU is free enough for
+    ComfyUI to load its own models.
+    """
+    print(f"[llama] _wait_vram_freed: polling nvidia-smi (threshold={threshold_mb}MB, timeout={timeout}s)")
+    for _ in range(timeout):
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            used_mb = int(r.stdout.strip().split("\n")[0])
+            if used_mb < threshold_mb:
+                print(f"[llama] VRAM freed: {used_mb} MB used (below {threshold_mb} MB threshold)")
+                return True
+            print(f"[llama] Waiting for VRAM free: {used_mb} MB still used...")
+        except Exception as e:
+            print(f"[llama] nvidia-smi check failed: {e}")
+        time.sleep(1)
+    print(f"[llama] VRAM did not drop below {threshold_mb} MB within {timeout}s")
+    return False
+
+
+def _is_vram_occupied(threshold_mb=500):
+    """True when nvidia-smi shows GPU memory above ``threshold_mb``."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        used_mb = int(r.stdout.strip().split("\n")[0])
+        return used_mb >= threshold_mb
+    except Exception:
+        return False
+
+
 def unload_llama_model(mode="gpu"):
     """Unload the model from the llama-server for ``mode``."""
+    current_status = M.server_status(mode)
+    print(f"[llama] unload_llama_model called: mode={mode}, current_status={current_status}")
     with M._model_transition_lock:
-        with M._data_lock:
-            if (M._cpu_model_status if mode == "cpu" else M.model_status) == "unloaded":
+        if current_status == "unloaded":
+            # Status says unloaded, but VRAM might still be occupied if a
+            # previous unload timed out before cudaFree completed. Check
+            # nvidia-smi and force the unload POST if VRAM is still high.
+            if mode in ("gpu", "guardrail") and _is_vram_occupied():
+                print(f"[llama] {mode} status is unloaded but VRAM still occupied — forcing unload")
+            else:
+                print(f"[llama] {mode} already unloaded — skipping")
                 return True
 
         print(f"[llama] Requesting {mode} model unload from VRAM/RAM...")
@@ -268,36 +348,61 @@ def unload_llama_model(mode="gpu"):
         # re-prefilling the whole conversation. This must happen while the
         # model still reads "chat_loaded" — save_slot_checkpoint skips
         # anything else — hence before the "unloading" transition below.
-        M.save_slot_checkpoint(mode)
+        save_slot_checkpoint(mode)
+        
         with M._data_lock:
             if mode == "cpu":
                 M._cpu_model_status = "unloading"
+            elif mode == "guardrail":
+                M._guardrail_model_status = "unloading"
             else:
                 M.model_status = "unloading"
 
-        try:
-            r = requests.post(
-                f"{M.server_base(mode)}/models/unload",
-                json={"model": M.server_model_id(mode)},
-                timeout=30,
-            )
-            if r.status_code == 200:
-                print(f"[llama] {mode} model unloaded")
-                with M._data_lock:
-                    if mode == "cpu":
-                        M._cpu_model_status = "unloaded"
-                    else:
-                        M.model_status = "unloaded"
-                return True
-            print(f"[llama] Unload response: {r.status_code} {r.text[:200]}")
-        except Exception as e:
-            print(f"[llama] Unload error: {e}")
+        url = f"{M.server_base(mode)}/models/unload"
+        model_id = M.server_model_id(mode)
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            print(f"[llama] Unload POST to {url} with model={model_id} (attempt {attempt}/{max_attempts})")
+            try:
+                r = requests.post(
+                    url,
+                    json={"model": model_id},
+                    timeout=60,
+                )
+                print(f"[llama] Unload response: {r.status_code} {r.text[:200]}")
+                if r.status_code == 200:
+                    print(f"[llama] {mode} model unloaded successfully")
+                    with M._data_lock:
+                        if mode == "cpu":
+                            M._cpu_model_status = "unloaded"
+                        elif mode == "guardrail":
+                            M._guardrail_model_status = "unloaded"
+                        else:
+                            M.model_status = "unloaded"
+                    # The POST returns 200 before VRAM is actually freed
+                    # (async cudaFree). Wait until nvidia-smi shows the
+                    # memory has been released so ComfyUI can use it.
+                    if mode in ("gpu", "guardrail"):
+                        _wait_vram_freed()
+                    return True
+                print(f"[llama] Unload failed: {r.status_code}")
+            except requests.Timeout:
+                print(f"[llama] Unload timeout after 60s (attempt {attempt}/{max_attempts})")
+            except requests.ConnectionError as ce:
+                print(f"[llama] Unload connection error (attempt {attempt}/{max_attempts}): {ce}")
+            except Exception as e:
+                print(f"[llama] Unload error (attempt {attempt}/{max_attempts}): {e}")
+            if attempt < max_attempts:
+                print(f"[llama] Retrying unload in 3s...")
+                time.sleep(3)
 
         # Check real status if unload failed or erred out
         alive = M.is_llama_alive(M.server_base(mode))
         with M._data_lock:
             if mode == "cpu":
                 M._cpu_model_status = "chat_loaded" if alive else "unloaded"
+            elif mode == "guardrail":
+                M._guardrail_model_status = "chat_loaded" if alive else "unloaded"
             else:
                 M.model_status = "chat_loaded" if alive else "unloaded"
         return False
@@ -310,64 +415,90 @@ def load_llama_model(mode="gpu"):
     When the load follows an unload (image generation, idle release), the KV
     checkpoint saved by :func:`save_slot_checkpoint` is restored so the next
     completion only has to evaluate new tokens."""
-    with M._data_lock:
-        # Only a fresh load benefits from a restore: if the model is already
-        # running, its live KV is newer than any snapshot on disk.
-        was_unloaded = (
-            M._cpu_model_status if mode == "cpu" else M.model_status
-        ) == "unloaded"
-        if mode == "cpu":
-            M._cpu_model_status = "loading"
-        else:
-            M.model_status = "loading"
-    model_id = M.server_model_id(mode)
-    base = M.server_base(mode)
-    print(f"[llama] Sending load request for model '{model_id}' to {base}...")
-    try:
-        r = requests.post(
-            f"{base}/models/load", json={"model": model_id}, timeout=180
-        )
-        if r.status_code in (200, 201):
-            for i in range(30):
-                if M.is_llama_alive(base):
-                    print(f"[llama] {mode} model ready (attempt {i+1})")
-                    with M._data_lock:
-                        if mode == "cpu":
-                            M._cpu_model_status = "chat_loaded"
-                            M._cpu_last_llm_use = time.time()
-                        else:
-                            M.model_status = "chat_loaded"
-                            M._last_llm_use = time.time()  # Reset idle timer upon loading
-                    # Resume from the pre-unload KV checkpoint (no-op when
-                    # there is none or the load wasn't a reload).
-                    if was_unloaded:
-                        M.restore_slot_checkpoint(mode)
-                    return True
-                time.sleep(2)
-        else:
-            print(f"[llama] Load failed ({r.status_code}): {r.text[:200]}")
-    except Exception as e:
-        print(f"[llama] Load exception: {e}")
+    with M._model_transition_lock:
+        with M._data_lock:
+            # Only a fresh load benefits from a restore: if the model is already
+            # running, its live KV is newer than any snapshot on disk.
+            # Read status directly — server_status() would re-acquire _data_lock
+            # (non-reentrant), causing a permanent deadlock.
+            if mode == "cpu":
+                was_unloaded = M._cpu_model_status == "unloaded"
+                M._cpu_model_status = "loading"
+            elif mode == "guardrail":
+                was_unloaded = M._guardrail_model_status == "unloaded"
+                M._guardrail_model_status = "loading"
+            else:
+                was_unloaded = M.model_status == "unloaded"
+                M.model_status = "loading"
+        model_id = M.server_model_id(mode)
+        base = M.server_base(mode)
+        url = f"{base}/models/load"
+        t_start = time.time()
+        print(f"[llama] Sending load request for model '{model_id}' to {url}...")
+        try:
+            r = requests.post(
+                url, json={"model": model_id}, timeout=180
+            )
+            t_load_resp = time.time() - t_start
+            print(f"[llama] Load response: {r.status_code} (took {t_load_resp:.1f}s) {r.text[:200]}")
+            if r.status_code in (200, 201):
+                print(f"[llama] {mode} load accepted, waiting for ready...")
+                for i in range(30):
+                    if M.is_model_ready(base, model_id):
+                        t_ready = time.time() - t_start
+                        print(f"[llama] {mode} model ready (attempt {i+1}, total {t_ready:.1f}s)")
+                        with M._data_lock:
+                            if mode == "cpu":
+                                M._cpu_model_status = "chat_loaded"
+                                M._cpu_last_llm_use = time.time()
+                            elif mode == "guardrail":
+                                M._guardrail_model_status = "chat_loaded"
+                                M._guardrail_last_llm_use = time.time()
+                            else:
+                                M.model_status = "chat_loaded"
+                                M._last_llm_use = time.time()
+                        if was_unloaded:
+                            t_restore_start = time.time()
+                            M.restore_slot_checkpoint(mode)
+                            t_restore = time.time() - t_restore_start
+                            print(f"[llama] {mode} KV restore took {t_restore:.1f}s")
+                        return True
+                    time.sleep(2)
+            else:
+                print(f"[llama] Load failed ({r.status_code}): {r.text[:500]}")
+        except requests.Timeout:
+            print(f"[llama] Load timeout after 180s")
+        except requests.ConnectionError as ce:
+            print(f"[llama] Load connection error: {ce}")
+        except Exception as e:
+            print(f"[llama] Load exception: {e}")
 
-    # Fallback check: verify if the server is alive and responding anyway
-    if M.is_llama_alive(base):
+        # Fallback check: the load request may have failed with "already running"
+        # (another caller raced us to load the same model) — verify the model is
+        # actually ready rather than just assuming so.
+        if M.is_model_ready(base, model_id):
+            with M._data_lock:
+                if mode == "cpu":
+                    M._cpu_model_status = "chat_loaded"
+                    M._cpu_last_llm_use = time.time()
+                elif mode == "guardrail":
+                    M._guardrail_model_status = "chat_loaded"
+                    M._guardrail_last_llm_use = time.time()
+                else:
+                    M.model_status = "chat_loaded"
+                    M._last_llm_use = time.time()
+            if was_unloaded:
+                M.restore_slot_checkpoint(mode)
+            return True
+
         with M._data_lock:
             if mode == "cpu":
-                M._cpu_model_status = "chat_loaded"
-                M._cpu_last_llm_use = time.time()
+                M._cpu_model_status = "unloaded"
+            elif mode == "guardrail":
+                M._guardrail_model_status = "unloaded"
             else:
-                M.model_status = "chat_loaded"
-                M._last_llm_use = time.time()  # Reset idle timer upon loading
-        if was_unloaded:
-            M.restore_slot_checkpoint(mode)
-        return True
-
-    with M._data_lock:
-        if mode == "cpu":
-            M._cpu_model_status = "unloaded"
-        else:
-            M.model_status = "unloaded"
-    return False
+                M.model_status = "unloaded"
+        return False
 
 
 def _inject_read_image(messages):
@@ -591,9 +722,17 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
 
 def _start_llm_round(task_id, sid, round_num):
     mode = M.task_mode(task_id)
-    M.ensure_llama_server(mode)
     with M._data_lock:
-        ms = M._cpu_model_status if mode == "cpu" else M.model_status
+        task = M.tasks.get(task_id, {})
+    if not task.get("skip_ensure_llama"):
+        M.ensure_llama_server(mode)
+    with M._data_lock:
+        if mode == "cpu":
+            ms = M._cpu_model_status
+        elif mode == "guardrail":
+            ms = M._guardrail_model_status
+        else:
+            ms = M.model_status
     if ms != "chat_loaded":
         M.load_llama_model(mode)
     with M._data_lock:
@@ -603,7 +742,7 @@ def _start_llm_round(task_id, sid, round_num):
         t["_state"] = "llm_waiting"
         t["_round"] = round_num
         messages = list(M.sessions.get(sid, []))
-    print(f"[llm_round] Starting round {round_num} for task {task_id} on {mode} server with {len(messages)} raw messages")  # DEBUG
+    print(f"[llm_round] Starting round {round_num} for task {task_id} on {mode} server with {len(messages)} raw messages")
     M.set_status(
         task_id, "Thinking..." if round_num == 0 else f"Thinking (round {round_num})..."
     )

@@ -32,9 +32,11 @@ from server.config import (
     COMFYUI_OUTPUT,
     FORCE_GPU_LANE,
     IMG_PATH,
+    MCP_USER,
     SELF_CHAT_MODE,
     UPLOADS_DIR,
 )
+from server.features.tasks_db import _MISSING
 
 IMAGE_MIME = {
     ".png": "image/png",
@@ -443,6 +445,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 )
             else:
                 self.send_error(404)
+        elif self.path.startswith("/v1/"):
+            from server.openai_api import handle_list_models, handle_retrieve_model, handle_v1_root
+            if self.path in ("/v1/", "/v1"):
+                handle_v1_root(self)
+            elif self.path == "/v1/models":
+                handle_list_models(self)
+            elif self.path.startswith("/v1/models/"):
+                model_id = self.path.split("/v1/models/", 1)[1].rstrip("/")
+                handle_retrieve_model(self, model_id)
+            else:
+                self.send_json(
+                    {"error": {"message": f"Unknown endpoint: {self.path}", "type": "invalid_request_error"}},
+                    status=404,
+                )
         elif self.path == "/":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -481,17 +497,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if is_global and identity["role"] != "admin":
                         self.send_json({"error": "Admin role required"}, status=403)
                         return
-                    result = handle_theme_tool(
-                        identity["username"],
-                        {
-                            "operation": "list",
-                            "scope": scope,
-                            "global": is_global,
-                            "status": qs.get("status", [""])[0] or None,
-                            "limit": qs.get("limit", ["50"])[0] or 50,
-                        },
-                    )
-                    self.send_json(json.loads(result))
+                    try:
+                        result = handle_theme_tool(
+                            identity["username"],
+                            {
+                                "operation": "list",
+                                "scope": scope,
+                                "global": is_global,
+                                "status": qs.get("status", [""])[0] or None,
+                                "limit": qs.get("limit", ["50"])[0] or 50,
+                            },
+                        )
+                        self.send_json(json.loads(result))
+                    except Exception as e:
+                        print(f"[db] handle_theme_tool error: {e}")
+                        self.send_json({"error": f"Database error: {e}"}, status=500)
                 else:
                     self.send_error(404)
             else:
@@ -527,7 +547,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return
                 msgs = list(sessions.get(sid, []))
             # Cancel all queued/in-flight tasks for this session so they stop processing
-            for mode in ("gpu", "cpu"):
+            for mode in ("gpu", "cpu", "guardrail"):
                 with _queue_locks[mode]:
                     q = _task_queues[mode]
                     q[:] = [item for item in q if item.get("session_id") != sid]
@@ -623,10 +643,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
             tid = self.path.split("/")[3]
-            if task_delete(tid, user):
-                self.send_json({"status": "deleted"})
-            else:
-                self.send_error(404)
+            try:
+                if task_delete(tid, user):
+                    self.send_json({"status": "deleted"})
+                else:
+                    self.send_error(404)
+            except Exception as e:
+                print(f"[db] task_delete error: {e}")
+                self.send_json({"error": f"Database error: {e}"}, status=500)
         else:
             self.send_error(404)
 
@@ -657,11 +681,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             tid = self.path.split("/")[3]
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
-            t = task_update(tid, user, **{k: v for k, v in body.items() if k in ("title","description","status","priority","due_date","reminder_at")})
-            if t:
-                self.send_json({"task": t})
-            else:
-                self.send_error(404)
+            try:
+                t = task_update(tid, user, **{k: v for k, v in body.items() if k in ("title","description","status","priority","due_date","reminder_at")})
+                if t:
+                    self.send_json({"task": t})
+                else:
+                    self.send_error(404)
+            except Exception as e:
+                print(f"[db] task_update error: {e}")
+                self.send_json({"error": f"Database error: {e}"}, status=500)
         else:
             self.send_error(404)
 
@@ -788,11 +816,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # and honored server-side only when research is set).
             cpu_flagged = entry["cpu"]
             mode = body.get("mode")
-            if mode not in ("gpu", "cpu") or user not in _agent_users:
+            if mode not in ("gpu", "cpu", "guardrail") or user not in _agent_users:
                 mode = SELF_CHAT_MODE if user in _agent_users else "gpu"
             if cpu_flagged:
                 mode = "cpu"
-            if FORCE_GPU_LANE and not cpu_flagged:
+            # Explicit mode override: allows callers (e.g. MCP gateway for
+            # LEVEL 2/3 verification) to pin a request to a specific lane,
+            # bypassing FORCE_GPU_LANE and the default routing above.
+            explicit_mode = body.get("mode")
+            if explicit_mode in ("gpu", "cpu", "guardrail"):
+                mode = explicit_mode
+            elif FORCE_GPU_LANE and not cpu_flagged:
                 # Test-time override: never admit anything to the CPU lane.
                 mode = "gpu"
             entry["mode"] = mode
@@ -1004,8 +1038,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
-            t = task_create(user, body.get("title", "Untitled"), body.get("description", ""), body.get("priority", "medium"), body.get("due_date"), body.get("session_id"), body.get("reminder_at"))
-            self.send_json({"task": t})
+            try:
+                t = task_create(user, body.get("title", "Untitled"), body.get("description", ""), body.get("priority", "medium"), body.get("due_date"), body.get("session_id"), body.get("reminder_at"))
+                self.send_json({"task": t})
+            except Exception as e:
+                print(f"[db] task_create error: {e}")
+                self.send_json({"error": f"Database error: {e}"}, status=500)
         elif self.path == "/api/themes":
             identity = get_identity(self.headers)
             if not identity:
@@ -1016,8 +1054,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if body.get("global") and identity["role"] != "admin":
                 self.send_json({"error": "Admin role required"}, status=403)
                 return
-            result = handle_theme_tool(identity["username"], body)
-            self.send_json(json.loads(result))
+            try:
+                result = handle_theme_tool(identity["username"], body)
+                self.send_json(json.loads(result))
+            except Exception as e:
+                print(f"[db] handle_theme_tool error: {e}")
+                self.send_json({"error": f"Database error: {e}"}, status=500)
+        elif self.path == "/v1/chat/completions":
+            from server.openai_api import handle_chat_completions
+            handle_chat_completions(self)
         else:
             self.send_error(404)
 

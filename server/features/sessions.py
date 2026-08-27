@@ -326,8 +326,3 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
             )
         M.sessions_meta[sid]["updated"] = time.time()
     M.save_sessions()
-    mode = M.task_mode(task_id)
-    with M._data_lock:
-        ms = M._cpu_model_status if mode == "cpu" else M.model_status
-    if ms != "chat_loaded":
-        M.load_llama_model(mode)

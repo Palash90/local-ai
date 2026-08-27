@@ -19,6 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from server.config import CPU_PARALLEL_SLOTS
 
+
 class _Registry:
     """Holds the single entrypoint module reference."""
 
@@ -92,10 +93,19 @@ MAX_TOOL_ROUNDS = {"default": 10, "research": 50}
 # choreography (see _image_queue in images.py) stays globally serialized,
 # since ComfyUI only has one physical GPU to render on regardless of which
 # lane requested the image.
-_task_queues = {"gpu": [], "cpu": []}
-_queue_locks = {"gpu": threading.Lock(), "cpu": threading.Lock()}
+_task_queues = {"gpu": [], "cpu": [], "guardrail": []}
+_queue_locks = {
+    "gpu": threading.Lock(),
+    "cpu": threading.Lock(),
+    "guardrail": threading.Lock(),
+}
 _queue_conds = {mode: threading.Condition(lock) for mode, lock in _queue_locks.items()}
-_current_task_ids = {"gpu": None, "cpu": None}
+_current_task_ids = {"gpu": None, "cpu": None, "guardrail": None}
+
+# The guardrail lane has no in-memory queue (its tasks are polled from SQLite by
+# _guardrail_db_worker), but monitoring code (idle-unload, RAM evacuation) iterates
+# ("gpu", "cpu", "guardrail") uniformly and indexes into these dicts, so "guardrail" needs
+# a (permanently empty) entry here too.
 
 _event_queue = _queue.Queue()
 # Serializes image generation/editing so VRAM management (llama unload/free/load)
@@ -107,8 +117,16 @@ _image_queue = _queue.Queue()
 # tool call still funneled through those single shared pools, so a GPU (UI)
 # task and a CPU (agent) task would still block on each other's turn in the
 # pool. Splitting per-lane makes them genuinely independent end-to-end.
-_llm_pools = {"gpu": ThreadPoolExecutor(max_workers=1), "cpu": ThreadPoolExecutor(max_workers=CPU_PARALLEL_SLOTS)}
-_tool_pools = {"gpu": ThreadPoolExecutor(max_workers=2), "cpu": ThreadPoolExecutor(max_workers=2)}
+_llm_pools = {
+    "gpu": ThreadPoolExecutor(max_workers=1),
+    "cpu": ThreadPoolExecutor(max_workers=CPU_PARALLEL_SLOTS),
+    "guardrail": ThreadPoolExecutor(max_workers=1),
+}
+_tool_pools = {
+    "gpu": ThreadPoolExecutor(max_workers=2),
+    "cpu": ThreadPoolExecutor(max_workers=2),
+    "guardrail": ThreadPoolExecutor(max_workers=2),
+}
 
 _location_events = {}
 
@@ -123,6 +141,9 @@ _last_tps = None
 _last_llm_use = time.time()
 _cpu_last_llm_use = time.time()
 
+_guardrail_model_status = "unloaded"
+_guardrail_last_llm_use = time.time()
+
 # KV-cache slot checkpoints per llama-server lane (see llm.py). Maps mode →
 # {"file": str, "model": str, "ts": float, "n_tokens": int} describing the
 # last successfully saved /slots/{id}?action=save snapshot, which is restored
@@ -131,7 +152,7 @@ _slot_checkpoints = {}
 # Per-lane flag set whenever a completion reaches a llama-server (its slot KV
 # changed) and cleared once that KV is captured by save/restore. Gates whether
 # an unload snapshots the slot again.
-_slot_kv_dirty = {"gpu": False, "cpu": False}
+_slot_kv_dirty = {"gpu": False, "cpu": False, "guardrail": False}
 _client_location = None
 _overheated = False
 _gpu_temp = None
@@ -148,6 +169,6 @@ AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 
 # Monitoring constants.
 TEMP_THRESHOLD_ON = 90
-TEMP_THRESHOLD_OFF =75
+TEMP_THRESHOLD_OFF = 75
 RAM_EVAC_THRESHOLD = 95
 RAM_RESUME_THRESHOLD = 70

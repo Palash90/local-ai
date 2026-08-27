@@ -46,6 +46,11 @@ HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "http://10.66.66.1:9863/heartbea
 # "http://192.168.1.10:3001/s/<token>" becomes a dead short URL that ends at the
 # colon. Leave empty to keep building links from the browser's own origin.
 SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL", "").strip().rstrip("/")
+
+# OpenAI-compatible API key for /v1/* endpoints.  Set via the OPENAI_API_KEY
+# environment variable (e.g. in .env).  Leave empty to disable the endpoints.
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
 REASONING_BUDGET = 2048
 MAX_OUTPUT_TOKENS = 8192
 
@@ -224,6 +229,18 @@ os.makedirs(LLAMA_SLOT_SAVE_DIR, exist_ok=True)
 
 LLAMA_QWEN_NGL = "0"
 LLAMA_GEMMA_NGL = "99"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCP verification server — a lightweight CPU-only llama-server dedicated to
+# LEVEL 2 (input) and LEVEL 3 (output) LLM verification for the MCP gateway.
+# Runs gemma4-e4b-qat (small, fast QAT model) with a tight 8K context.
+# Started by the MCP gateway on first batch and auto-unloaded after
+# VERIFY_IDLE_TIMEOUT seconds of inactivity to free RAM.
+# ─────────────────────────────────────────────────────────────────────────────
+VERIFY_PORT = int(os.environ.get("VERIFY_PORT", "8083"))
+VERIFY_MODEL = os.environ.get("VERIFY_MODEL", "gemma-4-E2B-it-Q4_K_M")
+VERIFY_CONTEXT_SIZE = int(os.environ.get("VERIFY_CONTEXT_SIZE", "8192"))
+VERIFY_IDLE_TIMEOUT = int(os.environ.get("VERIFY_IDLE_TIMEOUT", "300"))
 LLAMA_SERVER_ARGS = [
     "--host", "127.0.0.1",
     "--port", "8081",
@@ -233,7 +250,7 @@ LLAMA_SERVER_ARGS = [
     # GPU / VRAM & Performance
     "-ngl", LLAMA_GEMMA_NGL,
     "-fa", "on",
-    "--ctx-size", "24576",       # 24K context for interactive UI chat
+    "--ctx-size", "32768",       # 24K context for interactive UI chat
     "-ctk", "q8_0",
     "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q8_0
     "--no-mmproj-offload",
@@ -305,6 +322,42 @@ LLAMA_SERVER_ARGS_CPU = [
     "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
 ]
 
+
+LLAMA_BASE_GUARDRAIL = "http://localhost:8083"
+LLAMA_URL_GUARDRAIL = f"{LLAMA_BASE_GUARDRAIL}/v1/chat/completions"
+MODEL_ID_GUARDRAIL = "gemma-4-E2B-it-Q4_K_M"
+MCP_USER = os.environ.get("MCP_USER", "")
+
+LLAMA_SERVER_ARGS_GUARDRAIL = [
+    "--host", "127.0.0.1",
+    "--port", "8083",
+    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    "--jinja",
+    "--n-gpu-layers", "0",
+    "-fa", "off",
+    "--ctx-size", "16384",
+    "-ctk", "q8_0",
+    "--no-mmproj-offload",
+    "-t", "4",
+    "-tb", "4",
+    "--cache-reuse", "256",
+    "--reasoning-budget", str(REASONING_BUDGET),
+    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+    "--temp", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64",
+    "--min-p", "0.0",
+    "--repeat-penalty", "1.0",
+    "--device", "none",
+    "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
+]
+
+# Backward compatibility aliases
+LLAMA_BASE_MCP = LLAMA_BASE_GUARDRAIL
+LLAMA_URL_MCP = LLAMA_URL_GUARDRAIL
+MODEL_ID_MCP = MODEL_ID_GUARDRAIL
+LLAMA_SERVER_ARGS_MCP = LLAMA_SERVER_ARGS_GUARDRAIL
+
 FILES_DIR = os.path.expanduser("~/local-ai-files")
 SESSIONS_DIR = os.path.join(FILES_DIR, "session")
 SESSIONS_FILE = os.path.join(SESSIONS_DIR, "sessions.json")
@@ -312,8 +365,9 @@ SHARES_FILE = os.path.join(FILES_DIR, "shares.json")
 IMG_PATH = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 COMFYUI_INPUT = os.path.expanduser("~/local-ai-files/ComfyUI/input")
 PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
-TASKS_DB = os.path.expanduser("~/local-ai-files/tasks.db")
-THEMES_DB = os.path.expanduser("~/local-ai-files/themes.db")
+# Unified SQLite database: tasks, theme_log and MCP batches all live in this
+# one file (see server/db.py). Override at runtime with LOCAL_AI_DB.
+APP_DB = os.path.expanduser("~/local-ai-files/local_ai.db")
 IMAGE_TOKEN_COST = 1200
 AUDIO_TOKEN_COST = 800
 PER_MESSAGE_OVERHEAD = 4

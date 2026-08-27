@@ -69,18 +69,26 @@ def _task_max_rounds(task_id):
 
 
 def _set_task_error(task_id, error, sid=None):
+    mode = ""
     with M._data_lock:
         if task_id in M.tasks:
             d = M.tasks[task_id]
             elapsed_ms = None
             if d.get("_started_at") is not None:
                 elapsed_ms = int((time.time() - d.get("_started_at")) * 1000)
+            mode = d.get("mode", "")
             M.tasks[task_id] = {
                 "status": "error",
                 "error": str(error),
                 "session_id": d.get("session_id", sid),
                 "_elapsed_ms": elapsed_ms,
             }
+    if mode == "guardrail":
+        try:
+            from server.mcp_tasks_db import mcp_task_update
+            mcp_task_update(task_id, status="error", reply=str(error)[:300])
+        except Exception:
+            pass
 
 
 def _delete_task_image(task_id):
@@ -148,11 +156,14 @@ def _finalize_task(task_id, sid, msg_content, body):
         if sid in M.sessions:
             M.sessions[sid].append(msg_entry)
             M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
+
         if mode == "gpu":
             M._last_tps = predicted_per_second
-            M._last_llm_use = time.time()  # Reset GPU idle timer when task finishes
-        else:
-            M._cpu_last_llm_use = time.time()  # Reset CPU idle timer when task finishes
+            M._last_llm_use = time.time()
+        elif mode == "cpu":
+            M._cpu_last_llm_use = time.time()
+        elif mode == "guardrail":
+            M._guardrail_last_llm_use = time.time()
     M.save_sessions()
     with M._data_lock:
         if task_id in M.tasks:
@@ -175,6 +186,28 @@ def _finalize_task(task_id, sid, msg_content, body):
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
                 M.tasks[task_id]["_verification_duration"] = verification_duration
+    if mode == "guardrail":
+        try:
+            from server.mcp_tasks_db import mcp_task_update
+            from server.input_guard import is_strict_output_blocked
+
+            reply_text = msg_content or ""
+            print(f"[guardrail][L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}")
+            print(f"[guardrail][L3] msg_content={repr(reply_text[:500])}")
+
+            print(f"[guardrail][L3] checking strict output blocks")
+            if is_strict_output_blocked(reply_text):
+                print(f"[guardrail][L3] BLOCKED: strict output filter triggered on text: {repr(reply_text[:200])}")
+                mcp_task_update(task_id, status="done", reply=reply_text,
+                              verification_level="LEVEL 3 OUTPUT VERIFICATION FAILED",
+                              failure_reason="Output blocked by strict filter")
+            else:
+                print(f"[guardrail][L3] PASSED: output approved by strict filter")
+                mcp_task_update(task_id, status="done", reply=reply_text,
+                              verification_level="LEVEL 3 OUTPUT VERIFICATION PASSED")
+        except Exception as e:
+            print(f"[guardrail][L3] error during output verification: {e}")
+            pass
 
 
 def _event_post(ev_type, task_id, **data):
@@ -214,8 +247,12 @@ def _event_loop():
                     "research": bool(data.get("research")),
                     "cpu": bool(data.get("cpu")),
                     "no_tools": bool(data.get("no_tools")),
+                    "openai_lane": bool(data.get("openai_lane")),
                     "_started_at": t.get("_started_at"),
+                    "skip_ensure_llama": bool(data.get("skip_ensure_llama")),
                 }
+                if data.get("openai_lane"):
+                    print(f"[openai] processing OpenAI lane request for task {task_id}")
             # (The owning lane's _current_task_ids[mode] was already set by
             # _queue_worker before this "start" event was posted.)
             M._prepare_session(task_id, sid, user_message, image_b64, audio_b64, client_ts)
@@ -232,6 +269,8 @@ def _event_loop():
             with M._data_lock:
                 if mode == "cpu":
                     M._cpu_last_llm_use = time.time()
+                elif mode == "guardrail":
+                    M._guardrail_last_llm_use = time.time()
                 else:
                     M._last_llm_use = time.time()
             if msg.get("tool_calls"):
@@ -244,11 +283,15 @@ def _event_loop():
                         if rc:
                             tt["reasoning"] = rc
                 pending = len(msg["tool_calls"])
-                print(f"[llm_ok] Round {round_num}: LLM requested {pending} tool(s) for task {task_id}")  # DEBUG
+                is_openai = t.get("openai_lane")
+                print(f"[llm_ok] Round {round_num}: LLM requested {pending} tool(s) for task {task_id}" + (" (OpenAI lane: client will execute)" if is_openai else ""))  # DEBUG
                 with M._data_lock:
                     tt = M.tasks.get(task_id)
                     if tt:
-                        tt["_state"] = "tools_running"
+                        if is_openai:
+                            tt["_state"] = "client_tool_calls_pending"
+                        else:
+                            tt["_state"] = "tools_running"
                         tt["_pending_tools"] = pending
                 with M._data_lock:
                     if sid in M.sessions:
@@ -260,19 +303,23 @@ def _event_loop():
                         M.sessions[sid].append(assistant_msg)
                         M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
                 M.save_sessions()
-                tool_mode = M.task_mode(task_id)
-                for i, tc in enumerate(msg["tool_calls"]):
-                    M._tool_pools[tool_mode].submit(
-                        M._tool_worker,
-                        task_id,
-                        sid,
-                        tc,
-                        t.get("_original_image"),
-                        round_num,
-                        i,
-                    )
+                if not is_openai:
+                    tool_mode = M.task_mode(task_id)
+                    for i, tc in enumerate(msg["tool_calls"]):
+                        M._tool_pools[tool_mode].submit(
+                            M._tool_worker,
+                            task_id,
+                            sid,
+                            tc,
+                            t.get("_original_image"),
+                            round_num,
+                            i,
+                        )
+                else:
+                    print(f"[openai] skipping server-side tool execution; tool_calls sent to client")
             else:
                 print(f"[llm_ok] Round {round_num}: LLM generated final response (no tool calls) for task {task_id}")  # DEBUG
+                print(f"[llm_ok] Message structure: content={repr(msg.get('content'))}, reasoning={repr(msg.get('reasoning_content'))}")
                 if t.get("research"):
                     M.set_status(task_id, "Verifying sources...")
                     with M._data_lock:
@@ -398,7 +445,7 @@ def _queue_worker(mode):
     queue_cond = M._queue_conds[mode]
     task_queue = M._task_queues[mode]
     while True:
-        if mode == "cpu":
+        if mode in ("cpu", "guardrail"):
             # If a human is currently active in the UI, hold off agent tasks
             while _human_priority_active():
                 time.sleep(1.0)
@@ -424,7 +471,7 @@ def _queue_worker(mode):
                         }
                 queue_cond.wait(5)
                 continue
-            if mode == "cpu" and M._human_priority_active():
+            if mode in ("cpu", "guardrail") and M._human_priority_active():
                 for qitem in task_queue:
                     tid = qitem["task_id"]
                     if tid in M.tasks:
@@ -452,6 +499,7 @@ def _queue_worker(mode):
             research=item.get("research"),
             cpu=item.get("cpu"),
             no_tools=item.get("no_tools"),
+            skip_ensure_llama=item.get("skip_ensure_llama"),
         )
         # Wait for this task to finish (status becomes "done", "error" or "cancelled")
         # before dequeuing the next item IN THIS LANE. The other lane's worker
@@ -465,3 +513,74 @@ def _queue_worker(mode):
         with queue_lock:
             M._current_task_ids[mode] = None
             queue_cond.notify_all()
+
+
+MCP_DB_POLL_INTERVAL = 2
+
+
+def _mcp_db_worker():
+    """DB-polling worker for MCP tasks: reads queued tasks from the SQLite
+    ``mcp_tasks`` table, claims them, and feeds them into the shared event
+    loop — replacing the in-memory queue that the gpu/cpu lanes use.
+
+    This runs on its own thread so MCP requests never compete with
+    interactive UI users or self-chat agents for queue slots.
+    """
+    from server.mcp_tasks_db import mcp_task_list, mcp_task_update
+    MCP_USER = os.environ.get("MCP_USER", "")
+    print("[mcp-db] worker started — polling SQLite for queued tasks", flush=True)
+    while True:
+        rows = mcp_task_list(limit=1, status="queued")
+        if not rows:
+            time.sleep(MCP_DB_POLL_INTERVAL)
+            continue
+        row = rows[0]
+        task_id = row["task_id"]
+        mode = row.get("mode") or "guardrail"
+        print(f"[mcp-db] found queued task {task_id}, marking as working", flush=True)
+        mcp_task_update(task_id, status="working")
+        entry = {
+            "task_id": task_id,
+            "session_id": row["session_id"],
+            "message": row["message"],
+            "image": None,
+            "audio": None,
+            "user": MCP_USER,
+            "client_timestamp": None,
+            "research": bool(row.get("research")),
+            "cpu": bool(row.get("cpu")),
+            "no_tools": bool(row.get("no_tools")),
+            "mode": mode,
+        }
+        with M._data_lock:
+            M.tasks[task_id] = {
+                "status": "queued",
+                "message": "Waiting in line...",
+                "session_id": row["session_id"],
+                "mode": mode,
+                "research": bool(row.get("research")),
+                "cpu": bool(row.get("cpu")),
+                "no_tools": bool(row.get("no_tools")),
+            }
+        print(f"[mcp-db] posting start event for task {task_id}", flush=True)
+        M._event_post(
+            "start",
+            task_id,
+            sid=row["session_id"],
+            message=row["message"],
+            image=None,
+            audio=None,
+            user=MCP_USER,
+            client_timestamp=None,
+            research=bool(row.get("research")),
+            cpu=bool(row.get("cpu")),
+            no_tools=bool(row.get("no_tools")),
+        )
+        print(f"[mcp-db] waiting for task {task_id} to complete", flush=True)
+        while True:
+            with M._data_lock:
+                st = M.tasks.get(task_id, {}).get("status")
+            if st in ("done", "error", "cancelled"):
+                print(f"[mcp-db] task {task_id} completed with status={st}", flush=True)
+                break
+            time.sleep(0.5)
