@@ -726,15 +726,15 @@ def _start_llm_round(task_id, sid, round_num):
         task = M.tasks.get(task_id, {})
     if not task.get("skip_ensure_llama"):
         M.ensure_llama_server(mode)
-    with M._data_lock:
-        if mode == "cpu":
-            ms = M._cpu_model_status
-        elif mode == "guardrail":
-            ms = M._guardrail_model_status
-        else:
-            ms = M.model_status
-    if ms != "chat_loaded":
-        M.load_llama_model(mode)
+        with M._data_lock:
+            if mode == "cpu":
+                ms = M._cpu_model_status
+            elif mode == "guardrail":
+                ms = M._guardrail_model_status
+            else:
+                ms = M.model_status
+        if ms != "chat_loaded":
+            M.load_llama_model(mode)
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
