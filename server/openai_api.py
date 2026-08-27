@@ -65,17 +65,18 @@ def _require_api_key(handler):
 # ---------------------------------------------------------------------------
 
 _TOOL_CALL_TAG_RE = re.compile(
-    r"<\|tool_call\|>(.*?)<\|tool_call\|>", flags=re.DOTALL
+    r"<\|?\s*tool_call\s*\|?>\s*(.*?)\s*<\|?\s*tool_call\s*\|?>",
+    flags=re.DOTALL | re.IGNORECASE,
 )
 
 
 def _strip_tool_call_text(text):
     """Remove inline tool-call tags the model emits as *text* when tools are
     disabled (e.g. the OpenAI lane sends ``tools: []`` + ``tool_choice: none``,
-    but a model trained to use tools may still leak ``<|tool_call|>...`` into
-    its content).  Such tags are meaningless to an OpenAI client, so drop them
-    wholesale.  If the content is *only* tool-call spam, return an empty string
-    so the caller signals a stop rather than echoing junk back to the caller.
+    but a model trained to use tools may still leak ``<|tool_call|>`` variants
+    into its content).  Such tags are meaningless to an OpenAI client, so drop
+    them wholesale.  If the content is *only* tool-call spam, return an empty
+    string so the caller signals a stop rather than echoing junk to the caller.
     """
     if not text:
         return text
