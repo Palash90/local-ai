@@ -24,6 +24,10 @@ from server.config import (
     OPENAI_API_KEY,
 )
 from server.features.state import M
+from server.features.openai_adapter import (
+    stream_tool_calls,
+    format_tool_calls_for_response,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +475,7 @@ def handle_chat_completions(handler):
         if response_text:
             message["content"] = response_text
         if tool_calls:
-            message["tool_calls"] = tool_calls
+            message["tool_calls"] = format_tool_calls_for_response(tool_calls)
         handler.send_json({
             "id": completion_id,
             "object": "chat.completion",
@@ -487,9 +491,8 @@ def handle_chat_completions(handler):
         return
 
     if tool_calls:
-        for tc in tool_calls:
-            if not write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {'tool_calls': [tc]}, 'finish_reason': None}]})}\n\n"):
-                return
+        if not stream_tool_calls(write_sse, tool_calls, completion_id, created, model):
+            return
     else:
         chunk_size = 20
         for i in range(0, len(response_text), chunk_size):
@@ -497,6 +500,8 @@ def handle_chat_completions(handler):
             if not write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {'content': piece}, 'finish_reason': None}]})}\n\n"):
                 return
 
-    write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls' if tool_calls else 'stop'}], 'usage': usage})}\n\n")
+    if not tool_calls:
+        write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}], 'usage': usage})}\n\n")
+    
     write_sse("data: [DONE]\n\n")
     print(f"[openai_api] Task {task_id} stream complete")

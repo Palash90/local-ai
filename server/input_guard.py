@@ -330,7 +330,7 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
         return False
     print(
         f"[guardrail][{label}] -> {base_url} fail_closed={fail_closed} "
-        f"text={text[:160]!r}"
+        f"text={text!r}"
     )
     try:
         import requests
@@ -401,7 +401,7 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
     return fail_closed
 
 
-def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=False):
+def llm_classify_harmful_output(text, timeout=20, fail_closed=False):
     """Return True if an LLM judge classifies generated ``text`` as harmful
     how-to content.
 
@@ -411,10 +411,7 @@ def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=Fal
     caught even when the prompt itself dodged the input filters. Synchronous;
     ``fail_closed`` mirrors :func:`llm_classify_harmful`.
     """
-    if base_url is None:
-        base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8081")
-    if not base_url:
-        return False
+    base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     return _run_judge(
         "output-judge", _judge_output_system(), text, base_url, timeout,
         fail_closed, max_chars=4000,
@@ -446,7 +443,7 @@ def _parse_strict_verdict(content):
     return True
 
 
-def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
+def mcp_output_judge(text, timeout=None, fail_closed=True):
     """Final end-of-pipe strict judge for ALL MCP outputs.
 
     Return True if the text must be BLOCKED.  This function is the absolute
@@ -458,12 +455,7 @@ def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
     The text is truncated to 6000 chars before judging to stay within the
     judge model's context window while still covering the bulk of the output.
     """
-    if base_url is None:
-        base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8081")
-    if not base_url:
-        # No judge endpoint configured — fail-closed: block everything
-        print("[guardrail][strict-output-judge] no base_url configured — BLOCKED (fail-closed)")
-        return True
+    base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         try:
             timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
@@ -474,7 +466,7 @@ def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
         return False
     print(
         f"[guardrail][strict-output-judge] -> {base_url} "
-        f"fail_closed={fail_closed} text={text[:200]!r}"
+        f"fail_closed={fail_closed} text={text!r}"
     )
     try:
         import requests as _requests
@@ -540,7 +532,7 @@ def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
     return fail_closed
 
 
-def llm_classify_harmful(text, base_url=None, timeout=20, fail_closed=False):
+def llm_classify_harmful(text, timeout=20, fail_closed=False):
     """Return True if an LLM judge classifies ``text`` as a harmful request.
 
     Synchronous (uses requests). ``fail_closed`` controls behaviour when the
@@ -548,10 +540,7 @@ def llm_classify_harmful(text, base_url=None, timeout=20, fail_closed=False):
     harmful (blocked) so a missing/unavailable judge can never silently let
     dangerous traffic through; when False it degrades to the pattern layer.
     """
-    if base_url is None:
-        base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8081")
-    if not base_url:
-        return False
+    base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     return _run_judge(
         "input-judge", _judge_system(), text, base_url, timeout, fail_closed,
     )
