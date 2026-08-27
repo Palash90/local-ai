@@ -724,17 +724,24 @@ def _start_llm_round(task_id, sid, round_num):
     mode = M.task_mode(task_id)
     with M._data_lock:
         task = M.tasks.get(task_id, {})
-    if not task.get("skip_ensure_llama"):
-        M.ensure_llama_server(mode)
-        with M._data_lock:
-            if mode == "cpu":
-                ms = M._cpu_model_status
-            elif mode == "guardrail":
-                ms = M._guardrail_model_status
-            else:
-                ms = M.model_status
-        if ms != "chat_loaded":
-            M.load_llama_model(mode)
+    skip_load = task.get("skip_ensure_llama", False)
+    # Always ensure the llama-server process is alive — even API lane tasks
+    # need a running server to POST to.  Only skip the explicit model-load
+    # step when skip_ensure_llama is set, because that flag means "the caller
+    # (e.g. the OpenAI-compatible API) expects the model to already be loaded
+    # and doesn't want to compete for VRAM."
+    M.ensure_llama_server(mode)
+    with M._data_lock:
+        if mode == "cpu":
+            ms = M._cpu_model_status
+        elif mode == "guardrail":
+            ms = M._guardrail_model_status
+        else:
+            ms = M.model_status
+    if ms != "chat_loaded":
+        if skip_load:
+            print(f"[llm_round] skip_ensure_llama=True but model not loaded on {mode} — loading anyway to avoid failure")
+        M.load_llama_model(mode)
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
@@ -742,7 +749,7 @@ def _start_llm_round(task_id, sid, round_num):
         t["_state"] = "llm_waiting"
         t["_round"] = round_num
         messages = list(M.sessions.get(sid, []))
-    print(f"[llm_round] Starting round {round_num} for task {task_id} on {mode} server with {len(messages)} raw messages")
+    print(f"[llm_round] Starting round {round_num} for task {task_id} on {mode} server with {len(messages)} raw messages (skip_load={skip_load})")
     M.set_status(
         task_id, "Thinking..." if round_num == 0 else f"Thinking (round {round_num})..."
     )

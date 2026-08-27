@@ -79,7 +79,7 @@ _effective_contexts_lock = threading.Lock()
 _model_transition_lock = threading.Lock()
 _data_lock = threading.Lock()
 
-MAX_QUEUE_SIZE = 5
+MAX_QUEUE_SIZE = 15
 
 # Tool-loop budget per task. Normal chats stay light (10 LLM rounds ≈ small
 # number of tool calls); tasks sent with the UI's "research" toggle get the

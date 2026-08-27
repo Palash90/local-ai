@@ -316,7 +316,22 @@ def _event_loop():
                             i,
                         )
                 else:
-                    print(f"[openai] skipping server-side tool execution; tool_calls sent to client")
+                    # OpenAI lane: don't execute tools server-side — hand the
+                    # structured tool_calls back to the client so the extension
+                    # executes them and (optionally) posts results in a follow-up
+                    # request. Finalize the task with the tool_calls attached so
+                    # the /v1/chat/completions handler (blocking in _poll_task)
+                    # returns promptly instead of waiting out its timeout.
+                    print(f"[openai] skipping server-side tool execution; sending tool_calls to client")
+                    with M._data_lock:
+                        t2 = M.tasks.get(task_id)
+                        if t2:
+                            t2["status"] = "done"
+                            t2["response"] = msg.get("content") or ""
+                            t2["session_id"] = sid
+                            t2["tool_calls"] = msg["tool_calls"]
+                            t2["finish_reason"] = "tool_calls"
+                            t2["_terminal"] = True
             else:
                 print(f"[llm_ok] Round {round_num}: LLM generated final response (no tool calls) for task {task_id}")  # DEBUG
                 print(f"[llm_ok] Message structure: content={repr(msg.get('content'))}, reasoning={repr(msg.get('reasoning_content'))}")
@@ -499,6 +514,7 @@ def _queue_worker(mode):
             research=item.get("research"),
             cpu=item.get("cpu"),
             no_tools=item.get("no_tools"),
+            openai_lane=item.get("openai_lane"),
             skip_ensure_llama=item.get("skip_ensure_llama"),
         )
         # Wait for this task to finish (status becomes "done", "error" or "cancelled")

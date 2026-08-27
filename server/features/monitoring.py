@@ -312,6 +312,12 @@ def _evacuate_ram():
                             "image": t.get("_original_image"),
                             "user": t.get("_user", ""),
                             "client_timestamp": t.get("_client_timestamp"),
+                            "research": bool(t.get("research")),
+                            "cpu": bool(t.get("cpu")),
+                            "no_tools": bool(t.get("no_tools")),
+                            "openai_lane": bool(t.get("openai_lane")),
+                            "skip_ensure_llama": bool(t.get("skip_ensure_llama")),
+                            "mode": t.get("mode"),
                         }
                         M._task_queues[mode].insert(0, entry)
                         t["status"] = "error"
