@@ -14,6 +14,7 @@ other one.
 
 import json
 import os
+import subprocess
 import time
 
 import requests
@@ -287,11 +288,59 @@ def is_model_ready(base, model_id):
     return False
 
 
+def _wait_vram_freed(threshold_mb=500, timeout=30):
+    """Poll nvidia-smi until GPU memory usage drops below ``threshold_mb``.
+
+    The llama-server POST /models/unload returns 200 before VRAM is actually
+    released (async cudaFree). This blocks until the GPU is free enough for
+    ComfyUI to load its own models.
+    """
+    print(f"[llama] _wait_vram_freed: polling nvidia-smi (threshold={threshold_mb}MB, timeout={timeout}s)")
+    for _ in range(timeout):
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            used_mb = int(r.stdout.strip().split("\n")[0])
+            if used_mb < threshold_mb:
+                print(f"[llama] VRAM freed: {used_mb} MB used (below {threshold_mb} MB threshold)")
+                return True
+            print(f"[llama] Waiting for VRAM free: {used_mb} MB still used...")
+        except Exception as e:
+            print(f"[llama] nvidia-smi check failed: {e}")
+        time.sleep(1)
+    print(f"[llama] VRAM did not drop below {threshold_mb} MB within {timeout}s")
+    return False
+
+
+def _is_vram_occupied(threshold_mb=500):
+    """True when nvidia-smi shows GPU memory above ``threshold_mb``."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        used_mb = int(r.stdout.strip().split("\n")[0])
+        return used_mb >= threshold_mb
+    except Exception:
+        return False
+
+
 def unload_llama_model(mode="gpu"):
     """Unload the model from the llama-server for ``mode``."""
+    current_status = M.server_status(mode)
+    print(f"[llama] unload_llama_model called: mode={mode}, current_status={current_status}")
     with M._model_transition_lock:
-        if M.server_status(mode) == "unloaded":
-            return True
+        if current_status == "unloaded":
+            # Status says unloaded, but VRAM might still be occupied if a
+            # previous unload timed out before cudaFree completed. Check
+            # nvidia-smi and force the unload POST if VRAM is still high.
+            if mode in ("gpu", "guardrail") and _is_vram_occupied():
+                print(f"[llama] {mode} status is unloaded but VRAM still occupied — forcing unload")
+            else:
+                print(f"[llama] {mode} already unloaded — skipping")
+                return True
 
         print(f"[llama] Requesting {mode} model unload from VRAM/RAM...")
         # Checkpoint the KV cache BEFORE it is destroyed by the unload, so the
@@ -299,7 +348,7 @@ def unload_llama_model(mode="gpu"):
         # re-prefilling the whole conversation. This must happen while the
         # model still reads "chat_loaded" — save_slot_checkpoint skips
         # anything else — hence before the "unloading" transition below.
-        save_slot_checkpoint()
+        save_slot_checkpoint(mode)
         
         with M._data_lock:
             if mode == "cpu":
@@ -309,15 +358,16 @@ def unload_llama_model(mode="gpu"):
             else:
                 M.model_status = "unloading"
 
-        try:
-            url = f"{M.server_base(mode)}/models/unload"
-            model_id = M.server_model_id(mode)
-            print(f"[llama] Unload POST to {url} with model={model_id}")
+        url = f"{M.server_base(mode)}/models/unload"
+        model_id = M.server_model_id(mode)
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            print(f"[llama] Unload POST to {url} with model={model_id} (attempt {attempt}/{max_attempts})")
             try:
                 r = requests.post(
                     url,
                     json={"model": model_id},
-                    timeout=5,
+                    timeout=60,
                 )
                 print(f"[llama] Unload response: {r.status_code} {r.text[:200]}")
                 if r.status_code == 200:
@@ -329,14 +379,22 @@ def unload_llama_model(mode="gpu"):
                             M._guardrail_model_status = "unloaded"
                         else:
                             M.model_status = "unloaded"
+                    # The POST returns 200 before VRAM is actually freed
+                    # (async cudaFree). Wait until nvidia-smi shows the
+                    # memory has been released so ComfyUI can use it.
+                    if mode in ("gpu", "guardrail"):
+                        _wait_vram_freed()
                     return True
                 print(f"[llama] Unload failed: {r.status_code}")
             except requests.Timeout:
-                print(f"[llama] Unload timeout after 5s — endpoint may not exist or server hung")
+                print(f"[llama] Unload timeout after 60s (attempt {attempt}/{max_attempts})")
             except requests.ConnectionError as ce:
-                print(f"[llama] Unload connection error: {ce}")
-        except Exception as e:
-            print(f"[llama] Unload error: {e}")
+                print(f"[llama] Unload connection error (attempt {attempt}/{max_attempts}): {ce}")
+            except Exception as e:
+                print(f"[llama] Unload error (attempt {attempt}/{max_attempts}): {e}")
+            if attempt < max_attempts:
+                print(f"[llama] Retrying unload in 3s...")
+                time.sleep(3)
 
         # Check real status if unload failed or erred out
         alive = M.is_llama_alive(M.server_base(mode))
@@ -357,89 +415,90 @@ def load_llama_model(mode="gpu"):
     When the load follows an unload (image generation, idle release), the KV
     checkpoint saved by :func:`save_slot_checkpoint` is restored so the next
     completion only has to evaluate new tokens."""
-    with M._data_lock:
-        # Only a fresh load benefits from a restore: if the model is already
-        # running, its live KV is newer than any snapshot on disk.
-        # Read status directly — server_status() would re-acquire _data_lock
-        # (non-reentrant), causing a permanent deadlock.
-        if mode == "cpu":
-            was_unloaded = M._cpu_model_status == "unloaded"
-            M._cpu_model_status = "loading"
-        elif mode == "guardrail":
-            was_unloaded = M._guardrail_model_status == "unloaded"
-            M._guardrail_model_status = "loading"
-        else:
-            was_unloaded = M.model_status == "unloaded"
-            M.model_status = "loading"
-    model_id = M.server_model_id(mode)
-    base = M.server_base(mode)
-    url = f"{base}/models/load"
-    t_start = time.time()
-    print(f"[llama] Sending load request for model '{model_id}' to {url}...")
-    try:
-        r = requests.post(
-            url, json={"model": model_id}, timeout=180
-        )
-        t_load_resp = time.time() - t_start
-        print(f"[llama] Load response: {r.status_code} (took {t_load_resp:.1f}s) {r.text[:200]}")
-        if r.status_code in (200, 201):
-            print(f"[llama] {mode} load accepted, waiting for ready...")
-            for i in range(30):
-                if M.is_model_ready(base, model_id):
-                    t_ready = time.time() - t_start
-                    print(f"[llama] {mode} model ready (attempt {i+1}, total {t_ready:.1f}s)")
-                    with M._data_lock:
-                        if mode == "cpu":
-                            M._cpu_model_status = "chat_loaded"
-                            M._cpu_last_llm_use = time.time()
-                        elif mode == "guardrail":
-                            M._guardrail_model_status = "chat_loaded"
-                            M._guardrail_last_llm_use = time.time()
-                        else:
-                            M.model_status = "chat_loaded"
-                            M._last_llm_use = time.time()
-                    if was_unloaded:
-                        t_restore_start = time.time()
-                        M.restore_slot_checkpoint(mode)
-                        t_restore = time.time() - t_restore_start
-                        print(f"[llama] {mode} KV restore took {t_restore:.1f}s")
-                    return True
-                time.sleep(2)
-        else:
-            print(f"[llama] Load failed ({r.status_code}): {r.text[:500]}")
-    except requests.Timeout:
-        print(f"[llama] Load timeout after 180s")
-    except requests.ConnectionError as ce:
-        print(f"[llama] Load connection error: {ce}")
-    except Exception as e:
-        print(f"[llama] Load exception: {e}")
+    with M._model_transition_lock:
+        with M._data_lock:
+            # Only a fresh load benefits from a restore: if the model is already
+            # running, its live KV is newer than any snapshot on disk.
+            # Read status directly — server_status() would re-acquire _data_lock
+            # (non-reentrant), causing a permanent deadlock.
+            if mode == "cpu":
+                was_unloaded = M._cpu_model_status == "unloaded"
+                M._cpu_model_status = "loading"
+            elif mode == "guardrail":
+                was_unloaded = M._guardrail_model_status == "unloaded"
+                M._guardrail_model_status = "loading"
+            else:
+                was_unloaded = M.model_status == "unloaded"
+                M.model_status = "loading"
+        model_id = M.server_model_id(mode)
+        base = M.server_base(mode)
+        url = f"{base}/models/load"
+        t_start = time.time()
+        print(f"[llama] Sending load request for model '{model_id}' to {url}...")
+        try:
+            r = requests.post(
+                url, json={"model": model_id}, timeout=180
+            )
+            t_load_resp = time.time() - t_start
+            print(f"[llama] Load response: {r.status_code} (took {t_load_resp:.1f}s) {r.text[:200]}")
+            if r.status_code in (200, 201):
+                print(f"[llama] {mode} load accepted, waiting for ready...")
+                for i in range(30):
+                    if M.is_model_ready(base, model_id):
+                        t_ready = time.time() - t_start
+                        print(f"[llama] {mode} model ready (attempt {i+1}, total {t_ready:.1f}s)")
+                        with M._data_lock:
+                            if mode == "cpu":
+                                M._cpu_model_status = "chat_loaded"
+                                M._cpu_last_llm_use = time.time()
+                            elif mode == "guardrail":
+                                M._guardrail_model_status = "chat_loaded"
+                                M._guardrail_last_llm_use = time.time()
+                            else:
+                                M.model_status = "chat_loaded"
+                                M._last_llm_use = time.time()
+                        if was_unloaded:
+                            t_restore_start = time.time()
+                            M.restore_slot_checkpoint(mode)
+                            t_restore = time.time() - t_restore_start
+                            print(f"[llama] {mode} KV restore took {t_restore:.1f}s")
+                        return True
+                    time.sleep(2)
+            else:
+                print(f"[llama] Load failed ({r.status_code}): {r.text[:500]}")
+        except requests.Timeout:
+            print(f"[llama] Load timeout after 180s")
+        except requests.ConnectionError as ce:
+            print(f"[llama] Load connection error: {ce}")
+        except Exception as e:
+            print(f"[llama] Load exception: {e}")
 
-    # Fallback check: the load request may have failed with "already running"
-    # (another caller raced us to load the same model) — verify the model is
-    # actually ready rather than just assuming so.
-    if M.is_model_ready(base, model_id):
+        # Fallback check: the load request may have failed with "already running"
+        # (another caller raced us to load the same model) — verify the model is
+        # actually ready rather than just assuming so.
+        if M.is_model_ready(base, model_id):
+            with M._data_lock:
+                if mode == "cpu":
+                    M._cpu_model_status = "chat_loaded"
+                    M._cpu_last_llm_use = time.time()
+                elif mode == "guardrail":
+                    M._guardrail_model_status = "chat_loaded"
+                    M._guardrail_last_llm_use = time.time()
+                else:
+                    M.model_status = "chat_loaded"
+                    M._last_llm_use = time.time()
+            if was_unloaded:
+                M.restore_slot_checkpoint(mode)
+            return True
+
         with M._data_lock:
             if mode == "cpu":
-                M._cpu_model_status = "chat_loaded"
-                M._cpu_last_llm_use = time.time()
+                M._cpu_model_status = "unloaded"
             elif mode == "guardrail":
-                M._guardrail_model_status = "chat_loaded"
-                M._guardrail_last_llm_use = time.time()
+                M._guardrail_model_status = "unloaded"
             else:
-                M.model_status = "chat_loaded"
-                M._last_llm_use = time.time()
-        if was_unloaded:
-            M.restore_slot_checkpoint(mode)
-        return True
-
-    with M._data_lock:
-        if mode == "cpu":
-            M._cpu_model_status = "unloaded"
-        elif mode == "guardrail":
-            M._guardrail_model_status = "unloaded"
-        else:
-            M.model_status = "unloaded"
-    return False
+                M.model_status = "unloaded"
+        return False
 
 
 def _inject_read_image(messages):

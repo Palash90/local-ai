@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import random
+import subprocess
 import time
 import uuid
 
@@ -76,9 +77,28 @@ def generate_image(
     M.set_status(task_id, "Freeing VRAM for image generation...")
     # ComfyUI renders on the GPU, so unload both GPU and guardrail llama-servers.
     # The CPU server (self-chat agents) keeps running untouched.
-    M.unload_llama_model("gpu")
-    M.unload_llama_model("guardrail")
-    time.sleep(2)
+    try:
+        _vram = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        print(f"[image] VRAM before unload: {_vram.stdout.strip()} MB")
+    except Exception:
+        pass
+    print(f"[image] Calling unload_llama_model(gpu), current status: {M.server_status('gpu')}")
+    gpu_ok = M.unload_llama_model("gpu")
+    print(f"[image] gpu unload returned: {gpu_ok}, status now: {M.server_status('gpu')}")
+    print(f"[image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
+    guard_ok = M.unload_llama_model("guardrail")
+    print(f"[image] guardrail unload returned: {guard_ok}, status now: {M.server_status('guardrail')}")
+    # Verify unload actually freed VRAM — poll until both are "unloaded".
+    for _wait in range(10):
+        gpu_ms = M.server_status("gpu")
+        guard_ms = M.server_status("guardrail")
+        if gpu_ms == "unloaded" and guard_ms == "unloaded":
+            break
+        print(f"[image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms})...")
+        time.sleep(2)
     print(f"[image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}")
 
     width, height = _aspect_dims(aspect_ratio)
@@ -341,9 +361,20 @@ def edit_image(
     M.set_status(task_id, "Freeing VRAM for image editing...")
     # ComfyUI renders on the GPU, so unload both GPU and guardrail llama-servers.
     # The CPU server (self-chat agents) keeps running untouched.
-    M.unload_llama_model("gpu")
-    M.unload_llama_model("guardrail")
-    time.sleep(2)
+    print(f"[edit_image] Calling unload_llama_model(gpu), current status: {M.server_status('gpu')}")
+    gpu_ok = M.unload_llama_model("gpu")
+    print(f"[edit_image] gpu unload returned: {gpu_ok}, status now: {M.server_status('gpu')}")
+    print(f"[edit_image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
+    guard_ok = M.unload_llama_model("guardrail")
+    print(f"[edit_image] guardrail unload returned: {guard_ok}, status now: {M.server_status('guardrail')}")
+    # Verify unload actually freed VRAM — poll until both are "unloaded".
+    for _wait in range(10):
+        gpu_ms = M.server_status("gpu")
+        guard_ms = M.server_status("guardrail")
+        if gpu_ms == "unloaded" and guard_ms == "unloaded":
+            break
+        print(f"[edit_image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms})...")
+        time.sleep(2)
     print(f"[edit_image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}")
 
     gen_tag = str(uuid.uuid4())[:8]
