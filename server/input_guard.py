@@ -7,7 +7,7 @@ Two independent layers:
    task is created, no session history is touched.
 2. ``wrap_user_message`` — everything that passes is forwarded wrapped in
    the SAFETY DIRECTIVES / CRITICAL DIRECTIVE frame with explicit
-   ``[USER INPUT START] / [USER INPUT END]`` boundaries, so instructions
+   ``<user_input> / </user_input>`` XML boundaries, so instructions
    embedded inside user text stay user text and the model is told to answer
     boundary-violating content with a fixed refusal instead of complying.
 
@@ -216,6 +216,28 @@ _VERDICT_NEGATIONS = {"NOT", "NO", "NEITHER", "NEVER", "ISNT", "ISN'T",
 _VERDICT_HARMFUL = {"HARMFUL", "UNSAFE"}
 _VERDICT_SAFE = {"SAFE", "BENIGN", "HARMLESS", "NONE", "OKAY", "OK"}
 
+# ── LLM safety judge ────────────────────────────────────────────────────────
+# Pattern matching (above) is fast but language-bound and easy to dodge with
+# novel phrasings. The judge pre-calls the inference engine with a strict
+# classify-only prompt and asks for a single HARMFUL/SAFE verdict BEFORE the
+# real request is ever sent for generation. This catches non-English prompts
+# (e.g. French/Spanish bomb requests) and paraphrases that patterns miss.
+#
+# Configure via GUARD_LLM_BASE (defaults to the local llama-server). If unset
+# or the call fails, the judge is a no-op and the pattern layer remains the
+# only defence.
+
+# Verdict parsing: local models routinely ignore the 'exactly one word'
+# instruction and reply with phrases like "Not harmful", "Safe — no harmful
+# content", or "I cannot classify this". Substring-matching "HARMFUL" turned
+# every one of those into a block (massive false positives), so parse the
+# verdict properly instead: only an affirmative, unnegated harmful token may
+# block; anything ambiguous parses as SAFE.
+_VERDICT_NEGATIONS = {"NOT", "NO", "NEITHER", "NEVER", "ISNT", "ISN'T",
+                      "CANNOT", "CANT", "CAN'T"}
+_VERDICT_HARMFUL = {"HARMFUL", "UNSAFE"}
+_VERDICT_SAFE = {"SAFE", "BENIGN", "HARMLESS", "NONE", "OKAY", "OK"}
+
 
 def _parse_verdict(content):
     """Interpret a free-form judge reply as a boolean HARMFUL verdict."""
@@ -299,12 +321,34 @@ def _judge_candidates(base_url):
 def _judge_max_tokens():
     """Token budget for a judge call. Thinking models spend their budget on
     reasoning BEFORE emitting the verdict word, so a tiny cap yields an empty
-    content field and a meaningless SAFE. 400 covers gemma-style thinking;
-    tune via GUARD_LLM_MAX_TOKENS."""
+    content field and a meaningless SAFE. 2048 gives the reasoning headroom to
+    still emit the verdict; tune via GUARD_LLM_MAX_TOKENS."""
     try:
-        return int(os.environ.get("GUARD_LLM_MAX_TOKENS", "400"))
+        return int(os.environ.get("GUARD_LLM_MAX_TOKENS", "2048"))
     except ValueError:
-        return 400
+        return 2048
+
+
+def ensure_judge_ready(base_url):
+    """Bring the guardrail LLM judge server up with its model loaded.
+
+    Only acts when ``base_url`` points at the guardrail server (the default
+    for all judge calls); other endpoints are left untouched. The real work is
+    done by :func:`server.features.monitoring.ensure_guardrail_ready`, which
+    restarts the process if down, loads the model, and waits until it serves.
+    Best-effort: failures are logged, never raised.
+    """
+    try:
+        from server.config import LLAMA_BASE_GUARDRAIL
+    except ImportError:
+        LLAMA_BASE_GUARDRAIL = "http://localhost:8083"
+    if str(base_url or "").rstrip("/") != str(LLAMA_BASE_GUARDRAIL).rstrip("/"):
+        return
+    try:
+        from server.features.monitoring import ensure_guardrail_ready
+        ensure_guardrail_ready()
+    except Exception as e:
+        print(f"[guardrail][judge] ensure_judge_ready failed: {e}")
 
 
 def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
@@ -330,7 +374,7 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
         return False
     print(
         f"[guardrail][{label}] -> {base_url} fail_closed={fail_closed} "
-        f"text={text[:160]!r}"
+        f"text={text!r}"
     )
     try:
         import requests
@@ -345,51 +389,72 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
 
     max_tokens = _judge_max_tokens()
     last_err = ""
-    for cand in candidates:
-        payload = {
-            "model": cand,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text[:max_chars]},
-            ],
-            "temperature": 0,
-            "max_tokens": max_tokens,
-            "cache_prompt": False,
-            "stream": False,
-        }
-        try:
-            r = requests.post(
-                f"{base_url.rstrip('/')}/v1/chat/completions",
-                json=payload,
-                timeout=timeout,
-            )
-        except Exception as e:
-            # Endpoint itself down — other model ids won't help.
+    attempts = 0
+    while True:
+        attempts += 1
+        conn_failed = False
+        for cand in candidates:
+            payload = {
+                "model": cand,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text[:max_chars]},
+                ],
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "cache_prompt": False,
+                "stream": False,
+            }
+            try:
+                r = requests.post(
+                    f"{base_url.rstrip('/')}/v1/chat/completions",
+                    json=payload,
+                    timeout=timeout,
+                )
+            except Exception as e:
+                # Endpoint itself down — other model ids won't help.
+                print(
+                    f"[guardrail][{label}] call failed: {e} — treating as "
+                    f"{'HARMFUL (fail-closed)' if fail_closed else 'SAFE (fail-open)'}"
+                )
+                last_err = f"connection error: {e}"
+                conn_failed = True
+                break
+            if r.status_code == 200:
+                msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
+                content = msg.get("content") or ""
+                if not content.strip():
+                    # Thinking models may exhaust the budget mid-reasoning, leaving
+                    # content empty but a useful reasoning tail. Judge on the
+                    # reasoning text so we don't silently return a meaningless SAFE.
+                    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+                    if reasoning:
+                        content = reasoning
+                verdict = _parse_verdict(content)
+                raw = repr(content.strip())
+                if not content.strip():
+                    reasoning = msg.get("reasoning_content") or ""
+                    raw += f" reasoning_tail={reasoning[-120:]!r}"
+                print(
+                    f"[guardrail][{label}] model={cand} "
+                    f"verdict={'HARMFUL' if verdict else 'SAFE'} raw={raw}"
+                )
+                _JUDGE_MODEL_CACHE[base_url] = [cand] + [
+                    c for c in candidates if c != cand
+                ]
+                return verdict
+            last_err = f"HTTP {r.status_code}: {r.text[:150]}"
+            print(f"[guardrail][{label}] model={cand} rejected — {last_err}")
+        if conn_failed and attempts == 1:
             print(
-                f"[guardrail][{label}] call failed: {e} — treating as "
-                f"{'HARMFUL (fail-closed)' if fail_closed else 'SAFE (fail-open)'}"
+                f"[guardrail][{label}] judge connection failed — ensuring "
+                "guardrail server & retrying once",
+                flush=True,
             )
-            return fail_closed
-        if r.status_code == 200:
-            msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
-            content = msg.get("content") or ""
-            verdict = _parse_verdict(content)
-            raw = repr(content.strip())
-            if not content.strip():
-                # Thinking models may exhaust the budget mid-reasoning; show
-                # the reasoning tail so the log explains the empty verdict.
-                reasoning = msg.get("reasoning_content") or ""
-                raw += f" reasoning_tail={reasoning[-120:]!r}"
-            print(
-                f"[guardrail][{label}] model={cand} "
-                f"verdict={'HARMFUL' if verdict else 'SAFE'} raw={raw}"
-            )
-            _JUDGE_MODEL_CACHE[base_url] = [cand] + [
-                c for c in candidates if c != cand
-            ]
-            return verdict
-        last_err = f"HTTP {r.status_code}: {r.text[:150]}"
-        print(f"[guardrail][{label}] model={cand} rejected — {last_err}")
+            ensure_judge_ready(base_url)
+            _JUDGE_MODEL_CACHE.pop(base_url, None)
+            continue
+        break
 
     # Every candidate failed; forget the ordering so it is re-probed later.
     _JUDGE_MODEL_CACHE.pop(base_url, None)
@@ -411,10 +476,7 @@ def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=Fal
     caught even when the prompt itself dodged the input filters. Synchronous;
     ``fail_closed`` mirrors :func:`llm_classify_harmful`.
     """
-    if base_url is None:
-        base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8081")
-    if not base_url:
-        return False
+    base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     return _run_judge(
         "output-judge", _judge_output_system(), text, base_url, timeout,
         fail_closed, max_chars=4000,
@@ -446,7 +508,7 @@ def _parse_strict_verdict(content):
     return True
 
 
-def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
+def mcp_output_judge(text, timeout=None, fail_closed=True):
     """Final end-of-pipe strict judge for ALL MCP outputs.
 
     Return True if the text must be BLOCKED.  This function is the absolute
@@ -458,12 +520,7 @@ def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
     The text is truncated to 6000 chars before judging to stay within the
     judge model's context window while still covering the bulk of the output.
     """
-    if base_url is None:
-        base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8081")
-    if not base_url:
-        # No judge endpoint configured — fail-closed: block everything
-        print("[guardrail][strict-output-judge] no base_url configured — BLOCKED (fail-closed)")
-        return True
+    base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         try:
             timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
@@ -474,7 +531,7 @@ def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
         return False
     print(
         f"[guardrail][strict-output-judge] -> {base_url} "
-        f"fail_closed={fail_closed} text={text[:200]!r}"
+        f"fail_closed={fail_closed} text={text!r}"
     )
     try:
         import requests as _requests
@@ -489,48 +546,72 @@ def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
 
     max_tokens = _judge_max_tokens()
     last_err = ""
-    for cand in candidates:
-        payload = {
-            "model": cand,
-            "messages": [
-                {"role": "system", "content": _strict_judge_system()},
-                {"role": "user", "content": text[:6000]},
-            ],
-            "temperature": 0,
-            "max_tokens": max_tokens,
-            "cache_prompt": False,
-            "stream": False,
-        }
-        try:
-            r = _requests.post(
-                f"{base_url.rstrip('/')}/v1/chat/completions",
-                json=payload,
-                timeout=timeout,
-            )
-        except Exception as e:
+    attempts = 0
+    while True:
+        attempts += 1
+        conn_failed = False
+        for cand in candidates:
+            payload = {
+                "model": cand,
+                "messages": [
+                    {"role": "system", "content": _strict_judge_system()},
+                    {"role": "user", "content": text[:6000]},
+                ],
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "cache_prompt": False,
+                "stream": False,
+            }
+            try:
+                r = _requests.post(
+                    f"{base_url.rstrip('/')}/v1/chat/completions",
+                    json=payload,
+                    timeout=timeout,
+                )
+            except Exception as e:
+                print(
+                    f"[guardrail][strict-output-judge] call failed: {e} — "
+                    f"BLOCKED (fail-closed)"
+                )
+                last_err = f"connection error: {e}"
+                conn_failed = True
+                break
+            if r.status_code == 200:
+                msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
+                content = msg.get("content") or ""
+                if not content.strip():
+                    # Thinking models may exhaust the budget mid-reasoning, leaving
+                    # content empty. Judge on the reasoning text so a harmless
+                    # reply isn't falsely BLOCKED (fail-closed) on a truncated
+                    # response.
+                    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+                    if reasoning:
+                        content = reasoning
+                verdict = _parse_strict_verdict(content)
+                raw = repr(content.strip())
+                if not content.strip():
+                    reasoning = msg.get("reasoning_content") or ""
+                    raw += f" reasoning_tail={reasoning[-120:]!r}"
+                print(
+                    f"[guardrail][strict-output-judge] model={cand} "
+                    f"verdict={'BLOCKED' if verdict else 'SAFE'} raw={raw}"
+                )
+                _JUDGE_MODEL_CACHE[base_url] = [cand] + [
+                    c for c in candidates if c != cand
+                ]
+                return verdict
+            last_err = f"HTTP {r.status_code}: {r.text[:150]}"
+            print(f"[guardrail][strict-output-judge] model={cand} rejected — {last_err}")
+        if conn_failed and attempts == 1:
             print(
-                f"[guardrail][strict-output-judge] call failed: {e} — "
-                f"BLOCKED (fail-closed)"
+                "[guardrail][strict-output-judge] judge connection failed — "
+                "ensuring guardrail server & retrying once",
+                flush=True,
             )
-            return fail_closed
-        if r.status_code == 200:
-            msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
-            content = msg.get("content") or ""
-            verdict = _parse_strict_verdict(content)
-            raw = repr(content.strip())
-            if not content.strip():
-                reasoning = msg.get("reasoning_content") or ""
-                raw += f" reasoning_tail={reasoning[-120:]!r}"
-            print(
-                f"[guardrail][strict-output-judge] model={cand} "
-                f"verdict={'BLOCKED' if verdict else 'SAFE'} raw={raw}"
-            )
-            _JUDGE_MODEL_CACHE[base_url] = [cand] + [
-                c for c in candidates if c != cand
-            ]
-            return verdict
-        last_err = f"HTTP {r.status_code}: {r.text[:150]}"
-        print(f"[guardrail][strict-output-judge] model={cand} rejected — {last_err}")
+            ensure_judge_ready(base_url)
+            _JUDGE_MODEL_CACHE.pop(base_url, None)
+            continue
+        break
 
     _JUDGE_MODEL_CACHE.pop(base_url, None)
     print(
@@ -540,7 +621,7 @@ def mcp_output_judge(text, base_url=None, timeout=None, fail_closed=True):
     return fail_closed
 
 
-def llm_classify_harmful(text, base_url=None, timeout=20, fail_closed=False):
+def llm_classify_harmful(text, timeout=20, fail_closed=False):
     """Return True if an LLM judge classifies ``text`` as a harmful request.
 
     Synchronous (uses requests). ``fail_closed`` controls behaviour when the
@@ -548,18 +629,22 @@ def llm_classify_harmful(text, base_url=None, timeout=20, fail_closed=False):
     harmful (blocked) so a missing/unavailable judge can never silently let
     dangerous traffic through; when False it degrades to the pattern layer.
     """
-    if base_url is None:
-        base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8081")
-    if not base_url:
-        return False
+    base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     return _run_judge(
         "input-judge", _judge_system(), text, base_url, timeout, fail_closed,
     )
 
 
 def wrap_user_message(user_message: str) -> str:
-    return _safety_frame().format(
+    wrapped = _safety_frame().format(
         decline=GUARDRAIL_DECLINE,
         refusal=MODEL_REFUSAL,
         user_message=user_message if isinstance(user_message, str) else "",
+    )
+    # Normalise the legacy bracket boundaries to XML tags so the model gets an
+    # unambiguous structural boundary around untrusted user text.
+    return (
+        wrapped.replace("[USER INPUT START]", "<user_input>")
+        .replace("[USER INPUT END]", "</user_input>")
+        .strip()
     )

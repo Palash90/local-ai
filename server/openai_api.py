@@ -10,6 +10,7 @@ proxied raw to llama-server.
 """
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -24,6 +25,10 @@ from server.config import (
     OPENAI_API_KEY,
 )
 from server.features.state import M
+from server.features.openai_adapter import (
+    stream_tool_calls,
+    format_tool_calls_for_response,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +58,30 @@ def _require_api_key(handler):
         )
         return None
     return {"key": token}
+
+
+# ---------------------------------------------------------------------------
+# Tool-call text stripping
+# ---------------------------------------------------------------------------
+
+_TOOL_CALL_TAG_RE = re.compile(
+    r"<\|?\s*tool_call\s*\|?>\s*(.*?)\s*<\|?\s*tool_call\s*\|?>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_tool_call_text(text):
+    """Remove inline tool-call tags the model emits as *text* when tools are
+    disabled (e.g. the OpenAI lane sends ``tools: []`` + ``tool_choice: none``,
+    but a model trained to use tools may still leak ``<|tool_call|>`` variants
+    into its content).  Such tags are meaningless to an OpenAI client, so drop
+    them wholesale.  If the content is *only* tool-call spam, return an empty
+    string so the caller signals a stop rather than echoing junk to the caller.
+    """
+    if not text:
+        return text
+    stripped = _TOOL_CALL_TAG_RE.sub("", text).strip()
+    return stripped
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +392,7 @@ def handle_chat_completions(handler):
         "client_timestamp": None,
         "research": False,
         "cpu": False,
-        "no_tools": True,
+        "no_tools": False,
         "openai_lane": True,
         "mode": mode,
         "skip_ensure_llama": True,
@@ -447,15 +476,15 @@ def handle_chat_completions(handler):
             )
         return
 
-    response_text = result.get("response", "")
+    response_text = _strip_tool_call_text(result.get("response", ""))
     usage = {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
         if key in result:
             usage[key] = result[key]
 
-    tool_calls = None
+    tool_calls = result.get("tool_calls")
     sid = result.get("session_id")
-    if sid:
+    if not tool_calls and sid:
         with M._data_lock:
             session = M.sessions.get(sid, [])
             if session:
@@ -471,7 +500,7 @@ def handle_chat_completions(handler):
         if response_text:
             message["content"] = response_text
         if tool_calls:
-            message["tool_calls"] = tool_calls
+            message["tool_calls"] = format_tool_calls_for_response(tool_calls)
         handler.send_json({
             "id": completion_id,
             "object": "chat.completion",
@@ -487,9 +516,8 @@ def handle_chat_completions(handler):
         return
 
     if tool_calls:
-        for tc in tool_calls:
-            if not write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {'tool_calls': [tc]}, 'finish_reason': None}]})}\n\n"):
-                return
+        if not stream_tool_calls(write_sse, tool_calls, completion_id, created, model):
+            return
     else:
         chunk_size = 20
         for i in range(0, len(response_text), chunk_size):
@@ -497,6 +525,8 @@ def handle_chat_completions(handler):
             if not write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {'content': piece}, 'finish_reason': None}]})}\n\n"):
                 return
 
-    write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls' if tool_calls else 'stop'}], 'usage': usage})}\n\n")
+    if not tool_calls:
+        write_sse(f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}], 'usage': usage})}\n\n")
+    
     write_sse("data: [DONE]\n\n")
     print(f"[openai_api] Task {task_id} stream complete")

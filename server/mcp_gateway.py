@@ -383,19 +383,20 @@ async def _verify_idle_watcher():
 VERIFY_TIMEOUT = 90
 
 
-async def _run_llm_verify(message: str, judge_system_prompt: str,
-                          task_lane: str = "guardrail") -> tuple:
+async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
     from server.features.state import M
+    from server.features.monitoring import ensure_guardrail_ready
     from server.input_guard import _parse_verdict, _parse_strict_verdict
     import re as _re
 
+    task_lane = "guardrail"
     text = (message or "").strip()
     if not text:
         print(f"[guardrail][L2] empty message, auto-passing")
         return True, ""
 
-    print(f"[guardrail][L2] ensuring {task_lane} server is running")
-    M.ensure_llama_server(task_lane)
+    print(f"[guardrail][L2] ensuring {task_lane} server is running (with model loaded)")
+    await asyncio.to_thread(ensure_guardrail_ready)
     print(f"[guardrail][L2] {task_lane} server ready")
 
     payload = {
@@ -405,44 +406,77 @@ async def _run_llm_verify(message: str, judge_system_prompt: str,
             {"role": "user", "content": text[:4000]},
         ],
         "temperature": 0,
-        "max_tokens": 400,
+        "max_tokens": 2048,
         "stream": False,
     }
+
+    async def _judge_call(max_tokens=2048):
+        """POST the judge payload; return (content, reasoning, error_string).
+
+        Reasoning-capable "it" models emit a long ``reasoning_content`` before the
+        verdict in ``content``. If ``max_tokens`` is too small the reasoning eats
+        the whole budget and ``content`` comes back empty (finish_reason length),
+        which used to misread as 'judge unavailable'. We return both fields so the
+        caller can fall back to judging on the reasoning text, plus a larger budget
+        on retry.
+        """
+        payload["max_tokens"] = max_tokens
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    M.server_url(task_lane),
+                    json=payload,
+                    timeout=VERIFY_TIMEOUT,
+                )
+            if r.status_code != 200:
+                return "", "", f"HTTP {r.status_code}"
+            msg = r.json().get("choices", [{}])[0].get("message", {})
+            content = msg.get("content", "") or ""
+            reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+            return content, reasoning, ""
+        except Exception as e:
+            return "", "", str(e)
+
     print(f"[guardrail][L2] calling {task_lane} LLM server at {M.server_url(task_lane)}")
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                M.server_url(task_lane),
-                json=payload,
-                timeout=VERIFY_TIMEOUT,
-            )
-        print(f"[guardrail][L2] got HTTP {r.status_code} from {task_lane} server")
-        if r.status_code != 200:
-            print(
-                f"[guardrail][L2] HTTP {r.status_code} from {task_lane} server at "
-                f"{M.server_base(task_lane)} — treating as HARMFUL (fail-closed)"
-            )
-            return False, f"LLM judge unavailable (HTTP {r.status_code})"
-        reply = (
-            r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+    print(f"[guardrail][L2] input message: {text}")
+    reply, reasoning, err = await _judge_call()
+    if not reply and reasoning:
+        # Reasoning-only reply (reasoning consumed the token budget before the
+        # verdict was emitted). Judge on the reasoning text instead of failing.
+        print(
+            f"[guardrail][L2] empty content but reasoning present — "
+            "judging on reasoning text"
         )
-    except Exception as e:
-        print(f"[guardrail][L2] call to {task_lane} lane failed: {e} — treating as HARMFUL (fail-closed)")
-        return False, f"LLM judge unavailable ({e})"
-
+        reply = reasoning
     if not reply:
-        print(f"[guardrail][L2] empty response from {task_lane}")
-        return False, "LLM judge unavailable (empty response)"
+        # Availability failure (connection error / non-200 / empty reply): restart,
+        # wait for the model, and retry with a larger budget before failing closed.
+        print(
+            f"[guardrail][L2] judge call unavailable ({err or 'empty'}) — "
+            "restarting judge & retrying once",
+            flush=True,
+        )
+        await asyncio.to_thread(ensure_guardrail_ready)
+        reply, reasoning, err = await _judge_call(max_tokens=4096)
+        if not reply and reasoning:
+            reply = reasoning
+        if not reply:
+            print(
+                f"[guardrail][L2] judge still unavailable after restart "
+                f"({err or 'empty'}) — treating as HARMFUL (fail-closed)",
+                flush=True,
+            )
+            return False, f"LLM judge unavailable after restart ({err or 'empty'})"
 
-    print(f"[guardrail][L2] raw verdict: {reply.strip()[:200]}")
+    print(f"[guardrail][L2] raw verdict: {reply.strip()}")
     words = set(w for w in _re.findall(r"[A-Za-z']+", reply.upper())[:10])
     blocked_tokens = {"BLOCKED", "UNSAFE", "HARMFUL", "REJECTED", "DENIED", "REFUSED"}
     if words & blocked_tokens and _parse_strict_verdict(reply):
         print(f"[guardrail][L2] BLOCKED: found blocked token + strict verdict")
-        return False, f"LLM judge: {reply.strip()[:200]}"
+        return False, f"LLM judge: {reply.strip()}"
     if _parse_verdict(reply):
         print(f"[guardrail][L2] BLOCKED: verdict triggered")
-        return False, f"LLM judge: {reply.strip()[:200]}"
+        return False, f"LLM judge: {reply.strip()}"
     print(f"[guardrail][L2] PASSED: message approved by LLM judge")
     return True, ""
 
@@ -459,22 +493,63 @@ def _requeue_pending_mcp_tasks():
     if requeued_count > 0:
         print(f"[mcp] reset {requeued_count} pending MCP task(s) to queued on reload", flush=True)
 
+from server.config import (
+    LLAMA_BASE_GUARDRAIL,
+    LLAMA_SERVER_PATH,
+    VERIFY_CONTEXT_SIZE,
+    VERIFY_IDLE_TIMEOUT,
+    VERIFY_MODEL,
+    VERIFY_PORT,
+)
 
 @mcp.tool()
 async def get_user_context() -> str:
-    """Read the current user's persistent profile / memory context."""
+    """Retrieve the persistent user profile and memory context for the authenticated MCP caller.
+
+    Returns a JSON object containing user-level information that persists
+    across sessions: preferences, prior interactions, and any stored memory
+    entries. Use this to personalise subsequent requests without re-explaining
+    context.
+
+    Returns:
+        JSON string with the user's profile and memory context.
+    """
     return await _call("GET", "/api/user-context")
 
 
 @mcp.tool()
 async def list_sessions() -> str:
-    """List all chat sessions of the user, most recently active first."""
+    """List all chat sessions owned by the authenticated user, ordered by most recently active first.
+
+    Returns a JSON array of session objects, each containing session_id,
+    name, creation timestamp, and last-updated timestamp. Use session_id
+    values with send_chat_message, get_session_messages, and rename_session.
+
+    Returns:
+        JSON array of session summary objects.
+    """
     return await _call("GET", "/api/sessions")
 
 
 @mcp.tool()
 async def create_session(system_prompt: str = "", system_prompts: list = None) -> str:
-    """Create a brand-new empty chat session. System prompts may be blocked by guardrails (returns declined=True if rejected)."""
+    """Create a new empty chat session with an optional system prompt or list of system prompts.
+
+    The session is created under the authenticated user's account and can
+    receive messages via send_chat_message. System prompts are validated
+    through L1 pattern matching and L2 LLM judge before the session is
+    created; harmful or jailbreaking prompts are rejected.
+
+    Args:
+        system_prompt: A single system prompt string to set the session persona.
+        system_prompts: A list of system prompt strings or dicts with a "prompt" key.
+            When both are provided they are merged. Mutually exclusive with
+            session_ids in batch mode.
+
+    Returns:
+        JSON with the new session_id on success, or declined=True if a
+        guardrail rejected the system prompt.
+    """
     sp_jail = (system_prompt and is_jailbreak_attempt(system_prompt)) or any(
         isinstance(sp, dict) and is_jailbreak_attempt(str(sp.get("prompt", "")))
         or isinstance(sp, str) and is_jailbreak_attempt(sp)
@@ -515,7 +590,18 @@ async def create_session(system_prompt: str = "", system_prompts: list = None) -
 
 @mcp.tool()
 async def get_session_messages(session_id: str) -> str:
-    """Read the full message transcript of one chat session."""
+    """Retrieve the full message transcript of a chat session.
+
+    Returns the complete conversation history including user messages,
+    assistant replies, tool calls, and metadata. Use this to read the
+    assistant's response after get_message_status reports status=done.
+
+    Args:
+        session_id: The session identifier returned by create_session or list_sessions.
+
+    Returns:
+        JSON object with a "messages" array containing the full transcript.
+    """
     res = await _call("GET", f"/api/sessions/{session_id}/messages")
     raw = res.text if hasattr(res, "text") else res
     try:
@@ -527,7 +613,15 @@ async def get_session_messages(session_id: str) -> str:
 
 @mcp.tool()
 async def rename_session(session_id: str, name: str) -> str:
-    """Rename a chat session (the title shown in the UI sidebar)."""
+    """Rename a chat session. The name is displayed in the UI sidebar and returned in list_sessions.
+
+    Args:
+        session_id: The session to rename.
+        name: New display name for the session.
+
+    Returns:
+        JSON confirmation with the updated session metadata.
+    """
     return await _call("PUT", f"/api/sessions/{session_id}", json={"name": name})
 
 
@@ -539,7 +633,36 @@ async def send_chat_message(
     cpu: bool = False,
     no_tools: bool = False,
 ) -> str:
-    """Submit a user message for async processing. Runs L1/L2 guardrails (code-level + LLM). Returns declined=True if blocked; otherwise returns task_id to poll with get_message_status."""
+    """Submit a user message for asynchronous processing through the guardrail-protected pipeline.
+
+    Every message passes through three guardrail stages before content is
+    generated:
+
+      L1  Code-level pattern scan  — substring matching against known
+          jailbreak and harmful-request pattern lists.  Blocks instantly
+          with no LLM call.
+      L2  LLM input classification — the guardrail lane LLM judge
+          evaluates the text for harmful intent.  Fail-closed: if the
+          judge is unreachable the message is blocked.
+      L3  LLM output verification  — runs after generation against the
+          full reply to catch any policy-violating content that slipped
+          through.
+
+    If any guardrail stage rejects the message, the response contains
+    declined=True with the reason.  Otherwise a task_id is returned for
+    polling with get_message_status.
+
+    Args:
+        session_id: Target session from create_session or list_sessions.
+        message: The user message text to process.
+        research: Enable deep-research mode (tool-heavy, est. 3-7 min).
+        cpu: Force CPU lane processing (slower, preserves GPU for others).
+        no_tools: Skip tool execution, text-only generation (est. 40-90s).
+
+    Returns:
+        JSON with task_id and wait_hint on success, or declined=True if a
+        guardrail blocked the message.
+    """
     print(f"[MCP] send_chat_message called for session {session_id}, msg_len={len(message)}")
 
     print(f"[guardrail][L1] checking jailbreak...")
@@ -567,7 +690,7 @@ async def send_chat_message(
     print(f"[guardrail][L2] running LLM verification on guardrail lane...")
     from server.input_guard import _judge_system
     passed, reason = await _run_llm_verify(
-        message, _judge_system(), task_lane="guardrail"
+        message, _judge_system()
     )
     if not passed:
         print(f"[guardrail][L2] REJECTED: {reason}")
@@ -581,7 +704,7 @@ async def send_chat_message(
     task_id = str(uuid.uuid4())
     print(f"[MCP] inserting task {task_id} into db for session {session_id}")
     mcp_task_insert(
-        task_id, session_id, message,
+        task_id, session_id, message, mode="gpu",
         research=research, cpu=cpu, no_tools=no_tools,
     )
     print(f"[MCP] task {task_id} inserted successfully")
@@ -609,7 +732,24 @@ async def send_chat_message(
 
 @mcp.tool()
 async def get_message_status(task_id: str) -> str:
-    """Check the processing state of a submitted message. Returns status (queued/working/done/error), reply, verification_level (L1/L2/L3 pass/fail), and failure_reason if blocked."""
+    """Poll the processing state of a message submitted via send_chat_message.
+
+    Returns the current status, the assistant's reply (when done), the
+    guardrail verification level (L1/L2/L3 pass or fail), and a
+    failure_reason if any stage blocked the request.
+
+    Do NOT poll immediately after submitting.  Follow the wait_hint returned
+    by send_chat_message (typically 20-60 seconds depending on mode), then
+    poll no faster than every 15-20 seconds.
+
+    Args:
+        task_id: The task identifier returned by send_chat_message.
+
+    Returns:
+        JSON with fields: status (queued|working|done|error), reply,
+        verification_level, failure_reason, elapsed_seconds, and
+        next_action (a human-readable suggestion for what to do next).
+    """
     from server.features.state import M
     row = mcp_task_get(task_id)
     if row is None:
@@ -750,7 +890,7 @@ async def _run_batch(batch_id):
 
             from server.input_guard import _judge_system
             passed, reason = await _run_llm_verify(
-                prompt, _judge_system(), task_lane="guardrail"
+                prompt, _judge_system()
             )
             if not passed:
                 print(
@@ -830,7 +970,7 @@ async def _run_batch(batch_id):
             if reply:
                 from server.input_guard import _strict_judge_system
                 passed, reason = await _run_llm_verify(
-                    reply, _strict_judge_system(), task_lane="guardrail"
+                    reply, _strict_judge_system()
                 )
                 if not passed:
                     print(
@@ -896,7 +1036,34 @@ async def start_chat_batch(
     no_tools: bool = False,
     session_ids: list = None,
 ) -> str:
-    """Submit MANY chat prompts at once and get a batch_id back immediately."""
+    """Submit a batch of chat prompts for sequential processing and receive a batch_id immediately.
+
+    Items are processed one at a time through the same L1/L2/L3 guardrail
+    pipeline as send_chat_message.  Processing is sequential to respect
+    server capacity; expect roughly 2-7 minutes per item depending on mode.
+
+    The batch is queued behind any earlier batches.  Do NOT poll immediately:
+    sleep for the estimated total time, then call get_batch_status to check
+    progress and get_batch_results to collect replies.
+
+    Args:
+        prompts: List of user message strings to process (max 50).
+        shared_session: If True, all prompts share one session with
+            system_prompt as its persona.  Mutually exclusive with
+            session_ids.
+        system_prompt: Persona for the shared session (used only when
+            shared_session=True).
+        research: Enable deep-research mode for every item.
+        cpu: Force CPU lane processing for every item.
+        no_tools: Disable tool execution for every item.
+        session_ids: A list of pre-existing session_ids aligned 1:1 with
+            prompts.  Each prompt is processed in its own bound session.
+            Mutually exclusive with shared_session and system_prompt.
+
+    Returns:
+        JSON with batch_id, total item count, queue position, estimated
+        total time, and polling instructions.
+    """
     if not isinstance(prompts, list) or not prompts:
         return json.dumps({"error": "prompts must be a non-empty list"})
     prompts = [p for p in prompts if isinstance(p, str) and p.strip()]
@@ -968,7 +1135,19 @@ async def start_chat_batch(
 
 @mcp.tool()
 async def get_batch_status(batch_id: str) -> str:
-    """LIGHTWEIGHT progress check for a bulk-chat batch — no reply text here."""
+    """Check progress of a batch started with start_chat_batch without retrieving reply text.
+
+    Returns counts of completed, failed, and new (not yet collected) items,
+    along with any guardrail verification failures.  Use new_indexes with
+    get_batch_results to fetch the actual replies.
+
+    Args:
+        batch_id: The batch identifier returned by start_chat_batch.
+
+    Returns:
+        JSON with total, completed, failed, new_indexes, queue_position
+        (if still pending), and per-item verification failure details.
+    """
     b = batch_get(batch_id)
     if not b:
         return json.dumps({"error": "unknown batch_id"})
@@ -1019,7 +1198,24 @@ async def get_batch_status(batch_id: str) -> str:
 async def get_batch_results(
     batch_id: str, indexes: list = None, new_only: bool = False
 ) -> str:
-    """Collect assistant replies produced by a bulk-chat batch — per wave."""
+    """Collect assistant replies and metadata for items in a batch.
+
+    Each call marks retrieved items as collected so they are not returned
+    again on subsequent calls.  Use get_batch_status first to obtain
+    new_indexes, then pass them here to fetch only the latest wave.
+
+    Args:
+        batch_id: The batch identifier from start_chat_batch.
+        indexes: Optional list of specific item indexes to retrieve.
+            If omitted, all completed/failed items are returned.
+        new_only: If True, return only items not yet collected in a
+            previous call.
+
+    Returns:
+        JSON array of item objects with index, status, prompt, reply
+        (for done items), error (for failed items), session_id, and any
+        guardrail verification_level / failure_reason fields.
+    """
     b = batch_get(batch_id)
     if not b:
         return json.dumps({"error": "unknown batch_id"})
@@ -1070,7 +1266,21 @@ async def get_batch_results(
 
 @mcp.tool()
 async def submit_batch_results(batch_id: str, results: list) -> str:
-    """Push YOUR OWN per-item outcomes back onto a batch — in ONE call."""
+    """Attach your own per-item outcomes (grades, notes, evaluations) to a batch in a single call.
+
+    Use this to push external evaluation results back onto batch items after
+    collecting replies with get_batch_results.  Each result object must
+    contain an "index" field matching an item index in the batch, plus any
+    key-value pairs you want to store (e.g. "grade", "note", "score").
+
+    Args:
+        batch_id: The batch identifier from start_chat_batch.
+        results: List of dicts, each with "index" (int) and any additional
+            evaluation fields to attach.
+
+    Returns:
+        JSON with accepted/rejected counts and per-rejection reasons.
+    """
     b = batch_get(batch_id)
     if not b:
         return json.dumps({"error": "unknown batch_id"})
@@ -1122,7 +1332,18 @@ async def submit_batch_results(batch_id: str, results: list) -> str:
 
 @mcp.tool()
 async def get_image(image_id: str):
-    """Fetch and display an image referenced in a chat conversation."""
+    """Fetch an image that was generated or referenced in a chat conversation.
+
+    The image_id comes from assistant replies that include image output
+    (e.g. image generation tool results).  Returns the raw image bytes
+    suitable for display.
+
+    Args:
+        image_id: The image identifier from a chat message's image field.
+
+    Returns:
+        Raw image data, or an error message if the image is not found.
+    """
     img, err = await _call_image(f"/api/image/{image_id.lstrip('/')}")
     return err if err else img
 

@@ -79,7 +79,7 @@ _effective_contexts_lock = threading.Lock()
 _model_transition_lock = threading.Lock()
 _data_lock = threading.Lock()
 
-MAX_QUEUE_SIZE = 5
+MAX_QUEUE_SIZE = 15
 
 # Tool-loop budget per task. Normal chats stay light (10 LLM rounds ≈ small
 # number of tool calls); tasks sent with the UI's "research" toggle get the
@@ -162,9 +162,9 @@ _users_cache_time = 0
 
 # Context / token budget constants.
 # The interactive UI chat runs on the GPU llama-server, which is launched with
-# --ctx-size 24576 (24K). Keep this in sync with server/config.py so the UI's
+# --ctx-size 32768 (24K). Keep this in sync with server/config.py so the UI's
 # context meter and the /api/model-status payload reflect the real budget.
-MAX_INPUT_TOKENS = 24576
+MAX_INPUT_TOKENS = 32768
 AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 
 # Monitoring constants.

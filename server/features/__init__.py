@@ -13,6 +13,7 @@ now lives in this package, split by feature area:
 * :mod:`~server.features.images` — ComfyUI image generation / editing
 * :mod:`~server.features.monitoring` — health loops, restart, thermal/RAM
 * :mod:`~server.features.orchestration` — event loop and task queue
+* :mod:`~server.features.openai_adapter` — OpenAI-compatible streaming for VS Code
 
 ``chat-webui.py`` remains the single entrypoint: it owns every shared value and
 registers itself as the entrypoint module. Feature code resolves shared state,
@@ -26,6 +27,7 @@ from server.features import (
     images,
     llm,
     monitoring,
+    openai_adapter,
     orchestration,
     sessions,
     state,
@@ -39,6 +41,7 @@ __all__ = [
     "images",
     "llm",
     "monitoring",
+    "openai_adapter",
     "orchestration",
     "sessions",
     "state",
