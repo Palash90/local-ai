@@ -171,7 +171,19 @@ class MCPClientManager:
                 content_out.append(block.text)
             else:
                 content_out.append(str(block))
-        return "\n".join(content_out)
+        
+        full_text = "\n".join(content_out)
+        
+        # Enforce maximum character limit (e.g., 8,000 characters ~2,000 tokens)
+        MAX_CHARS = 8000
+        if len(full_text) > MAX_CHARS:
+            truncated_len = len(full_text) - MAX_CHARS
+            full_text = (
+                full_text[:MAX_CHARS] 
+                + f"\n\n[Output truncated: {truncated_len} characters omitted due to length limits.]"
+            )
+
+        return full_text
 
     async def close(self):
         """Gracefully shuts down all transports and sessions."""
