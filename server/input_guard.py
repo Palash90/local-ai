@@ -299,12 +299,12 @@ def _judge_candidates(base_url):
 def _judge_max_tokens():
     """Token budget for a judge call. Thinking models spend their budget on
     reasoning BEFORE emitting the verdict word, so a tiny cap yields an empty
-    content field and a meaningless SAFE. 400 covers gemma-style thinking;
-    tune via GUARD_LLM_MAX_TOKENS."""
+    content field and a meaningless SAFE. 2048 gives the reasoning headroom to
+    still emit the verdict; tune via GUARD_LLM_MAX_TOKENS."""
     try:
-        return int(os.environ.get("GUARD_LLM_MAX_TOKENS", "400"))
+        return int(os.environ.get("GUARD_LLM_MAX_TOKENS", "2048"))
     except ValueError:
-        return 400
+        return 2048
 
 
 def ensure_judge_ready(base_url):
@@ -401,11 +401,16 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
             if r.status_code == 200:
                 msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
                 content = msg.get("content") or ""
+                if not content.strip():
+                    # Thinking models may exhaust the budget mid-reasoning, leaving
+                    # content empty but a useful reasoning tail. Judge on the
+                    # reasoning text so we don't silently return a meaningless SAFE.
+                    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+                    if reasoning:
+                        content = reasoning
                 verdict = _parse_verdict(content)
                 raw = repr(content.strip())
                 if not content.strip():
-                    # Thinking models may exhaust the budget mid-reasoning; show
-                    # the reasoning tail so the log explains the empty verdict.
                     reasoning = msg.get("reasoning_content") or ""
                     raw += f" reasoning_tail={reasoning[-120:]!r}"
                 print(
@@ -552,6 +557,14 @@ def mcp_output_judge(text, timeout=None, fail_closed=True):
             if r.status_code == 200:
                 msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
                 content = msg.get("content") or ""
+                if not content.strip():
+                    # Thinking models may exhaust the budget mid-reasoning, leaving
+                    # content empty. Judge on the reasoning text so a harmless
+                    # reply isn't falsely BLOCKED (fail-closed) on a truncated
+                    # response.
+                    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+                    if reasoning:
+                        content = reasoning
                 verdict = _parse_strict_verdict(content)
                 raw = repr(content.strip())
                 if not content.strip():

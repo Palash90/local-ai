@@ -406,12 +406,21 @@ async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
             {"role": "user", "content": text[:4000]},
         ],
         "temperature": 0,
-        "max_tokens": 400,
+        "max_tokens": 2048,
         "stream": False,
     }
 
-    async def _judge_call():
-        """POST the judge payload; return (reply_text_or_empty, error_string)."""
+    async def _judge_call(max_tokens=2048):
+        """POST the judge payload; return (content, reasoning, error_string).
+
+        Reasoning-capable "it" models emit a long ``reasoning_content`` before the
+        verdict in ``content``. If ``max_tokens`` is too small the reasoning eats
+        the whole budget and ``content`` comes back empty (finish_reason length),
+        which used to misread as 'judge unavailable'. We return both fields so the
+        caller can fall back to judging on the reasoning text, plus a larger budget
+        on retry.
+        """
+        payload["max_tokens"] = max_tokens
         try:
             async with httpx.AsyncClient() as client:
                 r = await client.post(
@@ -420,27 +429,37 @@ async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
                     timeout=VERIFY_TIMEOUT,
                 )
             if r.status_code != 200:
-                return "", f"HTTP {r.status_code}"
-            return (
-                r.json().get("choices", [{}])[0].get("message", {}).get("content", ""),
-                "",
-            )
+                return "", "", f"HTTP {r.status_code}"
+            msg = r.json().get("choices", [{}])[0].get("message", {})
+            content = msg.get("content", "") or ""
+            reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+            return content, reasoning, ""
         except Exception as e:
-            return "", str(e)
+            return "", "", str(e)
 
     print(f"[guardrail][L2] calling {task_lane} LLM server at {M.server_url(task_lane)}")
     print(f"[guardrail][L2] input message: {text}")
-    reply, err = await _judge_call()
+    reply, reasoning, err = await _judge_call()
+    if not reply and reasoning:
+        # Reasoning-only reply (reasoning consumed the token budget before the
+        # verdict was emitted). Judge on the reasoning text instead of failing.
+        print(
+            f"[guardrail][L2] empty content but reasoning present — "
+            "judging on reasoning text"
+        )
+        reply = reasoning
     if not reply:
         # Availability failure (connection error / non-200 / empty reply): restart,
-        # wait for the model, and retry once before failing closed.
+        # wait for the model, and retry with a larger budget before failing closed.
         print(
             f"[guardrail][L2] judge call unavailable ({err or 'empty'}) — "
             "restarting judge & retrying once",
             flush=True,
         )
         await asyncio.to_thread(ensure_guardrail_ready)
-        reply, err = await _judge_call()
+        reply, reasoning, err = await _judge_call(max_tokens=4096)
+        if not reply and reasoning:
+            reply = reasoning
         if not reply:
             print(
                 f"[guardrail][L2] judge still unavailable after restart "
