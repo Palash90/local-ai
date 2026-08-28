@@ -245,7 +245,7 @@ def _messages_to_session(messages):
     return entries
 
 
-def _poll_task(task_id, timeout_s=600, status_callback=None, keepalive_interval=10):
+def _poll_task(task_id, timeout_s=3600, status_callback=None, keepalive_interval=10):
     """Block until the task reaches a terminal state, returning the task dict.
 
     If status_callback is provided, it's called with (status, message) whenever
@@ -392,7 +392,7 @@ def handle_chat_completions(handler):
         "client_timestamp": None,
         "research": False,
         "cpu": False,
-        "no_tools": False,
+        "no_tools": True,
         "openai_lane": True,
         "mode": mode,
         "skip_ensure_llama": True,
@@ -456,9 +456,9 @@ def handle_chat_completions(handler):
             # still counts as "bytes received" to reset the client's idle timer.
             write_sse(f": {status} — {message}\n\n")
 
-        result = _poll_task(task_id, timeout_s=600, status_callback=status_ping)
+        result = _poll_task(task_id, timeout_s=3600, status_callback=status_ping)
     else:
-        result = _poll_task(task_id, timeout_s=600)
+        result = _poll_task(task_id, timeout_s=3600)
 
     status = result.get("status", "error")
     print(f"[openai_api] Task {task_id} completed with status={status}")

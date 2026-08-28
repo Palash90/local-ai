@@ -629,7 +629,10 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         with M._data_lock:
             sampling = M.tasks.get(task_id, {}).get("_sampling")
         if sampling is None:
-            sampling = _route_sampling(mode, messages) if round_num == 0 else {}
+            if M.tasks.get(task_id, {}).get("openai_lane"):
+                sampling = M.SAMPLING_BUCKETS.get("code", {})
+            else:
+                sampling = _route_sampling(mode, messages) if round_num == 0 else {}
             with M._data_lock:
                 if task_id in M.tasks:
                     M.tasks[task_id]["_sampling"] = sampling
