@@ -16,6 +16,8 @@ import http.server, json, os, re, glob, uuid, base64, requests, subprocess, time
 sys.stdout.reconfigure(line_buffering=True)  # noqa
 from datetime import datetime  # noqa: F401
 from urllib.parse import urlparse, parse_qs  # noqa: F401
+import asyncio
+from server.mcp_client import start_mcp_client
 
 from server.read_file import read_file_text
 
@@ -338,7 +340,7 @@ if __name__ == "__main__":
     threading.Thread(target=_reminder_loop, daemon=True).start()
     threading.Thread(target=_connection_manager, daemon=True).start()
     threading.Thread(target=run_mcp, daemon=True).start()
-    print(f"Chat UI running on http://localhost:{PORT}")
+    threading.Thread(target=start_mcp_client, daemon=True).start()
     # ThreadingHTTPServer: plain HTTPServer handles one connection at a time on
     # the main thread, so a long-blocking handler (e.g. the OpenAI-compatible
     # /v1/chat/completions, which polls synchronously for up to 3600s) would
@@ -351,3 +353,4 @@ if __name__ == "__main__":
         s.serve_forever()
     except KeyboardInterrupt:
         s.shutdown()
+    print(f"Chat UI running on http://localhost:{PORT}")

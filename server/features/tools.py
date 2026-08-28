@@ -9,7 +9,9 @@ from datetime import datetime
 from urllib.parse import urlencode, urlparse
 
 import requests
+import asyncio
 
+from server.mcp_client import mcp_manager, dispatch_mcp_tool 
 from server.features.state import M
 
 # How many search results to hand back to the LLM, and how many of the top
@@ -260,13 +262,15 @@ def web_search(query, current_time=None, current_location=None):
         data = r.json()
     except Exception as e:
         print(f"Web-search failed: {e}")
-        return json.dumps({
-            "results": [],
-            "search_date": ts.strftime("%Y-%m-%d %A"),
-            "query": query,
-            "search_url": search_url,
-            "error": str(e),
-        })
+        return json.dumps(
+            {
+                "results": [],
+                "search_date": ts.strftime("%Y-%m-%d %A"),
+                "query": query,
+                "search_url": search_url,
+                "error": str(e),
+            }
+        )
     results = data.get("results", [])[:WEB_SEARCH_RESULT_LIMIT]
     formatted = []
     for x in results:
@@ -305,9 +309,7 @@ def _enrich_top_results(results):
         if not url.lower().startswith(("http://", "https://")):
             return
         try:
-            page = json.loads(
-                M.fetch_page(url, max_chars=WEB_SEARCH_ENRICH_CHARS)
-            )
+            page = json.loads(M.fetch_page(url, max_chars=WEB_SEARCH_ENRICH_CHARS))
             if page.get("content"):
                 entry["full_content"] = page["content"]
                 entry["page_title"] = page.get("title", "")
@@ -338,12 +340,19 @@ def fetch_page(url, max_chars=24000, chunk=1):
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
-            return json.dumps({"url": url, "error": "Only http/https URLs are supported."})
+            return json.dumps(
+                {"url": url, "error": "Only http/https URLs are supported."}
+            )
         host = parsed.hostname or ""
         ip = socket.gethostbyname(host)
         addr = ipaddress.ip_address(ip)
         if addr.is_private or addr.is_loopback or addr.is_link_local:
-            return json.dumps({"url": url, "error": "Access to private/internal addresses is not allowed."})
+            return json.dumps(
+                {
+                    "url": url,
+                    "error": "Access to private/internal addresses is not allowed.",
+                }
+            )
     except Exception as e:
         return json.dumps({"url": url, "error": f"Invalid URL: {e}"})
 
@@ -381,11 +390,29 @@ def fetch_page(url, max_chars=24000, chunk=1):
             )
 
         if not any(t in ctype for t in _TEXTISH_TYPES):
-            return json.dumps({"url": url, "content_type": ctype, "error": "Skipped: page is not readable text content (likely binary/media)."})
+            return json.dumps(
+                {
+                    "url": url,
+                    "content_type": ctype,
+                    "error": "Skipped: page is not readable text content (likely binary/media).",
+                }
+            )
         if not r.encoding:
             r.encoding = r.apparent_encoding
         soup = BeautifulSoup(r.text, "html.parser")
-        for tag in soup(["script", "style", "noscript", "svg", "nav", "footer", "header", "aside", "form"]):
+        for tag in soup(
+            [
+                "script",
+                "style",
+                "noscript",
+                "svg",
+                "nav",
+                "footer",
+                "header",
+                "aside",
+                "form",
+            ]
+        ):
             tag.decompose()
         title = soup.title.get_text(strip=True) if soup.title else ""
         main = soup.find("main") or soup.find("article") or soup.find("body") or soup
@@ -434,8 +461,20 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             M.set_status(task_id, "location_needed")
             ev.wait(timeout=60)
             M._location_events.pop(task_id, None)
-            result = M._client_location if M._client_location else "User denied location access"
-        M._event_post("tool_ok", task_id, tc_id=tc["id"], result=result, sid=sid, round=round_num, tool_index=tool_index)
+            result = (
+                M._client_location
+                if M._client_location
+                else "User denied location access"
+            )
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
         return
 
     if tool_name == "read_file":
@@ -450,7 +489,15 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                 result = f"Could not extract text from {file_url}. The file may contain only images."
         else:
             result = f"File not found: {file_url}"
-        M._event_post("tool_ok", task_id, tc_id=tc["id"], result=result, sid=sid, round=round_num, tool_index=tool_index)
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
         return
 
     if tool_name == "read_image":
@@ -460,7 +507,15 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             result = json.dumps({"ok": False, "error": f"Image not found: {url}"})
         else:
             result = json.dumps({"ok": True, "image_url": url})
-        M._event_post("tool_ok", task_id, tc_id=tc["id"], result=result, sid=sid, round=round_num, tool_index=tool_index)
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
         return
 
     if tool_name == "web_search":
@@ -475,7 +530,9 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             )
         except Exception as e:
             print(f"[web_search] Unhandled exception for task {task_id}: {e}")
-            result = json.dumps({"results": [], "query": args.get("query"), "error": str(e)})
+            result = json.dumps(
+                {"results": [], "query": args.get("query"), "error": str(e)}
+            )
         print(f"[web_search] RAW result for task {task_id}: {result[:300]}...")  # DEBUG
         with M._data_lock:
             t = M.tasks.get(task_id)
@@ -489,7 +546,9 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             f"Web search results for query '{args.get('query')}'. "
             f"Analyze these search results thoroughly and provide a clear, accurate response based on the findings:\n\n{result}"
         )
-        print(f"[web_search] LLM-bound result (with analysis instruction) for task {task_id}: {llm_result[:400]}...")  # DEBUG
+        print(
+            f"[web_search] LLM-bound result (with analysis instruction) for task {task_id}: {llm_result[:400]}..."
+        )  # DEBUG
         M._event_post(
             "tool_ok",
             task_id,
@@ -514,13 +573,15 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                 t.setdefault("_tools_used", []).append(tool_name)
                 try:
                     res = json.loads(result)
-                    t.setdefault("_search_details", []).append({
-                        "tool": "fetch_page",
-                        "url": res.get("url", args.get("url", "")),
-                        "title": res.get("title", ""),
-                        "content": res.get("content", ""),
-                        "error": res.get("error", ""),
-                    })
+                    t.setdefault("_search_details", []).append(
+                        {
+                            "tool": "fetch_page",
+                            "url": res.get("url", args.get("url", "")),
+                            "title": res.get("title", ""),
+                            "content": res.get("content", ""),
+                            "error": res.get("error", ""),
+                        }
+                    )
                 except Exception:
                     pass
         llm_result = (
@@ -557,7 +618,9 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                 tool_index=tool_index,
             )
         else:
-            M._enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index)
+            M._enqueue_image_job(
+                task_id, sid, tool_name, args, tc, round_num, tool_index
+            )
         return
     elif tool_name == "update_user_context":
         content = args.get("content", "")
@@ -607,10 +670,12 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         if not user:
             result = json.dumps({"ok": False, "error": "User not found"})
         elif user not in M._agent_users:
-            result = json.dumps({
-                "ok": False,
-                "error": "track_theme is reserved for the self-chat agent pipeline",
-            })
+            result = json.dumps(
+                {
+                    "ok": False,
+                    "error": "track_theme is reserved for the self-chat agent pipeline",
+                }
+            )
         else:
             result = M.handle_theme_tool(user, args)
         M._event_post(
@@ -628,18 +693,34 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         with M._data_lock:
             req_user = M.tasks.get(task_id, {}).get("_user", "")
         if req_user not in M._agent_users:
-            known = {
-                n: t for n, t in known.items() if n not in M.AGENT_ONLY_TOOLS
-            }
+            known = {n: t for n, t in known.items() if n not in M.AGENT_ONLY_TOOLS}
         found = [known[n] for n in wanted if n in known]
         if found:
             result = json.dumps(found)
         else:
-            result = json.dumps({
-                "error": "Unknown tool(s)",
-                "requested": wanted,
-                "available": sorted(known),
-            })
+            result = json.dumps(
+                {
+                    "error": "Unknown tool(s)",
+                    "requested": wanted,
+                    "available": sorted(known),
+                }
+            )
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
+
+    elif mcp_manager.is_mcp_tool(tool_name):
+        try:
+            result = dispatch_mcp_tool(tool_name, args)
+        except Exception as e:
+            result = json.dumps({"error": f"MCP tool {tool_name} failed: {e}"})
+
         M._event_post(
             "tool_ok",
             task_id,

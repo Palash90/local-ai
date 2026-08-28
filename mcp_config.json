@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "codebase-search": {
+      "command": "npx",
+      "args": ["-y", "codebase-memory-mcp@latest"],
+      "env":{
+        "CBM_ALLOWED_ROOT": "/home/palash/git"
+      },
+      "enabled": true
+    },
+    "dumm-http-mcp-server": {
+      "url": "http://loc/mcp",
+      "transport": "http",
+      "enabled": false,
+      "_comment": "This is a dummy placeholder, does not work."
+    }
+  }
+}

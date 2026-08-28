@@ -18,8 +18,10 @@ import subprocess
 import time
 
 import requests
+import traceback
 
 from server.features.state import M
+from server.mcp_client import mcp_manager
 
 
 # Rotating KV-checkpoint filename per lane (slot 0 is the only slot — both
@@ -606,12 +608,16 @@ def _route_sampling(mode, messages):
 
 
 def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
+    print("Entered LLM ")
     try:
         if M.estimate_tokens(msgs) > M.AUTO_COMPACT_THRESHOLD:
             M.set_status(task_id, "Context is full — compressing older messages...")
         messages = M.prepare_context_for_llm(sid, msgs, mode)
+        print("line 616")
         messages = _inject_read_image(messages)
         tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
+
+        print("Line 619")
         if tool_msgs:
             print(f"[llm_round] Round {round_num} includes {len(tool_msgs)} tool message(s) with search results")  # DEBUG
         with M._data_lock:
@@ -624,6 +630,13 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             wire_tools = M.TOOLS
         else:
             wire_tools = M.TOOLS_HUMAN
+
+        print("before mcp tools call")
+        mcp_extras = mcp_manager.get_openai_tools()
+        print("after mcp tools call")
+
+        if mcp_extras:
+            wire_tools += list(wire_tools) + mcp_extras
         # Sampling router: classify once on round 0, reuse for all rounds of
         # this task (stored under an underscore key so it stays private).
         with M._data_lock:
@@ -726,6 +739,8 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             )
     except Exception as e:
         err_text = str(e)
+        print(err_text)
+        traceback.format_exc()
         if "image" in err_text.lower() or "vision" in err_text.lower():
             err_text = "The current model does not support image input. Please use a vision-capable model or send text-only messages."
         M._event_post("llm_err", task_id, error=err_text, round=round_num, sid=sid)
