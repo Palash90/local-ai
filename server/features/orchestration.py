@@ -606,3 +606,4 @@ def _mcp_db_worker():
                 print(f"[mcp-db] task {task_id} completed with status={st}", flush=True)
                 break
             time.sleep(0.5)
+        time.sleep(5)
