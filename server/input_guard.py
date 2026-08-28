@@ -216,6 +216,28 @@ _VERDICT_NEGATIONS = {"NOT", "NO", "NEITHER", "NEVER", "ISNT", "ISN'T",
 _VERDICT_HARMFUL = {"HARMFUL", "UNSAFE"}
 _VERDICT_SAFE = {"SAFE", "BENIGN", "HARMLESS", "NONE", "OKAY", "OK"}
 
+# ── LLM safety judge ────────────────────────────────────────────────────────
+# Pattern matching (above) is fast but language-bound and easy to dodge with
+# novel phrasings. The judge pre-calls the inference engine with a strict
+# classify-only prompt and asks for a single HARMFUL/SAFE verdict BEFORE the
+# real request is ever sent for generation. This catches non-English prompts
+# (e.g. French/Spanish bomb requests) and paraphrases that patterns miss.
+#
+# Configure via GUARD_LLM_BASE (defaults to the local llama-server). If unset
+# or the call fails, the judge is a no-op and the pattern layer remains the
+# only defence.
+
+# Verdict parsing: local models routinely ignore the 'exactly one word'
+# instruction and reply with phrases like "Not harmful", "Safe — no harmful
+# content", or "I cannot classify this". Substring-matching "HARMFUL" turned
+# every one of those into a block (massive false positives), so parse the
+# verdict properly instead: only an affirmative, unnegated harmful token may
+# block; anything ambiguous parses as SAFE.
+_VERDICT_NEGATIONS = {"NOT", "NO", "NEITHER", "NEVER", "ISNT", "ISN'T",
+                      "CANNOT", "CANT", "CAN'T"}
+_VERDICT_HARMFUL = {"HARMFUL", "UNSAFE"}
+_VERDICT_SAFE = {"SAFE", "BENIGN", "HARMLESS", "NONE", "OKAY", "OK"}
+
 
 def _parse_verdict(content):
     """Interpret a free-form judge reply as a boolean HARMFUL verdict."""
@@ -444,7 +466,7 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
     return fail_closed
 
 
-def llm_classify_harmful_output(text, timeout=20, fail_closed=False):
+def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=False):
     """Return True if an LLM judge classifies generated ``text`` as harmful
     how-to content.
 

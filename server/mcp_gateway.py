@@ -493,6 +493,14 @@ def _requeue_pending_mcp_tasks():
     if requeued_count > 0:
         print(f"[mcp] reset {requeued_count} pending MCP task(s) to queued on reload", flush=True)
 
+from server.config import (
+    LLAMA_BASE_GUARDRAIL,
+    LLAMA_SERVER_PATH,
+    VERIFY_CONTEXT_SIZE,
+    VERIFY_IDLE_TIMEOUT,
+    VERIFY_MODEL,
+    VERIFY_PORT,
+)
 
 @mcp.tool()
 async def get_user_context() -> str:

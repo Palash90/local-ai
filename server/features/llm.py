@@ -732,13 +732,8 @@ def _start_llm_round(task_id, sid, round_num):
     mode = M.task_mode(task_id)
     with M._data_lock:
         task = M.tasks.get(task_id, {})
-    skip_load = task.get("skip_ensure_llama", False)
-    # Always ensure the llama-server process is alive — even API lane tasks
-    # need a running server to POST to.  Only skip the explicit model-load
-    # step when skip_ensure_llama is set, because that flag means "the caller
-    # (e.g. the OpenAI-compatible API) expects the model to already be loaded
-    # and doesn't want to compete for VRAM."
-    M.ensure_llama_server(mode)
+    if not task.get("skip_ensure_llama"):
+        M.ensure_llama_server(mode)
     with M._data_lock:
         if mode == "cpu":
             ms = M._cpu_model_status
