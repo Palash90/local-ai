@@ -41,9 +41,12 @@ start_one() {
 
 echo "== Stopping =="
 stop_all 'chat-webui\.py'      "chat web ui"
+stop_all 'main\.py'            "ComfyUI"
 stop_all 'markdown_hosting'    "markdown hosting"
 stop_all 'code_host\.py'       "code hosting"
 
+rm -rf dist
+npm run build
 sudo wg-quick up wg0
 
 echo "== Starting =="
