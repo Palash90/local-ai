@@ -742,7 +742,7 @@ def _start_llm_round(task_id, sid, round_num):
         else:
             ms = M.model_status
     if ms != "chat_loaded":
-        if skip_load:
+        if task.get("skip_ensure_llama"):
             print(f"[llm_round] skip_ensure_llama=True but model not loaded on {mode} — loading anyway to avoid failure")
         M.load_llama_model(mode)
     with M._data_lock:
@@ -752,7 +752,7 @@ def _start_llm_round(task_id, sid, round_num):
         t["_state"] = "llm_waiting"
         t["_round"] = round_num
         messages = list(M.sessions.get(sid, []))
-    print(f"[llm_round] Starting round {round_num} for task {task_id} on {mode} server with {len(messages)} raw messages (skip_load={skip_load})")
+    print(f"[llm_round] Starting round {round_num} for task {task_id} on {mode} server with {len(messages)} raw messages (skip_load={task.get('skip_ensure_llama')})")
     M.set_status(
         task_id, "Thinking..." if round_num == 0 else f"Thinking (round {round_num})..."
     )
