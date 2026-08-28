@@ -12,6 +12,7 @@ agent run never disturbs interactive users (and vice versa).
 
 import os
 import subprocess
+import threading
 import time
 from datetime import datetime
 
@@ -134,6 +135,74 @@ def ensure_llama_server(mode):
         return
     print(f"[llama] {mode} llama-server not reachable — starting...")
     restart_llama_server(mode)
+
+
+_guardrail_ready_lock = threading.Lock()
+_guardrail_starting = False
+
+
+def _guardrail_ready_now():
+    base = M.server_base("guardrail")
+    return (
+        M.is_llama_alive(base)
+        and M.server_status("guardrail") == "chat_loaded"
+        and M.is_model_ready(base, M.server_model_id("guardrail"))
+    )
+
+
+def ensure_guardrail_ready(timeout=240):
+    """Start/refresh the LLM judge (guardrail) llama-server and wait for it to
+    actually serve a loaded model.
+
+    ``ensure_llama_server`` only verifies the *process* is alive. After an idle
+    unload, image-generation unload, or RAM evacuation the process still answers
+    /health but no model is loaded, so a judge POST would fail. This helper loads
+    the model and polls /models until it reports ready.
+
+    Concurrency: only the first concurrent caller restarts/loads; the rest wait
+    and poll, so a burst of judge calls can't thundering-herd the server into
+    repeated restarts. During a RAM evacuation we never force a restart (the
+    evacuation already killed/restarted every server).
+
+    Returns True if the judge is ready to serve, False otherwise.
+    """
+    global _guardrail_starting
+    base = M.server_base("guardrail")
+    model_id = M.server_model_id("guardrail")
+
+    if _guardrail_ready_now():
+        return True
+
+    do_work = False
+    with _guardrail_ready_lock:
+        if not _guardrail_starting:
+            _guardrail_starting = True
+            do_work = True
+
+    deadline = time.time() + timeout
+    try:
+        if do_work:
+            if getattr(M, "_ram_evacuating", False):
+                print("[guardrail] RAM evacuation in progress — waiting for restart, not forcing one", flush=True)
+            elif not M.is_llama_alive(base):
+                print("[guardrail] judge llama-server not alive — restarting", flush=True)
+                restart_llama_server("guardrail")
+            with M._data_lock:
+                ms = M._guardrail_model_status
+            if ms != "chat_loaded" or not M.is_model_ready(base, model_id):
+                print(f"[guardrail] loading judge model ({model_id})...", flush=True)
+                M.load_llama_model("guardrail")
+
+        while time.time() < deadline:
+            if _guardrail_ready_now():
+                return True
+            time.sleep(2)
+        print("[guardrail] judge not ready within timeout — giving up", flush=True)
+        return False
+    finally:
+        with _guardrail_ready_lock:
+            _guardrail_starting = False
+
 
 
 def _ensure_llama_server_for_task(task_id):

@@ -7,7 +7,7 @@ Two independent layers:
    task is created, no session history is touched.
 2. ``wrap_user_message`` — everything that passes is forwarded wrapped in
    the SAFETY DIRECTIVES / CRITICAL DIRECTIVE frame with explicit
-   ``[USER INPUT START] / [USER INPUT END]`` boundaries, so instructions
+   ``<user_input> / </user_input>`` XML boundaries, so instructions
    embedded inside user text stay user text and the model is told to answer
     boundary-violating content with a fixed refusal instead of complying.
 
@@ -307,6 +307,28 @@ def _judge_max_tokens():
         return 400
 
 
+def ensure_judge_ready(base_url):
+    """Bring the guardrail LLM judge server up with its model loaded.
+
+    Only acts when ``base_url`` points at the guardrail server (the default
+    for all judge calls); other endpoints are left untouched. The real work is
+    done by :func:`server.features.monitoring.ensure_guardrail_ready`, which
+    restarts the process if down, loads the model, and waits until it serves.
+    Best-effort: failures are logged, never raised.
+    """
+    try:
+        from server.config import LLAMA_BASE_GUARDRAIL
+    except ImportError:
+        LLAMA_BASE_GUARDRAIL = "http://localhost:8083"
+    if str(base_url or "").rstrip("/") != str(LLAMA_BASE_GUARDRAIL).rstrip("/"):
+        return
+    try:
+        from server.features.monitoring import ensure_guardrail_ready
+        ensure_guardrail_ready()
+    except Exception as e:
+        print(f"[guardrail][judge] ensure_judge_ready failed: {e}")
+
+
 def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
                max_chars=2000):
     """Shared judge plumbing: POST the classify prompt, log exactly what was
@@ -345,51 +367,67 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
 
     max_tokens = _judge_max_tokens()
     last_err = ""
-    for cand in candidates:
-        payload = {
-            "model": cand,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text[:max_chars]},
-            ],
-            "temperature": 0,
-            "max_tokens": max_tokens,
-            "cache_prompt": False,
-            "stream": False,
-        }
-        try:
-            r = requests.post(
-                f"{base_url.rstrip('/')}/v1/chat/completions",
-                json=payload,
-                timeout=timeout,
-            )
-        except Exception as e:
-            # Endpoint itself down — other model ids won't help.
+    attempts = 0
+    while True:
+        attempts += 1
+        conn_failed = False
+        for cand in candidates:
+            payload = {
+                "model": cand,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text[:max_chars]},
+                ],
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "cache_prompt": False,
+                "stream": False,
+            }
+            try:
+                r = requests.post(
+                    f"{base_url.rstrip('/')}/v1/chat/completions",
+                    json=payload,
+                    timeout=timeout,
+                )
+            except Exception as e:
+                # Endpoint itself down — other model ids won't help.
+                print(
+                    f"[guardrail][{label}] call failed: {e} — treating as "
+                    f"{'HARMFUL (fail-closed)' if fail_closed else 'SAFE (fail-open)'}"
+                )
+                last_err = f"connection error: {e}"
+                conn_failed = True
+                break
+            if r.status_code == 200:
+                msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
+                content = msg.get("content") or ""
+                verdict = _parse_verdict(content)
+                raw = repr(content.strip())
+                if not content.strip():
+                    # Thinking models may exhaust the budget mid-reasoning; show
+                    # the reasoning tail so the log explains the empty verdict.
+                    reasoning = msg.get("reasoning_content") or ""
+                    raw += f" reasoning_tail={reasoning[-120:]!r}"
+                print(
+                    f"[guardrail][{label}] model={cand} "
+                    f"verdict={'HARMFUL' if verdict else 'SAFE'} raw={raw}"
+                )
+                _JUDGE_MODEL_CACHE[base_url] = [cand] + [
+                    c for c in candidates if c != cand
+                ]
+                return verdict
+            last_err = f"HTTP {r.status_code}: {r.text[:150]}"
+            print(f"[guardrail][{label}] model={cand} rejected — {last_err}")
+        if conn_failed and attempts == 1:
             print(
-                f"[guardrail][{label}] call failed: {e} — treating as "
-                f"{'HARMFUL (fail-closed)' if fail_closed else 'SAFE (fail-open)'}"
+                f"[guardrail][{label}] judge connection failed — ensuring "
+                "guardrail server & retrying once",
+                flush=True,
             )
-            return fail_closed
-        if r.status_code == 200:
-            msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
-            content = msg.get("content") or ""
-            verdict = _parse_verdict(content)
-            raw = repr(content.strip())
-            if not content.strip():
-                # Thinking models may exhaust the budget mid-reasoning; show
-                # the reasoning tail so the log explains the empty verdict.
-                reasoning = msg.get("reasoning_content") or ""
-                raw += f" reasoning_tail={reasoning[-120:]!r}"
-            print(
-                f"[guardrail][{label}] model={cand} "
-                f"verdict={'HARMFUL' if verdict else 'SAFE'} raw={raw}"
-            )
-            _JUDGE_MODEL_CACHE[base_url] = [cand] + [
-                c for c in candidates if c != cand
-            ]
-            return verdict
-        last_err = f"HTTP {r.status_code}: {r.text[:150]}"
-        print(f"[guardrail][{label}] model={cand} rejected — {last_err}")
+            ensure_judge_ready(base_url)
+            _JUDGE_MODEL_CACHE.pop(base_url, None)
+            continue
+        break
 
     # Every candidate failed; forget the ordering so it is re-probed later.
     _JUDGE_MODEL_CACHE.pop(base_url, None)
@@ -481,48 +519,64 @@ def mcp_output_judge(text, timeout=None, fail_closed=True):
 
     max_tokens = _judge_max_tokens()
     last_err = ""
-    for cand in candidates:
-        payload = {
-            "model": cand,
-            "messages": [
-                {"role": "system", "content": _strict_judge_system()},
-                {"role": "user", "content": text[:6000]},
-            ],
-            "temperature": 0,
-            "max_tokens": max_tokens,
-            "cache_prompt": False,
-            "stream": False,
-        }
-        try:
-            r = _requests.post(
-                f"{base_url.rstrip('/')}/v1/chat/completions",
-                json=payload,
-                timeout=timeout,
-            )
-        except Exception as e:
+    attempts = 0
+    while True:
+        attempts += 1
+        conn_failed = False
+        for cand in candidates:
+            payload = {
+                "model": cand,
+                "messages": [
+                    {"role": "system", "content": _strict_judge_system()},
+                    {"role": "user", "content": text[:6000]},
+                ],
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "cache_prompt": False,
+                "stream": False,
+            }
+            try:
+                r = _requests.post(
+                    f"{base_url.rstrip('/')}/v1/chat/completions",
+                    json=payload,
+                    timeout=timeout,
+                )
+            except Exception as e:
+                print(
+                    f"[guardrail][strict-output-judge] call failed: {e} — "
+                    f"BLOCKED (fail-closed)"
+                )
+                last_err = f"connection error: {e}"
+                conn_failed = True
+                break
+            if r.status_code == 200:
+                msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
+                content = msg.get("content") or ""
+                verdict = _parse_strict_verdict(content)
+                raw = repr(content.strip())
+                if not content.strip():
+                    reasoning = msg.get("reasoning_content") or ""
+                    raw += f" reasoning_tail={reasoning[-120:]!r}"
+                print(
+                    f"[guardrail][strict-output-judge] model={cand} "
+                    f"verdict={'BLOCKED' if verdict else 'SAFE'} raw={raw}"
+                )
+                _JUDGE_MODEL_CACHE[base_url] = [cand] + [
+                    c for c in candidates if c != cand
+                ]
+                return verdict
+            last_err = f"HTTP {r.status_code}: {r.text[:150]}"
+            print(f"[guardrail][strict-output-judge] model={cand} rejected — {last_err}")
+        if conn_failed and attempts == 1:
             print(
-                f"[guardrail][strict-output-judge] call failed: {e} — "
-                f"BLOCKED (fail-closed)"
+                "[guardrail][strict-output-judge] judge connection failed — "
+                "ensuring guardrail server & retrying once",
+                flush=True,
             )
-            return fail_closed
-        if r.status_code == 200:
-            msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
-            content = msg.get("content") or ""
-            verdict = _parse_strict_verdict(content)
-            raw = repr(content.strip())
-            if not content.strip():
-                reasoning = msg.get("reasoning_content") or ""
-                raw += f" reasoning_tail={reasoning[-120:]!r}"
-            print(
-                f"[guardrail][strict-output-judge] model={cand} "
-                f"verdict={'BLOCKED' if verdict else 'SAFE'} raw={raw}"
-            )
-            _JUDGE_MODEL_CACHE[base_url] = [cand] + [
-                c for c in candidates if c != cand
-            ]
-            return verdict
-        last_err = f"HTTP {r.status_code}: {r.text[:150]}"
-        print(f"[guardrail][strict-output-judge] model={cand} rejected — {last_err}")
+            ensure_judge_ready(base_url)
+            _JUDGE_MODEL_CACHE.pop(base_url, None)
+            continue
+        break
 
     _JUDGE_MODEL_CACHE.pop(base_url, None)
     print(
@@ -547,8 +601,15 @@ def llm_classify_harmful(text, timeout=20, fail_closed=False):
 
 
 def wrap_user_message(user_message: str) -> str:
-    return _safety_frame().format(
+    wrapped = _safety_frame().format(
         decline=GUARDRAIL_DECLINE,
         refusal=MODEL_REFUSAL,
         user_message=user_message if isinstance(user_message, str) else "",
+    )
+    # Normalise the legacy bracket boundaries to XML tags so the model gets an
+    # unambiguous structural boundary around untrusted user text.
+    return (
+        wrapped.replace("[USER INPUT START]", "<user_input>")
+        .replace("[USER INPUT END]", "</user_input>")
+        .strip()
     )

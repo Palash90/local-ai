@@ -267,14 +267,22 @@ def is_llama_alive(base=None):
         return False
 
 
+_READY_STATES = ("ready", "loaded")
+
+
 def is_model_ready(base, model_id):
     """True when ``model_id`` is actually loaded and serving on the router at
-    ``base`` (``GET /models`` -> ``status.value == "ready"`` for that id).
+    ``base`` (``GET /models`` -> ``status.value`` for that id).
 
     /health only proves the router itself is up; a child instance can fail to
     load (OOM, bad args, ...) and exit while the router stays healthy, which
     previously made load_llama_model report success for a model that was
     never actually ready.
+
+    A model is considered ready when its status is ``"loaded"`` OR ``"ready"``:
+    older llama.cpp builds report ``"ready"``, while mothership/``--models-dir``
+    builds report ``"loaded"``/``"unloaded"``. Treating ``"unloaded"``/anything
+    else as not-ready keeps this correct across both.
     """
     try:
         r = requests.get(f"{base}/models", timeout=5)
@@ -282,7 +290,7 @@ def is_model_ready(base, model_id):
             return False
         for m in r.json().get("data", []):
             if m.get("id") == model_id:
-                return m.get("status", {}).get("value") == "ready"
+                return (m.get("status") or {}).get("value") in _READY_STATES
     except Exception:
         pass
     return False

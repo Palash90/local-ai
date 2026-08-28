@@ -256,16 +256,32 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         context_tokens = meta.get("context_tokens", {})
         system_prompt = meta.get("system_prompt", "")
     user_context = M.read_user_context(user) if user else ""
-    context_block = f"\n\n## User Context\n{user_context}" if user_context else ""
+    context_block = (
+        f"\n\n<user_context>{user_context}</user_context>" if user_context else ""
+    )
     # A session created with its own system prompt (e.g. a self-chat agent
     # directive) uses it as the base instead of the global sys_prompt.txt.
     base_sys = system_prompt if system_prompt else M.SYS_CONTENT
-    full_sys_content = f"{base_sys}\n\n{date_loc_context}{context_block}"
+    # Wrap the base prompt in a <system_prompt> boundary unless it already
+    # carries one (the global sys_prompt.txt is tagged at build time), so we
+    # never double-wrap.
+    if base_sys.lstrip().startswith("<system_prompt"):
+        base_block = base_sys
+    else:
+        base_block = f"<system_prompt>\n{base_sys}\n</system_prompt>"
+    full_sys_content = (
+        f"{base_block}\n\n"
+        f"<current_info>\n{date_loc_context}\n</current_info>{context_block}"
+    )
     for blk in extra_prompts:
-        full_sys_content += f"\n\n## {blk.get('name', 'System Prompt')}\n{blk.get('content', '')}"
+        name = blk.get("name", "System Prompt")
+        full_sys_content += (
+            f"\n\n<extra_prompt name=\"{name}\">\n{blk.get('content', '')}\n"
+            f"</extra_prompt>"
+        )
     with M._data_lock:
         if M.tasks.get(task_id, {}).get("research"):
-            full_sys_content += f"\n\n{RESEARCH_DIRECTIVE}"
+            full_sys_content += f"\n\n<research_mode>\n{RESEARCH_DIRECTIVE}\n</research_mode>"
     full_sys_content = full_sys_content.replace(
         "%current_time%", ts.strftime("%Y-%m-%d %A %H:%M")
     )
@@ -309,7 +325,7 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         content.append(
             {
                 "type": "text",
-                "text": user_message,
+                "text": f"<user_input>{user_message}</user_input>",
             }
         )
         M.sessions[sid].append(

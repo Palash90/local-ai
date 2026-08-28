@@ -186,17 +186,22 @@ def _finalize_task(task_id, sid, msg_content, body):
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
                 M.tasks[task_id]["_verification_duration"] = verification_duration
-    if mode == "guardrail":
+    if mode == "guardrail" or t.get("_mcp"):
         try:
             from server.mcp_tasks_db import mcp_task_update
-            from server.input_guard import is_strict_output_blocked
+            from server.input_guard import is_strict_output_blocked, mcp_output_judge
 
             reply_text = msg_content or ""
             print(f"[guardrail][L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}")
             print(f"[guardrail][L3] msg_content={reply_text}")
 
             print(f"[guardrail][L3] checking strict output blocks")
-            if is_strict_output_blocked(reply_text):
+            blocked = is_strict_output_blocked(reply_text)
+            if not blocked and reply_text.strip():
+                # LLM strict judge (fail-closed; self-heals by restarting the
+                # guardrail server and retrying when the judge is unavailable).
+                blocked = mcp_output_judge(reply_text)
+            if blocked:
                 print(f"[guardrail][L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
                 mcp_task_update(task_id, status="done", reply=reply_text,
                               verification_level="LEVEL 3 OUTPUT VERIFICATION FAILED",
@@ -244,6 +249,7 @@ def _event_loop():
                     "_user": user,
                     "_client_timestamp": client_ts,
                     "mode": t.get("mode"),
+                    "_mcp": bool(t.get("_mcp")),
                     "research": bool(data.get("research")),
                     "cpu": bool(data.get("cpu")),
                     "no_tools": bool(data.get("no_tools")),
@@ -536,11 +542,13 @@ MCP_DB_POLL_INTERVAL = 2
 
 def _mcp_db_worker():
     """DB-polling worker for MCP tasks: reads queued tasks from the SQLite
-    ``mcp_tasks`` table, claims them, and feeds them into the shared event
-    loop — replacing the in-memory queue that the gpu/cpu lanes use.
+    ``mcp_tasks`` table, claims them, and routes them through the owning
+    lane's queue (GPU by default, CPU when requested) so they are scheduled
+    exactly like an interactive chat user.
 
-    This runs on its own thread so MCP requests never compete with
-    interactive UI users or self-chat agents for queue slots.
+    This runs on its own thread and processes one MCP task at a time; the
+    guardrail (L2/L3) LLM judging still happens on the dedicated guardrail
+    server regardless of which lane runs the generation.
     """
     from server.mcp_tasks_db import mcp_task_list, mcp_task_update
     MCP_USER = os.environ.get("MCP_USER", "")
@@ -552,8 +560,11 @@ def _mcp_db_worker():
             continue
         row = rows[0]
         task_id = row["task_id"]
-        mode = "guardrail"
-        print(f"[mcp-db] found queued task {task_id}, marking as working", flush=True)
+        cpu_flagged = bool(row.get("cpu"))
+        # MCP chat generation runs on the GPU lane (same server/model as
+        # interactive chat users) by default; callers may opt into the CPU lane.
+        mode = "cpu" if cpu_flagged else "gpu"
+        print(f"[mcp-db] found queued task {task_id}, marking as working ({mode} lane)", flush=True)
         mcp_task_update(task_id, status="working")
         entry = {
             "task_id": task_id,
@@ -564,9 +575,10 @@ def _mcp_db_worker():
             "user": MCP_USER,
             "client_timestamp": None,
             "research": bool(row.get("research")),
-            "cpu": bool(row.get("cpu")),
+            "cpu": cpu_flagged,
             "no_tools": bool(row.get("no_tools")),
             "mode": mode,
+            "_mcp": True,
         }
         with M._data_lock:
             M.tasks[task_id] = {
@@ -574,24 +586,18 @@ def _mcp_db_worker():
                 "message": "Waiting in line...",
                 "session_id": row["session_id"],
                 "mode": mode,
+                "_mcp": True,
                 "research": bool(row.get("research")),
-                "cpu": bool(row.get("cpu")),
+                "cpu": cpu_flagged,
                 "no_tools": bool(row.get("no_tools")),
             }
-        print(f"[mcp-db] posting start event for task {task_id}", flush=True)
-        M._event_post(
-            "start",
-            task_id,
-            sid=row["session_id"],
-            message=row["message"],
-            image=None,
-            audio=None,
-            user=MCP_USER,
-            client_timestamp=None,
-            research=bool(row.get("research")),
-            cpu=bool(row.get("cpu")),
-            no_tools=bool(row.get("no_tools")),
-        )
+        # Route through the owning lane's queue so MCP chat tasks are scheduled
+        # exactly like an interactive chat user (FIFO ordering, _current_task_ids
+        # bookkeeping for idle/RAM/thermal protection) rather than bypassing it.
+        print(f"[mcp-db] queuing task {task_id} on {mode} lane", flush=True)
+        with M._queue_locks[mode]:
+            M._task_queues[mode].append(entry)
+            M._queue_conds[mode].notify_all()
         print(f"[mcp-db] waiting for task {task_id} to complete", flush=True)
         while True:
             with M._data_lock:

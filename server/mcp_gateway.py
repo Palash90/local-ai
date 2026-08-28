@@ -385,6 +385,7 @@ VERIFY_TIMEOUT = 90
 
 async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
     from server.features.state import M
+    from server.features.monitoring import ensure_guardrail_ready
     from server.input_guard import _parse_verdict, _parse_strict_verdict
     import re as _re
 
@@ -394,8 +395,8 @@ async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
         print(f"[guardrail][L2] empty message, auto-passing")
         return True, ""
 
-    print(f"[guardrail][L2] ensuring {task_lane} server is running")
-    M.ensure_llama_server(task_lane)
+    print(f"[guardrail][L2] ensuring {task_lane} server is running (with model loaded)")
+    await asyncio.to_thread(ensure_guardrail_ready)
     print(f"[guardrail][L2] {task_lane} server ready")
 
     payload = {
@@ -408,32 +409,45 @@ async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
         "max_tokens": 400,
         "stream": False,
     }
+
+    async def _judge_call():
+        """POST the judge payload; return (reply_text_or_empty, error_string)."""
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    M.server_url(task_lane),
+                    json=payload,
+                    timeout=VERIFY_TIMEOUT,
+                )
+            if r.status_code != 200:
+                return "", f"HTTP {r.status_code}"
+            return (
+                r.json().get("choices", [{}])[0].get("message", {}).get("content", ""),
+                "",
+            )
+        except Exception as e:
+            return "", str(e)
+
     print(f"[guardrail][L2] calling {task_lane} LLM server at {M.server_url(task_lane)}")
     print(f"[guardrail][L2] input message: {text}")
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                M.server_url(task_lane),
-                json=payload,
-                timeout=VERIFY_TIMEOUT,
-            )
-        print(f"[guardrail][L2] got HTTP {r.status_code} from {task_lane} server")
-        if r.status_code != 200:
-            print(
-                f"[guardrail][L2] HTTP {r.status_code} from {task_lane} server at "
-                f"{M.server_base(task_lane)} — treating as HARMFUL (fail-closed)"
-            )
-            return False, f"LLM judge unavailable (HTTP {r.status_code})"
-        reply = (
-            r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        )
-    except Exception as e:
-        print(f"[guardrail][L2] call to {task_lane} lane failed: {e} — treating as HARMFUL (fail-closed)")
-        return False, f"LLM judge unavailable ({e})"
-
+    reply, err = await _judge_call()
     if not reply:
-        print(f"[guardrail][L2] empty response from {task_lane}")
-        return False, "LLM judge unavailable (empty response)"
+        # Availability failure (connection error / non-200 / empty reply): restart,
+        # wait for the model, and retry once before failing closed.
+        print(
+            f"[guardrail][L2] judge call unavailable ({err or 'empty'}) — "
+            "restarting judge & retrying once",
+            flush=True,
+        )
+        await asyncio.to_thread(ensure_guardrail_ready)
+        reply, err = await _judge_call()
+        if not reply:
+            print(
+                f"[guardrail][L2] judge still unavailable after restart "
+                f"({err or 'empty'}) — treating as HARMFUL (fail-closed)",
+                flush=True,
+            )
+            return False, f"LLM judge unavailable after restart ({err or 'empty'})"
 
     print(f"[guardrail][L2] raw verdict: {reply.strip()}")
     words = set(w for w in _re.findall(r"[A-Za-z']+", reply.upper())[:10])
@@ -663,7 +677,7 @@ async def send_chat_message(
     task_id = str(uuid.uuid4())
     print(f"[MCP] inserting task {task_id} into db for session {session_id}")
     mcp_task_insert(
-        task_id, session_id, message, mode="guardrail",
+        task_id, session_id, message, mode="gpu",
         research=research, cpu=cpu, no_tools=no_tools,
     )
     print(f"[MCP] task {task_id} inserted successfully")
