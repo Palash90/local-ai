@@ -437,14 +437,14 @@ async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
         except Exception as e:
             return "", "", str(e)
 
-    print(f"[guardrail][L2] calling {task_lane} LLM server at {M.server_url(task_lane)}")
-    print(f"[guardrail][L2] input message: {text}")
+    print(f"[guardrail] calling {task_lane} LLM server at {M.server_url(task_lane)}")
+    print(f"[guardrail] input message: {text}")
     reply, reasoning, err = await _judge_call()
     if not reply and reasoning:
         # Reasoning-only reply (reasoning consumed the token budget before the
         # verdict was emitted). Judge on the reasoning text instead of failing.
         print(
-            f"[guardrail][L2] empty content but reasoning present — "
+            f"[guardrail] empty content but reasoning present — "
             "judging on reasoning text"
         )
         reply = reasoning
@@ -462,7 +462,7 @@ async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
             reply = reasoning
         if not reply:
             print(
-                f"[guardrail][L2] judge still unavailable after restart "
+                f"[guardrail] judge still unavailable after restart "
                 f"({err or 'empty'}) — treating as HARMFUL (fail-closed)",
                 flush=True,
             )
@@ -475,9 +475,9 @@ async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
         print(f"[guardrail][L2] BLOCKED: found blocked token + strict verdict")
         return False, f"LLM judge: {reply.strip()}"
     if _parse_verdict(reply):
-        print(f"[guardrail][L2] BLOCKED: verdict triggered")
+        print(f"[guardrail] BLOCKED: verdict triggered")
         return False, f"LLM judge: {reply.strip()}"
-    print(f"[guardrail][L2] PASSED: message approved by LLM judge")
+    print(f"[guardrail] PASSED: message approved by LLM judge")
     return True, ""
 
 
