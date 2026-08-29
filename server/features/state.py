@@ -76,6 +76,45 @@ ACTIVE_WINDOW_SECONDS = 120
 _effective_contexts = {}
 _effective_contexts_lock = threading.Lock()
 
+# Per-session caches so the (large, stable) tool list and system prompt are not
+# rebuilt on every LLM round / user message. The tool cache is keyed by
+# ``(sid, is_agent)`` and invalidated via ``mcp_manager._tools_version`` (see
+# server/mcp_client.py). The system-prompt cache is keyed by ``sid`` and holds
+# the static skeleton (base prompt + user context + extra prompts) plus the
+# owning user and the ``base_block`` used to build it; the time/location/research/
+# token substitutions are applied at stamp time so they stay fresh.
+# ``invalidate_user_sys_cache`` drops the cached skeleton for every session of a
+# user after ``write_user_context`` (user context is per-user and may be shared
+# across several sessions).
+_tools_cache_per_session = {}
+_tools_cache_per_session_lock = threading.Lock()
+_sys_cache = {}
+_sys_cache_lock = threading.Lock()
+# Hard caps so these per-session caches cannot grow without bound on a
+# long-running server (sessions are never evicted elsewhere, so a cap is the
+# only backstop). Eviction drops the oldest entry; a live session simply
+# rebuilds its cache entry once, which is cheap.
+SYS_CACHE_MAX_ENTRIES = 2048
+TOOLS_CACHE_MAX_ENTRIES = 2048
+
+
+def invalidate_user_sys_cache(user):
+    """Drop cached system prompts for every session owned by ``user``.
+
+    Called after ``write_user_context`` because user context is per-user and may
+    be shared across several sessions.
+    """
+    if not user:
+        return
+    with _sys_cache_lock:
+        for sid, val in list(_sys_cache.items()):
+            # Defensive: tolerate any legacy/foreign payload shape; only the
+            # owning user (2nd element of the (extra_sig, user, skeleton,
+            # base_block) tuple) matters for invalidation.
+            if isinstance(val, tuple) and len(val) >= 2 and val[1] == user:
+                _sys_cache.pop(sid, None)
+
+
 _model_transition_lock = threading.Lock()
 _data_lock = threading.Lock()
 

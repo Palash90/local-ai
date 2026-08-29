@@ -21,6 +21,27 @@ class ServerConfig:
     env: Optional[Dict[str, str]] = None
 
 
+# Only these (read-only) MCP tool names are surfaced to the model and may be
+# dispatched. Everything else — e.g. mutating/indexing tools like
+# ``delete_project``, ``index_repository``, ``manage_adr``, ``ingest_traces`` —
+# is never advertised and is hard-blocked at call time so the LLM cannot perform
+# destructive operations on the codebase. Extend this list only for tools you
+# explicitly trust to be side-effect-free.
+MCP_READONLY_TOOL_NAMES = frozenset({
+    "search_graph",
+    "trace_path",
+    "check_index_coverage",
+    "detect_changes",
+    "query_graph",
+    "get_architecture",
+    "get_graph_schema",
+    "get_code_snippet",
+    "search_code",
+    "list_projects",
+    "index_status",
+})
+
+
 class MCPClientManager:
     """Manages connection lifecycles and tool execution across multiple MCP servers."""
     
@@ -29,6 +50,11 @@ class MCPClientManager:
         self.sessions: Dict[str, ClientSession] = {}
         self.transports: Dict[str, Any] = {}
         self._tools_cache: Dict[str, List[Dict[str, Any]]] = {}
+        # Bumped whenever tool definitions change so downstream per-session
+        # caches (see server/features/llm.py) can detect staleness.
+        self._tools_version = 0
+        # Cached OpenAI-formatted tool list, rebuilt only on refresh_tools().
+        self._openai_tools_cache: List[Dict[str, Any]] = []
 
     def load_configs(self) -> List[ServerConfig]:
         if not os.path.exists(self.config_path):
@@ -121,21 +147,18 @@ class MCPClientManager:
                 self._tools_cache[name] = tools
             except Exception as e:
                 print(f"[MCP] Error fetching tools from '{name}': {e}")
+        # Rebuild the cached OpenAI-formatted list once and bump the version so
+        # per-session tool caches invalidate.
+        self._openai_tools_cache = self._build_openai_tools()
+        self._tools_version += 1
 
-    def get_all_tools(self) -> List[Dict[str, Any]]:
-        all_tools = []
-        print("In get all_tools")
-        try:
-            for tools in self._tools_cache.values():
-                all_tools.extend(tools)
-        except Exception as e:
-            print(e)
-        return all_tools
-
-    def get_openai_tools(self):
+    def _build_openai_tools(self) -> List[Dict[str, Any]]:
         result = []
         for tools in self._tools_cache.values():
             for t in tools:
+                if t["raw_name"] not in MCP_READONLY_TOOL_NAMES:
+                    # Never advertise tools the model is not allowed to call.
+                    continue
                 result.append({
                     "type": "function",
                     "function": {
@@ -145,6 +168,37 @@ class MCPClientManager:
                     }
                 })
         return result
+
+    def is_mcp_tool(self, namespaced_tool: str) -> bool:
+        """True if ``namespaced_tool`` (e.g. ``server__tool``) names a read-only
+        tool served by a connected MCP server. Destructive tools are never
+        dispatchable regardless of connection state."""
+        raw = namespaced_tool.split("__", 1)[1] if "__" in namespaced_tool else namespaced_tool
+        if raw not in MCP_READONLY_TOOL_NAMES:
+            return False
+        if "__" in namespaced_tool:
+            server_name = namespaced_tool.split("__", 1)[0]
+            return server_name in self.sessions
+        return any(
+            t["raw_name"] == namespaced_tool
+            for tools in self._tools_cache.values()
+            for t in tools
+        )
+
+    def get_all_tools(self) -> List[Dict[str, Any]]:
+        all_tools = []
+        try:
+            for tools in self._tools_cache.values():
+                all_tools.extend(tools)
+        except Exception as e:
+            print(e)
+        return all_tools
+
+    def get_openai_tools(self):
+        # Returned list is built once per refresh_tools() (see _build_openai_tools)
+        # to avoid rebuilding the schemas on every LLM round. A copy is returned
+        # so no caller can mutate (and thereby corrupt) the shared cache.
+        return list(self._openai_tools_cache)
 
 
     async def call_tool(self, namespaced_tool: str, arguments: Dict[str, Any]) -> Any:
@@ -162,27 +216,45 @@ class MCPClientManager:
         if not session:
             raise RuntimeError(f"No active session for server '{server_name}'")
 
-        result = await session.call_tool(tool_name, arguments)
-        
-        # Format text payload out of response blocks
-        content_out = []
-        for block in result.content:
-            if hasattr(block, "text"):
-                content_out.append(block.text)
-            else:
-                content_out.append(str(block))
-        
-        full_text = "\n".join(content_out)
-        
-        # Enforce maximum character limit (e.g., 8,000 characters ~2,000 tokens)
-        MAX_CHARS = 8000
-        if len(full_text) > MAX_CHARS:
-            truncated_len = len(full_text) - MAX_CHARS
-            full_text = (
-                full_text[:MAX_CHARS] 
-                + f"\n\n[Output truncated: {truncated_len} characters omitted due to length limits.]"
+        # Hard block destructive MCP tools at execution time too, regardless of
+        # how the tool was referenced (defense in depth).
+        if tool_name not in MCP_READONLY_TOOL_NAMES:
+            raise RuntimeError(
+                f"MCP tool '{tool_name}' is not allowed (read-only allowlist)."
             )
 
+        result = await session.call_tool(tool_name, arguments)
+
+        # Stream the text blocks under a hard character budget instead of
+        # materializing the whole result and slicing afterward. This bounds the
+        # memory/pipe cost (a multi-MB search result never enters our context)
+        # and preserves whole leading snippets rather than cutting the head.
+        MAX_CHARS = 4000
+        content_out = []
+        total = 0
+        omitted = 0
+        for block in result.content:
+            text = block.text if hasattr(block, "text") else str(block)
+            if not text:
+                continue
+            if total + len(text) > MAX_CHARS:
+                # If nothing has been emitted yet, cap this (single oversized)
+                # block so one huge snippet can't evade the budget.
+                if not content_out:
+                    content_out.append(text[:MAX_CHARS])
+                    total = MAX_CHARS
+                omitted += 1
+                continue
+            content_out.append(text)
+            total += len(text)
+
+        full_text = "\n".join(content_out)
+        if omitted:
+            full_text += (
+                f"\n\n[Output truncated: {omitted} additional result block(s) omitted "
+                f"to keep within the {MAX_CHARS}-character limit. Narrow your query "
+                f"to retrieve fewer matches.]"
+            )
         return full_text
 
     async def close(self):

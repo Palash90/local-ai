@@ -106,6 +106,7 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 - Poll `GET /api/status/:task_id`: state machine `queued → (waiting) → … → done`, `message` updates, `response` present, `tools_used` when tools fired
 - Verify `GET /api/sessions/:id/messages` shows assistant msg + tool payloads
 - Repeat with an **agent** user (e.g. kolpo JWT) → confirm routing to CPU lane (task `mode:"cpu"`)
+  - **Note:** `server/config.py` ships with `FORCE_GPU_LANE = True` (test-time flag) — while set, agents also land on the GPU lane and the CPU server is not booted. Flip to `False` and restart before asserting agent→CPU.
 - Repeat with `free` non-agent user → GPU lane; verify a human never lands on CPU
 
 **B4. Queue/lane behavior**

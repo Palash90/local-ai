@@ -20,7 +20,7 @@ import time
 import requests
 import traceback
 
-from server.features.state import M
+from server.features.state import M, TOOLS_CACHE_MAX_ENTRIES
 from server.mcp_client import mcp_manager
 
 
@@ -101,12 +101,15 @@ def delete_session_kv(sid):
             cp = M._slot_checkpoints.get(mode)
             if cp and cp.get("session_id") == sid:
                 M._slot_checkpoints.pop(mode, None)
-            if ms == "chat_loaded" and M._active_slot_session.get(mode) == sid:
-                # The deleted session's KV is still resident in this lane's
-                # physical slot. If we just null the owner, the next session
-                # would inherit the stale prefix (contamination). Record the
-                # lane so we reload it below and wipe the slot immediately.
-                clear_modes.append(mode)
+            if M._active_slot_session.get(mode) == sid:
+                # Drop the ownership record so the next switch doesn't treat the
+                # deleted session as the previous owner (which would re-create its
+                # KV file / restore stale state). If the model is still loaded,
+                # the resident KV would also leak into the next session, so the
+                # slot is wiped via a reload below.
+                M._active_slot_session[mode] = None
+                if ms == "chat_loaded":
+                    clear_modes.append(mode)
     for mode in clear_modes:
         try:
             _reload_clear_slot(mode, restore_sid=sid, final_active=None)
@@ -356,13 +359,23 @@ def _reload_clear_slot(mode="gpu", restore_sid=None, final_active=None):
         # restore_sid's checkpoint file. Drop it BEFORE the reload so the load's
         # restore step finds nothing and the slot stays empty.
         _remove_session_kv_file(mode, restore_sid)
-    M.load_llama_model(mode)
+    try:
+        loaded = M.load_llama_model(mode)
+        if not loaded:
+            print(
+                f"[llama] reload-clear load failed for {mode}, retrying once..."
+            )
+            loaded = M.load_llama_model(mode)
+    finally:
+        # Always finalize ownership so the lane's bookkeeping stays consistent
+        # even if the load failed (the lane will be reloaded by idle/unload
+        # monitoring, and the next switch will find an empty slot).
+        with M._data_lock:
+            M._active_slot_session[mode] = final_active
     if restore_sid:
         # Belt-and-braces: nothing should regenerate it now, but clean any
         # leftover so a cleared slot never leaves a stale file behind.
         _remove_session_kv_file(mode, restore_sid)
-    with M._data_lock:
-        M._active_slot_session[mode] = final_active
 
 
 def _remove_session_kv_file(mode, sid):
@@ -850,16 +863,29 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         # Agents (Kaya/Kolpo pipeline) get the full tool set; humans never see
         # AGENT_ONLY_TOOLS (track_theme), saving its tokens on every turn.
         if task_user in M._agent_users:
-            wire_tools = M.TOOLS
+            base_tools = M.TOOLS
         else:
-            wire_tools = M.TOOLS_HUMAN
+            base_tools = M.TOOLS_HUMAN
 
-        print("before mcp tools call")
-        mcp_extras = mcp_manager.get_openai_tools()
-        print("after mcp tools call")
-
-        if mcp_extras:
-            wire_tools += list(wire_tools) + mcp_extras
+        # Per-session tool cache: the built-in + MCP tool list is stable within a
+        # session, but was previously rebuilt (and, due to `+=`, mutated the
+        # shared module-level list in place) on every LLM round — doubling the
+        # schemas each round once MCP tools existed. Build a fresh list once per
+        # session and reuse it; invalidate when the MCP tool set changes.
+        cache_key = (sid, task_user in M._agent_users)
+        with M._tools_cache_per_session_lock:
+            cached = M._tools_cache_per_session.get(cache_key)
+            if cached is not None and cached[0] == mcp_manager._tools_version:
+                wire_tools = cached[1]
+            else:
+                mcp_extras = mcp_manager.get_openai_tools()
+                tools = list(base_tools) + list(mcp_extras) if mcp_extras else list(base_tools)
+                M._tools_cache_per_session[cache_key] = (mcp_manager._tools_version, tools)
+                if len(M._tools_cache_per_session) > TOOLS_CACHE_MAX_ENTRIES:
+                    # Evict the oldest entries so the cache stays bounded.
+                    for _ in range(len(M._tools_cache_per_session) - TOOLS_CACHE_MAX_ENTRIES):
+                        M._tools_cache_per_session.pop(next(iter(M._tools_cache_per_session)), None)
+                wire_tools = tools
         # Sampling router: classify once on round 0, reuse for all rounds of
         # this task (stored under an underscore key so it stays private).
         with M._data_lock:

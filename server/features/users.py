@@ -94,3 +94,6 @@ def write_user_context(username, content):
         new_content = (existing.strip() + "\n\n" + entry) if existing.strip() else entry
         with open(path, "w") as f:
             f.write(new_content)
+        # User context is per-user and may be shared across multiple sessions;
+        # drop the cached system prompts so the next message reflects the update.
+        M.invalidate_user_sys_cache(username)

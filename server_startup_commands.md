@@ -49,7 +49,9 @@ nvidia-smi # To confirm the nvidia support
 nvcc --version # To verify nvcc
 ```
 
-There is a separate docker-compose.yaml file in the repo if you want a containerized setup.
+There is a separate docker-compose.yaml file in the repo for priority services
+(SearXNG + Nextcloud). The AI stack itself (ComfyUI, llama.cpp, chat-webui)
+runs directly on the host / container as shown above.
 
 Internet Toggle for container:
 
@@ -87,7 +89,24 @@ python main.py --lowvram --input-directory ~/local-ai-files/ComfyUI/input --outp
 Build step was there - read seup.sh
 
 ```shell
- ~/local-ai/llama.cpp/build/bin/llama-server --host 0.0.0.0 --port 8081 --models-dir ~/local-ai-files/my-models/ --n-gpu-layers 99 --no-kv-offload --ctx-size 16384 --reasoning-budget 2048
+# GPU server — interactive chat UI users (see server/config.py LLAMA_SERVER_ARGS)
+~/local-ai/llama.cpp/build/bin/llama-server --host 127.0.0.1 --port 8081 \
+  --models-dir ~/local-ai-files/my-models/ --jinja -ngl 99 -fa on \
+  --ctx-size 32768 -ctk q8_0 -ctv q8_0 --no-mmproj-offload -t 8 \
+  --cache-reuse 256 --slot-save-path ~/local-ai-files/kv-slots
+
+# CPU server — self-chat agents (LLAMA_SERVER_ARGS_CPU)
+~/local-ai/llama.cpp/build/bin/llama-server --host 127.0.0.1 --port 8079 \
+  --models-dir ~/local-ai-files/my-models/ --jinja --n-gpu-layers 0 -fa off \
+  --ctx-size 65536 -ctk q8_0 --no-mmproj-offload -t 6 --cache-reuse 256 \
+  --reasoning-budget 2048 --reasoning-budget-message "Reasoning limit reached, summarize final answer." \
+  --device none --slot-save-path ~/local-ai-files/kv-slots
+
+# Guardrail server — MCP L2/L3 verification (LLAMA_SERVER_ARGS_GUARDRAIL, lazy-start)
+~/local-ai/llama.cpp/build/bin/llama-server --host 127.0.0.1 --port 8083 \
+  --models-dir ~/local-ai-files/my-models/ --jinja --n-gpu-layers 0 -fa off \
+  --ctx-size 16384 -ctk q8_0 --no-mmproj-offload -t 4 --cache-reuse 256 \
+  --reasoning-budget 2048 --device none
 
 ```
 

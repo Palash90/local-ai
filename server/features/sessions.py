@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import datetime
 
-from server.features.state import M
+from server.features.state import M, SYS_CACHE_MAX_ENTRIES
 
 # Injected into the system prompt only when the UI's "research" toggle is on.
 RESEARCH_DIRECTIVE = """## Research Mode
@@ -255,10 +255,6 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         extra_prompts = meta.get("system_prompts", [])
         context_tokens = meta.get("context_tokens", {})
         system_prompt = meta.get("system_prompt", "")
-    user_context = M.read_user_context(user) if user else ""
-    context_block = (
-        f"\n\n<user_context>{user_context}</user_context>" if user_context else ""
-    )
     # A session created with its own system prompt (e.g. a self-chat agent
     # directive) uses it as the base instead of the global sys_prompt.txt.
     base_sys = system_prompt if system_prompt else M.SYS_CONTENT
@@ -269,16 +265,46 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         base_block = base_sys
     else:
         base_block = f"<system_prompt>\n{base_sys}\n</system_prompt>"
-    full_sys_content = (
-        f"{base_block}\n\n"
-        f"<current_info>\n{date_loc_context}\n</current_info>{context_block}"
-    )
-    for blk in extra_prompts:
-        name = blk.get("name", "System Prompt")
-        full_sys_content += (
-            f"\n\n<extra_prompt name=\"{name}\">\n{blk.get('content', '')}\n"
-            f"</extra_prompt>"
+
+    # Build and cache the STATIC system-prompt skeleton (base prompt + user
+    # context + extra prompts). The date/location block, research directive and
+    # the %current_time% / %current_location% / context_tokens substitutions are
+    # applied at stamp time below, so the (file-reading, string-joining) skeleton
+    # is built at most once per session and the dynamic bits stay fresh. The user
+    # context is deliberately folded into the skeleton (it is static between
+    # writes) and is only read on a cache miss; ``invalidate_user_sys_cache``
+    # drops the cached skeleton for every session of a user after
+    # ``write_user_context``, and the ``base_block`` is part of the cache key so
+    # a changed base prompt also forces a rebuild.
+    extra_sig = tuple((b.get("name"), b.get("content")) for b in extra_prompts)
+    cached = None
+    with M._sys_cache_lock:
+        cached = M._sys_cache.get(sid)
+    if cached is not None and len(cached) >= 4 and cached[0] == extra_sig and cached[1] == user and cached[3] == base_block:
+        skeleton = cached[2]
+    else:
+        user_context = M.read_user_context(user) if user else ""
+        context_block = (
+            f"\n\n<user_context>{user_context}</user_context>" if user_context else ""
         )
+        skeleton = (
+            f"{base_block}\n\n"
+            f"<current_info>\n%current_info%\n</current_info>{context_block}"
+        )
+        for blk in extra_prompts:
+            name = blk.get("name", "System Prompt")
+            skeleton += (
+                f"\n\n<extra_prompt name=\"{name}\">\n{blk.get('content', '')}\n"
+                f"</extra_prompt>"
+            )
+        with M._sys_cache_lock:
+            M._sys_cache[sid] = (extra_sig, user, skeleton, base_block)
+            if len(M._sys_cache) > SYS_CACHE_MAX_ENTRIES:
+                # Evict the oldest entries so the cache stays bounded.
+                for _ in range(len(M._sys_cache) - SYS_CACHE_MAX_ENTRIES):
+                    M._sys_cache.pop(next(iter(M._sys_cache)), None)
+
+    full_sys_content = skeleton.replace("%current_info%", date_loc_context)
     with M._data_lock:
         if M.tasks.get(task_id, {}).get("research"):
             full_sys_content += f"\n\n<research_mode>\n{RESEARCH_DIRECTIVE}\n</research_mode>"
@@ -295,10 +321,6 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
     for token, value in context_tokens.items():
         full_sys_content = full_sys_content.replace(token, value)
     image_url = _resolve_image_url(image_b64, user)
-    if user_context:
-        print(
-            f"[context] Injected {len(user_context)} chars of context for user '{user}'"
-        )
     with M._data_lock:
         if sid not in M.sessions or not M.sessions[sid]:
             M.sessions[sid] = [{"role": "system", "content": full_sys_content}]
