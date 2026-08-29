@@ -139,6 +139,7 @@ _tokens_lock = None
 active_users = None
 context_token_report = None
 create_share = None
+delete_session_kv = None
 get_share = None
 get_user_context_path = None
 handle_theme_tool = None
@@ -184,6 +185,7 @@ APP_STATE_NAMES = [
     "active_users",
     "context_token_report",
     "create_share",
+    "delete_session_kv",
     "get_share",
     "get_user_context_path",
     "handle_theme_tool",
@@ -629,6 +631,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if exists:
                     sessions.pop(sid, None)
                     sessions_meta.pop(sid, None)
+            if exists:
+                # Remove the session's KV-cache checkpoint(s), mirroring the
+                # image / file-upload cleanup above, so a deleted conversation's
+                # prefix never lingers or gets restored for a reused id.
+                try:
+                    delete_session_kv(sid)
+                except Exception as e:
+                    print(f"[delete] delete_session_kv error for {sid}: {e}")
             if exists:
                 with _effective_contexts_lock:
                     _effective_contexts.pop(sid, None)

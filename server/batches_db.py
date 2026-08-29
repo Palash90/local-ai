@@ -152,6 +152,7 @@ def item_update(batch_id, idx, **fields):
         "guardrail_blocked",
         "verification_level",
         "failure_reason",
+        "l3_judged_at",
     }
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:

@@ -341,4 +341,19 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
                 "..." if len(user_message) > 50 else ""
             )
         M.sessions_meta[sid]["updated"] = time.time()
+    # Session entry point: if a *different* session previously occupied this
+    # lane's KV slot, save its prefix to its own checkpoint and load this
+    # session's (if any). Handles the UI / MCP / OpenAI sessions sharing the
+    # GPU lane (and many self-chat sessions sharing the CPU / guardrail lanes)
+    # so none of them pollute or inherit each other's KV cache.
+    try:
+        mode = M.task_mode(task_id)
+        action = M.switch_session_kv(mode, sid)
+        if action == "reload-needed":
+            # The switch detected a different session's KV still resident in the
+            # slot but no checkpoint for this session — wipe the slot before it
+            # generates so it never attends over another conversation's prefix.
+            M._reload_clear_slot(mode, restore_sid=sid, final_active=sid)
+    except Exception as e:
+        print(f"[llama] switch_session_kv error at session start: {e}")
     M.save_sessions()

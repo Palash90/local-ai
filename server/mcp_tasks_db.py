@@ -48,7 +48,7 @@ def mcp_task_update(task_id, **fields):
     """Update arbitrary fields on an MCP task record."""
     allowed = {
         "status", "reply", "verification_level", "failure_reason",
-        "session_id",
+        "session_id", "l3_judged_at",
     }
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:

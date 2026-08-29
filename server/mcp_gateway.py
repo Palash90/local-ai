@@ -764,6 +764,7 @@ async def get_message_status(task_id: str) -> str:
         "failure_reason": row["failure_reason"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "l3_judged_at": row["l3_judged_at"] or 0,
     }
 
     with _data_lock:
@@ -983,11 +984,13 @@ async def _run_batch(batch_id):
                         verification_level="LEVEL 3 POST PROCESSING LLM VERIFICATION FAILED",
                         failure_reason=reason,
                         guardrail_blocked=1,
+                        l3_judged_at=int(time.time()),
                     )
                     continue
 
             item_update(
                 batch_id, it["index"], status="done", reply=reply,
+                l3_judged_at=int(time.time()) if reply else 0,
             )
         except Exception as e:
             item_update(
@@ -1253,6 +1256,7 @@ async def get_batch_results(
                 entry["verification_level"] = it["verification_level"]
             if it.get("failure_reason"):
                 entry["failure_reason"] = it["failure_reason"]
+            entry["l3_judged_at"] = it.get("l3_judged_at") or 0
         elif it["status"] == "error":
             entry["error"] = it["error"]
         else:

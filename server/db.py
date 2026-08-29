@@ -140,11 +140,17 @@ def _create_tables(conn):
         ("guardrail_blocked", "INTEGER DEFAULT 0"),
         ("verification_level", "TEXT DEFAULT ''"),
         ("failure_reason", "TEXT DEFAULT ''"),
+        ("l3_judged_at", "INTEGER DEFAULT 0"),
     ]:
         try:
             conn.execute(
                 f"ALTER TABLE mcp_batch_items ADD COLUMN {col} {typedef}"
             )
+        except sqlite3.OperationalError:
+            pass
+    for col, typedef in [("l3_judged_at", "INTEGER DEFAULT 0")]:
+        try:
+            conn.execute(f"ALTER TABLE mcp_tasks ADD COLUMN {col} {typedef}")
         except sqlite3.OperationalError:
             pass
     # Tracks one-time bookkeeping such as the legacy migration.

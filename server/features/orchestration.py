@@ -191,27 +191,34 @@ def _finalize_task(task_id, sid, msg_content, body):
             from server.mcp_tasks_db import mcp_task_update
             from server.input_guard import is_strict_output_blocked, mcp_output_judge
 
+            lane_tag = "guardrail" if mode == "guardrail" else "MCP"
             reply_text = msg_content or ""
-            print(f"[guardrail][L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}")
-            print(f"[guardrail][L3] msg_content={reply_text}")
+            print(f"[{lane_tag}-L3] verifying output for task {task_id} ({lane_tag} lane), len={len(reply_text)}, image_file={image_filename}")
+            print(f"[{lane_tag}-L3] msg_content={reply_text}")
 
-            print(f"[guardrail][L3] checking strict output blocks")
+            print(f"[{lane_tag}-L3] checking strict output blocks")
             blocked = is_strict_output_blocked(reply_text)
+            judge_blocked = None
             if not blocked and reply_text.strip():
                 # LLM strict judge (fail-closed; self-heals by restarting the
                 # guardrail server and retrying when the judge is unavailable).
-                blocked = mcp_output_judge(reply_text)
+                print(f"[{lane_tag}-L3] invoking LLM strict-output judge (input {len(reply_text)} chars)")
+                judge_blocked = mcp_output_judge(reply_text)
+                blocked = judge_blocked
+            now_ts = int(time.time())
             if blocked:
-                print(f"[guardrail][L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
+                print(f"[{lane_tag}-L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
                 mcp_task_update(task_id, status="done", reply=reply_text,
                               verification_level="LEVEL 3 OUTPUT VERIFICATION FAILED",
-                              failure_reason="Output blocked by strict filter")
+                              failure_reason="Output blocked by strict filter",
+                              l3_judged_at=now_ts)
             else:
-                print(f"[guardrail][L3] PASSED: output approved by strict filter")
+                print(f"[{lane_tag}-L3] PASSED: output approved by strict filter")
                 mcp_task_update(task_id, status="done", reply=reply_text,
-                              verification_level="LEVEL 3 OUTPUT VERIFICATION PASSED")
+                              verification_level="LEVEL 3 OUTPUT VERIFICATION PASSED",
+                              l3_judged_at=now_ts)
         except Exception as e:
-            print(f"[guardrail][L3] error during output verification: {e}")
+            print(f"[L3] error during output verification: {e}")
             pass
 
 

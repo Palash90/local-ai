@@ -153,6 +153,13 @@ _slot_checkpoints = {}
 # changed) and cleared once that KV is captured by save/restore. Gates whether
 # an unload snapshots the slot again.
 _slot_kv_dirty = {"gpu": False, "cpu": False, "guardrail": False}
+# Per-lane id of the session whose KV currently occupies the physical slot.
+# Only one conversation fits in a slot at a time (--parallel 1), so when a
+# different session starts on the same lane the previous session's KV must be
+# saved to its own named checkpoint before the new one is restored. This map
+# tracks which session currently "owns" the slot so save/load-on-switch knows
+# whether a transition actually happened. None = no session tracked yet.
+_active_slot_session = {"gpu": None, "cpu": None, "guardrail": None}
 _client_location = None
 _overheated = False
 _gpu_temp = None
