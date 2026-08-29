@@ -82,7 +82,7 @@ guardrail only if needed) and starts ComfyUI on demand. Manual equivalents:
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 127.0.0.1 --port 8081 \
     --models-dir ~/local-ai-files/my-models/ \
-    --jinja -ngl 99 -fa on --ctx-size 32768 -ctk q8_0 -ctv q8_0 \
+    --jinja -ngl 99 -fa on --ctx-size 24576 -ctk q8_0 -ctv q8_0 \
     --no-mmproj-offload -t 8 --cache-reuse 256 \
     --slot-save-path ~/local-ai-files/kv-slots
 
@@ -300,7 +300,7 @@ graph TD
     end
 
     subgraph RCLlama ["llama-server Args (three concurrent servers)"]
-        RCL1["GPU: --port 8081 -ngl 99 -fa on\n--ctx-size 32768 -t 8\n-ctk q8_0 -ctv q8_0"]
+        RCL1["GPU: --port 8081 -ngl 99 -fa on\n--ctx-size 24576 -t 8\n-ctk q8_0 -ctv q8_0"]
         RCL2["CPU: --port 8079 --n-gpu-layers 0 -fa off\n--ctx-size 65536 -t 6\n--reasoning-budget 2048\n--device none -ctk q8_0"]
         RCL3["GUARDRAIL: --port 8083 --n-gpu-layers 0\n--ctx-size 16384 -t 4\n--reasoning-budget 2048"]
         RCL4["all: --models-dir ~/local-ai-files/my-models/"]
@@ -319,7 +319,7 @@ graph TD
 
     subgraph RCLimits ["Limits and Pools"]
         RL1["MAX_QUEUE_SIZE = 15 (per lane)"]
-        RL2["MAX_INPUT_TOKENS = 32768\nAUTO_COMPACT_THRESHOLD = 70% of ctx"]
+        RL2["MAX_INPUT_TOKENS = 24576\nAUTO_COMPACT_THRESHOLD = 70% of ctx"]
         RL3["MAX_TOOL_ROUNDS = 10 default / 50 research"]
         RL4["_llm_pools: gpu 1 / cpu 4 / guardrail 1\n(CPU_PARALLEL_SLOTS = 4)"]
         RL5["_tool_pools: gpu 2 / cpu 2 / guardrail 2"]

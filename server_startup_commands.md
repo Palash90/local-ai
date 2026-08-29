@@ -92,7 +92,7 @@ Build step was there - read seup.sh
 # GPU server — interactive chat UI users (see server/config.py LLAMA_SERVER_ARGS)
 ~/local-ai/llama.cpp/build/bin/llama-server --host 127.0.0.1 --port 8081 \
   --models-dir ~/local-ai-files/my-models/ --jinja -ngl 99 -fa on \
-  --ctx-size 32768 -ctk q8_0 -ctv q8_0 --no-mmproj-offload -t 8 \
+  --ctx-size 24576 -ctk q8_0 -ctv q8_0 --no-mmproj-offload -t 8 \
   --cache-reuse 256 --slot-save-path ~/local-ai-files/kv-slots
 
 # CPU server — self-chat agents (LLAMA_SERVER_ARGS_CPU)
