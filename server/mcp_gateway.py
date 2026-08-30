@@ -47,12 +47,15 @@ try:
         HARMFUL_DECLINE,
         is_harmful_content,
         is_strict_output_blocked,
-        llm_classify_harmful,
-        llm_classify_harmful_output,
         is_harmful_request,
         is_jailbreak_attempt,
-        mcp_output_judge,
         wrap_user_message,
+    )
+    from server.features.judge import (
+        llm_classify_harmful,
+        llm_classify_harmful_output,
+        mcp_output_judge,
+        resolve_judge_model,
     )
     from server.mcp_tasks_db import (
         mcp_task_insert,
@@ -64,7 +67,6 @@ try:
         _data_lock as _data_lock,
     )
     from server.config import SELF_CHAT_MODE
-    from server.features.judge import resolve_judge_model
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from server.auth import identity_from_bearer, oidc_password_grant
@@ -90,12 +92,15 @@ except ImportError:
         HARMFUL_DECLINE,
         is_harmful_content,
         is_strict_output_blocked,
-        llm_classify_harmful,
-        llm_classify_harmful_output,
         is_harmful_request,
         is_jailbreak_attempt,
-        mcp_output_judge,
         wrap_user_message,
+    )
+    from server.features.judge import (
+        llm_classify_harmful,
+        llm_classify_harmful_output,
+        mcp_output_judge,
+        resolve_judge_model,
     )
     from server.mcp_tasks_db import (
         mcp_task_insert,
@@ -401,7 +406,7 @@ async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str 
     from server.features.state import M
     from server.features.monitoring import ensure_guardrail_ready
     from server.features.judge import sanitize_judge_model
-    from server.input_guard import _parse_verdict, _parse_strict_verdict
+    from server.features.judge import _parse_verdict, _parse_strict_verdict
     import re as _re
 
     task_lane = "guardrail"
@@ -713,7 +718,7 @@ async def send_chat_message(
     print(f"[guardrail][L1] harmful check passed")
 
     print(f"[guardrail][L2] running LLM verification on guardrail lane...")
-    from server.input_guard import _judge_system
+    from server.features.judge import _judge_system
     judge_model = resolve_judge_model(_request_username(ctx))
     passed, reason = await _run_llm_verify(
         message, _judge_system(), model_id=judge_model
@@ -917,7 +922,7 @@ async def _run_batch(batch_id):
                 )
                 continue
 
-            from server.input_guard import _judge_system
+            from server.features.judge import _judge_system
             passed, reason = await _run_llm_verify(
                 prompt, _judge_system(), model_id=batch_judge_model
             )
@@ -997,7 +1002,7 @@ async def _run_batch(batch_id):
                 pass
 
             if reply:
-                from server.input_guard import _strict_judge_system
+                from server.features.judge import _strict_judge_system
                 passed, reason = await _run_llm_verify(
                     reply, _strict_judge_system(), model_id=batch_judge_model
                 )

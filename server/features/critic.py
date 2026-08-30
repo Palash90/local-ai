@@ -12,6 +12,14 @@ The pass is always-on for research tasks (no separate toggle) and bounded only
 per-citation: at most ``VERIFY_RETRIES`` extra search/fetch attempts per
 citation, so a pathological report can never loop forever while keeping the
 "no overall cap" behaviour.
+
+On top of the deterministic + critic checks, the finished answer is also passed
+to the LLM judge (:func:`server.features.judge.llm_verify_research_answer`)
+together with the user's original question, because citations are mandatory on
+the research surface: the judge surfaces citation-free / off-topic replies and
+screens the answer as generated output. That verdict is transcribed into the
+same verification trail (``JUDGE`` entry); it is informational, never a hard
+gate.
 """
 
 import json
@@ -393,6 +401,7 @@ def _build_verification_block(verdicts):
         "UNVERIFIABLE": "✗",
         "AMBIGUOUS": "⚠",
         "UNCHECKED": "∅",
+        "JUDGE": "⚖",
     }
     lines = [_TAGLINE]
     for v in verdicts:
@@ -402,6 +411,60 @@ def _build_verification_block(verdicts):
         lines.append(f"{symbol} {v['url']}{note}")
     lines.append("</details>")
     return "\n".join(lines)
+
+
+def _judge_research_answer(task_id, answer):
+    """Optional LLM judge pass over the finished research answer, in context of
+    the user's original question — citations are mandatory on the research
+    surface. Best-effort: any failure yields no verdict and never blocks
+    delivery; the result becomes one transparent ``JUDGE`` item in the
+    verification trail, not a hard gate."""
+    try:
+        from server.features.judge import llm_verify_research_answer
+    except Exception as e:
+        print(f"[critic] research-answer judge unavailable: {e}")
+        return None
+    with M._data_lock:
+        user_input = (M.tasks.get(task_id) or {}).get("_original_message", "")
+    try:
+        result = llm_verify_research_answer(user_input, answer)
+    except Exception as e:
+        print(f"[critic] research-answer judge call failed: {e}")
+        return None
+    if not result:
+        return None
+    if result.get("unsafe"):
+        note = "LLM judge flagged the answer as unsafe"
+    elif result.get("ok"):
+        note = "LLM judge: answer addresses the question with inline citations"
+    elif result.get("citations") is False:
+        note = "LLM judge: answer lacks mandatory inline citations"
+    else:
+        note = "LLM judge reply not recognized — review"
+    return {
+        "url": "",
+        "meta": None,
+        "action": "JUDGE",
+        "note": note,
+        "corrected_meta": None,
+        "reason": result.get("reason"),
+        "model": result.get("model"),
+    }
+
+
+def _finalize_verdicts(task_id, answer, verdicts):
+    """Append the LLM research-answer judge verdict, then attach the
+    verification trail. Returns (answer, verdicts)."""
+    with M._data_lock:
+        t = M.tasks.get(task_id) or {}
+    if t.get("research") and answer:
+        jv = _judge_research_answer(task_id, answer)
+        if jv:
+            verdicts.append(jv)
+    block = _build_verification_block(verdicts)
+    if block:
+        answer = answer.rstrip() + block
+    return answer, verdicts
 
 
 def run_verification(task_id, sid, answer, mode="gpu"):
@@ -419,7 +482,7 @@ def run_verification(task_id, sid, answer, mode="gpu"):
     paras = re.split(r"\s*\n\s*\n\s*", answer)
     citations = extract_citations(answer)
     if not citations:
-        return answer, verdicts
+        return _finalize_verdicts(task_id, answer, verdicts)
 
     # Deterministic anti-fabrication gate, computed ONCE per task: the set of
     # URLs the agent genuinely retrieved, and per-URL usage so a single source
@@ -492,10 +555,7 @@ def run_verification(task_id, sid, answer, mode="gpu"):
             paras[idx] = "".join(parts)
         answer = "\n\n".join(paras)
 
-    block = _build_verification_block(verdicts)
-    if block:
-        answer = answer.rstrip() + block
-    return answer, verdicts
+    return _finalize_verdicts(task_id, answer, verdicts)
 
 
 def run_verification_worker(task_id, sid, answer, body, mode):

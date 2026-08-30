@@ -189,8 +189,8 @@ def _finalize_task(task_id, sid, msg_content, body):
     if mode == "guardrail" or t.get("_mcp"):
         try:
             from server.mcp_tasks_db import mcp_task_update
-            from server.input_guard import is_strict_output_blocked, mcp_output_judge
-            from server.features.judge import resolve_judge_model
+            from server.input_guard import is_strict_output_blocked
+            from server.features.judge import mcp_output_judge, resolve_judge_model
 
             reply_text = msg_content or ""
             print(f"[guardrail][L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}")
