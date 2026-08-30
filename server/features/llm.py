@@ -337,8 +337,14 @@ def _is_vram_occupied(threshold_mb=500):
         return False
 
 
-def unload_llama_model(mode="gpu"):
-    """Unload the model from the llama-server for ``mode``."""
+def unload_llama_model(mode="gpu", model_id=None):
+    """Unload the model from the llama-server for ``mode``.
+
+    For the guardrail lane ``model_id`` defaults to whichever judge is
+    currently resident (``_guardrail_loaded_model``), so idle-unload always
+    releases the right per-user judge. KV slot checkpointing is skipped for
+    the guardrail lane: judge calls are stateless single-shots.
+    """
     current_status = M.server_status(mode)
     print(f"[llama] unload_llama_model called: mode={mode}, current_status={current_status}")
     with M._model_transition_lock:
@@ -358,7 +364,8 @@ def unload_llama_model(mode="gpu"):
         # re-prefilling the whole conversation. This must happen while the
         # model still reads "chat_loaded" — save_slot_checkpoint skips
         # anything else — hence before the "unloading" transition below.
-        save_slot_checkpoint(mode)
+        if mode != "guardrail":
+            save_slot_checkpoint(mode)
         
         with M._data_lock:
             if mode == "cpu":
@@ -369,7 +376,12 @@ def unload_llama_model(mode="gpu"):
                 M.model_status = "unloading"
 
         url = f"{M.server_base(mode)}/models/unload"
-        model_id = M.server_model_id(mode)
+        if mode == "guardrail":
+            with M._data_lock:
+                loaded = M._guardrail_loaded_model
+            model_id = (model_id or "").strip() or loaded or M.server_model_id(mode)
+        else:
+            model_id = (model_id or "").strip() or M.server_model_id(mode)
         max_attempts = 2
         for attempt in range(1, max_attempts + 1):
             print(f"[llama] Unload POST to {url} with model={model_id} (attempt {attempt}/{max_attempts})")
@@ -387,6 +399,7 @@ def unload_llama_model(mode="gpu"):
                             M._cpu_model_status = "unloaded"
                         elif mode == "guardrail":
                             M._guardrail_model_status = "unloaded"
+                            M._guardrail_loaded_model = ""
                         else:
                             M.model_status = "unloaded"
                     # The POST returns 200 before VRAM is actually freed
@@ -418,13 +431,16 @@ def unload_llama_model(mode="gpu"):
         return False
 
 
-def load_llama_model(mode="gpu"):
+def load_llama_model(mode="gpu", model_id=None):
     """Load the model on the llama-server for ``mode`` and wait for it to be
     ready, tracking the per-server model status and idle timestamp.
 
     When the load follows an unload (image generation, idle release), the KV
     checkpoint saved by :func:`save_slot_checkpoint` is restored so the next
-    completion only has to evaluate new tokens."""
+    completion only has to evaluate new tokens. The guardrail lane is exempt:
+    judge calls are stateless single-shots, and per-user judges may differ
+    from ``MODEL_ID_GUARDRAIL``, so a cached KV snapshot never applies.
+    """
     with M._model_transition_lock:
         with M._data_lock:
             # Only a fresh load benefits from a restore: if the model is already
@@ -440,8 +456,31 @@ def load_llama_model(mode="gpu"):
             else:
                 was_unloaded = M.model_status == "unloaded"
                 M.model_status = "loading"
-        model_id = M.server_model_id(mode)
+        model_id = (model_id or "").strip() or M.server_model_id(mode)
         base = M.server_base(mode)
+
+        if mode == "guardrail":
+            # A different judge is resident (per-user swap): release it first
+            # so two judges never stack on the CPU server. Equal id = no-op.
+            with M._data_lock:
+                resident = M._guardrail_loaded_model
+            if resident and resident != model_id:
+                print(
+                    f"[llama] guardrail judge swap: unloading '{resident}' "
+                    f"before loading '{model_id}'",
+                    flush=True,
+                )
+                try:
+                    requests.post(
+                        f"{base}/models/unload",
+                        json={"model": resident},
+                        timeout=60,
+                    )
+                except Exception as e:
+                    print(f"[llama] guardrail pre-swap unload error: {e}")
+                with M._data_lock:
+                    M._guardrail_loaded_model = ""
+
         url = f"{base}/models/load"
         t_start = time.time()
         print(f"[llama] Sending load request for model '{model_id}' to {url}...")
@@ -464,10 +503,11 @@ def load_llama_model(mode="gpu"):
                             elif mode == "guardrail":
                                 M._guardrail_model_status = "chat_loaded"
                                 M._guardrail_last_llm_use = time.time()
+                                M._guardrail_loaded_model = model_id
                             else:
                                 M.model_status = "chat_loaded"
                                 M._last_llm_use = time.time()
-                        if was_unloaded:
+                        if was_unloaded and mode != "guardrail":
                             t_restore_start = time.time()
                             M.restore_slot_checkpoint(mode)
                             t_restore = time.time() - t_restore_start
@@ -494,10 +534,11 @@ def load_llama_model(mode="gpu"):
                 elif mode == "guardrail":
                     M._guardrail_model_status = "chat_loaded"
                     M._guardrail_last_llm_use = time.time()
+                    M._guardrail_loaded_model = model_id
                 else:
                     M.model_status = "chat_loaded"
                     M._last_llm_use = time.time()
-            if was_unloaded:
+            if was_unloaded and mode != "guardrail":
                 M.restore_slot_checkpoint(mode)
             return True
 
@@ -506,6 +547,7 @@ def load_llama_model(mode="gpu"):
                 M._cpu_model_status = "unloaded"
             elif mode == "guardrail":
                 M._guardrail_model_status = "unloaded"
+                M._guardrail_loaded_model = ""
             else:
                 M.model_status = "unloaded"
         return False

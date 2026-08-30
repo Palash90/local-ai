@@ -143,6 +143,10 @@ _cpu_last_llm_use = time.time()
 
 _guardrail_model_status = "unloaded"
 _guardrail_last_llm_use = time.time()
+# The judge model_id currently resident on the guardrail server ("" = none /
+# the default is not yet known). Per-user judges swap this in/out; keeping the
+# loaded id lets a repeated request for the same judge skip the reload churn.
+_guardrail_loaded_model = ""
 
 # KV-cache slot checkpoints per llama-server lane (see llm.py). Maps mode →
 # {"file": str, "model": str, "ts": float, "n_tokens": int} describing the

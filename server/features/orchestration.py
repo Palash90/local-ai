@@ -190,6 +190,7 @@ def _finalize_task(task_id, sid, msg_content, body):
         try:
             from server.mcp_tasks_db import mcp_task_update
             from server.input_guard import is_strict_output_blocked, mcp_output_judge
+            from server.features.judge import resolve_judge_model
 
             reply_text = msg_content or ""
             print(f"[guardrail][L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}")
@@ -200,7 +201,10 @@ def _finalize_task(task_id, sid, msg_content, body):
             if not blocked and reply_text.strip():
                 # LLM strict judge (fail-closed; self-heals by restarting the
                 # guardrail server and retrying when the judge is unavailable).
-                blocked = mcp_output_judge(reply_text)
+                blocked = mcp_output_judge(
+                    reply_text,
+                    model_id=resolve_judge_model(os.environ.get("MCP_USER", "")),
+                )
             if blocked:
                 print(f"[guardrail][L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
                 mcp_task_update(task_id, status="done", reply=reply_text,

@@ -135,6 +135,15 @@ def _create_tables(conn):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_judges (
+            username TEXT PRIMARY KEY,
+            model_id TEXT NOT NULL,
+            updated_at INTEGER DEFAULT 0
+        )
+        """
+    )
     # Columns may already exist on databases created before these migrations.
     for col, typedef in [
         ("guardrail_blocked", "INTEGER DEFAULT 0"),

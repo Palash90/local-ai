@@ -26,6 +26,8 @@ import re
 import unicodedata
 from pathlib import Path
 
+from server.features.judge import sanitize_judge_model
+
 log = logging.getLogger(__name__)
 
 GUARDRAIL_DECLINE = "I cannot fulfill this request."
@@ -271,7 +273,7 @@ def _chat_model_id():
         return ""
 
 
-def _judge_candidates(base_url):
+def _judge_candidates(base_url, forced=None):
     """Ordered list of model ids to try for judging on ``base_url``.
 
     Constraints discovered the hard way:
@@ -284,11 +286,12 @@ def _judge_candidates(base_url):
       the chat model itself.
 
     So the order below never allocates when avoidable:
-      1. GUARD_LLM_MODEL env override
-      2. a model ALREADY LOADED on the endpoint (zero VRAM churn)
-      3. the chat model id (warms exactly what generation will use next)
-      4. whatever else the endpoint lists
-    The winner is cached per endpoint; failures fall through to the next
+      1. ``forced`` (per-user/per-call judge model id, if provided)
+      2. GUARD_LLM_MODEL env override
+      3. a model ALREADY LOADED on the endpoint (zero VRAM churn)
+      4. the chat model id (warms exactly what generation will use next)
+      5. whatever else the endpoint lists
+    The winner is cached per endpoint+model; failures fall through to the next
     candidate and clear the cache so it is re-probed later.
     """
     ids, loaded = [], []
@@ -307,6 +310,9 @@ def _judge_candidates(base_url):
         pass
 
     out = []
+    requested = (forced or "").strip()
+    if requested:
+        out.append(requested)
     forced = os.environ.get("GUARD_LLM_MODEL", "").strip()
     if forced:
         out.append(forced)
@@ -329,13 +335,14 @@ def _judge_max_tokens():
         return 2048
 
 
-def ensure_judge_ready(base_url):
-    """Bring the guardrail LLM judge server up with its model loaded.
+def ensure_judge_ready(base_url, model_id=None):
+    """Bring the guardrail LLM judge server up with the requested model loaded.
 
     Only acts when ``base_url`` points at the guardrail server (the default
     for all judge calls); other endpoints are left untouched. The real work is
     done by :func:`server.features.monitoring.ensure_guardrail_ready`, which
     restarts the process if down, loads the model, and waits until it serves.
+    ``model_id`` may be a per-user judge; defaults to the configured judge.
     Best-effort: failures are logged, never raised.
     """
     try:
@@ -346,20 +353,22 @@ def ensure_judge_ready(base_url):
         return
     try:
         from server.features.monitoring import ensure_guardrail_ready
-        ensure_guardrail_ready()
+        ensure_guardrail_ready(model_id=model_id)
     except Exception as e:
         print(f"[guardrail][judge] ensure_judge_ready failed: {e}")
 
 
 def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
-               max_chars=2000):
+               max_chars=2000, model_id=None):
     """Shared judge plumbing: POST the classify prompt, log exactly what was
     passed and what came back, apply fail-open/fail-closed policy.
 
     Tries candidate models in order (see :func:`_judge_candidates`) and
     caches whichever one answers, so steady-state calls hit a single model
-    with zero load/unload churn. Returns True only for an affirmative
-    HARMFUL verdict.
+    with zero load/unload churn. ``model_id`` pins the judge (e.g. a per-user
+    judge) and is tried first; on the guardrail server an unavailable pinned
+    judge is (re)loaded via ``ensure_judge_ready`` before the retry. Returns
+    True only for an affirmative HARMFUL verdict.
     """
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         # Must cover a COLD model load (~25s) plus thinking-model inference;
@@ -374,7 +383,7 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
         return False
     print(
         f"[guardrail][{label}] -> {base_url} fail_closed={fail_closed} "
-        f"text={text!r}"
+        f"model={model_id or 'auto'} text={text!r}"
     )
     try:
         import requests
@@ -382,10 +391,16 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
         print(f"[guardrail][{label}] requests unavailable: {e}")
         return fail_closed
 
-    cached = _JUDGE_MODEL_CACHE.get(base_url)
+    model_id = sanitize_judge_model(model_id, base_url)
+
+    cache_key = (base_url, (model_id or "").strip())
+    cached = _JUDGE_MODEL_CACHE.get(cache_key)
     candidates = list(cached) if isinstance(cached, list) else (
         [cached] if cached else None
-    ) or _judge_candidates(base_url)
+    ) or _judge_candidates(base_url, forced=model_id)
+
+    if (model_id or "").strip():
+        ensure_judge_ready(base_url, model_id=model_id)
 
     max_tokens = _judge_max_tokens()
     last_err = ""
@@ -439,7 +454,7 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
                     f"[guardrail][{label}] model={cand} "
                     f"verdict={'HARMFUL' if verdict else 'SAFE'} raw={raw}"
                 )
-                _JUDGE_MODEL_CACHE[base_url] = [cand] + [
+                _JUDGE_MODEL_CACHE[cache_key] = [cand] + [
                     c for c in candidates if c != cand
                 ]
                 return verdict
@@ -451,13 +466,13 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
                 "guardrail server & retrying once",
                 flush=True,
             )
-            ensure_judge_ready(base_url)
-            _JUDGE_MODEL_CACHE.pop(base_url, None)
+            ensure_judge_ready(base_url, model_id=model_id)
+            _JUDGE_MODEL_CACHE.pop(cache_key, None)
             continue
         break
 
     # Every candidate failed; forget the ordering so it is re-probed later.
-    _JUDGE_MODEL_CACHE.pop(base_url, None)
+    _JUDGE_MODEL_CACHE.pop(cache_key, None)
     print(
         f"[guardrail][{label}] all {len(candidates)} judge model(s) failed "
         f"({last_err}) — treating as "
@@ -466,7 +481,8 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
     return fail_closed
 
 
-def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=False):
+def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=False,
+                                model_id=None):
     """Return True if an LLM judge classifies generated ``text`` as harmful
     how-to content.
 
@@ -474,12 +490,13 @@ def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=Fal
     run against the model's own reply (the single-message read path and the
     batch worker) so that completions which comply with a harmful request are
     caught even when the prompt itself dodged the input filters. Synchronous;
-    ``fail_closed`` mirrors :func:`llm_classify_harmful`.
+    ``fail_closed`` mirrors :func:`llm_classify_harmful`. ``model_id`` pins a
+    per-user judge.
     """
     base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     return _run_judge(
         "output-judge", _judge_output_system(), text, base_url, timeout,
-        fail_closed, max_chars=4000,
+        fail_closed, max_chars=4000, model_id=model_id,
     )
 
 
@@ -508,14 +525,14 @@ def _parse_strict_verdict(content):
     return True
 
 
-def mcp_output_judge(text, timeout=None, fail_closed=True):
+def mcp_output_judge(text, timeout=None, fail_closed=True, model_id=None):
     """Final end-of-pipe strict judge for ALL MCP outputs.
 
     Return True if the text must be BLOCKED.  This function is the absolute
     last line of defence: it is called after pattern scans and the existing
     output judge, and covers ALL prohibited categories plus prompt/input
     leaking.  ``fail_closed`` defaults to True — if the judge model is down
-    or errors, the output is BLOCKED.
+    or errors, the output is BLOCKED. ``model_id`` pins a per-user judge.
 
     The text is truncated to 6000 chars before judging to stay within the
     judge model's context window while still covering the bulk of the output.
@@ -531,7 +548,7 @@ def mcp_output_judge(text, timeout=None, fail_closed=True):
         return False
     print(
         f"[guardrail][strict-output-judge] -> {base_url} "
-        f"fail_closed={fail_closed} text={text!r}"
+        f"fail_closed={fail_closed} model={model_id or 'auto'} text={text!r}"
     )
     try:
         import requests as _requests
@@ -539,10 +556,16 @@ def mcp_output_judge(text, timeout=None, fail_closed=True):
         print(f"[guardrail][strict-output-judge] requests unavailable: {e}")
         return fail_closed
 
-    cached = _JUDGE_MODEL_CACHE.get(base_url)
+    model_id = sanitize_judge_model(model_id, base_url)
+
+    cache_key = (base_url, (model_id or "").strip())
+    cached = _JUDGE_MODEL_CACHE.get(cache_key)
     candidates = list(cached) if isinstance(cached, list) else (
         [cached] if cached else None
-    ) or _judge_candidates(base_url)
+    ) or _judge_candidates(base_url, forced=model_id)
+
+    if (model_id or "").strip():
+        ensure_judge_ready(base_url, model_id=model_id)
 
     max_tokens = _judge_max_tokens()
     last_err = ""
@@ -596,7 +619,7 @@ def mcp_output_judge(text, timeout=None, fail_closed=True):
                     f"[guardrail][strict-output-judge] model={cand} "
                     f"verdict={'BLOCKED' if verdict else 'SAFE'} raw={raw}"
                 )
-                _JUDGE_MODEL_CACHE[base_url] = [cand] + [
+                _JUDGE_MODEL_CACHE[cache_key] = [cand] + [
                     c for c in candidates if c != cand
                 ]
                 return verdict
@@ -608,12 +631,12 @@ def mcp_output_judge(text, timeout=None, fail_closed=True):
                 "ensuring guardrail server & retrying once",
                 flush=True,
             )
-            ensure_judge_ready(base_url)
-            _JUDGE_MODEL_CACHE.pop(base_url, None)
+            ensure_judge_ready(base_url, model_id=model_id)
+            _JUDGE_MODEL_CACHE.pop(cache_key, None)
             continue
         break
 
-    _JUDGE_MODEL_CACHE.pop(base_url, None)
+    _JUDGE_MODEL_CACHE.pop(cache_key, None)
     print(
         f"[guardrail][strict-output-judge] all {len(candidates)} judge model(s) "
         f"failed ({last_err}) — BLOCKED (fail-closed)"
@@ -621,17 +644,20 @@ def mcp_output_judge(text, timeout=None, fail_closed=True):
     return fail_closed
 
 
-def llm_classify_harmful(text, timeout=20, fail_closed=False):
+def llm_classify_harmful(text, base_url=None, timeout=None, fail_closed=False,
+                         model_id=None):
     """Return True if an LLM judge classifies ``text`` as a harmful request.
 
     Synchronous (uses requests). ``fail_closed`` controls behaviour when the
     judge is unreachable or errors: when True the request is treated as
     harmful (blocked) so a missing/unavailable judge can never silently let
     dangerous traffic through; when False it degrades to the pattern layer.
+    ``model_id`` pins a per-user judge.
     """
-    base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
+    base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     return _run_judge(
         "input-judge", _judge_system(), text, base_url, timeout, fail_closed,
+        model_id=model_id,
     )
 
 

@@ -113,6 +113,7 @@ from server.features.state import (  # noqa: E402
     _cpu_model_status,
     _guardrail_last_llm_use,
     _guardrail_model_status,
+    _guardrail_loaded_model,
     _current_task_ids,
     _data_lock,
     _effective_contexts,
