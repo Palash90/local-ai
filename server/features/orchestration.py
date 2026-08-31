@@ -130,7 +130,6 @@ def _finalize_task(task_id, sid, msg_content, body):
         verification = t.get("_verification")
         verification_duration = t.get("_verification_duration")
         judge_result = t.get("_judge_result")
-        input_quality = t.get("_request_quality")
     image_url = f"/output/{image_filename}" if image_filename else None
     if image_url:
         print(f"[finalize] image_file='{image_filename}' → image_url='{image_url}' for task {task_id}")  # DEBUG
@@ -164,8 +163,6 @@ def _finalize_task(task_id, sid, msg_content, body):
     confidence = (judge_result or {}).get("quality")
     if isinstance(confidence, int):
         msg_entry["_confidence"] = confidence
-    if isinstance(input_quality, int):
-        msg_entry["_input_quality"] = input_quality
     mode = M.task_mode(task_id)
     with M._data_lock:
         if sid in M.sessions:
@@ -303,7 +300,7 @@ def _event_loop():
                     "_user": user,
                     "_client_timestamp": client_ts,
                     "mode": t.get("mode"),
-                    "_mcp": bool(t.get("_mcp")),
+                    "_mcp": bool(data.get("_mcp")) or bool(t.get("_mcp")),
                     "research": bool(data.get("research")),
                     "cpu": bool(data.get("cpu")),
                     "no_tools": bool(data.get("no_tools")),
@@ -594,6 +591,10 @@ def _queue_worker(mode):
             no_tools=item.get("no_tools"),
             openai_lane=item.get("openai_lane"),
             skip_ensure_llama=item.get("skip_ensure_llama"),
+            # Carry the MCP lane flag through the queue: the RAM/thermal pause
+            # paths below rewrite M.tasks[tid] to a minimal dict (dropping
+            # "_mcp"), so the entry itself must remain the source of truth.
+            _mcp=item.get("_mcp"),
         )
         # Wait for this task to finish (status becomes "done", "error" or "cancelled")
         # before dequeuing the next item IN THIS LANE. The other lane's worker

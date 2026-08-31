@@ -263,8 +263,6 @@ With a browser (or headed test) authenticated via SSO:
 - Guardrail server lifecycle: first L3 verify lazy-starts :8083, `GET :8083/health` 200, after 300s idle → model unloaded (`[verify] idle` logs), RAM freed
 - Per-user judge: `resolve_judge_model` for a user with a custom judge env/config vs default user → correct model id in `[L3] ... judge=` log lines
 - Judge outage: kill :8083 mid-batch → MCP batch items error (fail-closed) but UI chat replies still deliver
-- **MCP over HTTP flag**: chat as `mcp-service-account` (`MCP_USER`) via `/api/chat` (JWT) → `[L3] verifying output ... lane=guardrail/MCP` in `logs/chat-webui.log` (pre-fix these read `lane=UI`); a blocked reply marks the task failed (**fail-closed**) even though it never went through the MCP gateway tool, and passes record `LEVEL 3 OUTPUT VERIFICATION PASSED` bookkeeping for DB-backed tasks
-- **Judge render gate**: fire a `generate_image` chat and a judge-eligible chat concurrently → logs show `[judge] image render active — holding judge call until it finishes`; the judge proceeds after the render (+30s cooldown) and the judge model load triggers **no** `[ram] Emergency RAM evacuation`
 
 **I3. Critic citation pass (research answers)**
 - Ask a research-mode question that yields `(Author, Venue, Year) [url]` citations → logs show per-citation re-search/re-fetch, `VERIFY_FETCH_CHARS`-bounded excerpts
@@ -289,7 +287,6 @@ With a browser (or headed test) authenticated via SSO:
 
 **J4. Image VRAM choreography (gate + serialization)**
 - Fire 2 concurrent `generate_image` chats → `_image_queue` serializes them (one `image_active` at a time); during the render a normal chat request must NOT reload the GPU model into VRAM (`_image_active` gate) — assert no cudaMalloc OOM in logs
-- Judge calls during the render hold (`[judge] image render active`) and fire after ComfyUI finishes — a judge model load must never overlap a render (RAM-evacuation guard, see §I2)
 - After render: ComfyUI VRAM freed, GPU model reloaded, KV restored, ~5s cooldown observed
 
 ---

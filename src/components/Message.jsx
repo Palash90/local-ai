@@ -646,9 +646,6 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
         {role === 'bot' && msg._confidence != null && (
           <span className="conf-badge" title="Confidence from the verification judge">&#9878; {msg._confidence}%</span>
         )}
-        {role === 'bot' && msg._input_quality != null && (
-          <span className="conf-badge input" title="Confidence the judge had in understanding your request">request {msg._input_quality}%</span>
-        )}
         {role === 'bot' && toolsUsed.length > 0 && (() => {
           let fetchIdx = 0
           return toolsUsed.map((t, i) => {
