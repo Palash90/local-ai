@@ -48,6 +48,8 @@ IMAGE_MIME = {
     ".bmp": "image/bmp",
 }
 
+MAX_PDF_UPLOAD_BYTES = 100 * 1024 * 1024
+
 
 def _get_identity_safe(headers):
     """Resolve identity from SSO headers or a Bearer JWT; None on any failure.
@@ -890,6 +892,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             safe_name = str(uuid.uuid4()) + ext
             filepath = os.path.join(UPLOADS_DIR, safe_name)
             raw = base64.b64decode(data_b64)
+            if ext == ".pdf" and len(raw) > MAX_PDF_UPLOAD_BYTES:
+                self.send_json({"error": "PDF too large (maximum 100 MB)"}, status=413)
+                return
             with open(filepath, "wb") as f:
                 f.write(raw)
             file_url = f"/uploads/{safe_name}"

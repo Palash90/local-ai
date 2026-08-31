@@ -215,6 +215,7 @@ class MCPClientManager:
 
 mcp_manager = MCPClientManager("mcp_config.json")
 _mcp_loop = None
+MCP_TOOL_TIMEOUT = int(os.environ.get("MCP_TOOL_TIMEOUT", "300"))
 
 def start_mcp_client():
     global _mcp_loop
@@ -223,7 +224,13 @@ def start_mcp_client():
     _mcp_loop.run_until_complete(mcp_manager.initialize_all())
     _mcp_loop.run_forever()
 
-def dispatch_mcp_tool(tool_name, arguments, timeout):
+def dispatch_mcp_tool(tool_name, arguments, timeout=MCP_TOOL_TIMEOUT):
+    """Execute an MCP tool from synchronous worker code.
+
+    MCP tools can be slow (for example, repository indexing), so keep the
+    timeout explicit and configurable while providing a safe default for
+    callers that do not need a custom deadline.
+    """
     if _mcp_loop is None or not _mcp_loop.is_running():
         raise RuntimeError("[MCP] Event loop not running - MCP not yet initialized")
 

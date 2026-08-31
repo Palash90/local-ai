@@ -982,7 +982,11 @@ async def _run_batch(batch_id):
                     st = json.loads(raw).get("status", "")
                 except (ValueError, TypeError, AttributeError):
                     continue
-                if st in ("done", "error", "cancelled"):
+                # A process restart can remove the task from the API's
+                # in-memory registry while leaving this durable batch item in
+                # "running". Treat that lost task as terminal so one stale
+                # item cannot block the rest of the batch forever.
+                if st in ("done", "error", "cancelled", "unknown", "not_found"):
                     final_status = st
                     break
             if not final_status:

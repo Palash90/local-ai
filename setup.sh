@@ -22,7 +22,7 @@ $SUDO apt install -y \
     git python3 python3-venv python3-pip \
     build-essential cmake \
     nginx avahi-daemon \
-    pdftotext poppler-utils catdoc antiword \
+     pdftotext poppler-utils catdoc antiword tesseract-ocr tesseract-ocr-ben \
     curl docker.io docker-compose-v2
 
 # Ensure Node.js (LTS) is installed (required for frontend build)

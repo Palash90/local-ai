@@ -454,6 +454,29 @@ def is_model_ready(base, model_id):
     return False
 
 
+def _wait_model_unloaded(base, model_id, timeout=180):
+    """Wait for the router to finish tearing down a model child process."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{base}/models", timeout=5)
+            if r.status_code == 200:
+                model = next(
+                    (item for item in r.json().get("data", [])
+                     if item.get("id") == model_id),
+                    None,
+                )
+                status = (model.get("status") or {}).get("value") if model else None
+                if model is None or status == "unloaded":
+                    print(f"[llama] model '{model_id}' is fully unloaded")
+                    return True
+        except Exception:
+            pass
+        time.sleep(2)
+    print(f"[llama] timed out waiting for model '{model_id}' to unload")
+    return False
+
+
 def _wait_vram_freed(threshold_mb=500, timeout=30):
     """Poll nvidia-smi until GPU memory usage drops below ``threshold_mb``.
 
@@ -699,6 +722,11 @@ def load_llama_model(mode="gpu", model_id=None):
                     )
                 except Exception as e:
                     print(f"[llama] guardrail pre-swap unload error: {e}")
+                if not _wait_model_unloaded(base, resident):
+                    with M._data_lock:
+                        M._guardrail_model_status = "unloaded"
+                        M._guardrail_loaded_model = ""
+                    return False
                 with M._data_lock:
                     M._guardrail_loaded_model = ""
 

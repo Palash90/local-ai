@@ -581,6 +581,16 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
     )
   }
 
+  const isFileExtractionResult = msg.role === 'tool' &&
+    typeof msg.content === 'string' && msg.content.startsWith('Content of ')
+  if (msg.role === 'tool' && isFileExtractionResult) {
+    return (
+      <details className="ocr-result">
+        <summary>OCR / file extraction result</summary>
+        <div className="msg-content" dangerouslySetInnerHTML={{ __html: html }} />
+      </details>
+    )
+  }
   if (msg.role === 'system' || msg.role === 'tool' || msg._steering) return null
 
   const toolsUsed = msg._tools_used || []

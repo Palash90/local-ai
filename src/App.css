@@ -1000,6 +1000,55 @@ a.page-modal-url:hover {
 .reasoning-text ul, .reasoning-text ol { padding-left: 18px; margin: 4px 0; }
 .reasoning-text blockquote { border-left: 2px solid #4a6cf7; padding-left: 10px; margin: 4px 0; color: #999; }
 
+.source-verification {
+  margin-top: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+.source-verification > summary {
+  cursor: pointer;
+  padding: 7px 10px;
+  color: #aeb8c8;
+  font-size: 12px;
+  user-select: none;
+}
+.source-verification-list {
+  display: grid;
+  gap: 5px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.source-verification-item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, auto) 1fr;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.source-verification-item a {
+  overflow: hidden;
+  color: #72b7ff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-verification-mark { font-size: 13px; text-align: center; }
+.source-keep .source-verification-mark { color: #55d68a; }
+.source-metadata_fix .source-verification-mark,
+.source-ambiguous .source-verification-mark { color: #f4c76b; }
+.source-unverifiable .source-verification-mark { color: #ff7e88; }
+.source-unchecked .source-verification-mark { color: #9ca8b8; }
+.source-verification-note {
+  min-width: 0;
+  overflow: hidden;
+  color: #8994a5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-verification-empty { color: #8994a5; }
+
 /* ---- Message Content ---- */
 .msg-content p { margin: 4px 0; }
 

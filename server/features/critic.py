@@ -27,8 +27,10 @@ every other exhausted budget delivers the last answer with the trail note.
 """
 
 import json
+import html
 import re
 import time
+from urllib.parse import urlsplit
 
 import requests
 
@@ -61,7 +63,11 @@ _EMPTY_CITE_RE = re.compile(r"(?P<meta>[\[(][^)\]\[(\n]{0,180}[\]\)])\s*\[\s*\]"
 _PLAIN_URL_RE = re.compile(r"(?<!\w)(https?://[^\s\]<>()]+)")
 _CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
-_TAGLINE = "\n\n<details>\n<summary>Source verification</summary>"
+_TAGLINE = (
+    '\n\n<details class="source-verification">'
+    '<summary>Source verification</summary>'
+    '<div class="source-verification-list">'
+)
 
 # Requirement-mismatch detection (re-scheduling). All three classes are decided
 # deterministically from the user's own words + the task's recorded tool trace,
@@ -265,6 +271,25 @@ def _norm_url(url):
         return "".join(parts)
     except Exception:
         return (url or "").rstrip("/")
+
+
+def _is_search_endpoint(url):
+    """Return True for the search UI/API URL, which is not a source page."""
+    try:
+        from urllib.parse import urlsplit
+
+        candidate = urlsplit(url or "")
+        configured = urlsplit(getattr(M, "SEARXNG_PUBLIC_URL", ""))
+        internal = urlsplit(getattr(M, "SEARXNG_URL", ""))
+        for endpoint in (configured, internal):
+            if endpoint.netloc and candidate.netloc.lower() == endpoint.netloc.lower():
+                endpoint_path = endpoint.path.rstrip("/") or "/"
+                candidate_path = candidate.path.rstrip("/") or "/"
+                if candidate_path == endpoint_path:
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 def _retrieved_urls(task_id):
@@ -515,9 +540,28 @@ def _build_verification_block(verdicts):
     for v in verdicts:
         action = v.get("action", "KEEP")
         symbol = marks.get(action, "•")
-        note = f" — {v['note']}" if v.get("note") else ""
-        lines.append(f"{symbol} {v['url']}{note}")
-    lines.append("</details>")
+        url = v.get("url") or ""
+        try:
+            parsed = urlsplit(url)
+            label = parsed.netloc + (parsed.path.rstrip("/") or "/")
+        except Exception:
+            label = url
+        if len(label) > 72:
+            label = label[:69] + "..."
+        safe_url = html.escape(url, quote=True)
+        safe_label = html.escape(label or "No URL")
+        safe_note = html.escape(v.get("note") or "")
+        note = f'<span class="source-verification-note">{safe_note}</span>' if safe_note else ""
+        link = (
+            f'<a href="{safe_url}" target="_blank" rel="noreferrer">'
+            f"{safe_label}</a>"
+            if url else f'<span class="source-verification-empty">{safe_label}</span>'
+        )
+        lines.append(
+            f'<div class="source-verification-item source-{action.lower()}">'
+            f'<span class="source-verification-mark">{symbol}</span>{link}{note}</div>'
+        )
+    lines.append("</div></details>")
     return "\n".join(lines)
 
 
@@ -692,6 +736,10 @@ def run_verification(task_id, sid, answer, mode="gpu"):
         if not cit["url"]:
             pre_action, pre_note = "UNVERIFIABLE", (
                 "citation has no URL to verify — cannot exist"
+            )
+        elif _is_search_endpoint(cit["url"]):
+            pre_action, pre_note = "UNVERIFIABLE", (
+                "search endpoint is navigation, not a fetched source page"
             )
         elif cit["url"] not in retrieved:
             if not _citation_exists(cit["url"]):

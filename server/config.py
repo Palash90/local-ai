@@ -19,6 +19,9 @@ LLAMA_URL_CPU = f"{LLAMA_BASE_CPU}/v1/chat/completions"
 VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
 COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080/")
+SEARXNG_PUBLIC_URL = os.environ.get(
+    "SEARXNG_PUBLIC_URL", "https://home.palashkantikundu.in/search"
+)
 COMFYUI_URL = "http://localhost:8188"
 HOST = os.environ.get("CHAT_HOST", "127.0.0.1")
 PORT = 3001
@@ -523,7 +526,7 @@ TOOLS_DETAILED = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the text content of an uploaded file (PDF, DOC, DOCX, XLS, XLSX). Call this when the user has attached a file and you need to read its content to answer their question. The file URL is provided in the user message as [FILE: url]. Pass that url as the file_url parameter.",
+            "description": "Read the text content of an uploaded file (PDF, DOC, DOCX, XLS, XLSX). Image-only PDFs are OCR'd when Tesseract is available. Call this when the user has attached a file and you need to read its content to answer their question. The file URL is provided in the user message as [FILE: url]. Pass that url as the file_url parameter.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -713,7 +716,7 @@ _TOOL_SHORT_DESC = {
     ),
     "read_file": (
         "Extract text from an uploaded file (PDF/DOC/DOCX/XLS/XLSX) via its "
-        "[FILE: url] path."
+        "[FILE: url] path; OCR is used for scanned PDFs when available."
     ),
     "read_image": (
         "View an image attached or generated earlier in the conversation via "

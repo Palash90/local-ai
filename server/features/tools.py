@@ -253,8 +253,10 @@ def web_search(query, current_time=None, current_location=None):
     ts = datetime.now()
     clean_query = query.strip()
     params = {"q": clean_query, "format": "json"}
-    search_url = f"{M.SEARXNG_URL}?{urlencode(params)}"
-    print("Performing web search", search_url)
+    # Keep the backend URL private; only expose the public search URL in tool
+    # output that may be shown to the user or passed through to the model.
+    search_url = f"{M.SEARXNG_PUBLIC_URL}?{urlencode(params)}"
+    print("Performing web search", M.SEARXNG_URL)
     try:
         r = requests.get(M.SEARXNG_URL, params=params, timeout=10)
         r.raise_for_status()
@@ -719,6 +721,7 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         try:
             result = dispatch_mcp_tool(tool_name, args)
         except Exception as e:
+            print(f"[MCP] Tool '{tool_name}' failed: {e}")
             result = json.dumps({"error": f"MCP tool {tool_name} failed: {e}"})
 
         M._event_post(

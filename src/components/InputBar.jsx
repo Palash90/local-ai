@@ -14,6 +14,7 @@ const CODE_EXTS = new Set([
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
 const DOC_EXTS = new Set(['.pdf', '.xls', '.xlsx', '.doc', '.docx'])
 const MAX_FILE_SIZE = 10 * 1024 * 1024
+const MAX_PDF_SIZE = 100 * 1024 * 1024
 
 function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
@@ -55,13 +56,14 @@ export default function InputBar({ onSend, hasPending }) {
   const handleFile = useCallback(async (e) => {
     const file = e.target.files[0]
     if (!file) return
-    if (file.size > MAX_FILE_SIZE) {
-      alert('File too large (max 10MB): ' + file.name)
+    const ext = '.' + file.name.split('.').pop().toLowerCase()
+    const maxSize = ext === '.pdf' ? MAX_PDF_SIZE : MAX_FILE_SIZE
+    if (file.size > maxSize) {
+      alert('File too large (max ' + (ext === '.pdf' ? '100MB' : '10MB') + '): ' + file.name)
       e.target.value = ''
       return
     }
     clearAttachments()
-    const ext = '.' + file.name.split('.').pop().toLowerCase()
 
     if (IMAGE_EXTS.has(ext)) {
       const reader = new FileReader()
