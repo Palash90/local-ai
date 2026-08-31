@@ -16,7 +16,7 @@ Intended workflow for an MCP client (e.g. Claude):
 """
 
 import os, sys, json, time, uuid, asyncio, threading, base64, httpx
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.fastmcp import FastMCP, Image, Context
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
@@ -47,12 +47,15 @@ try:
         HARMFUL_DECLINE,
         is_harmful_content,
         is_strict_output_blocked,
-        llm_classify_harmful,
-        llm_classify_harmful_output,
         is_harmful_request,
         is_jailbreak_attempt,
-        mcp_output_judge,
         wrap_user_message,
+    )
+    from server.features.judge import (
+        llm_classify_harmful,
+        llm_classify_harmful_output,
+        mcp_output_judge,
+        resolve_judge_model,
     )
     from server.mcp_tasks_db import (
         mcp_task_insert,
@@ -89,12 +92,15 @@ except ImportError:
         HARMFUL_DECLINE,
         is_harmful_content,
         is_strict_output_blocked,
-        llm_classify_harmful,
-        llm_classify_harmful_output,
         is_harmful_request,
         is_jailbreak_attempt,
-        mcp_output_judge,
         wrap_user_message,
+    )
+    from server.features.judge import (
+        llm_classify_harmful,
+        llm_classify_harmful_output,
+        mcp_output_judge,
+        resolve_judge_model,
     )
     from server.mcp_tasks_db import (
         mcp_task_insert,
@@ -106,6 +112,7 @@ except ImportError:
         _data_lock as _data_lock,
     )
     from server.config import SELF_CHAT_MODE
+    from server.features.judge import resolve_judge_model
 
 API_BASE = os.environ.get("CHAT_API_BASE", "http://127.0.0.1:3001")
 
@@ -161,7 +168,19 @@ class EnforcementAuthMiddleware:
                 await response(scope, receive, send)
                 return
 
+            scope.setdefault("state", {})["identity"] = identity
+
         await self.app(scope, receive, send)
+
+
+def _request_username(ctx: Context) -> str:
+    """Username of the authenticated MCP caller, from the request scope."""
+    try:
+        req = ctx.request_context.request
+        identity = req.scope.get("state", {}).get("identity") or {}
+        return str(identity.get("username", ""))
+    except Exception:
+        return ""
 
 
 _token_lock = threading.Lock()
@@ -383,24 +402,36 @@ async def _verify_idle_watcher():
 VERIFY_TIMEOUT = 90
 
 
-async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
+async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str = None) -> tuple:
     from server.features.state import M
     from server.features.monitoring import ensure_guardrail_ready
-    from server.input_guard import _parse_verdict, _parse_strict_verdict
+    from server.features.judge import sanitize_judge_model
+    from server.features.judge import _parse_verdict, _parse_strict_verdict
+    from server.features.judge import wait_until_render_safe
     import re as _re
 
     task_lane = "guardrail"
+    model_id = sanitize_judge_model(
+        (model_id or "").strip() or M.server_model_id(task_lane),
+        M.server_base(task_lane),
+    )
     text = (message or "").strip()
     if not text:
         print(f"[guardrail][L2] empty message, auto-passing")
         return True, ""
 
-    print(f"[guardrail][L2] ensuring {task_lane} server is running (with model loaded)")
-    await asyncio.to_thread(ensure_guardrail_ready)
+    # Never stack a judge model load on top of an active ComfyUI render —
+    # that collision is what triggers emergency RAM evacuations. Waiting is
+    # free for the MCP lane (background batching; a few seconds is fine).
+    if not await asyncio.to_thread(wait_until_render_safe, label="L2"):
+        print(f"[guardrail][L2] render window never cleared — verifying anyway")
+
+    print(f"[guardrail][L2] ensuring {task_lane} server is running (with model {model_id} loaded)")
+    await asyncio.to_thread(ensure_guardrail_ready, model_id=model_id)
     print(f"[guardrail][L2] {task_lane} server ready")
 
     payload = {
-        "model": M.server_model_id(task_lane),
+        "model": model_id,
         "messages": [
             {"role": "system", "content": judge_system_prompt},
             {"role": "user", "content": text[:4000]},
@@ -456,7 +487,7 @@ async def _run_llm_verify(message: str, judge_system_prompt: str) -> tuple:
             "restarting judge & retrying once",
             flush=True,
         )
-        await asyncio.to_thread(ensure_guardrail_ready)
+        await asyncio.to_thread(ensure_guardrail_ready, model_id=model_id)
         reply, reasoning, err = await _judge_call(max_tokens=4096)
         if not reply and reasoning:
             reply = reasoning
@@ -532,7 +563,11 @@ async def list_sessions() -> str:
 
 
 @mcp.tool()
-async def create_session(system_prompt: str = "", system_prompts: list = None) -> str:
+async def create_session(
+    system_prompt: str = "",
+    system_prompts: list = None,
+    ctx: Context = None,
+) -> str:
     """Create a new empty chat session with an optional system prompt or list of system prompts.
 
     The session is created under the authenticated user's account and can
@@ -571,9 +606,10 @@ async def create_session(system_prompt: str = "", system_prompts: list = None) -
         str(sp.get("prompt", "")) if isinstance(sp, dict) else str(sp)
         for sp in (system_prompts or [])
     ]
+    judge_model = resolve_judge_model(_request_username(ctx))
     for sp in sp_texts:
         if sp and await asyncio.to_thread(
-            llm_classify_harmful, sp, None, 20, JUDGE_FAIL_CLOSED
+            llm_classify_harmful, sp, None, 20, JUDGE_FAIL_CLOSED, judge_model
         ):
             return json.dumps({
                 "declined": True,
@@ -632,6 +668,7 @@ async def send_chat_message(
     research: bool = False,
     cpu: bool = False,
     no_tools: bool = False,
+    ctx: Context = None,
 ) -> str:
     """Submit a user message for asynchronous processing through the guardrail-protected pipeline.
 
@@ -688,9 +725,10 @@ async def send_chat_message(
     print(f"[guardrail][L1] harmful check passed")
 
     print(f"[guardrail][L2] running LLM verification on guardrail lane...")
-    from server.input_guard import _judge_system
+    from server.features.judge import _judge_system
+    judge_model = resolve_judge_model(_request_username(ctx))
     passed, reason = await _run_llm_verify(
-        message, _judge_system()
+        message, _judge_system(), model_id=judge_model
     )
     if not passed:
         print(f"[guardrail][L2] REJECTED: {reason}")
@@ -846,6 +884,9 @@ async def _run_batch(batch_id):
     b = batch_get(batch_id)
     if not b:
         return
+    # Batches are owned by the single configured MCP identity, so every item's
+    # L2/L3 judge resolves to MCP_USER's configured judge model.
+    batch_judge_model = resolve_judge_model(MCP_USER)
     shared_sid = b["session_id"]
     for it in b["items"]:
         if it["status"] in ("done", "error"):
@@ -888,9 +929,9 @@ async def _run_batch(batch_id):
                 )
                 continue
 
-            from server.input_guard import _judge_system
+            from server.features.judge import _judge_system
             passed, reason = await _run_llm_verify(
-                prompt, _judge_system()
+                prompt, _judge_system(), model_id=batch_judge_model
             )
             if not passed:
                 print(
@@ -968,9 +1009,9 @@ async def _run_batch(batch_id):
                 pass
 
             if reply:
-                from server.input_guard import _strict_judge_system
+                from server.features.judge import _strict_judge_system
                 passed, reason = await _run_llm_verify(
-                    reply, _strict_judge_system()
+                    reply, _strict_judge_system(), model_id=batch_judge_model
                 )
                 if not passed:
                     print(

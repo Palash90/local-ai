@@ -14,6 +14,7 @@ import json
 import mimetypes
 import os
 import re
+import threading
 import time
 import traceback
 import uuid
@@ -630,6 +631,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     sessions.pop(sid, None)
                     sessions_meta.pop(sid, None)
             if exists:
+                # Drop the deleted session's KV checkpoints (all lanes).
+                try:
+                    from server.features.llm import invalidate_session_kv
+                    for _m in ("gpu", "cpu", "guardrail"):
+                        invalidate_session_kv(_m, sid)
+                except Exception:
+                    pass
+            if exists:
                 with _effective_contexts_lock:
                     _effective_contexts.pop(sid, None)
             if exists:
@@ -804,6 +813,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "research": bool(body.get("research")),
                 "cpu": bool(body.get("cpu")) and bool(body.get("research")),
                 "no_tools": bool(body.get("no_tools")),
+                # MCP service account chatting over the HTTP API: flag the
+                # task so _finalize_task runs the fail-closed MCP L3 output
+                # judge (LEVEL 3 verification) instead of the UI fail-open one.
+                "_mcp": bool(MCP_USER) and user == MCP_USER,
             }
             # Route to the GPU lane (interactive UI users) or the lane chosen
             # by SELF_CHAT_MODE — cpu (self-chat agents on the RAM-backed CPU
@@ -846,6 +859,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "cpu": cpu_flagged,
                     "no_tools": bool(body.get("no_tools")),
                 }
+            # Return the task_id immediately so the UI can enqueue the pending
+            # message and poll /api/status/{task_id} for live progress ("Waiting
+            # in line...", "Processing task...", "Generating image...", etc.).
             self.send_json({"task_id": task_id})
         elif self.path == "/api/extract-file":
             length = int(self.headers.get("Content-Length", 0))

@@ -27,7 +27,7 @@ def model_status_snapshot():
     # The UI reports the interactive (GPU) server's state.
     with M._data_lock:
         return {
-            "model": M.model_status,
+            "model": "image_active" if M._image_active else M.model_status,
             "predicted_per_second": M._last_tps,
             "overheated": M._overheated,
             "gpu_temp": M._gpu_temp,
@@ -119,6 +119,7 @@ def restart_llama_server(mode):
             M._cpu_model_status = "unloaded"
         elif mode == "guardrail":
             M._guardrail_model_status = "unloaded"
+            M._guardrail_loaded_model = ""
         else:
             M.model_status = "unloaded"
     args = {
@@ -141,36 +142,39 @@ _guardrail_ready_lock = threading.Lock()
 _guardrail_starting = False
 
 
-def _guardrail_ready_now():
+def _guardrail_ready_now(model_id=None):
     base = M.server_base("guardrail")
+    model_id = (model_id or "").strip() or M.server_model_id("guardrail")
     return (
         M.is_llama_alive(base)
-        and M.server_status("guardrail") == "chat_loaded"
-        and M.is_model_ready(base, M.server_model_id("guardrail"))
+        and M.is_model_ready(base, model_id)
     )
 
 
-def ensure_guardrail_ready(timeout=240):
+def ensure_guardrail_ready(timeout=240, model_id=None):
     """Start/refresh the LLM judge (guardrail) llama-server and wait for it to
-    actually serve a loaded model.
+    actually serve the requested judge model.
 
-    ``ensure_llama_server`` only verifies the *process* is alive. After an idle
-    unload, image-generation unload, or RAM evacuation the process still answers
-    /health but no model is loaded, so a judge POST would fail. This helper loads
-    the model and polls /models until it reports ready.
+    ``model_id`` is the per-user/-call judge to be resident (defaults to the
+    configured ``MODEL_ID_GUARDRAIL``). ``ensure_llama_server`` only verifies
+    the *process* is alive. After an idle unload, image-generation unload, or
+    RAM evacuation the process still answers /health but no model is loaded, so
+    a judge POST would fail. This helper loads the model and polls /models until
+    it reports ready.
 
     Concurrency: only the first concurrent caller restarts/loads; the rest wait
     and poll, so a burst of judge calls can't thundering-herd the server into
     repeated restarts. During a RAM evacuation we never force a restart (the
     evacuation already killed/restarted every server).
 
-    Returns True if the judge is ready to serve, False otherwise.
+    Returns True if the requested judge is ready to serve, False otherwise.
     """
     global _guardrail_starting
+    model_id = (model_id or "").strip() or M.server_model_id("guardrail")
     base = M.server_base("guardrail")
-    model_id = M.server_model_id("guardrail")
 
-    if _guardrail_ready_now():
+    if _guardrail_ready_now(model_id):
+        _mark_guardrail_ready(model_id)
         return True
 
     do_work = False
@@ -181,27 +185,47 @@ def ensure_guardrail_ready(timeout=240):
 
     deadline = time.time() + timeout
     try:
+        load_ok = True
         if do_work:
             if getattr(M, "_ram_evacuating", False):
                 print("[guardrail] RAM evacuation in progress — waiting for restart, not forcing one", flush=True)
             elif not M.is_llama_alive(base):
                 print("[guardrail] judge llama-server not alive — restarting", flush=True)
                 restart_llama_server("guardrail")
-            with M._data_lock:
-                ms = M._guardrail_model_status
-            if ms != "chat_loaded" or not M.is_model_ready(base, model_id):
+            if not M.is_model_ready(base, model_id):
                 print(f"[guardrail] loading judge model ({model_id})...", flush=True)
-                M.load_llama_model("guardrail")
+                load_ok = bool(M.load_llama_model("guardrail", model_id=model_id))
+        if not load_ok:
+            # The load was rejected outright or accepted-but-never-ready. Don't
+            # burn the full timeout polling a model that will never serve (an
+            # invalid per-user judge used to stall L2 for minutes); give the
+            # server a short grace window for slow-but-valid loads then bail.
+            deadline = min(deadline, time.time() + 45)
 
         while time.time() < deadline:
-            if _guardrail_ready_now():
+            if _guardrail_ready_now(model_id):
+                _mark_guardrail_ready(model_id)
                 return True
             time.sleep(2)
-        print("[guardrail] judge not ready within timeout — giving up", flush=True)
+        print(f"[guardrail] judge model '{model_id}' not ready within timeout — giving up", flush=True)
         return False
     finally:
         with _guardrail_ready_lock:
             _guardrail_starting = False
+
+
+def _mark_guardrail_ready(model_id):
+    """Reconcile guardrail-lane bookkeeping when ``model_id`` is verified ready.
+
+    The server may already be serving the model (e.g. auto-loaded at boot), in
+    which case no load path ran; keeping ``_guardrail_loaded_model`` in sync
+    makes the next judge swap know exactly what to release.
+    """
+    with M._data_lock:
+        M._guardrail_model_status = "chat_loaded"
+        M._guardrail_last_llm_use = time.time()
+        if model_id:
+            M._guardrail_loaded_model = model_id
 
 
 
@@ -277,6 +301,7 @@ def restart_servers():
         M.model_status = "unloaded"
         M._cpu_model_status = "unloaded"
         M._guardrail_model_status = "unloaded"
+        M._guardrail_loaded_model = ""
     _start_llama_process(M.LLAMA_SERVER_ARGS, "gpu")
     if _cpu_lane_needed():
         _start_llama_process(M.LLAMA_SERVER_ARGS_CPU, "cpu")
@@ -433,10 +458,11 @@ def _thermal_monitor():
             if not busy:
                 with M._data_lock:
                     ms = M.model_status
+                    img_active = M._image_active
                 if ms == "chat_loaded":
                     print("[thermal] Overheated — unloading GPU chat model")
                     M.unload_llama_model("gpu")
-                elif ms == "image_active":
+                elif img_active:
                     print("[thermal] Overheated — freeing ComfyUI VRAM")
                     M.free_comfyui_vram()
 

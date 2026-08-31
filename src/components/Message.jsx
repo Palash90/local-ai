@@ -462,7 +462,7 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
       if (selectingRef && selectingRef.current) return
       setMessage(st.message || 'Working...')
       if (st.reasoning) setReasoning(prev => (prev === st.reasoning ? prev : st.reasoning))
-    }, 1000)
+    }, 3000)
     return () => clearInterval(iv)
   }, [pending, onResolved, onLocationNeeded, selectingRef])
 
@@ -569,7 +569,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
     )
   }
 
-  if (msg.role === 'system' || msg.role === 'tool') return null
+  if (msg.role === 'system' || msg.role === 'tool' || msg._steering) return null
 
   const toolsUsed = msg._tools_used || []
   const searchDetails = msg._search_details || []
@@ -642,6 +642,9 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
       )}
       {role === 'bot' && msg._elapsed_ms != null && (
           <span className="msg-elapsed" title="Time from task start to completion">&#9202; {formatElapsed(msg._elapsed_ms)}</span>
+        )}
+        {role === 'bot' && msg._confidence != null && (
+          <span className="conf-badge" title="Confidence from the verification judge">&#9878; {msg._confidence}%</span>
         )}
         {role === 'bot' && toolsUsed.length > 0 && (() => {
           let fetchIdx = 0

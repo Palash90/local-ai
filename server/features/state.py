@@ -76,6 +76,14 @@ ACTIVE_WINDOW_SECONDS = 120
 _effective_contexts = {}
 _effective_contexts_lock = threading.Lock()
 
+# Per-session tool-cache so the (large, stable) built-in + MCP tool list is not
+# rebuilt on every LLM round. Keyed by ``(sid, is_agent)`` and invalidated via
+# ``mcp_manager._tools_version`` (see server/mcp_client.py). The per-session
+# rebuild is cheap, so eviction just drops the oldest entry.
+_tools_cache_per_session = {}
+_tools_cache_per_session_lock = threading.Lock()
+TOOLS_CACHE_MAX_ENTRIES = 2048
+
 _model_transition_lock = threading.Lock()
 _data_lock = threading.Lock()
 
@@ -143,6 +151,17 @@ _cpu_last_llm_use = time.time()
 
 _guardrail_model_status = "unloaded"
 _guardrail_last_llm_use = time.time()
+# The judge model_id currently resident on the guardrail server ("" = none /
+# the default is not yet known). Per-user judges swap this in/out; keeping the
+# loaded id lets a repeated request for the same judge skip the reload churn.
+_guardrail_loaded_model = ""
+
+# Number of LLM inference calls currently generating on the GPU/guardrail
+# servers. Mirrors ``image_active``: while a chat/judge is actively streaming
+# tokens into VRAM we must NOT unload the model or load ComfyUI's models (the
+# reverse of the image_active rule). Guarded by ``_chat_generating_lock``.
+_chat_generating = 0
+_chat_generating_lock = threading.Lock()
 
 # KV-cache slot checkpoints per llama-server lane (see llm.py). Maps mode →
 # {"file": str, "model": str, "ts": float, "n_tokens": int} describing the
@@ -153,18 +172,34 @@ _slot_checkpoints = {}
 # changed) and cleared once that KV is captured by save/restore. Gates whether
 # an unload snapshots the slot again.
 _slot_kv_dirty = {"gpu": False, "cpu": False, "guardrail": False}
+# Per-session KV-cache checkpoints (see llm.py). Maps (mode, sid) →
+# {"file", "model", "ts", "n_tokens"} so each chat session keeps its own
+# snapshot and is restored when the user returns to that session, instead of a
+# single shared per-lane snapshot. Kept alongside the per-lane
+# ``_slot_checkpoints``.
+_session_kv = {}
+# Which session currently owns the live KV in slot 0 of each lane (the session
+# whose prompt was most recently processed). None = no session resident yet.
+_slot_resident_sid = {"gpu": None, "cpu": None, "guardrail": None}
 _client_location = None
 _overheated = False
 _gpu_temp = None
 _ram_evacuating = False
+# Dedicated flag set from the START of generate_image/edit_image until ComfyUI
+# finishes (free_comfyui_vram + reload). The image worker sets this BEFORE
+# unloading the llama model; unload_llama_model sets model_status="unloaded"
+# which now only tracks the lane's own model state, not the image gate. This
+# prevents a concurrent chat round from reloading the GPU model into VRAM
+# while ComfyUI is rendering.
+_image_active = False
 _users_cache = None
 _users_cache_time = 0
 
 # Context / token budget constants.
 # The interactive UI chat runs on the GPU llama-server, which is launched with
-# --ctx-size 32768 (24K). Keep this in sync with server/config.py so the UI's
+# --ctx-size 24576 (24K). Keep this in sync with server/config.py so the UI's
 # context meter and the /api/model-status payload reflect the real budget.
-MAX_INPUT_TOKENS = 32768
+MAX_INPUT_TOKENS = 24576
 AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 
 # Monitoring constants.

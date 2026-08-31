@@ -6,3 +6,5 @@ Markdown
 mcp[cli]
 websockets
 cryptography
+requests
+starlette
