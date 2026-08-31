@@ -292,7 +292,13 @@ def _norm_url(url):
 
 
 def _is_search_endpoint(url):
-    """Return True for the search UI/API URL, which is not a source page."""
+    """Return True for the search UI/API URL, which is not a source page.
+
+    Matches either configured SearXNG endpoint (public or internal) by host,
+    accepting the ``/search`` path and the bare endpoint — an internal URL
+    like ``http://127.0.0.1:8080/search?q=...`` must be caught just like the
+    public one, or a leaked backend link gets "verified" as a source.
+    """
     try:
         from urllib.parse import urlsplit
 
@@ -303,7 +309,7 @@ def _is_search_endpoint(url):
             if endpoint.netloc and candidate.netloc.lower() == endpoint.netloc.lower():
                 endpoint_path = endpoint.path.rstrip("/") or "/"
                 candidate_path = candidate.path.rstrip("/") or "/"
-                if candidate_path == endpoint_path:
+                if candidate_path in (endpoint_path, "/search"):
                     return True
     except Exception:
         pass

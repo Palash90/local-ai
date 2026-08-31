@@ -475,7 +475,26 @@ def _rewrite_search_url_to_internal(parsed):
     return urlunparse(internal._replace(path=path, query=parsed.query))
 
 
+def _republicize_internal_url(payload_json):
+    """Replace the internal SearXNG URL with the public one in a tool payload.
+
+    fetch_page rewrites the public search URL onto the internal instance to
+    pass the SSRF guard, but the model (and the user) must only ever see the
+    public URL — otherwise the private backend address leaks into citations.
+    """
+    internal = (M.SEARXNG_URL or "").rstrip("/")
+    public = (M.SEARXNG_PUBLIC_URL or "").rstrip("/")
+    if not internal or not public or internal == public:
+        return payload_json
+    return payload_json.replace(internal, public)
+
+
 def fetch_page(url, max_chars=24000, chunk=1):
+    """SSRF-guarded page fetch; the result never exposes the internal URL."""
+    return _republicize_internal_url(_fetch_page_impl(url, max_chars, chunk))
+
+
+def _fetch_page_impl(url, max_chars=24000, chunk=1):
     import ipaddress
     import socket
 

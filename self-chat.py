@@ -1353,6 +1353,26 @@ def verify_task_fulfillment(
                     "query instead of sourcing the story from a real reported event."
                 )
 
+    # Inline citations must point at the specific article that backs the
+    # claim — never at a site root or section page. Checked on the story body
+    # only (the auto-appended citations section may legitimately keep landing
+    # pages when a search returned nothing deeper).
+    story_body = re.sub(
+        r"(?is)(?:^|\n)\s*#{1,6}\s+(?:citations?\s*(?:&|and)?\s*)?references?\b.*$",
+        "",
+        check_text,
+    )
+    cited_urls = set(re.findall(r"\[[^\]]*\]\((https?://[^)\s]+)\)", story_body))
+    cited_urls |= set(re.findall(r"\[(https?://[^\]\s)]+)\]", story_body))
+    landing_cites = sorted(u for u in cited_urls if _is_landing_url(u))
+    if landing_cites:
+        problems.append(
+            f"{len(landing_cites)} inline citation URL(s) are homepage/section "
+            f"pages (e.g. {landing_cites[0]}) instead of specific article links — "
+            "replace each with the exact article URL that supports the claim, "
+            "or remove the citation."
+        )
+
     if not check_language_script(check_text, language):
         problems.append(
             f"Story does not appear to be predominantly written in the declared language '{language}'."
@@ -2255,6 +2275,30 @@ def _conversation_attempt(
             )
             reply = result["text"]
 
+        if in_research_phase:
+            # A research turn that ends without a single article-level URL
+            # degenerates into homepage citations for every claim in the
+            # deliverable. Re-prompt for targeted searches (bounded) before
+            # accepting the turn.
+            for _ in range(2):
+                if _turn_has_deep_source(result.get("searches")):
+                    break
+                print(
+                    f"[research] {AGENT_NAMES[current_speaker]} turn "
+                    f"{message_number}: no article-level URLs in search "
+                    "results — re-prompting for targeted searches"
+                )
+                result = call_llm(
+                    token,
+                    session,
+                    prompt + "\n" + _DEEP_SOURCE_PROMPT,
+                    image_b64=shared_image_b64,
+                    research=True,
+                )
+                reply = result["text"]
+                if not reply.strip():
+                    break
+
         if turn_theme_id:
             theme_api("complete", token_a, operation="complete", theme_id=turn_theme_id)
             print(f"[theme] Marked turn {turn_theme_id} completed")
@@ -2288,6 +2332,9 @@ def _conversation_attempt(
         shared_searches = result.get("searches")
         if shared_searches:
             block = []
+            # Mirror collect_citations(): when the reports contain article
+            # links, don't hand the partner homepage/section URLs to cite.
+            deep_shared = _turn_has_deep_source(shared_searches)
             for s in shared_searches:
                 if not isinstance(s, dict):
                     continue
@@ -2296,6 +2343,8 @@ def _conversation_attempt(
                 for r in s.get("results") or []:
                     title = r.get("title") or r.get("url") or ""
                     url = r.get("url", "")
+                    if deep_shared and _is_landing_url(url):
+                        continue
                     snippet = (r.get("snippet") or r.get("content") or "")[:200]
                     line = f"  - {title}" + (f" | {snippet}" if snippet else "")
                     if url:
@@ -2697,15 +2746,28 @@ def strip_model_citations(text):
 
     Only finalize_story() may emit that section, and it is built exclusively from
     web-search results. Model-authored variants (images, placeholder links, double
-    hashes) are dropped so they can never leak into the published section.
+    hashes, bare "## References" headings) are dropped so they can never leak
+    into the published section.
     """
     text = re.sub(
-        r"(?i)(?:^|\n)\s*#{1,6}\s+citations?\s*&?\s*references?.*$",
+        r"(?i)(?:^|\n)\s*#{1,6}\s+(?:citations?\s*(?:&|and)?\s*)?references?\b.*$",
         "",
         text,
         flags=re.DOTALL,
     )
     return text.strip()
+
+
+_VERIFICATION_CHROME_RE = re.compile(
+    r"(?s)<details\s+class=\"source-verification\".*?</details>\s*"
+)
+
+
+def strip_verification_chrome(text):
+    """Remove the server-appended source-verification <details> block from a
+    reply. It is UI chrome for the chat transcript — never story content — but
+    an unclosed [CONTENT] capture would otherwise sweep it into the story."""
+    return _VERIFICATION_CHROME_RE.sub("", text or "")
 
 
 def extract_tagged_content(text):
@@ -2747,9 +2809,38 @@ def extract_tagged_content(text):
     return "\n\n".join(b.strip() for b in blocks if b.strip())
 
 
+def _turn_has_deep_source(searches):
+    """True if a research turn's tool trail contains at least one
+    article-level (deep-link) URL — the kind a specific claim can cite."""
+    for s in searches or []:
+        if not isinstance(s, dict):
+            continue
+        if s.get("tool") == "fetch_page":
+            url = s.get("url", "")
+            if url and not _is_landing_url(url):
+                return True
+            continue
+        for r in s.get("results") or []:
+            if isinstance(r, dict):
+                url = r.get("url") or r.get("link") or ""
+                if url and not _is_landing_url(url):
+                    return True
+    return False
+
+
+_DEEP_SOURCE_PROMPT = (
+    "[SYSTEM ERROR: Your searches returned no article-level source URLs "
+    "(empty result sets, homepages, or section pages only). Do NOT hand off "
+    "yet. Run new web_search calls with specific, article-targeting queries "
+    "(exact event/story names, or site + topic) until your results include "
+    "2-3 article URLs (deep links, not homepages), then share your findings "
+    "with those exact URLs.]"
+)
+
+
 def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     speaker = entry.get("speaker", "Unknown")
-    raw_text = entry.get("text", "")
+    raw_text = strip_verification_chrome(entry.get("text", ""))
     turn = entry.get("message", idx)
 
     content = extract_tagged_content(raw_text)

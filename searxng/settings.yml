@@ -1,11 +1,27 @@
 use_default_settings:
   engines:
     keep_only:
-      - google
       - bing
+      - google
       - duckduckgo
       - brave
+      - mojeek
       - wikipedia
+
+# keep_only only trims the engine list; the default `disabled` flag of each
+# engine still applies (bing/mojeek ship disabled upstream). Enable them
+# explicitly so queries never depend on a single unblocked engine.
+engines:
+  - name: bing
+    disabled: false
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: mojeek
+    disabled: false
 
 server:
   secret_key: "ultrasecretkeyforsearxng"
