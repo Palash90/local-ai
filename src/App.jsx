@@ -63,6 +63,8 @@ export default function App() {
               switchSession(lastSid)
             } else if (list.length > 0) {
               switchSession(list[0].session_id)
+            } else {
+              newChat()
             }
           })
         } else {

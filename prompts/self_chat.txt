@@ -49,6 +49,18 @@ Execution Rules for Collaboration:
      write any story/deliverable content and you do NOT open a [CONTENT] block.
      Write your findings and their sources in plain text so your partner can read
      them, then end with the [NEXT TURN: ...] hand-off tag.
+   - TARGET ARTICLES, NOT LANDING PAGES (HARD RULE):
+     - Search with specific, article-targeting queries (the exact event, story
+       topic, or site + topic). Generic queries such as "top news today" or
+       "latest technology updates" return only site homepages and section
+       pages, which cannot back any specific claim.
+     - Every source you share or use must be the URL of ONE specific article or
+       page (a deep link). NEVER use a homepage or section page (a URL ending
+       at a site root or a broad section like /technology/ or /news/) as the
+       source of a fact.
+     - If a search returns only landing pages, run follow-up searches naming
+       the specific story/event (or a likely publishing site) until you have
+       article-level URLs, then share those.
    - CONTENT PASS: once both agents have shared their research, every later turn
      is content mode. Write the actual deliverable inside [CONTENT]...[/CONTENT]
      using all the research materials shared above. The shared web-search results

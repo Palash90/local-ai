@@ -10,6 +10,7 @@ import threading
 import traceback
 from difflib import SequenceMatcher
 from datetime import datetime
+from urllib.parse import urlparse
 import random
 
 from server.dotenv import load_dotenv
@@ -1275,6 +1276,30 @@ def _is_placeholder_query(query):
     return any(re.search(p, q, re.I) for p in generic)
 
 
+def _story_body_lines(text):
+    """Return the story's narrative lines — everything that is neither the
+    generated header/metadata block, a turn marker, an image, a horizontal
+    rule, a heading, nor the citations section. An empty result means the
+    story shipped with no published content at all (the empty-body failure
+    mode where every turn stayed planning/research-only)."""
+    body = re.sub(
+        r"(?is)(?:^|\n)\s*#{1,6}\s+citations?\s*&?\s*references?\b.*$", "", text
+    )
+    body = re.sub(r"(?s)<small.*?</small>", "", body)
+    body = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", body)
+    lines = []
+    for raw in body.splitlines():
+        s = raw.strip()
+        if not s or s.startswith(("#", "**", "<!--")):
+            continue
+        if re.match(r"^\*[^*\s].*\*[:.,!]?\s*$", s):
+            continue  # *Round N · Generated on ...* italic metadata line
+        if set(s) <= set("-—=*_·|~ "):
+            continue  # horizontal rules and separators
+        lines.append(s)
+    return lines
+
+
 def verify_task_fulfillment(
     original_text, check_text, mediums, language, retrieved_citations=None
 ):
@@ -1304,6 +1329,13 @@ def verify_task_fulfillment(
         r"#+\s+Citations?\s*&?\s*References?", original_text
     ) and not re.search(r"#+\s+Citations?\s*&?\s*References?", check_text):
         problems.append("Editor dropped the Citations & References section.")
+
+    if (not mediums or "text" in mediums) and not _story_body_lines(check_text):
+        problems.append(
+            "Story body is empty — only the header/metadata and citations were "
+            "published; no narrative or deliverable content ever reached the "
+            "story file."
+        )
 
     if retrieved_citations is not None:
         published = re.findall(r"\[[^\]]*\]\((https?://[^)\s]+)\)", check_text)
@@ -1605,10 +1637,13 @@ def build_input(
         lines.append(
             "[RESEARCH MODE: This turn is for research ONLY. Perform web searches "
             "and fetch pages to gather sourced facts, figures, and material needed "
-            f"for the task. Do NOT write any final story or deliverable content yet, "
-            "and do NOT open a [CONTENT] block this turn. Write your findings and "
-            "their sources in plain text so your partner can read them, then end "
-            f"with [NEXT TURN: {partner_agent}]."
+            f"for the task. Search with specific, article-targeting queries and "
+            "share only article-level (deep-link) URLs — never a homepage or "
+            "section page. Do NOT write any final story or deliverable content "
+            "yet, and do NOT open a [CONTENT] block this turn. Write your "
+            "findings and their sources in plain text so your partner can read "
+            "them, then end with "
+            f"[NEXT TURN: {partner_agent}]."
         )
     elif message_number <= 2:
         lines.append(
@@ -2604,16 +2639,57 @@ def embed_story_image(img_url, stories_dir, round_number, speaker, idx):
     return local_name
 
 
+_LANDING_SEGMENT_RE = re.compile(
+    r"^(section|sections|category|categories|topics?|tags?|archive|index)$"
+)
+
+
+def _is_landing_url(url):
+    """True for site roots and section/landing pages rather than single articles.
+
+    Search engines answer generic "top news" queries with outlet homepages and
+    section pages (``/``, ``/technology/``, ``/section/technology``). Such a URL
+    can never back a specific claim, so it is only useful as a citation when
+    the same search returned nothing better (see ``collect_citations``).
+    """
+    try:
+        path = urlparse(url).path or "/"
+    except (ValueError, AttributeError):
+        return False
+    path = path.rstrip("/")
+    if not path:
+        return True
+    segs = [s for s in path.split("/") if s]
+    if len(segs) == 1:
+        seg = segs[0].lower()
+        # One clean segment with no file extension and no digits ("/technology")
+        # is a section page; real article slugs almost always carry a date, an
+        # ID, or a hyphenated multi-part path.
+        if "." not in seg and not re.search(r"\d", seg) and len(seg) <= 40:
+            return True
+    if segs and _LANDING_SEGMENT_RE.match(segs[0].lower()):
+        return True
+    return False
+
+
 def collect_citations(citations, searches):
     for s in searches or []:
         if not isinstance(s, dict):
             continue
         query = s.get("query", "")
-        for r in s.get("results") or []:
-            url = r.get("url", "")
+        results = [r for r in (s.get("results") or []) if isinstance(r, dict)]
+        found = [(r.get("url", ""), r.get("title") or "") for r in results]
+        # Prefer article-level links: when one search returned both deep
+        # article URLs and landing pages, only the deep links can source a
+        # claim — the landing pages are dropped from that search's citations.
+        has_deep = any(url and not _is_landing_url(url) for url, _ in found)
+        for url, title in found:
             if not url or url in citations:
                 continue
-            citations[url] = (r.get("title") or url, query)
+            if has_deep and _is_landing_url(url):
+                print(f"[citations] Dropping landing-page result: {url}")
+                continue
+            citations[url] = (title or url, query)
 
 
 def strip_model_citations(text):
@@ -2676,16 +2752,26 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     raw_text = entry.get("text", "")
     turn = entry.get("message", idx)
 
+    content = extract_tagged_content(raw_text)
+
     # Research-phase turns gather and share material; they must never publish
     # narrative or images, but their web-search results still feed citations.
-    if entry.get("publish") is False:
+    # Exception: if the model wrote a [CONTENT] block anyway (observed when
+    # judge retries keep a turn in the research phase and the model crams the
+    # whole deliverable into it), publishing nothing would silently lose the
+    # entire story body — so the explicit [CONTENT] block always wins.
+    if entry.get("publish") is False and content is None:
         collect_citations(citations, entry.get("searches"))
         print(
             f"[content] {speaker} turn {turn} — research phase, citations captured only"
         )
         return
+    if entry.get("publish") is False and content:
+        print(
+            f"[content] {speaker} turn {turn} — research phase opened a "
+            "[CONTENT] block; publishing it to avoid losing the story body"
+        )
 
-    content = extract_tagged_content(raw_text)
     if content is None:
         # No [CONTENT] block — Phase 1 planning turn (or a turn that only
         # ran tools). Still capture any citations. If the turn generated an

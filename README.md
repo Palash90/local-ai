@@ -307,7 +307,7 @@ rendered stories open in a new tab (`render_story_html` adds
 
 Offline multi-agent story production: persona agents (kolpo/kaya…) hold
 cross-critique rounds, then editor/moderator review and a moderation gate
-(GREEN/RED, auto-RED on duplicate/citation-drop/wrong-script/name-leak) writes
+(GREEN/RED, auto-RED on duplicate/citation-drop/empty-body/wrong-script/name-leak) writes
 stories + moderation JSON to `~/local-ai-files/stories/`. CLI flags:
 `--config <tasks.json>`, `--defaults`, `--dry-run` (validate + print plan, no
 LLM calls), `--gpu` (pin agents to the GPU lane). Agents log in via the
