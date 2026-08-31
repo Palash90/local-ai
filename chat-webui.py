@@ -110,6 +110,7 @@ from server.features.state import (  # noqa: E402
     _active_tokens,
     _agent_tokens,
     _agent_users,
+    _agent_token_by_user,
     _client_location,
     _cpu_last_llm_use,
     _cpu_model_status,
@@ -271,6 +272,7 @@ from server.features.monitoring import (  # noqa: E402
     _thermal_monitor,
     _connection_manager,
     ensure_comfyui_running,
+    recycle_comfyui,
     ensure_llama_server,
     get_gpu_temp,
     get_ram_usage,
@@ -299,6 +301,7 @@ from server.features.orchestration import (  # noqa: E402
 
 from server.features.critic import (  # noqa: E402
     extract_citations,
+    run_peer_review_worker,
     run_verification,
     run_verification_worker,
 )

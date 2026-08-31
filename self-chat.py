@@ -94,6 +94,34 @@ CRITIQUE_PROMPT_FILE = "/home/palash/local-ai-files/contexts/critique.txt"
 # before giving up and letting the deterministic gate auto-RED the story.
 MAX_CRITIQUE_RETRIES = 2
 
+# Editor gate: how many times a FLAGGED story is discarded wholesale and the
+# conversation restarted from scratch (0 = judge once, never restart), plus the
+# default confidence threshold below which the cross-critique revision round
+# fires (overridable per task via the "editor_min_confidence" config key).
+MAX_EDITOR_RESTARTS = int(os.environ.get("SELF_CHAT_EDITOR_RESTARTS", "2"))
+EDITOR_DEFAULT_MIN_CONFIDENCE = int(
+    os.environ.get("SELF_CHAT_EDITOR_MIN_CONFIDENCE", "70")
+)
+
+EDITOR_CONTRACT = """
+
+───────────────────────────────────────────────────────────────────────────────
+FINAL GATE INSTRUCTIONS — reply with exactly this shape (nothing else):
+
+VERDICT: CLEAN or FLAGGED
+CONFIDENCE: NN/100
+FLAGS:
+- <the exact checklist item violated, plus where in the story>
+
+- VERDICT is FLAGGED when ANY checklist item above is violated by the story.
+- CONFIDENCE is 0-100: how confident you are that the story fully delivers the
+  task, mediums and language as graded by the checklist. 100 = every item
+  satisfied end-to-end; deduct for partial or shallow delivery.
+- FLAGS lists each violated item (omit the FLAGS section entirely when the
+  story is CLEAN).
+───────────────────────────────────────────────────────────────────────────────
+"""
+
 DEFAULT_TASKS_FILE = os.path.expanduser("~/local-ai-files/tasks.json")
 
 # All participants of the self-chat window (kolpo, kaya, editor, moderator)
@@ -242,6 +270,17 @@ def _parse_tasks(items):
         research_turns = int(item.get("research_turns") or 1)
         if research_turns < 1:
             research_turns = 1
+        editor_min_confidence = EDITOR_DEFAULT_MIN_CONFIDENCE
+        if item.get("editor_min_confidence") is not None:
+            try:
+                editor_min_confidence = max(
+                    0, min(100, int(item["editor_min_confidence"]))
+                )
+            except (TypeError, ValueError):
+                print(
+                    f"[config] Ignoring bad editor_min_confidence for task: "
+                    f"{item.get('editor_min_confidence')!r}"
+                )
         if raw_turns is not None:
             try:
                 turns = int(raw_turns)
@@ -264,6 +303,7 @@ def _parse_tasks(items):
                 "turns": turns,
                 "research": research,
                 "research_turns": research_turns,
+                "editor_min_confidence": editor_min_confidence,
             }
         )
     return tasks
@@ -1600,7 +1640,370 @@ def build_input(
     return "\n".join(lines)
 
 
+def _write_moderation(
+    source_fname, verdict, reasons, task, genre, confidence=None,
+    low_confidence=False,
+):
+    """Write <story>.moderation.json next to the checked story file."""
+    verdict_path = source_fname.replace(".md", ".moderation.json")
+    data = {
+        "verdict": verdict,
+        "reasons": reasons,
+        "confidence": confidence,
+        "task": task,
+        "genre": genre,
+        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    if low_confidence:
+        data["low_confidence"] = True
+    with open(verdict_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    print(f"[editor-gate] Moderation {verdict} saved to {verdict_path}")
+    return data
+
+
+def run_editor_review(
+    stories_dir,
+    fname,
+    task,
+    genre,
+    mediums=None,
+    language="",
+    details="",
+    checklist=None,
+    cast="",
+):
+    """Editor gate: the editor agent grades the finished story against the
+    task/genre checklist and returns a structured verdict.
+
+    Returns ``{verdict, confidence, flags, reasons}`` — verdict "CLEAN" or
+    "FLAGGED", confidence an int 0-100 (None when unparseable), flags the
+    violated checklist items. Best-effort and fail-open: any login, prompt or
+    parse failure yields a CLEAN verdict with confidence None so the
+    deterministic gate remains the only hard gate. Text-only review — image
+    delivery is enforced by the deterministic gate.
+    """
+    try:
+        token = login(USERNAME_EDITOR, PASSWORD_EDITOR)
+    except Exception as e:
+        print(f"[editor-gate] Could not log in {USERNAME_EDITOR}: {e}")
+        return {
+            "verdict": "CLEAN", "confidence": None, "flags": [],
+            "reasons": f"editor unavailable: {e}",
+        }
+    register_agent_tokens([token], [USERNAME_EDITOR])
+    session_id = None
+    try:
+        prompt = open(EDITOR_PROMPT_FILE, encoding="utf-8").read()
+        context_tokens = {
+            "%genre%": genre,
+            "%mediums%": ", ".join(mediums or []),
+            "%language%": language or "",
+            "%details%": details or "None",
+            "%cast%": cast or "None",
+            "%checklist%": checklist_for(genre, "editor", checklist),
+        }
+        for placeholder, value in context_tokens.items():
+            prompt = prompt.replace(placeholder, value)
+    except OSError as e:
+        print(f"[editor-gate] Could not read prompt file: {e}")
+        return {
+            "verdict": "CLEAN", "confidence": None, "flags": [],
+            "reasons": f"editor prompt unavailable: {e}",
+        }
+    try:
+        session_id = create_session(
+            token,
+            "Editor gate review",
+            system_prompt=prompt,
+            context_tokens=context_tokens,
+        )
+        with open(fname, "r", encoding="utf-8") as f:
+            markdown_text = f.read()
+        markdown_text = sanitize_story_images(markdown_text, stories_dir)
+        wait_for_user_to_leave()
+        result = call_llm(
+            token,
+            session_id,
+            "Here is the complete story markdown:\n\n"
+            + markdown_text
+            + "\n\nGrade this story against every checklist item."
+            + EDITOR_CONTRACT,
+            no_tools=True,
+        )
+        text = result["text"] or ""
+        verdict = "CLEAN"
+        m = re.search(r"VERDICT\s*:\s*(CLEAN|FLAGGED)", text, flags=re.IGNORECASE)
+        if m:
+            verdict = m.group(1).upper()
+        elif re.search(r"\bFLAGGED\b", text, flags=re.IGNORECASE):
+            verdict = "FLAGGED"
+        confidence = None
+        m = re.search(
+            r"CONFIDENCE\s*:\s*(\d{1,3})\s*(?:/|out of\s*)?100?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            confidence = max(0, min(100, int(m.group(1))))
+        flags = []
+        m = re.search(
+            r"FLAGS?\s*:\s*\n((?:\s*[-*•].*(?:\n|$))+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            flags = [
+                ln.strip().lstrip("-*• ").strip()
+                for ln in m.group(1).strip().splitlines()
+                if ln.strip().lstrip("-*• ").strip()
+            ]
+        if verdict == "FLAGGED" and not flags:
+            flags = ["Editor flagged the story without naming the violated item"]
+        print(
+            f"[editor-gate] VERDICT: {verdict} | CONFIDENCE: "
+            f"{confidence if confidence is not None else 'n/a'} | flags: {len(flags)}"
+        )
+        for fl in flags:
+            print(f"[editor-gate]   - {fl}")
+        return {
+            "verdict": verdict,
+            "confidence": confidence,
+            "flags": flags,
+            "reasons": text[:2000],
+        }
+    except Exception as e:
+        print(f"[editor-gate] Editor gate failed (fail-open): {e}")
+        return {
+            "verdict": "CLEAN", "confidence": None, "flags": [],
+            "reasons": f"editor gate error: {e}",
+        }
+    finally:
+        if session_id and not keep_sessions:
+            delete_session(token, session_id)
+
+
 def run_single_conversation(
+    token_a,
+    token_b,
+    round_number,
+    task,
+    mediums,
+    languages,
+    roles=None,
+    genre="General",
+    details="",
+    details_spec=None,
+    checklist=None,
+    path=None,
+    context=None,
+    persona=None,
+    themes_context="",
+    turns=None,
+    task_roles=None,
+    round_fields=None,
+    per_turn_task=False,
+    research=False,
+    research_turns=1,
+    editor_min_confidence=None,
+):
+    """Driver: run the conversation, then apply the editor gate.
+
+    - FLAGGED stories are discarded wholesale (sessions deleted, story files
+      removed) and the conversation restarts from scratch — up to
+      ``MAX_EDITOR_RESTARTS`` restarts, after which the story ships RED with
+      the editor flags as reasons.
+    - A CLEAN story whose confidence is below the task's threshold gets ONE
+      cross-critique revision round (editor concerns passed as extra problems)
+      followed by a single editor re-review; pre/post confidence is recorded.
+    - Deterministic-gate violations keep the existing auto-RED semantics.
+    - The editor gate itself is fail-open (editor down = CLEAN, confidence
+      None), so an outage can never wedge the pipeline.
+
+    Returns ``(transcript, session_a, session_b, fname)`` of the surviving
+    attempt, matching the historical call contract.
+    """
+    threshold = (
+        EDITOR_DEFAULT_MIN_CONFIDENCE
+        if editor_min_confidence is None
+        else editor_min_confidence
+    )
+    for attempt in range(1, MAX_EDITOR_RESTARTS + 2):
+        result = _conversation_attempt(
+            token_a,
+            token_b,
+            round_number,
+            task,
+            mediums,
+            languages,
+            roles=roles,
+            genre=genre,
+            details=details,
+            details_spec=details_spec,
+            checklist=checklist,
+            path=path,
+            context=context,
+            persona=persona,
+            themes_context=themes_context,
+            turns=turns,
+            task_roles=task_roles,
+            round_fields=round_fields,
+            per_turn_task=per_turn_task,
+            research=research,
+            research_turns=research_turns,
+        )
+        if result["red"]:
+            return (
+                result["transcript"],
+                result["session_a"],
+                result["session_b"],
+                result["fname"],
+            )
+
+        check_source = result["edited_path"] or result["fname"]
+        verdict = run_editor_review(
+            result["stories_dir"],
+            check_source,
+            task,
+            genre,
+            mediums=result["medium"],
+            language=result["language"],
+            details=details,
+            checklist=checklist,
+        )
+        confidence = verdict.get("confidence")
+
+        if verdict["verdict"] == "FLAGGED":
+            if attempt <= MAX_EDITOR_RESTARTS:
+                print(
+                    f"[editor-gate] FLAGGED with {len(verdict['flags'])} flag(s) — "
+                    f"discarding the session and starting fresh "
+                    f"(restart {attempt}/{MAX_EDITOR_RESTARTS})"
+                )
+                if not keep_sessions:
+                    delete_session(token_a, result["session_a"])
+                    delete_session(token_b, result["session_b"])
+                for stale in (result["fname"], result["edited_path"]):
+                    if stale:
+                        try:
+                            os.remove(stale)
+                            print(f"[editor-gate] Removed discarded story file {stale}")
+                        except OSError:
+                            pass
+                continue
+            _write_moderation(
+                check_source,
+                "RED",
+                "Editor gate flagged the story after "
+                f"{MAX_EDITOR_RESTARTS} fresh restart(s):\n"
+                + "\n".join(f"- {f}" for f in verdict["flags"]),
+                task,
+                genre,
+                confidence=confidence,
+            )
+            return (
+                result["transcript"],
+                result["session_a"],
+                result["session_b"],
+                result["fname"],
+            )
+
+        # CLEAN so far — apply the confidence threshold.
+        if confidence is not None and confidence < threshold:
+            print(
+                f"[editor-gate] CLEAN but confidence {confidence}/100 < "
+                f"{threshold} — triggering the cross-critique revision round"
+            )
+            revised_path = run_cross_critique(
+                result["stories_dir"],
+                result["fname"],
+                task,
+                genre,
+                token_a,
+                result["session_a"],
+                token_b,
+                result["session_b"],
+                mediums=result["medium"],
+                language=result["language"],
+                details=details,
+                checklist=checklist,
+                citations=result["citations"],
+                extra_problems=[
+                    f"Editor confidence {confidence}/100 is below the required "
+                    f"{threshold}. Strengthen the weakest checklist areas without "
+                    "changing anything that already complies."
+                ],
+            )
+            final_source = revised_path or check_source
+            re_verdict = run_editor_review(
+                result["stories_dir"],
+                final_source,
+                task,
+                genre,
+                mediums=result["medium"],
+                language=result["language"],
+                details=details,
+                checklist=checklist,
+            )
+            final_confidence = re_verdict.get("confidence")
+            note = (
+                f"Editor gate: CLEAN. Confidence after revision: "
+                f"{pre if (pre := confidence) is not None else 'n/a'}/100 → "
+                f"{final_confidence if final_confidence is not None else 'n/a'}"
+                f"/100 (threshold {threshold})."
+            )
+            if re_verdict["verdict"] == "FLAGGED":
+                _write_moderation(
+                    final_source,
+                    "RED",
+                    "Editor re-review flagged the story after the revision "
+                    "round:\n"
+                    + "\n".join(f"- {f}" for f in re_verdict["flags"]),
+                    task,
+                    genre,
+                    confidence=final_confidence,
+                )
+            else:
+                _write_moderation(
+                    final_source,
+                    "GREEN",
+                    note,
+                    task,
+                    genre,
+                    confidence=final_confidence,
+                    low_confidence=(
+                        final_confidence is None or final_confidence < threshold
+                    ),
+                )
+            return (
+                result["transcript"],
+                result["session_a"],
+                result["session_b"],
+                result["fname"],
+            )
+
+        # CLEAN and confident (or confidence unknown — fail-open).
+        _write_moderation(
+            check_source,
+            "GREEN",
+            f"Editor gate: CLEAN with confidence "
+            f"{confidence if confidence is not None else 'n/a'}/100 "
+            f"(threshold {threshold}).",
+            task,
+            genre,
+            confidence=confidence,
+        )
+        return (
+            result["transcript"],
+            result["session_a"],
+            result["session_b"],
+            result["fname"],
+        )
+    # Defensive: the loop always returns; keep a sane fallback anyway.
+    raise RuntimeError("editor gate loop exited without a verdict")
+
+
+def _conversation_attempt(
     token_a,
     token_b,
     round_number,
@@ -1911,31 +2314,36 @@ def run_single_conversation(
         original_text, check_text, medium, language, citations
     )
 
+    red = bool(problems)
     if problems:
         print(
-            f"[verify] {len(problems)} problem(s) found — auto-RED, skipping moderator LLM call:"
+            f"[verify] {len(problems)} problem(s) found — auto-RED, skipping editor gate:"
         )
         for p in problems:
             print(f"[verify]   - {p}")
-        verdict_path = (edited_path if edited_path else fname).replace(
-            ".md", ".moderation.json"
-        )
-        data = {
-            "verdict": "RED",
-            "reasons": "Automatic RED (deterministic check, no LLM call):\n"
+        _write_moderation(
+            check_source,
+            "RED",
+            "Automatic RED (deterministic check, no LLM call):\n"
             + "\n".join(f"- {p}" for p in problems),
-            "task": task,
-            "genre": genre,
-            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
-        }
-        with open(verdict_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    else:
-        print("=== Moderator phase ===")
-        print("Moderator Phase Skipped, not much value add")
-        # run_moderator(stories_dir, fname, task, genre, editor_path=edited_path, mediums=medium, language=language, details=details, checklist=checklist)
+            task,
+            genre,
+        )
 
-    return transcript, session_a, session_b, fname
+    return {
+        "transcript": transcript,
+        "session_a": session_a,
+        "session_b": session_b,
+        "fname": fname,
+        "stories_dir": stories_dir,
+        "medium": medium,
+        "language": language,
+        "citations": citations,
+        "edited_path": edited_path,
+        "check_source": check_source,
+        "problems": problems,
+        "red": red,
+    }
 
 
 def save_transcript(transcript, round_number):
@@ -2544,6 +2952,7 @@ def run_cross_critique(
     cast="",
     citations=None,
     retries=MAX_CRITIQUE_RETRIES,
+    extra_problems=None,
 ):
     """Kaya↔Kolpo cross-critique of the finished story (research-style self-verify).
 
@@ -2555,6 +2964,9 @@ def run_cross_critique(
     of every violation, and return a corrected markdown where ONLY those spots
     changed. The gate re-runs after every attempt; residual problems after
     ``retries`` attempts surface as an auto-RED (never a silently shipped story).
+    ``extra_problems`` merges caller-supplied concerns (e.g. a low editor
+    confidence) into the gate's list so a clean-deterministic story can still be
+    revised.
 
     Returns the path to the ``.edited.md`` file, or ``None`` to keep the original.
     """
@@ -2571,6 +2983,9 @@ def run_cross_critique(
         )
 
     problems = _gate(text)
+    for extra in extra_problems or []:
+        if extra not in problems:
+            problems.append(extra)
     if not problems:
         print("[critique] PASS — no deterministic violations, skipping LLM rewrite")
         return None
@@ -2965,6 +3380,7 @@ def run_forever():
                     per_turn_task=per_turn_task,
                     research=spec.get("research"),
                     research_turns=spec.get("research_turns") or 1,
+                    editor_min_confidence=spec.get("editor_min_confidence"),
                 )
             except Exception as e:
                 traceback.print_exc()

@@ -61,6 +61,10 @@ _active_tokens = {}
 _tokens_lock = threading.Lock()
 _agent_tokens = set()
 _agent_users = set()
+# username → latest registered agent token, so server-side flows (the
+# cross-agent peer-review worker) can act as a registered agent. self-chat.py
+# re-registers after every token heal, keeping this fresh.
+_agent_token_by_user = {}
 
 # Username → last-activity timestamp for SSO/header-authenticated clients.
 # With Authentik fronting the browser there is no per-request token anymore;

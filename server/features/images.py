@@ -308,6 +308,10 @@ def generate_image(
         M.set_status(task_id, "Loading chat model...")
         M.load_llama_model("gpu")
         M.load_llama_model("guardrail")
+        # Return the render RAM ComfyUI retains (~8 GB with --lowvram):
+        # background-kill + reboot it so the next render starts lean. Async —
+        # this task is already done; only the NEXT render pays the model load.
+        M.recycle_comfyui()
     return result
 
 
@@ -568,6 +572,8 @@ def edit_image(
         M.set_status(task_id, "Loading chat model...")
         M.load_llama_model("gpu")
         M.load_llama_model("guardrail")
+        # Same post-render recycle as generate_image (see the comment there).
+        M.recycle_comfyui()
 
     return result
 

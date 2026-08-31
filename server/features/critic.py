@@ -138,7 +138,7 @@ _STEERING_HINTS = {
 }
 
 
-def _critic_completion(system, user, mode="gpu", max_tokens=600):
+def _critic_completion(system, user, mode="gpu", max_tokens=2048):
     """Secondary, non-streamed, low-temperature LLM call. Retries once and
     never raises — returns None only when the model itself is unreachable."""
     payload = {
@@ -157,10 +157,25 @@ def _critic_completion(system, user, mode="gpu", max_tokens=600):
             M.mark_slot_kv_dirty(mode)
             r = requests.post(M.server_url(mode), json=payload, timeout=120)
             r.raise_for_status()
-            content = r.json()["choices"][0]["message"].get("content")
-            if content:
+            msg = r.json()["choices"][0]["message"] or {}
+            content = msg.get("content")
+            if not content:
+                # Reasoning-capable models can burn the whole token budget on
+                # ``reasoning_content`` before emitting the verdict (same
+                # failure the L2 judge solves in mcp_gateway._judge_call).
+                # Fall back to the reasoning text and retry with a doubled
+                # budget instead of silently dropping the verdict.
+                reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+                if reasoning.strip():
+                    print(
+                        f"[critic] empty content but reasoning present — "
+                        "judging on reasoning text"
+                    )
+                    return reasoning
+                payload["max_tokens"] = max_tokens * 2
+                last_err = "empty content in response"
+            else:
                 return content
-            last_err = "empty content in response"
         except Exception as e:
             last_err = str(e)
         print(f"[critic] LLM call failed (mode={mode}, attempt {attempt + 1}/2): {last_err}")
@@ -281,8 +296,23 @@ def _retrieved_urls(task_id):
 
 
 def _citation_exists(url):
-    """Existence probe for a source the agent never retrieved: re-search the
-    URL itself and require a same-URL hit. Used before ANY invention verdict."""
+    """Existence probe for a source the agent never retrieved.
+
+    Search indexes rarely return deep links (PMC article pages, hospital
+    blogs) verbatim, so a search-only probe brands real sources as
+    "likely fabricated". Try a direct fetch first: a page that loads — or a
+    bot-block (403/405/429) — proves the URL exists. Only when the fetch
+    fails AND no verification search finds the URL do we call it fabricated.
+    """
+    fetched = _fetch_source(url, max_chars=500)
+    if fetched.get("ok") and (fetched.get("content") or "").strip():
+        return True
+    err = (fetched.get("error") or "").lower()
+    if any(tok in err for tok in ("403", "405", "429", "forbidden",
+                                  "captcha", "cloudflare", "blocked")):
+        print(f"[critic] existence probe: {url} bot-blocked from direct "
+              "fetch — treating as existing")
+        return True
     try:
         res = json.loads(M.web_search(url))
     except Exception as e:
@@ -880,3 +910,130 @@ def run_verification_worker(task_id, sid, answer, body, mode):
                 tt["_verification"] = [{"url": "?", "action": "UNCHECKED",
                                         "note": f"verification pass failed: {e}"}]
         M._finalize_task(task_id, sid, answer, body)
+
+
+_PEER_REVIEW_TIMEOUT = 300
+
+_PEER_REVIEW_PROMPT = (
+    "You are {peer}, peer-reviewing a reply written by your co-writer {author} "
+    "as part of your shared creative work.\n\n"
+    "Reply from {author}:\n"
+    "----------\n{answer}\n----------\n\n"
+    "Review it like a demanding co-writer: does it deliver what was asked, is "
+    "it in-character, coherent, and free of placeholder or meta text?\n\n"
+    "Reply with exactly:\n\n"
+    "PEER VERDICT: PASS or FLAG\n"
+    "CONFIDENCE: NN/100\n"
+    "NOTES: <one or two short lines>"
+)
+
+
+def _parse_peer_verdict(text):
+    """Parse the peer-review contract reply → (verdict, confidence, notes)."""
+    text = text or ""
+    verdict = "PASS"
+    if re.search(r"PEER VERDICT\s*:\s*FLAG", text, flags=re.IGNORECASE):
+        verdict = "FLAG"
+    elif re.search(r"\bFLAG\b", text, flags=re.IGNORECASE) and not re.search(
+        r"\bPASS\b", text, flags=re.IGNORECASE
+    ):
+        verdict = "FLAG"
+    confidence = None
+    m = re.search(r"CONFIDENCE\s*:\s*(\d{1,3})", text, flags=re.IGNORECASE)
+    if m:
+        confidence = max(0, min(100, int(m.group(1))))
+    notes = ""
+    m = re.search(r"NOTES\s*:\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        notes = m.group(1).strip()[:500]
+    return verdict, confidence, notes
+
+
+def run_peer_review_worker(task_id, sid, answer, body, mode="cpu"):
+    """Full cross-agent critique round for background agent replies (Kaya↔Kolpo).
+
+    The peer agent reviews the reply as a dedicated LLM round on the CPU
+    llama-server. The call goes DIRECTLY to the lane's server (not through
+    ``/api/chat``): the reviewed task is still the cpu lane's current task, so
+    a queued peer task could never start — the lane serializes one task at a
+    time and the direct call sidesteps that queue entirely (the server itself
+    is free while the review runs).
+
+    The verdict is stored as the task's ``_judge_result`` so the finalize path
+    surfaces it as the message's confidence chip. Fail-open everywhere: no
+    peer configured, a down lane server or an empty reply falls back to the
+    generic per-user quality judge, and the reply is always finalized.
+    """
+    from server.config import AGENT_PEER_MAP
+
+    try:
+        with M._data_lock:
+            t = M.tasks.get(task_id) or {}
+            author = t.get("_user", "")
+        peer = (AGENT_PEER_MAP or {}).get(author)
+        if not peer:
+            print(
+                f"[peer-review] no peer configured for {author!r} — falling "
+                "back to the quality judge"
+            )
+            _judge_answer_quality(task_id, answer)
+            M._finalize_task(task_id, sid, answer, body)
+            return
+
+        prompt = _PEER_REVIEW_PROMPT.format(
+            peer=peer, author=author, answer=(answer or "")[:6000]
+        )
+        try:
+            base = M.server_base("cpu")
+            payload = {
+                "model": M.server_model_id("cpu"),
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7,
+                "max_tokens": 1024,
+                "stream": False,
+            }
+            r = requests.post(
+                f"{base}/v1/chat/completions",
+                json=payload,
+                timeout=_PEER_REVIEW_TIMEOUT,
+            )
+            r.raise_for_status()
+            reply = (
+                (r.json().get("choices") or [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                or ""
+            )
+            if not reply:
+                raise RuntimeError("peer round returned an empty reply")
+            verdict, confidence, notes = _parse_peer_verdict(reply)
+            print(
+                f"[peer-review] {peer} verdict={verdict} "
+                f"confidence={confidence if confidence is not None else 'n/a'} "
+                f"notes={notes[:120]!r}"
+            )
+            with M._data_lock:
+                tt = M.tasks.get(task_id)
+                if tt:
+                    tt["_judge_result"] = {
+                        "quality": confidence,
+                        "ok": verdict == "PASS",
+                        "peer": peer,
+                        "flags": [] if verdict == "PASS"
+                        else [notes or "peer flagged the reply"],
+                        "reason": notes or f"peer review by {peer}",
+                        "model": f"peer-review:{peer}",
+                    }
+        except Exception as e:
+            print(
+                f"[peer-review] peer round failed (fail-open) — falling back "
+                f"to the quality judge: {e}"
+            )
+            _judge_answer_quality(task_id, answer)
+        M._finalize_task(task_id, sid, answer, body)
+    except Exception as e:
+        print(f"[peer-review] worker error for task {task_id}: {e}")
+        try:
+            M._finalize_task(task_id, sid, answer, body)
+        except Exception:
+            pass

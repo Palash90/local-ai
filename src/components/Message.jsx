@@ -8,6 +8,17 @@ import StatusBox from './StatusBox'
 
 marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
 
+// Open external links in a new tab. Applied inside sanitization so the
+// attributes survive DOMPurify regardless of which parse path produced the HTML.
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName !== 'A' || node.hasAttribute('download')) return
+  const href = node.getAttribute('href') || ''
+  if (/^(https?:)?\/\//i.test(href) || /^mailto:/i.test(href)) {
+    node.setAttribute('target', '_blank')
+    node.setAttribute('rel', 'noopener noreferrer')
+  }
+})
+
 // Research-mode citations are stored as `(Author, Venue, Year) [https://url]`
 // (the critic parses the square-bracketed URL), but marked would swallow the
 // trailing `]` into the link href. Turn `[https://url]` into a proper markdown
@@ -525,6 +536,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
           }
         })
       }
+      text = text.replace(/<\/?user_input>/g, '')
       if (msg._timestamp) {
         try {
           const d = new Date(msg._timestamp)
@@ -590,30 +602,6 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
     msg.tool_calls.length > 0
   ) {
     return null
-  }
-
-  if (role === 'user') {
-    if (typeof msg.content === 'string') {
-      text = msg.content
-      // @ts-ignore
-    } else if (Array.isArray(msg.content)) {
-      msg.content.forEach(part => {
-        if (part.type === 'text') text += part.text
-        else if (part.type === 'image_url') {
-          const url = part.image_url.url
-          if (url.startsWith('data:')) userImg = url.split(',')[1]
-          else if (url.startsWith('/uploads/') || url.startsWith('/output/') || /^https?:/.test(url)) userImg = url
-        }
-      })
-    }
-    if (msg._timestamp) {
-      try {
-        const d = new Date(msg._timestamp)
-        timestamp = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
-      } catch { }
-    }
-  } else {
-    text = typeof msg.content === 'string' ? msg.content : ''
   }
 
   const ttsText = text

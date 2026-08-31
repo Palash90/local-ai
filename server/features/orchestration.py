@@ -301,6 +301,8 @@ def _event_loop():
                     "_client_timestamp": client_ts,
                     "mode": t.get("mode"),
                     "_mcp": bool(data.get("_mcp")) or bool(t.get("_mcp")),
+                    "_peer_review": bool(data.get("_peer_review"))
+                    or bool(t.get("_peer_review")),
                     "research": bool(data.get("research")),
                     "cpu": bool(data.get("cpu")),
                     "no_tools": bool(data.get("no_tools")),
@@ -312,8 +314,16 @@ def _event_loop():
                     print(f"[openai] processing OpenAI lane request for task {task_id}")
             # (The owning lane's _current_task_ids[mode] was already set by
             # _queue_worker before this "start" event was posted.)
-            M._prepare_session(task_id, sid, user_message, image_b64, audio_b64, client_ts)
-            M._start_llm_round(task_id, sid, 0)
+            if data.get("_resumed"):
+                # RAM-evacuation resume: _prepare_session already ran on the
+                # first attempt — the user message and everything the model
+                # produced since (tool trail, steering turns) are in the
+                # session. Only the user message was appended back then;
+                # appending it again duplicated the turn in the UI.
+                M._start_llm_round(task_id, sid, 0)
+            else:
+                M._prepare_session(task_id, sid, user_message, image_b64, audio_b64, client_ts)
+                M._start_llm_round(task_id, sid, 0)
 
         elif ev_type == "llm_ok":
             if t.get("_state") != "llm_waiting":
@@ -424,6 +434,30 @@ def _event_loop():
                         body,
                         mode,
                     )
+                elif (
+                    mode == "cpu"
+                    and t.get("_user") in M._agent_users
+                    and not t.get("_peer_review")
+                    and not t.get("research")
+                ):
+                    # Background agent replies (Kaya/Kolpo on the CPU lane) get
+                    # a full cross-agent critique round: the peer reviews the
+                    # reply as a real chat before the task finalizes. The peer
+                    # round itself is flagged _peer_review and skips this
+                    # branch (no recursion).
+                    M.set_status(task_id, "Peer review...")
+                    with M._data_lock:
+                        tt = M.tasks.get(task_id)
+                        if tt:
+                            tt["_state"] = "peer_review_running"
+                    M._tool_pools[mode].submit(
+                        M.run_peer_review_worker,
+                        task_id,
+                        sid,
+                        (msg.get("content") or ""),
+                        body,
+                        mode,
+                    )
                 else:
                     M._finalize_task(task_id, sid, (msg.get("content") or ""), body)
 
@@ -444,7 +478,7 @@ def _event_loop():
                     M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
                     print(f"[tool_ok] Appended tool result to session {sid} for task {task_id}")  # DEBUG
                 tt = M.tasks.get(task_id)
-                if not tt or tt.get("status") in ("done", "error"):
+                if not tt or tt.get("status") in ("done", "error", "requeued"):
                     continue
                 pending = (tt.get("_pending_tools", 0) - 1) if tt else 0
                 if tt:
@@ -478,7 +512,7 @@ def _event_loop():
                     )
                     M.sessions_meta.setdefault(data["sid"], {})["updated"] = time.time()
                 tt = M.tasks.get(task_id)
-                if not tt or tt.get("status") in ("done", "error"):
+                if not tt or tt.get("status") in ("done", "error", "requeued"):
                     continue
                 pending = (tt.get("_pending_tools", 0) - 1) if tt else 0
                 if tt:
@@ -595,14 +629,22 @@ def _queue_worker(mode):
             # paths below rewrite M.tasks[tid] to a minimal dict (dropping
             # "_mcp"), so the entry itself must remain the source of truth.
             _mcp=item.get("_mcp"),
+            # Same for the peer-review recursion guard.
+            _peer_review=item.get("_peer_review"),
+            # Set when _evacuate_ram requeued an in-flight task: the session
+            # already holds this task's user message, so "start" must skip
+            # _prepare_session (see the resume branch in _event_loop).
+            _resumed=item.get("_resumed"),
         )
-        # Wait for this task to finish (status becomes "done", "error" or "cancelled")
-        # before dequeuing the next item IN THIS LANE. The other lane's worker
-        # keeps running independently the whole time.
+        # Wait for this task to finish (status becomes "done", "error",
+        # "cancelled" or "requeued") before dequeuing the next item IN THIS
+        # LANE. The other lane's worker keeps running independently the whole
+        # time. ("requeued" is set only by _evacuate_ram on the CURRENT task,
+        # never at enqueue time, so it cannot race with a fresh "queued".)
         while True:
             with M._data_lock:
                 st = M.tasks.get(item["task_id"], {}).get("status")
-            if st in ("done", "error", "cancelled"):
+            if st in ("done", "error", "cancelled", "requeued"):
                 break
             time.sleep(0.5)
         with queue_lock:

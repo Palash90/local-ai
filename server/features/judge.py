@@ -555,11 +555,18 @@ def mcp_output_judge(text, timeout=None, fail_closed=True, model_id=None):
     judge model's context window while still covering the bulk of the output.
     """
     base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
-    if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
+    # The guardrail lane is CPU-only and this prompt carries up to 6000 chars
+    # of reply text: a cold model load plus thinking-model inference can
+    # legitimately run 2-4 minutes (observed: 90s read timeouts right after a
+    # RAM-evacuation restart). Floor the L3 window at 240s — GUARD_LLM_TIMEOUT
+    # can raise it, never lower it below this floor. A truly DOWN server still
+    # fails fast (connection refused), so this only tolerates slow starts.
+    if timeout is None or timeout < 240:
         try:
-            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
+            env_timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
         except ValueError:
-            timeout = _JUDGE_MIN_TIMEOUT
+            env_timeout = _JUDGE_MIN_TIMEOUT
+        timeout = max(240, env_timeout)
     text = (text or "").strip()
     if not text:
         return False

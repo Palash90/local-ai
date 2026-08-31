@@ -335,6 +335,13 @@ LLAMA_URL_GUARDRAIL = f"{LLAMA_BASE_GUARDRAIL}/v1/chat/completions"
 MODEL_ID_GUARDRAIL = "gemma-4-E2B-it-Q4_K_M"
 MCP_USER = os.environ.get("MCP_USER", "")
 
+# Background agent peer review: who critiques whom for the full cross-agent
+# round on the CPU lane. Keys are agent usernames; a reply finalized by the
+# key user is reviewed by the value user before finalization.
+AGENT_PEER_MAP = json.loads(
+    os.environ.get("AGENT_PEER_MAP", '{"kaya": "kolpo", "kolpo": "kaya"}')
+)
+
 LLAMA_SERVER_ARGS_GUARDRAIL = [
     "--host", "127.0.0.1",
     "--port", "8083",
@@ -343,6 +350,10 @@ LLAMA_SERVER_ARGS_GUARDRAIL = [
     "--n-gpu-layers", "0",
     "-fa", "off",
     "--ctx-size", "16384",
+    # Two slots so concurrent judge calls (L3 output + answer-quality often
+    # fire together) stop serializing behind a single slot. ctx is split
+    # across slots (8K each) — judge prompts are small, so this is plenty.
+    "--parallel", "2",
     "-ctk", "q8_0",
     "--no-mmproj-offload",
     "-t", "4",
@@ -399,7 +410,7 @@ TOOLS_DETAILED = [
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search. The results contain snippets only; if the snippets are insufficient to answer the question fully, follow up with fetch_page to read the full content of the relevant page.",
+                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search. The results contain snippets only; if the snippets are insufficient to answer the question fully, follow up with fetch_page to read the full content of the relevant page. NEVER for questions about the user's own code, projects, or codebase — those must use the codebase-search tools.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -683,7 +694,8 @@ _FULL_DOCS_TOOLS = {"web_search", "fetch_page"}
 _TOOL_SHORT_DESC = {
     "web_search": (
         "Search the web for real-time/current information (news, weather, "
-        "prices, events). Returns snippets only."
+        "prices, events). Returns snippets only. Never for the user's own "
+        "code/codebase — use codebase-search tools for those."
     ),
     "fetch_page": (
         "Read the full text of a web page by URL; long pages are chunked, "

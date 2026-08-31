@@ -33,7 +33,7 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 | 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI, 24K ctx, VRAM-backed |
 | 8083 | llama-server (guardrail) | lazy by MCP gateway / judge | small verify model, idle-unloads after 300s |
 | 8080 | SearXNG | docker / systemd | web search backend |
-| 8188 | ComfyUI | lazy on image request | image generation |
+| 8188 | ComfyUI | lazy on image request | image generation; recycled after every render to return its RAM (`COMFYUI_RECYCLE_AFTER_RENDER=0` to disable) |
 | 9000 | code host | `restart_services.sh` | `code_host.py` (lives outside this repo) |
 | 9010 | Authentik proxy outpost | docker | nginx `auth_request` upstream |
 
@@ -179,7 +179,9 @@ local-ai/
 │       ├── users.py         Presence, per-user context files, agent registration
 │       ├── judge.py         LLM safety/quality judges (harmful in/out, research verify, quality);
 │       │                    judge calls hold while an image render is active (RAM guard)
-│       ├── critic.py        Citation extraction + per-citation re-fetch verification
+│       ├── critic.py        Citation extraction + existence probe (direct fetch →
+│       │                    bot-block → search) + per-citation LLM verification
+│       │                    (reasoning-aware judge calls, 2048/4096 token budget)
 │       ├── monitoring.py    Thermal/RAM/idle loops, server lifecycle, DDNS + GCP heartbeat
 │       ├── surface_loader.py Fernet-decryptable attack-surface pattern files
 │       └── openai_adapter.py Tool-call ↔ OpenAI SSE format adapters (incremental chunks)
@@ -189,9 +191,11 @@ local-ai/
 ├── scripts/                 authentik_bootstrap.py, encrypt_surface.py, gcp_heartbeat_server.py
 ├── searxng/                 SearXNG settings volume
 ├── markdown_hosting.py      Story hosting service on :3002 (FastAPI, free/premium/admin RBAC)
-├── self-chat.py             Offline multi-agent story pipeline (CLI)
+├── self-chat.py             Offline multi-agent story pipeline (CLI; editor gate
+│                            + confidence, kaya↔kolpo cross-critique)
 ├── genre_creator.py         Interactive console helper to author task genre schemas
 ├── mcp_config.json          External MCP servers for mcp_client.py
+│                            (codebase-search = codebase-memory-mcp graph)
 ├── docker-compose.yaml      Containerized stack + SearXNG
 ├── authentik-compose.yaml   Authentik identity provider
 ├── local_cloud.sh / gcp_nginx.conf   nginx front-ends (auth_request SSO gate, TLS)
@@ -203,7 +207,8 @@ local-ai/
 The data dir (`~/local-ai-files/`, shared into the container) holds: `model.json`,
 `models.json`, `sys_prompt.txt`, `sessions/`, `shares.json`, `contexts/<user>.txt`,
 `my-models/` (GGUFs), `ComfyUI/{input,output}`, `uploads/`, `kv-slots/`,
-`stories/`, `local_ai.db` (tasks + theme log + MCP batches).
+`stories/`, `local_ai.db` (tasks + theme log + MCP batches + per-user
+`user_judges` assignments).
 
 ## Authentication (SSO)
 
@@ -267,7 +272,24 @@ lazy-start, 300s idle-unload). `MCP_USER` owns the acting identity.
 
 `server/mcp_client.py` is the *outbound* side: external MCP servers declared in
 `mcp_config.json` are connected at startup and their tools are merged into the
-chat tool list (per-session cache, version-invalidated).
+chat tool list (per-session cache, version-invalidated via
+`mcp_manager._tools_version`). The model sees them under namespaced ids
+(`<server>__<tool>`); dispatch routes through `MCPClientManager.is_mcp_tool()`
+→ `dispatch_mcp_tool()` (asyncio bridge to the client loop, results truncated
+to 8k chars). The OpenAI lane never receives MCP tools (`no_tools: true` in
+`openai_api.py`).
+
+Shipped servers:
+
+- **`codebase-search`** (`codebase-memory-mcp@latest`, stdio,
+  `CBM_ALLOWED_ROOT=/home/palash/git`) — a code **knowledge graph** (15 tools:
+  `search_graph`, `query_graph` Cypher, `trace_path`, `get_architecture`,
+  `detect_changes`, …), exposed to chat as `codebase-search__*`. A repo returns
+  **zero results until indexed**: run `index_repository(repo_path=…)` once per
+  repo and re-index after significant changes (`index_status` /
+  `detect_changes` report coverage and blast radius). Graph state lives under
+  `~/.cache/codebase-memory-mcp/`; `local-ai` itself is indexed as project
+  `home-palash-git-local-ai`.
 
 ### Markdown Hosting (`markdown_hosting.py`, :3002)
 
@@ -276,7 +298,10 @@ FastAPI site publishing the self-chat stories with role-gated collections
 collection index `GET /`, `GET /story/<col>/<id>` (rendered HTML + KaTeX, images
 rewritten to auth-gated `/media/…`), `GET /story/…/content` (live incremental
 poll while a story is being written), admin `DELETE /story/…`. Requires
-`STORIES_PREMIUM_DIR` / `STORIES_ADMIN_DIR` env vars.
+`STORIES_PREMIUM_DIR` / `STORIES_ADMIN_DIR` env vars. External links in the
+rendered stories open in a new tab (`render_story_html` adds
+`target="_blank" rel="noopener noreferrer"` to `http(s)` hrefs; in-page
+`#anchors` stay in-tab).
 
 ### Self-Chat Pipeline (`self-chat.py`)
 
@@ -288,6 +313,17 @@ stories + moderation JSON to `~/local-ai-files/stories/`. CLI flags:
 LLM calls), `--gpu` (pin agents to the GPU lane). Agents log in via the
 Authentik machine-client password grant and use the normal `/api/chat` API;
 theme dedup goes through `track_theme`.
+
+The **editor gate** grades every finished story against the task/genre
+checklist (`VERDICT / CONFIDENCE / FLAGS`): flagged stories are discarded and
+the conversation restarts from scratch (`SELF_CHAT_EDITOR_RESTARTS`, default 2,
+then RED with the flags); clean stories below the confidence threshold
+(`editor_min_confidence` task key or `SELF_CHAT_EDITOR_MIN_CONFIDENCE`,
+default 70) get one cross-critique revision + re-review. `.moderation.json` is
+written for GREEN too and carries the confidence number. Online (cpu-lane)
+agent replies get a full cross-agent peer-review round (`AGENT_PEER_MAP`,
+default kaya↔kolpo) whose verdict becomes the reply's confidence chip; both
+resolve per-agent judge models from the `user_judges` table.
 
 ### Scripts
 
@@ -304,7 +340,8 @@ React 19 + Vite, no router/state library — chat UI served by chat-webui from
 `dist/`. `App.jsx` owns auth check, session CRUD, the `/api/status/:id` polling
 loop, location prompts and share routing (`/s/<token>`); `api.js` wraps the
 `/api/*` endpoints and dispatches `auth:unauthorized` on 401. Components:
-`Sidebar`, `ChatArea`, `Message` (markdown + KaTeX + DOMPurify, search popups,
+`Sidebar`, `ChatArea`, `Message` (markdown + KaTeX + DOMPurify, external links
+open in a new tab via a sanitize hook, search popups,
 reasoning block, TTS/copy/share buttons), `InputBar` (file upload with
 extension whitelist), `ModelBar` (live temp/tps), `StatusBox`, `TaskPanel`,
 `ImageLightbox`, `LocationPrompt`, `OverloadWarning`, `PublicShareView`.
@@ -336,13 +373,24 @@ proxies to the backend for development.
   `prompts/surface_attacks/`), the L3 judge and the critic citation pass catch the
   common cases — MCP/guardrail traffic is screened fail-closed, but the interactive
   UI lane is deliberately **fail-open** (a judge outage must never drop a reply).
-  Tasks submitted by `MCP_USER` over `/api/chat` are flagged `_mcp` and get the
-  same fail-closed L3 output judge as gateway-admitted MCP traffic. There is no
-  kid-safe filter; choose your model accordingly.
+  The small L2 judge model can also **false-positive on benign technical phrasing**
+  (e.g. "Debug this Rust program" prompts have been blocked as HARMFUL while
+  equivalent "identify the bug" phrasing passes) — if a batch item dies with
+  `LEVEL 2 LLM VERIFICATION FAILED`, check the `[guardrail][L2] raw verdict:` log
+  line before assuming bad input. Tasks submitted by `MCP_USER` over `/api/chat`
+  are flagged `_mcp` and get the same fail-closed L3 output judge as
+  gateway-admitted MCP traffic. There is no kid-safe filter; choose your model
+  accordingly.
 - **Judge calls pause during image renders.** Every judge POST
   (`judge.wait_until_render_safe`) holds while ComfyUI is generating, so a judge
   model load can never collide with a render and trigger an emergency RAM
   evacuation (600s cap, then proceed; 30s cooldown after the render).
+- **RAM evacuation resumes tasks instead of failing them.** When
+  `_evacuate_ram` fires, each lane's in-flight task is requeued to the front of
+  its queue with the non-terminal `requeued` status (the UI pending bubble keeps
+  polling — no error flash) plus a `_resumed` flag. After the servers restart,
+  the queue's `start` event skips `_prepare_session`, so the user message is
+  **not** appended twice and the answer still arrives exactly once.
 - **Image/file endpoints require identity.** `/output/…`, `/uploads/…` and
   `/api/image/…` answer only with valid SSO headers or a verified agent JWT. Public
   share pages load images exclusively through `/api/public/share/<token>/image/…`,
