@@ -1,18 +1,6 @@
-# Local AI — Self-Hosted LLM + Image Generation Stack
+# Local AI - LLM + Image Generation Setup
 
-A self-hosted AI stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM): a
-chat web UI with tool use (web search, page fetch, image generation/editing,
-file reading, tasks, reminders), an OpenAI-compatible API, an MCP gateway with
-batched agent jobs, a multi-agent story-writing pipeline, tiered story hosting,
-and Authentik SSO in front of everything.
-
-The interactive chat engine (`chat-webui.py` + `server/`) is the core; the
-other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
-`scripts/`) build on top of it.
-
-**Docs:** [ARCHITECTURE.md](ARCHITECTURE.md) — runtime design & diagrams ·
-[TEST_STEPS.md](TEST_STEPS.md) — manual regression plan ·
-[server_startup_commands.md](server_startup_commands.md) · [sso-debugging.md](sso-debugging.md)
+Self-hosted LLM + image generation stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM).
 
 ## Requirements
 
@@ -21,21 +9,6 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
   it automatically if it's missing.
 - **Dockerized path:** **NVIDIA Container Toolkit** on the *host* (for `--gpus`), plus
   CUDA toolkit *inside* the container (`setup.sh` installs it there too).
-
-## Ports & Services
-
-| Port | Service | Started by | Notes |
-|---|---|---|---|
-| 3001 | chat-webui (core API + SPA) | `python chat-webui.py` | binds `127.0.0.1` (`CHAT_HOST`) — expose only via nginx |
-| 3002 | markdown hosting (stories) | `restart_services.sh` (uvicorn) | FastAPI app, role-gated collections |
-| 8000 | MCP gateway | in-process thread of chat-webui | FastMCP + OAuth; `MCP_USER` token auth |
-| 8079 | llama-server (CPU) | lazy / `restart_servers` | self-chat agents, 64K ctx, RAM-backed |
-| 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI, 24K ctx, VRAM-backed |
-| 8083 | llama-server (guardrail) | lazy by MCP gateway / judge | small verify model, idle-unloads after 300s |
-| 8080 | SearXNG | docker / systemd | web search backend |
-| 8188 | ComfyUI | lazy on image request | image generation |
-| 9000 | code host | `restart_services.sh` | `code_host.py` (lives outside this repo) |
-| 9010 | Authentik proxy outpost | docker | nginx `auth_request` upstream |
 
 ## Quick Start — Host OS
 
@@ -46,10 +19,9 @@ cd ~/git/local-ai
 bash setup.sh
 
 # 2. Post-processing — download your models (setup.sh does NOT download them)
-#    LLM (chat):   put GGUFs into ~/local-ai-files/my-models/
-#                  model.json holds "gpu" (chat UI) and "cpu" (self-chat
-#                  agents) model ids — edit if you use other models
-#                  (the guardrail/verify model is VERIFY_MODEL in .env/config)
+#    LLM (chat):   put a GGUF into ~/local-ai-files/my-models/
+#                  model.json holds "gpu" (chat UI) and "cpu" (self-chat agents)
+#                  model ids — edit it if you use other models
 #    Image (z_image): copy these into ~/local-ai/ComfyUI/models/:
 #      diffusion_models/z_image_turbo_bf16.safetensors
 #      text_encoders/qwen_3_4b.safetensors
@@ -63,45 +35,38 @@ Access at `http://chat.local` or `http://localhost:3001`.
 
 Authentication is unified SSO via Authentik — see "Authentication (SSO)" below.
 
-Self-chat agents (editor/moderator/registered agents) default to the CPU
-llama-server (port 8079) so they never compete with interactive UI users for
-VRAM. Switch lanes with `SELF_CHAT_MODE` (env var or `server/config.py`):
+Self-chat agents (editor/moderator/registered agents) run on the CPU llama-server
+(`http://localhost:8079`) by default so they never compete with interactive UI
+users for VRAM. To run them on the interactive GPU server instead, set the
+`SELF_CHAT_MODE` environment variable to `gpu`:
 
 ```bash
 SELF_CHAT_MODE=gpu python chat-webui.py
 ```
 
-> **Note:** `server/config.py` currently ships with `FORCE_GPU_LANE = True`, a
-> test-time flag that pins *everything* (including agents) to the GPU lane
-> unless a request explicitly sets `mode` or the UI's research+CPU toggle. Set
-> it to `False` for the intended CPU-agent behaviour.
+You can also edit `SELF_CHAT_MODE` in `server/config.py`.
 
-`chat-webui.py` auto-starts the GPU llama-server on boot if it's down (CPU and
-guardrail servers lazy-start on first use) and starts ComfyUI on demand. If you
-prefer to run the services manually:
+`chat-webui.py` auto-starts the two llama-servers on boot if they're down, and
+starts ComfyUI on demand, so no manual service startup is required. If you prefer
+to run the services manually:
 
 ```bash
 # GPU llama-server — interactive chat UI users (VRAM-backed, 24K context)
 ~/local-ai/llama.cpp/build/bin/llama-server \
-    --host 127.0.0.1 --port 8081 \
+    --host 0.0.0.0 --port 8081 \
     --models-dir ~/local-ai-files/my-models/ \
     --jinja -ngl 99 -fa on --ctx-size 24576 \
-    -ctk q8_0 -ctv q8_0 --no-mmproj-offload \
-    -t 8 -tb 8 -ub 512 --timeout 3600 \
-    --cache-reuse 256 --slot-save-path ~/local-ai-files/kv-slots \
-    --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0.05
+    -ctk q8_0 -ctv q8_0 \
+    --no-mmproj-offload
 
 # CPU llama-server — automated self-chat agents (RAM-backed, concurrent)
 ~/local-ai/llama.cpp/build/bin/llama-server \
-    --host 127.0.0.1 --port 8079 \
+    --host 0.0.0.0 --port 8079 \
     --models-dir ~/local-ai-files/my-models/ \
-    --jinja --n-gpu-layers 0 -fa off --ctx-size 65536 \
-    -ctk q8_0 --no-mmproj-offload --device none \
-    -t 6 -tb 6 --cache-reuse 256 \
-    --reasoning-budget 2048 \
-    --reasoning-budget-message "Reasoning limit reached, summarize final answer." \
-    --slot-save-path ~/local-ai-files/kv-slots \
-    --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0.0 --repeat-penalty 1.0
+    --jinja --n-gpu-layers 0 -fa off --ctx-size 24576 \
+    -ctk q8_0 -nkvo \
+    --reasoning-budget 4096 \
+    --no-mmproj-offload --device none
 
 cd ~/local-ai/ComfyUI && source venv/bin/activate && python main.py \
     --lowvram \
@@ -124,8 +89,8 @@ cd /root/git/local-ai
 bash setup.sh
 
 # 3. Post-processing — download models into the shared host dirs
-#    (same list as the Host OS path; image models land in
-#     ~/local-ai/ComfyUI/models/ on the HOST, mounted into the container)
+#    (same list as the Host OS path, but the image models land in
+#     ~/local-ai/ComfyUI/models/ on the HOST, which is mounted into the container)
 
 # 4. Run — inside the container
 cd /root/git/local-ai && python chat-webui.py
@@ -143,68 +108,6 @@ Access at `http://localhost:3001` (published from the container). Notes:
 - Config/data dirs (`~/local-ai-files`) are shared with the host, so models and
   sessions persist across container restarts.
 
-## Repository Layout
-
-```
-local-ai/
-├── chat-webui.py            Entrypoint: owns ALL shared state, re-exports config +
-│                            features, registers the M proxy, starts 11 daemon threads,
-│                            serves server/api.Handler on :3001
-├── server/                  Core backend
-│   ├── api.py               HTTP layer (routes, Handler, app-state injection)
-│   ├── auth.py              Authentik identity: X-Authentik-* headers, JWT/JWKS, OIDC grant
-│   ├── config.py            Constants, model ids, tool catalogs (TOOLS/TOOLS_DETAILED/
-│   │                        TOOLS_HUMAN), llama-server arg sets, prompt builder
-│   ├── db.py                Unified SQLite layer (~/local-ai-files/local_ai.db), LOCAL_AI_DB env
-│   ├── tasks/…              (see features/) — batches_db.py, mcp_tasks_db.py: MCP queue tables
-│   ├── input_guard.py       Pattern-based moderation: jailbreak/harmful input, strict output blocks
-│   ├── openai_api.py        OpenAI-compatible /v1/* handlers (auth, models, SSE streaming)
-│   ├── mcp_client.py        Outbound MCP client (mcp_config.json servers → extra chat tools)
-│   ├── mcp_gateway.py       Inbound MCP server on :8000 (12 tools, OAuth, batch worker, verify)
-│   ├── read_file.py         Upload text extraction (PDF/DOCX/DOC/XLSX)
-│   ├── dotenv.py            Tiny .env parser
-│   └── features/            Chat engine, one concern per module (see ARCHITECTURE.md)
-│       ├── state.py         Shared containers/locks + the M entrypoint proxy; lane constants
-│       ├── llm.py           llama-server load/unload FSM, task_mode routing, sampling router,
-│       │                    KV slot checkpoints, _llm_worker (SSE parse), tool-call reassembly
-│       ├── orchestration.py Queues, event loop, finalize (critic pass + L3 judge), reminders glue
-│       ├── tools.py         Tool dispatch: web_search, fetch_page (SSRF-guarded), read_file/image,
-│       │                    update_user_context, manage_tasks, track_theme, tool_details
-│       ├── images.py        ComfyUI generate/edit workflows, VRAM choreography, image worker
-│       ├── sessions.py      Per-user session files, prompt injection, auto-rename, compaction glue
-│       ├── context.py       Token estimation, trim/compact, sanitize, effective-context reports
-│       ├── shares.py        Public share snapshots + scoped image serving
-│       ├── tasks_db.py      To-do tasks (SQLite) + manage_tasks tool handler
-│       ├── themes_db.py     Creative-combination tracker (dedup) + track_theme tool handler
-│       ├── users.py         Presence, per-user context files, agent registration
-│       ├── judge.py         LLM safety/quality judges (harmful in/out, research verify, quality);
-│       │                    judge calls hold while an image render is active (RAM guard)
-│       ├── critic.py        Citation extraction + per-citation re-fetch verification
-│       ├── monitoring.py    Thermal/RAM/idle loops, server lifecycle, DDNS + GCP heartbeat
-│       ├── surface_loader.py Fernet-decryptable attack-surface pattern files
-│       └── openai_adapter.py Tool-call ↔ OpenAI SSE format adapters (incremental chunks)
-├── src/                     React 19 + Vite SPA (built to dist/, served by chat-webui)
-├── prompts/                 System prompts, persona/genre/task pools, judge prompts
-│   └── surface_attacks/     Guardrail pattern/judge files (optionally .enc via SURFACE_ATTACKS_KEY)
-├── scripts/                 authentik_bootstrap.py, encrypt_surface.py, gcp_heartbeat_server.py
-├── searxng/                 SearXNG settings volume
-├── markdown_hosting.py      Story hosting service on :3002 (FastAPI, free/premium/admin RBAC)
-├── self-chat.py             Offline multi-agent story pipeline (CLI)
-├── genre_creator.py         Interactive console helper to author task genre schemas
-├── mcp_config.json          External MCP servers for mcp_client.py
-├── docker-compose.yaml      Containerized stack + SearXNG
-├── authentik-compose.yaml   Authentik identity provider
-├── local_cloud.sh / gcp_nginx.conf   nginx front-ends (auth_request SSO gate, TLS)
-├── setup.sh / restart_services.sh / stop_services.sh / local_cloud.sh
-├── ARCHITECTURE.md          System design deep-dive (diagrams: lanes, FSMs, event loop…)
-└── TEST_STEPS.md            Manual interface test plan (curl-level, run before trusting a deploy)
-```
-
-The data dir (`~/local-ai-files/`, shared into the container) holds: `model.json`,
-`models.json`, `sys_prompt.txt`, `sessions/`, `shares.json`, `contexts/<user>.txt`,
-`my-models/` (GGUFs), `ComfyUI/{input,output}`, `uploads/`, `kv-slots/`,
-`stories/`, `local_ai.db` (tasks + theme log + MCP batches).
-
 ## Authentication (SSO)
 
 Authentication is unified **SSO via Authentik** — the single identity provider for
@@ -219,98 +122,27 @@ users, passwords and roles live in Authentik.
    nginx forwards to the upstream apps. On 401 nginx sends the browser to the SSO
    portal (`@ak-sso-ai`). The SPA calls `/api/check-auth` on load to learn who the
    user is.
-2. **Machine agents** (`self-chat.py`, MCP clients) — authenticate via Authentik's
-   OAuth2 password grant (separate `AUTH_AGENTS_*` OIDC client) and send the JWT as
-   `Authorization: Bearer <token>`. Backends verify the signature against Authentik's
-   JWKS (`server/auth.py` → `identity_from_bearer`).
+2. **Machine agents** (`self-chat.py`) — authenticate via Authentik's OAuth2 password
+   grant and send the JWT as `Authorization: Bearer <token>`. Backends verify the
+   signature against Authentik's JWKS (`server/auth.py` → `identity_from_bearer`).
 
 Resolved identity is always a dict — `username`, `email`, `name`, `groups`, `role`
-(`free`/`premium`/`admin`, mapped from the user's Authentik groups via
-`AUTH_ROLE_GROUPS`; highest wins) and the Authentik `uid`. Roles decide Story
-collection access (`markdown_hosting`) and the "overwrite user context" admin action.
+(`free`/`premium`/`admin` from the user's Authentik groups) and the Authentik `uid`
+(`server/auth.py` → `get_identity`). Roles decide Story collection access and the
+"overwrite user context" admin action.
 
 **Enabling steps** (one-time):
 
 1. Fill the `AUTHENTIK_*` / `POSTGRES_*` secrets in `.env` (see `authentik-compose.yaml`).
 2. Start Authentik: `docker compose -f authentik-compose.yaml up -d`.
 3. Open `https://<host>/sso/if/flow/initial-setup/` and create the admin account.
-4. Provision groups/users, the `local-ai` + machine-agent OIDC providers and the proxy
-   outpost: `python3 scripts/authentik_bootstrap.py`.
+4. Provision groups/users, the `local-ai` OIDC provider and the proxy outpost:
+   `python3 scripts/authentik_bootstrap.py`.
 5. Deploy the proxy outpost (`ghcr.io/goauthentik/proxy`) with the outpost token the
    bootstrap script prints, on `127.0.0.1:9010` (nginx's `ak_outpost` upstream).
 6. Ensure the apps are only reachable through the nginx front-end in `local_cloud.sh`
-   (the `auth_request` gate on `/ai/`, `/api/`, `/stories/`, `/story/`), then reload nginx.
-
-## Architecture
-
-The full runtime design — network topology, module layout, lane/queue
-machinery, model state machines, REST surface, event loop, tool dispatch,
-resource management and the moderation/verification pipeline — is documented
-with diagrams in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
-
-## Companion Services
-
-### MCP Gateway (`server/mcp_gateway.py`, :8000)
-
-A FastMCP (streamable HTTP) server **in-process with chat-webui** (started by the
-`run_mcp` thread), fronted by nginx with OAuth metadata at
-`/.well-known/oauth-authorization-server`, `/authorize`, `/oauth/token` and an
-`EnforcementAuthMiddleware` (401 without a valid bearer). It exposes 12 tools:
-`get_user_context`, `list_sessions`, `create_session`, `get_session_messages`,
-`rename_session`, `send_chat_message`, `get_message_status`, `start_chat_batch`,
-`get_batch_status`, `get_batch_results`, `submit_batch_results`, `get_image`.
-
-Batches queue into SQLite (`batches_db.py` + `mcp_tasks_db.py`), drain through
-`_batch_worker` → the guardrail lane, and run **LEVEL 2 (input) / LEVEL 3
-(output)** LLM verification on the dedicated guardrail llama-server (:8083,
-lazy-start, 300s idle-unload). `MCP_USER` owns the acting identity.
-
-`server/mcp_client.py` is the *outbound* side: external MCP servers declared in
-`mcp_config.json` are connected at startup and their tools are merged into the
-chat tool list (per-session cache, version-invalidated).
-
-### Markdown Hosting (`markdown_hosting.py`, :3002)
-
-FastAPI site publishing the self-chat stories with role-gated collections
-(`free` → `premium` → `admin`, resolved from Authentik groups). Routes:
-collection index `GET /`, `GET /story/<col>/<id>` (rendered HTML + KaTeX, images
-rewritten to auth-gated `/media/…`), `GET /story/…/content` (live incremental
-poll while a story is being written), admin `DELETE /story/…`. Requires
-`STORIES_PREMIUM_DIR` / `STORIES_ADMIN_DIR` env vars.
-
-### Self-Chat Pipeline (`self-chat.py`)
-
-Offline multi-agent story production: persona agents (kolpo/kaya…) hold
-cross-critique rounds, then editor/moderator review and a moderation gate
-(GREEN/RED, auto-RED on duplicate/citation-drop/wrong-script/name-leak) writes
-stories + moderation JSON to `~/local-ai-files/stories/`. CLI flags:
-`--config <tasks.json>`, `--defaults`, `--dry-run` (validate + print plan, no
-LLM calls), `--gpu` (pin agents to the GPU lane). Agents log in via the
-Authentik machine-client password grant and use the normal `/api/chat` API;
-theme dedup goes through `track_theme`.
-
-### Scripts
-
-- `scripts/authentik_bootstrap.py` — one-time Authentik provisioning (groups, users,
-  OIDC apps, outpost token) via the Authentik admin API.
-- `scripts/encrypt_surface.py` — Fernet-encrypt `prompts/surface_attacks/*.txt` to
-  `.enc` (set `SURFACE_ATTACKS_KEY` to enable decryption at load).
-- `scripts/gcp_heartbeat_server.py` — the GCP-side receiver (DNS + heartbeat) that
-  `_connection_manager` talks to over WireGuard; feeds nginx/DDNS.
-
-## Frontend SPA (`src/` → `dist/`)
-
-React 19 + Vite, no router/state library — chat UI served by chat-webui from
-`dist/`. `App.jsx` owns auth check, session CRUD, the `/api/status/:id` polling
-loop, location prompts and share routing (`/s/<token>`); `api.js` wraps the
-`/api/*` endpoints and dispatches `auth:unauthorized` on 401. Components:
-`Sidebar`, `ChatArea`, `Message` (markdown + KaTeX + DOMPurify, search popups,
-reasoning block, TTS/copy/share buttons), `InputBar` (file upload with
-extension whitelist), `ModelBar` (live temp/tps), `StatusBox`, `TaskPanel`,
-`ImageLightbox`, `LocationPrompt`, `OverloadWarning`, `PublicShareView`.
-
-Build with `npm install && npm run build` (Vite → `dist/`); `npm run dev`
-proxies to the backend for development.
+   (the `auth_request` gate on `/ai/`, `/api/`, `/stories/`, `/story/`), then reload
+   nginx.
 
 ## Security & Deployment Notes
 
@@ -322,49 +154,439 @@ proxies to the backend for development.
 
 > **Authentication is unified SSO.** Browser access requires an Authentik session
 > (nginx `auth_request`), and per-user identity comes from the forwarded
-> `X-Authentik-*` headers (see "Authentication (SSO)"). The notes below assume the
-> SSO-enabled nginx front-end (`local_cloud.sh`); running `chat-webui.py` directly
-> bypasses all of it.
+> `X-Authentik-*` headers (see "Authentication (SSO)" below). The notes that follow
+> assume the SSO-enabled nginx front-end (`local_cloud.sh`); running `chat-webui.py`
+> directly on port 3001 bypasses all of it.
 
-- **Bypass on bare `chat-webui.py`.** It binds `127.0.0.1` by default (`CHAT_HOST`),
-  so it is only reachable through the nginx front-end or from the box itself. Setting
-  `CHAT_HOST=0.0.0.0` re-exposes every endpoint without the SSO gate — don't.
-- **Header trust.** `X-Authentik-*` headers are trusted upstream; any path that lets a
-  client reach :3001/:3002 directly (or a proxy that forgets to strip inbound
-  `X-Authentik-*`) spoofs identity. Keep the nginx rules from `local_cloud.sh`.
-- **Moderation is best-effort.** `input_guard` (pattern lists under
-  `prompts/surface_attacks/`), the L3 judge and the critic citation pass catch the
-  common cases — MCP/guardrail traffic is screened fail-closed, but the interactive
-  UI lane is deliberately **fail-open** (a judge outage must never drop a reply).
-  Tasks submitted by `MCP_USER` over `/api/chat` are flagged `_mcp` and get the
-  same fail-closed L3 output judge as gateway-admitted MCP traffic. There is no
-  kid-safe filter; choose your model accordingly.
-- **Judge calls pause during image renders.** Every judge POST
-  (`judge.wait_until_render_safe`) holds while ComfyUI is generating, so a judge
-  model load can never collide with a render and trigger an emergency RAM
-  evacuation (600s cap, then proceed; 30s cooldown after the render).
-- **Image/file endpoints require identity.** `/output/…`, `/uploads/…` and
-  `/api/image/…` answer only with valid SSO headers or a verified agent JWT. Public
-  share pages load images exclusively through `/api/public/share/<token>/image/…`,
-  which serves only files referenced by that share's snapshot.
-- **CORS is wide open.** Responses carry `Access-Control-Allow-Origin: *`. SSO cookies
-  are HttpOnly + SameSite, so cross-origin pages cannot ride the session, but same-origin
-  scripts can call the API.
-- **No TLS on bare 3001.** Always use the TLS-terminating nginx front-end
-  (`local_cloud.sh` / `gcp_nginx.conf`); never port-forward 3001/8081/8079/8083 directly.
-- **Third-party calls.** `fetch_page`, web search (SearXNG backends), location lookup
-  (Nominatim), DDNS (GoDaddy) and optional edge-tts all leave the box; `fetch_page`
-  rejects private-IP targets (SSRF guard). Disable or replace if strict data
-  residency matters.
+- **Bypass on bare `chat-webui.py`.** `chat-webui.py` binds to `127.0.0.1` by
+  default (`CHAT_HOST`), so it is only reachable through the nginx front-end or
+  from the box itself. Setting `CHAT_HOST=0.0.0.0` re-exposes every endpoint
+  without the SSO gate — don't.
+- **Image endpoints require identity.** `/output/...`, `/uploads/...` and
+  `/api/image/...` answer only with valid Authentik SSO headers (browser via
+  nginx) or a verified agent JWT (self-chat / MCP gateway). Public share pages
+  load images exclusively through the scoped
+  `/api/public/share/<token>/image/...` route, which serves only files
+  referenced by that share's snapshot.
+- **CORS is wide open.** Responses carry `Access-Control-Allow-Origin: *`
+  (`chat-webui.py` `do_OPTIONS`/`send_json`). A malicious page on the same origin
+  context could call the API and read responses; SSO cookies are HttpOnly and
+  SameSite-bound so cross-origin pages cannot use the session.
+- **No TLS/HTTPS on bare 3001.** Login and chat content travel in plaintext if you
+  connect without nginx. Always use the TLS-terminating nginx front-end
+  (`local_cloud.sh`); never port-forward 3001/8081/8079 directly.
+- **No content guardrails.** The model outputs whatever the loaded model produces; there
+  is no moderation or kid-safe filter in the stack. Choose your model accordingly and
+  set expectations for anyone using it.
+- **Third-party calls.** `fetch_page` and location lookup call external services
+  (SearXNG backends, `nominatim.openstreetmap.org`), and optional TTS can use
+  Microsoft `edge-tts` unless you configure the local Piper voices. If strict data
+  residency matters, disable or replace these.
 - **Compose exposes SearXNG on all host interfaces** (`8080:8080`), while the host path
   binds it to `127.0.0.1`. Bind it to localhost if you don't need LAN-wide search.
 
-## Testing
+## System Design
 
-There is **no automated test suite yet** (no `tests/`, no pytest/vitest config, no CI).
-The current regression gate is the manual interface plan in **[TEST_STEPS.md](TEST_STEPS.md)** —
-curl-level checks across the OpenAI API (§A), chat API + shares/tasks/presence (§B),
-tools + SSRF (§C), MCP gateway (§D), story RBAC (§E), self-chat pipeline (§F),
-SPA (§G), infra (§H), moderation & verification (§I), resource management (§J)
-and the Android client (§K). Run it (especially §Pre-flight + §A)
-after every deploy or llama-server restart before trusting results.
+### 1. Infrastructure & Network
+
+```mermaid
+graph TD
+    subgraph Hardware ["Hardware (RTX 3050 Laptop)"]
+        HW1["GPU: NVIDIA RTX 3050 — 4 GB VRAM"]
+        HW2["RAM: 16 GB"]
+        HW3["Same dev machine hosts everything"]
+        HW4["Target: 2–4 concurrent users"]
+    end
+
+    subgraph ExternalServices ["External Services"]
+        Docker["Docker Engine"]
+        Docker --> SearXNG["SearXNG Container\nlocalhost:8080\nRestart: unless-stopped"]
+        Nginx["Nginx Reverse Proxy\nchat.local:80 → localhost:3001"]
+        Avahi["avahi-daemon\nmDNS: chat.local"]
+    end
+
+    subgraph Network ["Network Topology"]
+        LAN["LAN Devices"] -->|"http://chat.local"| Nginx
+        Nginx -->|"proxy_pass\nUpgrade + X-Real-IP"| HTTPServer["chat-webui.py\n0.0.0.0:3001"]
+        HTTPServer -->|"localhost:8081"| LLamaGPU["llama-server (GPU)\ninteractive UI users"]
+        HTTPServer -->|"localhost:8079"| LLamaCPU["llama-server (CPU)\nself-chat agents"]
+        HTTPServer -->|"localhost:8188"| ComfyUIRuntime["ComfyUI"]
+        HTTPServer -->|"localhost:8080/search"| SearXNG
+        HTTPServer -->|"nominatim.openstreetmap.org"| Nominatim["Reverse Geocoding"]
+    end
+
+    subgraph StartupOrder ["Startup (manual)"]
+        SO1["1. llama-server (GPU)\n--port 8081"] --> SO2["2. llama-server (CPU)\n--port 8079"]
+        SO2 --> SO3["3. ComfyUI\nvenv → python main.py --lowvram"]
+        SO3 --> SO4["4. chat-webui.py\npython chat-webui.py"]
+        SO5["chat-webui.py on boot:\nGPU /health OK? else restart_servers\n→ ensure CPU server → SearXNG\nreachable? else sys.exit(1)"]
+    end
+```
+
+### 2. File Layout & Build
+
+```mermaid
+graph TD
+    subgraph CodeRepo ["Code (~/local-ai/)"]
+        CR1["chat-webui.py\nMain server — Python 3"]
+        CR2["setup.sh\nBootstrap: installs deps,\nclones repos, creates templates"]
+        CR3["dist/\nVite-built SPA frontend"]
+        CR4["llama.cpp/ git clone\nBuilt: cmake -DGGML_CUDA=ON\nBinary: build/bin/llama-server"]
+        CR5["ComfyUI/ git clone\nvenv: ComfyUI/venv/\nRequires: requirements.txt"]
+    end
+
+    subgraph DataDir ["Data (~/local-ai-files/)"]
+        DF1["model.json\nLLM model ids:\ngpu (chat UI)\n+ cpu (self-chat)"]
+        DF2["models.json\nComfyUI image model defs\nz_image (turbo)"]
+        DF3["Authentik (external)\nUsers, groups, SSO roles\ncontexts/<user>.txt\nPer-user persistent context"]
+        DF4["sys_prompt.txt\nSystem prompt template\n%model_list% %current_time%\n%current_location%"]
+        DF5["session/sessions_<user>.json\nPer-user persisted chat sessions"]
+        DF6["my-models/\nLLM GGUF model files"]
+        DF7["ComfyUI/input/\nTemp files for image editing"]
+        DF8["ComfyUI/output/\nGenerated/edited images"]
+        DF9["contexts/\nPer-user persistent context"]
+        DF10["searxng/\nSearXNG config volume"]
+        DF11["uploads/\nUploaded files saved to disk\n(code/docs via /api/extract-file)"]
+        DF12["local_ai.db\nUnified SQLite DB: to-do tasks, theme log + MCP batches"]
+    end
+
+    subgraph BuildFlags ["Build Flags"]
+        BF1["llama.cpp\ncmake -DGGML_CUDA=ON\n-DCMAKE_BUILD_TYPE=Release\n-j nproc"]
+        BF2["ComfyUI\npip install requirements.txt\nin Python venv"]
+        BF3["Frontend\nnpm install && npm run build\nVite to dist/"]
+        BF4["System deps\ngit python3 cmake avahi-daemon\npdftotext catdoc antiword\nnginx docker.io"]
+    end
+```
+
+### 3. Runtime Constants & Locks
+
+```mermaid
+graph TD
+    subgraph RCNetwork ["Service URLs"]
+        RC1["LLAMA_BASE = localhost:8081 (GPU)\nLLAMA_URL = /v1/chat/completions"]
+        RC2["LLAMA_BASE_CPU = localhost:8079 (CPU)\nLLAMA_URL_CPU = /v1/chat/completions"]
+        RC3["COMFYUI_URL = localhost:8188"]
+        RC4["SEARXNG_URL = localhost:8080/search"]
+        RC5["HOST = 0.0.0.0  PORT = 3001"]
+    end
+
+    subgraph RCLlama ["llama-server Args (two concurrent servers)"]
+        RCL1["GPU: --host 0.0.0.0 --port 8081\n--n-gpu-layers 99 -fa on --jinja"]
+        RCL2["CPU: --host 0.0.0.0 --port 8079\n--n-gpu-layers 0 -fa off\n--device none --jinja"]
+        RCL3["--models-dir ~/local-ai-files/my-models/"]
+        RCL4["GPU: --ctx-size 24576 (32K)\nCPU: --ctx-size 24576 (32K)"]
+        RCL5["--reasoning-budget 4096\n(CPU server only)"]
+        RCL6["-ctk q8_0 (KV cache quant, both)\n-ctv q8_0 (GPU only)\n-nkvo (CPU only)"]
+        RCL7["--no-mmproj-offload on BOTH servers\n(multimodal projector stays in RAM —\notherwise its ~950 MiB on the 4 GiB card\nstarves the CPU server's worker buffers)"]
+        RCL8["Routing: agent task → 8079 CPU,\nUI task → 8081 GPU (task_mode)"]
+    end
+
+    subgraph RCThermal ["Thermal and RAM Thresholds"]
+        RT1["TEMP_THRESHOLD_ON = 85 C"]
+        RT2["TEMP_THRESHOLD_OFF = 75 C"]
+        RT3["RAM_EVAC_THRESHOLD = 95%"]
+        RT4["RAM_RESUME_THRESHOLD = 70%"]
+    end
+
+    subgraph RCLimits ["Limits and Pools"]
+        RL1["MAX_QUEUE_SIZE = 5 (per lane)"]
+        RL2["MAX_INPUT_TOKENS = 24576 (24K)"]
+        RL3["_llm_pools: gpu 1 / cpu 4 workers\n(CPU_PARALLEL_SLOTS = 4)"]
+        RL4["_tool_pools: gpu 2 / cpu 2 workers"]
+        RL5["Max tool rounds = 10"]
+        RL6["Idle unload = 300s"]
+        RL7["LLM timeout = 600s"]
+        RL8["ComfyUI poll = 120s"]
+        RL9["REASONING_BUDGET = 4096 (CPU server)"]
+    end
+
+    subgraph RCThreads ["Thread Pools and Locks"]
+        LK1["_llm_pools: ThreadPoolExecutor\nper lane (gpu 1, cpu 4)\nLLM calls run per-lane"]
+        LK2["_tool_pools: ThreadPoolExecutor\nper lane (gpu 2, cpu 2)"]
+        LK3["_event_queue: queue.Queue\nDecouples dequeue from dispatch"]
+        LK4["_image_queue + _image_worker\nSerializes image jobs\n(image loading can starve GPU)"]
+        LK5["_data_lock: threading.Lock\nGuards sessions, tasks, model_status"]
+        LK6["_model_transition_lock\nSerializes load/unload of LLM"]
+        LK7["_tokens_lock\nGuards _agent_tokens/_agent_users\n(self-chat agent tracking)"]
+        LK8["_queue_locks + _queue_conds\nPer-lane task queues\n(gpu lane + cpu lane)\nCondition variables"]
+    end
+```
+
+### 4. Server Startup
+
+```mermaid
+graph TD
+    A["python chat-webui.py"] --> A1["Load configs at module import:\nmodel.json, models.json,\nsys_prompt.txt"]
+    A --> B["load_sessions()\nLoad per-user session files"]
+    A1 & B --> C{"GPU llama-server /health\nHTTP GET localhost:8081?"}
+    C -- "200 OK" --> C2{"CPU llama-server /health\nHTTP GET localhost:8079?"}
+    C -- "Dead" --> Restart["restart_servers:\n1. kill_llama_server pkill -9\n2. kill_comfyui pkill main.py\n3. Spawn ComfyUI Popen (no poll here)\n4. Spawn GPU llama-server (8081)\n5. Spawn CPU llama-server (8079)\n6. Poll each /health 2s up to 120s\n7. Kill on timeout"]
+    C2 -- "Dead" --> EnsureCPU["ensure_llama_server cpu:\nrestart CPU llama-server only\n(GPU stays running)"]
+    C2 -- "200 OK" --> D{"SearXNG reachable\non localhost:8080?"}
+    EnsureCPU --> D
+    D -- "Yes" --> E["Start 7 Daemon Threads"]
+    D -- "No" --> Exit["print ERROR & sys.exit(1)"]
+    Restart --> D
+
+    subgraph Daemons ["Background Daemon Threads"]
+        E1["_event_loop\nSingle-threaded event dispatcher"]
+        E2["_queue_worker gpu\nSequential dequeuer\n(GPU lane — UI users)"]
+        E3["_queue_worker cpu\nSequential dequeuer\n(CPU lane — self-chat agents)"]
+        E4["_image_worker\nSerialized image jobs\n(one at a time)"]
+        E5["_idle_unload_loop\nPolls every 10s"]
+        E6["_thermal_monitor\nPolls every 10s"]
+        E7["_reminder_loop\nPolls every 30s"]
+    end
+    E --> E1 & E2 & E3 & E4 & E5 & E6 & E7
+    E --> F["HTTPServer.serve_forever\n0.0.0.0:3001"]
+```
+
+### 5. Model State Machine
+
+Two independent state machines run concurrently — one per llama-server.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state "GPU server (8081) — UI users" as G {
+        [*] --> unloaded: gpu
+        unloaded --> loading : load_llama_model("gpu")
+        loading --> chat_loaded : 200 from /models/load\n+ health check passes
+        loading --> unloaded : failed
+        chat_loaded --> unloading : unload_llama_model("gpu")
+        unloading --> unloaded : 200 from /models/unload
+        unloading --> chat_loaded : failed but health OK
+        chat_loaded --> image_active : generate_image\nor edit_image starts
+        image_active --> chat_loaded : free_comfyui_vram\n+ load_llama_model("gpu")
+    end
+
+    state "CPU server (8079) — self-chat agents" as C {
+        [*] --> cpu_unloaded
+        cpu_unloaded --> cpu_loading : load_llama_model("cpu")
+        cpu_loading --> cpu_loaded : 200 from /models/load\n+ health check passes
+        cpu_loading --> cpu_unloaded : failed
+        cpu_loaded --> cpu_unloading : unload_llama_model("cpu")
+        cpu_unloading --> cpu_unloaded : 200 from /models/unload
+        cpu_unloading --> cpu_loaded : failed but health OK
+    }
+```
+
+Image generation unloads **only** the GPU server; the CPU server keeps serving
+agents throughout. Per-server idle timestamps drive independent unloads
+(`_last_llm_use` for GPU, `_cpu_last_llm_use` for CPU).
+
+### 6. REST API Endpoints
+
+```mermaid
+graph TD
+    Client([User Client])
+
+    subgraph AuthEndpoints ["Auth (SSO)"]
+        Client -->|"Browser: nginx auth_request\n→ Authentik SSO portal"| SSO["SSO session cookie set\nX-Authentik-* forwarded upstream"]
+        Client -->|"GET /api/check-auth"| CheckAuth["identity from\nX-Authentik-* headers"]
+        CheckAuth -- Yes --> AuthOK["{authenticated: true, username, role}"]
+        CheckAuth -- No --> AuthNO["{authenticated: false}"]
+        Client -->|"Agents: POST /sso/... token\nAuthorization: Bearer <JWT>"| Bearer["Verify JWT against\nAuthentik JWKS"]
+    end
+
+    subgraph SessionEndpoints ["Session Management"]
+        Client -->|"POST /api/sessions"| NewSession["Create UUID session\nStore in sessions_meta"]
+        Client -->|"GET /api/sessions"| ListSessions["List user sessions\nSorted by updated desc"]
+        Client -->|"GET /api/sessions/:id/messages"| GetMessages["Return messages\n+ token_estimate"]
+        Client -->|"PUT /api/sessions/:id"| RenameSession["Rename session"]
+        Client -->|"DELETE /api/sessions/:id"| DeleteSession["Delete session + cleanup\nassociated output images\nand uploaded files"]
+    end
+
+    subgraph TaskEndpoints ["Task Management"]
+        Client -->|"GET /api/tasks"| ListTasks["List user tasks\nwith reminders"]
+        Client -->|"POST /api/tasks"| CreateTask["Create task\n(title, priority, due_date, reminder)"]
+        Client -->|"PUT /api/tasks/:id"| UpdateTask["Update task fields"]
+        Client -->|"DELETE /api/tasks/:id"| DeleteTask["Delete task"]
+    end
+
+    subgraph AgentEndpoints ["Agent / Presence"]
+        Client -->|"POST /api/register-agent"| RegisterAgent["Create agent token\nfor self-chat bots\n(kolpo, kaya, editor, moderator)"]
+        Client -->|"POST /api/leaving"| Leaving["Set user's active window\nnow → end (presence)"]
+        Client -->|"GET /api/active-users"| ActiveUsers["List currently active users\n(presence tracking)"]
+    end
+
+    subgraph UtilityEndpoints ["Utility"]
+        Client -->|"GET /api/model-status"| ModelStatus["model_status, _last_tps\n_overheated, _gpu_temp,\nreminder_count, max_context"]
+        Client -->|"POST /api/extract-file"| ExtractFile["Save uploaded file to disk\n(~/local-ai-files/uploads/)\nReturn {url, name}\nText extraction happens later\nvia the read_file tool"]
+        Client -->|"POST /api/location"| SetLocation["Reverse geocode via Nominatim\nstore _client_location"]
+        Client -->|"GET /api/user-context"| GetUserCtx["Read user context file"]
+        Client -->|"POST /api/user-context\n{action: write|overwrite|read}"| SetUserCtx["Write / overwrite / read\nuser context file"]
+        Client -->|"POST /api/tts"| TTS["Text-to-speech via Piper (local)\nor edge-tts (cloud fallback)"]
+        Client -->|"GET /output/:filename"| ServeImage["Serve generated images\nfrom ComfyUI output dir (no auth)"]
+        Client -->|"GET /uploads/:filename"| ServeUpload["Serve uploaded files\n(no auth)"]
+    end
+
+    subgraph SPA ["Static / SPA Serving"]
+        Client -->|"GET /"| SPAIndex["Serve dist/index.html"]
+        Client -->|"GET /*"| SPAAssets["Serve dist/ assets\nor SPA fallback to index.html"]
+    end
+
+    subgraph StatusPolling ["Status Polling"]
+        Client -->|"GET /api/status/:task_id"| PollStatus["Return tasks id:\nstatus message response\n tools_used image etc"]
+    end
+```
+
+### 7. Chat Ingress Flow
+
+```mermaid
+graph TD
+    Client([User Client]) -->|"POST /api/chat\n(SSO session via nginx)"| EndpointChat
+
+    EndpointChat["Handler.do_POST: /api/chat"]
+    EndpointChat --> AuthCheck{"get_current_user\nvia X-Authentik-*/JWT"}
+    AuthCheck -- No --> AuthErr[401 Unauthorized]
+    AuthCheck -- Yes --> SessionCheck{"Session exists\nand owned by user?"}
+    SessionCheck -- No --> SessionErr[404 Session not found]
+    SessionCheck -- Yes --> RouteAtAdmission{"user in\n_agent_users?"}
+    RouteAtAdmission -- "agent (cpu)" --> LaneCPU["lane = cpu\nQueue: _task_queues['cpu']"]
+    RouteAtAdmission -- "user (gpu)" --> LaneGPU["lane = gpu\nQueue: _task_queues['gpu']"]
+    LaneCPU --> QueueCheck{"len lane queue\n< MAX_QUEUE_SIZE 5?"}
+    LaneGPU --> QueueCheck
+    QueueCheck -- No --> QueueBusy[503 Server Busy]
+    QueueCheck -- Yes --> EnqueueTask["lane queue.append\n_queue_conds[lane].notify"]
+    EnqueueTask --> TaskInit["tasks task_id =\nstatus queued"]
+    TaskInit --> ReturnTaskID["Return task_id to Client"]
+    ReturnTaskID -. "mode resolved later\nin task_mode(task_id)" .-> TaskMode["agent → 8079 CPU\nuser → 8081 GPU"]
+    TaskMode --> EnsureServer["ensure + load that\nmode's llama-server"]
+```
+
+### 8. Queue Workers (one per lane)
+
+A separate worker drains each lane (`_queue_worker("gpu")`, `_queue_worker("cpu")`),
+each with its own lock/condition/queue. The two lanes never wait behind each other;
+they only share hardware when both need the GPU (chat load / image gen), which is
+arbitrated separately. (The CPU-lane "yield to human presence" pause is disabled in
+the current code — self-chat agents run on the CPU server continuously.)
+
+```mermaid
+graph TD
+    E2["_queue_worker(mode)\ngpu or cpu"] --> QueueLoop["queue_cond[mode].wait\nblock on empty queue"]
+    QueueLoop --> PauseCheck{"overheated and mode=gpu\nor ram_evacuating?"}
+    PauseCheck -- Yes --> MarkWaiting["Set all queued tasks in\nthis lane to status waiting\npause label"]
+    MarkWaiting --> PauseWait["queue_cond.wait 5s"] --> QueueLoop
+    PauseCheck -- No --> PopTask["item = lane queue.pop 0\n_current_task_ids[mode] = task_id"]
+    PopTask --> PostStart["event_post start\nsession_id message image\naudio user client_timestamp"]
+    PostStart --> TaskDoneWait{"Poll tasks id.status\nevery 0.5s"}
+    TaskDoneWait -- "done or error" --> ClearTask["_current_task_ids[mode] = None\nqueue_cond.notify_all"]
+    ClearTask --> QueueLoop
+```
+
+### 9. Event Loop Pipeline
+
+```mermaid
+graph TD
+    E1["_event_loop"] --> EvLoop["Loop: event_queue.get\nev_type task_id data"]
+    EvLoop --> EvDispatch{"ev_type?"}
+
+    EvDispatch -- "start" --> EvStart["Store task metadata:\n_tools_used, _search_details\n_original_message, _original_image\n_audio, _user, _client_timestamp"]
+    EvStart --> PrepSession["prepare_session:\n1. Compute mode = task_mode(task_id)\n   (agent → cpu 8079, user → gpu 8081)\n2. Ensure + load that mode's server\n3. Inject sys prompt + date + location\n4. Inject user context\n5. Append user msg to session\n6. Auto-name session from message\n7. save_sessions\n[...]" ]
+    PrepSession --> StartRound0["start_llm_round round 0"]
+
+    EvDispatch -- "llm_ok" --> LLMOK{"state == llm_waiting\nand has tool_calls?"}
+    LLMOK -- "No tools" --> Finalize["_finalize_task:\n1. Build msg_entry with reasoning\n   tools_used, image_url etc\n2. Append to session\n3. save_sessions\n4. tasks id = status done\n5. Reset + update that\n   mode's idle timestamp"]
+    LLMOK -- "Has tools" --> SubmitTools["1. Append assistant msg\n2. state = tools_running\n3. pending_tools = count\n4. save_sessions\n5. Submit to that\n   task's lane tool pool"]
+
+    EvDispatch -- "llm_err" --> LLMERR{"state == llm_waiting?"}
+    LLMERR -- Yes --> LLMErrAction["_set_task_error:\ntasks id = status error"]
+    LLMERR -- No --> EvLoop
+
+    EvDispatch -- "tool_ok" --> ToolOK["1. Append tool result to session\n2. pending_tools minus 1\n3. save_sessions"]
+    ToolOK --> AllToolsDone{"pending_tools <= 0?"}
+    AllToolsDone -- No --> EvLoop
+    AllToolsDone -- Yes --> NextRoundCheck{"round+1 < 10?"}
+    NextRoundCheck -- Yes --> NextRound["start_llm_round round N+1\nFeed tool results back to LLM"]
+    NextRoundCheck -- No --> MaxRoundsErr["_set_task_error:\nMax tool rounds exceeded"]
+
+    EvDispatch -- "tool_err" --> ToolERR["1. Append error as tool result\n2. pending_tools minus 1\n3. save_sessions\n4. Same round-limit logic"]
+```
+
+### 10. LLM Worker
+
+```mermaid
+graph TD
+    StartRound0["start_llm_round\n(mode from task_mode)"] --> LLMWorker["_llm_worker\nin _llm_pools[mode]\n(gpu 1 / cpu 4 workers)"]
+    LLMWorker --> PayloadBuild["Build payload:\nmodel (mode's model id)\nmessages tools\ntool_choice auto\nmax_tokens 24576\nstream true\n(CPU server: --reasoning-budget 4096)"]
+    PayloadBuild --> StreamReq["POST llama-server\n(mode's base: 8081 gpu / 8079 cpu)\nv1/chat/completions\nstream=True timeout=600s"]
+    StreamReq --> StreamParse["Parse SSE stream:\n- reasoning_content delta\n  accumulate in reasoning_buf\n- content delta\n  accumulate in content_buf\n- tool_calls delta\n  reassemble by index[...]" ]
+    StreamParse --> BuildAssistantMsg["Build assistant msg:\nrole assistant content\nreasoning_content tool_calls"]
+    BuildAssistantMsg --> LLMOKPost["event_post llm_ok\nbody choices message"]
+    LLMOKPost --> EvLoop["Back to _event_loop"]
+
+    StreamReq -. "exception" .-> LLMException["event_post llm_err\nif image or vision in error\nuser-friendly message"]
+```
+
+### 11. Tool Worker
+
+```mermaid
+graph TD
+    SubmitTools["Submit to _tool_pools[mode]\ngpu 2 / cpu 2 workers"] --> ToolWorker["_tool_worker\nin the task's lane pool"]
+    ToolWorker --> ParseArgs["Parse tc.function.arguments\nfrom JSON string"]
+    ParseArgs --> ChooseTool{"tc.function.name?"}
+
+    ChooseTool -- "web_search" --> ExecSearch["1. set_status Searching\n2. Get _client_timestamp\n3. web_search query client_ts:\n   Append city to query\n   GET SearXNG search json\n   Return to[...]" ]
+    ExecSearch --> ToolPost["event_post tool_ok"]
+
+    ChooseTool -- "fetch_page" --> FetchPage["1. set_status Fetching\n2. fetch_page URL:\n   Validate URL (no private IPs)\n   GET with browser headers\n   Parse HTML (BeautifulSoup)\n   Return title + content"]
+    FetchPage --> ToolPost
+
+    ChooseTool -- "generate_image" --> GenGuard{"already generated\nimage this task?"}
+    GenGuard -- Yes --> GenReject["Return error:\nImage generation limit reached"]
+    GenGuard -- No --> EnqueueImage["_enqueue_image_job\nImage worker (single, serialized)"]
+    EnqueueImage --> GenImage["1. unload_llama_model('gpu')\n2. Build ComfyUI workflow:\n   z_image 8 steps res_multistep\n   (default; sd3_5_medium 20\n   steps euler if in models.json)\n3. ensure_comfyui_running\n4. POST /prompt\n5. Poll history 120s\n6. free_comfyui_vram\n7. load_llama_model('gpu')\n8. 5s GPU cooldown\n(CPU agents keep running)"]
+    GenImage --> ToolPost
+
+    ChooseTool -- "edit_image" --> EditEnqueue["_enqueue_image_job\nImage worker (single, serialized)"]
+    EditEnqueue --> EditImage["1. Find source image:\n   Check _image_url in session\n   Check base64 in user messages\n2. unload_llama_model('gpu')\n3. Write input to ComfyUI/input\n4. Build img2img workflow (denoise)\n5. ensure_comfyui_running\n6. POST /prompt\n7. Poll history 120s\n8. free_comfyui_vram\n9. load_llama_model('gpu')\n10. 5s GPU cooldown\n(CPU agents keep running)"]
+    EditImage --> ToolPost
+
+    ChooseTool -- "get_user_location" --> GetLoc["If _client_location cached: return it\nElse: set_status location_needed\nWait for browser geolocation\n(60s timeout)\nReturn location or 'denied'"]
+    GetLoc --> ToolPost
+
+    ChooseTool -- "read_file" --> ReadFile["1. Validate file_url in /uploads/\n2. Read file from uploads dir\n3. Extract text via:\n   fitz (PDF), python-docx (DOCX)\n   catdoc/antiword (DOC)\n   openpyxl (XLSX)\n4. Return content"]
+    ReadFile --> ToolPost
+
+    ChooseTool -- "update_user_context" --> ExecContext["write_user_context:\nAppend timestamped entry\nto user context file"]
+    ExecContext --> ToolPost
+
+    ChooseTool -- "manage_tasks" --> ManageTasks["SQLite tasks DB ops:\ncreate/update/complete/delete/list/get\nPer-user, with reminders"]
+    ManageTasks --> ToolPost
+
+    ChooseTool -- "unknown" --> ToolUnknown["Return error:\nUnknown tool"]
+    ToolUnknown --> ToolPost
+```
+
+### 12. Resource Management
+
+```mermaid
+graph TD
+    E4["_thermal_monitor"] --> ThermalLoop["Loop every 10s"]
+    ThermalLoop --> CheckGPU["nvidia-smi GPU temp"]
+    CheckGPU --> GPUTempCheck{"Temp >= 85 C?"}
+    GPUTempCheck -- Yes --> SetOverheat["_overheated = True"]
+    GPUTempCheck -- No --> CheckCool{"_overheated\nand Temp <= 75 C?"}
+    CheckCool -- Yes --> UnsetOverheat["_overheated = False"]
+    SetOverheat --> ThermalAction{"Is GPU lane\ntask running?"}
+    ThermalAction -- No --> ThermalUnload["GPU model_status?"]
+    ThermalUnload -- "chat_loaded" --> UnloadModel["unload_llama_model('gpu')\n(CPU server untouched)"]
+    ThermalUnload -- "image_active" --> FreeVRAM["free_comfyui_vram"]
+    ThermalAction -- Yes --> ThermalSkip["Skip let task finish"]
+    UnsetOverheat --> RAMCheck1
+
+    ThermalLoop --> RAMCheck1{"not evacuating\nand RAM >= 95%?"}
+    RAMCheck1 -- Yes --> EvacuateRAM["_evacuate_ram:\n1. ram_evacuating = True\n2. Requeue in-flight task\n   to front of EACH lane\n   (gpu + cpu) status error\n3. kill_llama_server (both 8081 + 8079)\n4. kill_comfyui\n5. Wait until RAM <= 70%\n6. restart_servers()"]
+    RAMCheck1 -- No --> ThermalLoop
+
+    E3["_idle_unload_loop"] --> IdleLoop["Loop every 10s"]
+    IdleLoop --> IdleCheck{"chat_loaded (gpu)\nidle > 300s\nno queue tasks?"}
+    IdleCheck -- Yes --> UnloadModel2["unload_llama_model('gpu')\nRelease VRAM weights"]
+    IdleCheck -- No --> IdleLoop
+    IdleLoop --> IdleCheck2{"cpu_loaded\n_cpu_last_llm_use idle > 300s\nno queue tasks?"}
+    IdleCheck2 -- Yes --> UnloadModel3["unload_llama_model('cpu')\nRelease RAM weights"]
+    IdleCheck2 -- No --> IdleLoop
+```
