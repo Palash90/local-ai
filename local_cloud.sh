@@ -231,6 +231,13 @@ server {
     sub_filter_types text/html;
     sub_filter '</body>' '$nav_overlay';
 
+    # Custom "Service Unavailable" page, same pattern as the GCP lane
+    # (gcp_nginx.conf @server_offline). proxy_intercept_errors only replaces
+    # upstream responses whose status has an error_page defined here
+    # (502/503/504); every other upstream response passes through untouched.
+    proxy_intercept_errors on;
+    error_page 502 503 504 = @service_unavailable;
+
     # Expose Outpost traffic directly
     location /outpost.goauthentik.io/ {
         proxy_pass http://ak_outpost;
@@ -250,6 +257,15 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_no_cache 1;
         proxy_cache_bypass 1;
+
+        # If the outpost itself is down, fail auth gracefully (401) instead of
+        # leaking a raw 500: the SSO redirect chain then ends on the custom
+        # "Service Unavailable" page, since the outpost is unreachable anyway.
+        error_page 502 503 504 = @auth_outage;
+    }
+
+    location @auth_outage {
+        return 401;
     }
 
     # Redirect unauthenticated users directly to Outpost start portal
@@ -306,6 +322,37 @@ server {
     location / {
         root /var/www/dashboard;
         index index.html;
+    }
+
+    # Inline HTML page served when any upstream service (AI, stories, search,
+    # cloud, code, sso) is down. Styling mirrors the GCP lane @server_offline
+    # page. The nav-overlay sub_filter still injects the nav dock into this
+    # page, so visitors can hop to a service that is actually up.
+    location @service_unavailable {
+        default_type text/html;
+        return 502 '<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Service Unavailable</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 20px; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 32px; max-width: 420px; width: 100%; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+        .icon { font-size: 48px; margin-bottom: 16px; }
+        .title { font-size: 20px; font-weight: 600; color: #f85149; margin-bottom: 8px; }
+        .desc { font-size: 14px; color: #8b949e; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">⚠️</div>
+        <div class="title">Service Unavailable</div>
+        <div class="desc">The requested service is currently unreachable or powered off. Please try again later.</div>
+    </div>
+</body>
+</html>';
     }
 
     # Public share pages (/s/<token>). The chat SPA client-routes this path

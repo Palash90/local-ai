@@ -1,4 +1,11 @@
-use_default_settings: true
+use_default_settings:
+  engines:
+    keep_only:
+      - google
+      - bing
+      - duckduckgo
+      - brave
+      - wikipedia
 
 server:
   secret_key: "ultrasecretkeyforsearxng"
@@ -8,6 +15,7 @@ server:
 search:
   safe_search: 0
   autocomplete: ""
+  default_category: web
   formats:
     - html
     - json
@@ -16,12 +24,3 @@ outgoing:
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   request_timeout: 10.0
   max_request_timeout: 15.0
-
-engines:
-  - name: wikidata
-    engine: dummy
-    disabled: true
-    language_support: true
-
-  - name: ahmia
-    disabled: true

@@ -590,14 +590,22 @@ def _judge_research_answer(task_id, answer):
     delivery; the result becomes one transparent ``JUDGE`` item in the
     verification trail, not a hard gate."""
     try:
-        from server.features.judge import llm_verify_research_answer
+        from server.features.judge import (
+            llm_verify_research_answer,
+            resolve_judge_model,
+        )
     except Exception as e:
         print(f"[critic] research-answer judge unavailable: {e}")
         return None
     with M._data_lock:
-        user_input = (M.tasks.get(task_id) or {}).get("_original_message", "")
+        t = M.tasks.get(task_id) or {}
+        user_input = t.get("_original_message", "")
+        user = t.get("_user", "")
     try:
-        result = llm_verify_research_answer(user_input, answer)
+        result = llm_verify_research_answer(
+            user_input, answer,
+            model_id=resolve_judge_model(user or ""),
+        )
     except Exception as e:
         print(f"[critic] research-answer judge call failed: {e}")
         result = None

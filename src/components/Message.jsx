@@ -194,11 +194,11 @@ function SearchPopup({ details }) {
       </div>
       {details.map((sd, i) => (
         <div key={i}>
-          {sd.search_url && (
+          {sd.fallback_fetch_url && (
             <div style={{ marginBottom: 6, fontSize: 11, wordBreak: 'break-all' }}>
               <span style={{ color: '#888' }}>SearXNG:</span>{' '}
-              <a href={sd.search_url} target="_blank" rel="noreferrer" style={{ color: '#60a5fa' }}>
-                {sd.search_url}
+              <a href={sd.fallback_fetch_url} target="_blank" rel="noreferrer" style={{ color: '#60a5fa' }}>
+                {sd.fallback_fetch_url}
               </a>
             </div>
           )}

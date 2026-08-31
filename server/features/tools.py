@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from datetime import datetime
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, urlunparse
 
 import requests
 import asyncio
@@ -250,30 +250,155 @@ def _parse_excel(raw, url):
         return f"(Could not parse this spreadsheet: {e})", doc_title
 
 
+# Search-result cache and outbound pacing for web_search. Non-time-sensitive
+# results are reused for a day for exact and near-duplicate queries;
+# time-sensitive queries are only reused within a short window. Outbound
+# fetches are paced globally so bursts from the research agents cannot get
+# the upstream engines rate-limited or CAPTCHA'd. Cache reads take only
+# _CACHE_LOCK and never wait on pacing or on an in-flight fetch.
+SEARCH_CACHE_TTL = 86400
+SEARCH_FRESH_TTL = 300
+SEARCH_CACHE_MAX = 256
+SEARCH_SIMILARITY_THRESHOLD = 0.7
+SEARCH_MIN_INTERVAL = 5.0
+SEARCH_INFLIGHT_WAIT = 30
+_CACHE_LOCK = threading.Lock()
+_PACE_LOCK = threading.Lock()
+_SEARCH_LAST_FETCH = 0.0
+_SEARCH_CACHE = {}
+_IN_FLIGHT = {}
+
+_FRESH_QUERY_RE = re.compile(
+    r"\b(?:today|tonight|yesterday|now|current(?:ly)?|latest|breaking|"
+    r"recent(?:ly)?|news|headlines?|live|updates?|this\s+(?:week|month|year)|"
+    r"\d{4})\b",
+    re.IGNORECASE,
+)
+
+
+def _search_cache_get(norm_query, query, now):
+    """Lock-free cache lookup; caller must hold _CACHE_LOCK."""
+    fresh = bool(_FRESH_QUERY_RE.search(query))
+    entry = _SEARCH_CACHE.get(norm_query)
+    if entry:
+        age = now - entry[0]
+        if age <= (SEARCH_FRESH_TTL if fresh else SEARCH_CACHE_TTL):
+            payload = dict(entry[1])
+            payload["cached_result"] = True
+            return payload
+    if fresh:
+        return None
+    tokens = set(norm_query.split())
+    if not tokens:
+        return None
+    best_key, best_score = None, 0.0
+    for key, (cached_at, _) in _SEARCH_CACHE.items():
+        if now - cached_at > SEARCH_CACHE_TTL:
+            continue
+        cand = set(key.split())
+        if not cand:
+            continue
+        score = len(tokens & cand) / min(len(tokens), len(cand))
+        if score > best_score:
+            best_key, best_score = key, score
+    if best_score >= SEARCH_SIMILARITY_THRESHOLD:
+        payload = dict(_SEARCH_CACHE[best_key][1])
+        payload["cached_result"] = True
+        return payload
+    return None
+
+
+def _search_cache_store(norm_query, payload):
+    snapshot = json.loads(json.dumps(payload))
+    with _CACHE_LOCK:
+        _SEARCH_CACHE[norm_query] = (time.monotonic(), snapshot)
+        while len(_SEARCH_CACHE) > SEARCH_CACHE_MAX:
+            oldest = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])
+            del _SEARCH_CACHE[oldest]
+
+
+def _finish_inflight(norm_query, event):
+    event.set()
+    with _CACHE_LOCK:
+        if _IN_FLIGHT.get(norm_query) is event:
+            del _IN_FLIGHT[norm_query]
+
+
+def _pace_outbound_request():
+    """Space outbound fetches at least SEARCH_MIN_INTERVAL apart.
+
+    Holds _PACE_LOCK while sleeping so concurrent fetchers queue up behind
+    the pacing decision; cache readers are never blocked by this lock.
+    """
+    global _SEARCH_LAST_FETCH
+    with _PACE_LOCK:
+        wait = SEARCH_MIN_INTERVAL - (time.monotonic() - _SEARCH_LAST_FETCH)
+        if wait > 0:
+            time.sleep(wait)
+        _SEARCH_LAST_FETCH = time.monotonic()
+
+
 def web_search(query, current_time=None, current_location=None):
     ts = datetime.now()
-    clean_query = query.strip()
+    clean_query = (query or "").strip()
+    norm_query = " ".join(re.findall(r"[a-z0-9]+", clean_query.lower()))
     params = {"q": clean_query, "format": "json"}
     # Keep the backend URL private; only expose the public search URL in tool
     # output that may be shown to the user or passed through to the model.
     search_url = f"{M.SEARXNG_PUBLIC_URL}?{urlencode(params)}"
+
+    def _respond(results, error=None):
+        payload = {
+            "results": results,
+            "search_date": ts.strftime("%Y-%m-%d %A"),
+            "query": query,
+            "fallback_fetch_url": search_url,
+            "fallback_fetch_note": (
+                "Internal pointer to the raw JSON results. Never cite "
+                "this URL as a source; cite result URLs only. Fetch it "
+                "via fetch_page only if the results are insufficient."
+            ),
+        }
+        if error:
+            payload["error"] = error
+        return payload
+
+    owns_slot = False
+    with _CACHE_LOCK:
+        hit = _search_cache_get(norm_query, clean_query, time.monotonic())
+        if hit is None:
+            inflight = _IN_FLIGHT.get(norm_query)
+            if inflight is None:
+                inflight = _IN_FLIGHT[norm_query] = threading.Event()
+                owns_slot = True
+    if hit is not None:
+        print("Web-search cache hit")
+        return json.dumps(hit)
+    if not owns_slot:
+        # An identical fetch is already running: wait for its result
+        # instead of duplicating the request.
+        if inflight.wait(SEARCH_INFLIGHT_WAIT):
+            with _CACHE_LOCK:
+                hit = _search_cache_get(
+                    norm_query, clean_query, time.monotonic()
+                )
+            if hit is not None:
+                print("Web-search cache hit (in-flight wait)")
+                return json.dumps(hit)
+        # Timed out or the fetch failed without caching: fall through and
+        # fetch this query ourselves (paced like any other).
+
+    _pace_outbound_request()
     print("Performing web search", M.SEARXNG_URL)
     try:
         r = requests.get(M.SEARXNG_URL, params=params, timeout=10)
         r.raise_for_status()
-        print("Web-search completed")
         data = r.json()
     except Exception as e:
         print(f"Web-search failed: {e}")
-        return json.dumps(
-            {
-                "results": [],
-                "search_date": ts.strftime("%Y-%m-%d %A"),
-                "query": query,
-                "search_url": search_url,
-                "error": str(e),
-            }
-        )
+        _finish_inflight(norm_query, inflight)
+        return json.dumps(_respond([], error=str(e)))
+
     results = data.get("results", [])[:WEB_SEARCH_RESULT_LIMIT]
     formatted = []
     for x in results:
@@ -284,15 +409,15 @@ def web_search(query, current_time=None, current_location=None):
                 "snippet": x.get("content", "") or x.get("snippet", ""),
             }
         )
+    payload = _respond(formatted)
+    # Cache the raw results before enrichment so waiters can pick them up,
+    # then re-store the enriched version once page fetching completes.
+    _search_cache_store(norm_query, payload)
+    _finish_inflight(norm_query, inflight)
     enriched = _enrich_top_results(formatted)
-    return json.dumps(
-        {
-            "results": enriched,
-            "search_date": ts.strftime("%Y-%m-%d %A"),
-            "query": query,
-            "search_url": search_url,
-        }
-    )
+    payload["results"] = enriched
+    _search_cache_store(norm_query, payload)
+    return json.dumps(payload)
 
 
 def _enrich_top_results(results):
@@ -328,6 +453,28 @@ def _enrich_top_results(results):
     return results
 
 
+def _rewrite_search_url_to_internal(parsed):
+    """Map the public SearXNG search URL onto the internal SearXNG instance.
+
+    The public host resolves to a loopback address via /etc/hosts on this
+    machine, so fetch_page's SSRF guard would refuse to fetch the very search
+    URL that web_search hands out as a citation. Returns None for URLs that
+    are not the search endpoint.
+    """
+    public = urlparse(M.SEARXNG_PUBLIC_URL or "")
+    internal = urlparse(M.SEARXNG_URL or "")
+    if not (public.netloc and internal.scheme and internal.netloc):
+        return None
+    base = (public.path or "").rstrip("/")
+    path = parsed.path or "/"
+    if path != base and not path.startswith(base + "/"):
+        return None
+    prefix = (internal.path or "").rstrip("/")
+    if prefix and path.startswith(prefix):
+        path = path[len(prefix):] or "/"
+    return urlunparse(internal._replace(path=path, query=parsed.query))
+
+
 def fetch_page(url, max_chars=24000, chunk=1):
     import ipaddress
     import socket
@@ -346,16 +493,19 @@ def fetch_page(url, max_chars=24000, chunk=1):
             return json.dumps(
                 {"url": url, "error": "Only http/https URLs are supported."}
             )
-        host = parsed.hostname or ""
-        ip = socket.gethostbyname(host)
-        addr = ipaddress.ip_address(ip)
-        if addr.is_private or addr.is_loopback or addr.is_link_local:
-            return json.dumps(
-                {
-                    "url": url,
-                    "error": "Access to private/internal addresses is not allowed.",
-                }
-            )
+        rewritten = _rewrite_search_url_to_internal(parsed)
+        if rewritten:
+            url = rewritten
+        else:
+            ip = socket.gethostbyname(parsed.hostname or "")
+            addr = ipaddress.ip_address(ip)
+            if addr.is_private or addr.is_loopback or addr.is_link_local:
+                return json.dumps(
+                    {
+                        "url": url,
+                        "error": "Access to private/internal addresses is not allowed.",
+                    }
+                )
     except Exception as e:
         return json.dumps({"url": url, "error": f"Invalid URL: {e}"})
 
