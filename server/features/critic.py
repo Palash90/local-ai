@@ -102,6 +102,16 @@ _WEB_ASK_RE = re.compile(
     re.IGNORECASE,
 )
 
+_RESEARCH_HEADINGS = (
+    "Executive Summary",
+    "Scope and Methodology",
+    "Findings",
+    "Analysis",
+    "Limitations and Uncertainty",
+    "Conclusion",
+    "References",
+)
+
 # Steering hints appended (as an invisible-to-the-UI user turn) to re-generate
 # the final response. The judge/L3 verdict text travels with the message too.
 _STEERING_HINTS = {
@@ -140,6 +150,14 @@ _STEERING_HINTS = {
         "The user explicitly asked to search the web / find the latest "
         "information, but no web search was performed. Call the web_search tool "
         "and ground your new answer in the results."
+    ),
+    "research_structure": (
+        "Your previous research draft was not a professional report. Rewrite it "
+        "using these exact level-2 headings, in this order: Executive Summary; "
+        "Scope and Methodology; Findings; Analysis; Limitations and Uncertainty; "
+        "Conclusion; References. Include the answer and strongest evidence in "
+        "the summary, separate facts from interpretation, disclose uncertainty, "
+        "and list every cited source once in References."
     ),
 }
 
@@ -793,7 +811,7 @@ def _requirement_mismatch(task_id, user_input, answer):
     """Return a retry ``reason`` when the answer falls short of an explicit user
     requirement that a steering re-run could satisfy, else None.
 
-    Detects three classes (deterministic, no judge call):
+    Detects report and request mismatches (deterministic, no judge call):
     - the request needs an image, or the answer claims one was generated, while
       the task produced no image file;
     - the user explicitly asked for citations/sources but the answer has none;
@@ -807,6 +825,17 @@ def _requirement_mismatch(task_id, user_input, answer):
         t = M.tasks.get(task_id) or {}
         tools_used = list(t.get("_tools_used", []) or [])
         image_file = t.get("image_file")
+        is_research = bool(t.get("research"))
+    if is_research:
+        headings = [
+            m.group(1).strip()
+            for m in re.finditer(r"^##\s+(.+?)\s*$", answer or "", re.MULTILINE)
+        ]
+        if any(name not in headings for name in _RESEARCH_HEADINGS):
+            return "research_structure"
+        positions = [headings.index(name) for name in _RESEARCH_HEADINGS]
+        if positions != sorted(positions):
+            return "research_structure"
     has_image = bool(image_file)
     if _IMG_NEED_RE.search(user_input) and not has_image:
         return "image_needed"

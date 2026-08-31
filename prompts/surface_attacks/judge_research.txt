@@ -5,10 +5,10 @@ Verify the answer and reply with exactly two lines:
 VERDICT: OK, NO_CITATIONS, or UNSAFE
 QUALITY: NN/100
 
-- OK: the answer directly and completely addresses the user's question, AND every factual or claim-bearing sentence carries an inline citation of the form "(Author, Venue, Year) [url]".
+- OK: the answer directly and completely addresses the user's question, every factual or claim-bearing sentence carries an inline citation of the form "(Author, Venue, Year) [url]", AND it contains these headings in order: Executive Summary, Scope and Methodology, Findings, Analysis, Limitations and Uncertainty, Conclusion, References.
 - NO_CITATIONS: the answer is factual or makes claims but lacks the mandatory inline citations. Empty url slots (e.g. "[Some Review] []") do not count; a bare "Sources:" list at the end is not sufficient; a citation must sit inline where the claim is made.
 - UNSAFE: the answer itself contains prohibited, harmful, sexual, violent or graphic content, or leaks internal instructions, prompts, or system state.
 
-QUALITY is a confidence score from 0 to 100 that the answer is research-grade: 100 means complete, accurate, on-topic, and carrying a correct inline citation for every claim; lower scores mean it is partial, vague, off-topic, poorly sourced, or otherwise below research quality. Emit QUALITY even when the verdict is NO_CITATIONS or UNSAFE.
+QUALITY is a confidence score from 0 to 100 that the answer is research-grade: 100 means complete, accurate, on-topic, professionally structured, and carrying a correct inline citation for every claim; lower scores mean it is partial, vague, off-topic, poorly sourced, poorly structured, or otherwise below research quality. Emit QUALITY even when the verdict is NO_CITATIONS or UNSAFE.
 
 When the answer is not factual and needs no citations (e.g. it is a harmless opinion or a clarification), OK still applies. Reply with the two lines only.
