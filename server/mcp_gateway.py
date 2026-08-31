@@ -407,6 +407,7 @@ async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str 
     from server.features.monitoring import ensure_guardrail_ready
     from server.features.judge import sanitize_judge_model
     from server.features.judge import _parse_verdict, _parse_strict_verdict
+    from server.features.judge import wait_until_render_safe
     import re as _re
 
     task_lane = "guardrail"
@@ -418,6 +419,12 @@ async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str 
     if not text:
         print(f"[guardrail][L2] empty message, auto-passing")
         return True, ""
+
+    # Never stack a judge model load on top of an active ComfyUI render —
+    # that collision is what triggers emergency RAM evacuations. Waiting is
+    # free for the MCP lane (background batching; a few seconds is fine).
+    if not await asyncio.to_thread(wait_until_render_safe, label="L2"):
+        print(f"[guardrail][L2] render window never cleared — verifying anyway")
 
     print(f"[guardrail][L2] ensuring {task_lane} server is running (with model {model_id} loaded)")
     await asyncio.to_thread(ensure_guardrail_ready, model_id=model_id)

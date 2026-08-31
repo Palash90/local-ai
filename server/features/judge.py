@@ -306,6 +306,48 @@ def ensure_judge_ready(base_url, model_id=None):
         print(f"[guardrail][judge] ensure_judge_ready failed: {e}")
 
 
+_RENDER_WAIT_TIMEOUT = 600   # matches llm._wait_image_active_clear
+_RENDER_COOLDOWN = 30        # let ComfyUI /free + post-render VRAM settle
+
+
+def wait_until_render_safe(timeout=_RENDER_WAIT_TIMEOUT, cooldown=_RENDER_COOLDOWN,
+                           label=None):
+    """Hold judge calls while an image render owns the machine (RAM safety).
+
+    ComfyUI renders pull multi-GB weights into system RAM; a judge model
+    loading in that same window pushes the box over RAM_EVAC_THRESHOLD and
+    triggers an emergency evacuation that kills the render mid-flight (and
+    everything else). The image path unloads the judge at render start, so a
+    judge call arriving during ``M._image_active`` is always early — waiting
+    it out is safe: background lanes (self-chat agents, MCP batching) don't
+    care about a short delay, and UI tasks surface explicit status notes
+    ("Image Gen", "Evaluating answer...") while they wait. The response
+    judges run right after the render anyway.
+
+    After the render clears, sleep a short cooldown so ComfyUI's /free and
+    the post-render VRAM settle before judge weights land in RAM. Returns
+    True when the render window cleared, False on timeout (callers proceed
+    anyway — same semantics as ``llm._wait_image_active_clear``).
+    """
+    try:
+        from server.features.state import M
+    except Exception:
+        return True
+    tag = f"[judge][{label}]" if label else "[judge]"
+    deadline = time.time() + timeout
+    waited = False
+    while time.time() < deadline:
+        if not getattr(M, "_image_active", False):
+            break
+        waited = True
+        time.sleep(1)
+    if not waited:
+        return True
+    print(f"{tag} image render active — holding judge call until it finishes", flush=True)
+    time.sleep(min(cooldown, max(0.0, deadline - time.time())))
+    return time.time() < deadline
+
+
 def _judge_completion(label, system_prompt, user_content, base_url, timeout,
                       max_chars=2000, model_id=None):
     """Lowest-level judge POST plumbing shared by every judge entry point.
@@ -329,6 +371,9 @@ def _judge_completion(label, system_prompt, user_content, base_url, timeout,
     user_content = (user_content or "").strip()
     if not user_content:
         return None, None
+    # One ComfyUI render + one judge model load can tip the box over the RAM
+    # evacuation threshold — never load judge weights mid-render.
+    wait_until_render_safe(label=label)
     try:
         import requests
     except Exception as e:
@@ -601,25 +646,6 @@ def _parse_research_verdict(content):
     return None
 
 
-_RES_REQUEST_CLEAR = {"OK", "CLEAR", "UNDERSTANDABLE", "COMPLETE", "ACTIONABLE"}
-_RES_REQUEST_UNCLEAR = {"UNCLEAR", "VAGUE", "GARBLED", "CONFUSED", "AMBIGUOUS"}
-
-
-def _parse_request_verdict(content):
-    """Interpret a free-form judge reply as a request-clarity verdict:
-    OK / UNCLEAR, or None when nothing usable was said."""
-    words = re.findall(r"[A-Za-z']+", (content or "").upper())
-    negated = False
-    for w in words[:12]:
-        if w in _VERDICT_NEGATIONS:
-            negated = not negated
-        elif w in _RES_REQUEST_UNCLEAR:
-            return "OK" if negated else "UNCLEAR"
-        elif w in _RES_REQUEST_CLEAR:
-            return "OK" if not negated else "UNCLEAR"
-    return None
-
-
 def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
                                model_id=None, max_chars=8000):
     """Context-aware LLM judge for research answers.
@@ -735,59 +761,6 @@ def llm_verify_answer_quality(user_input, answer, base_url=None, timeout=None,
     }
     print(
         f"[guardrail][quality-judge] model={cand} status={status or 'UNKNOWN'} "
-        f"quality={quality} reason={result['reason'][:160]!r}"
-    )
-    return result
-
-
-def llm_verify_user_request(user_input, base_url=None, timeout=None,
-                            model_id=None, max_chars=4000):
-    """One LLM judge check of a UI user's own request.
-
-    Produces a quality/confidence score (0-100) plus a clarity verdict for the
-    user's message BEFORE generation — the interactive-chat analogue of the
-    L1/L2 checks the MCP gateway runs on its own lane. By contract this is
-    called OFF the hot path (background thread at admission): the result is
-    purely informational — recorded on the task and surfaced as a chip in the
-    assistant message header, never blocking generation.
-
-    Returns a dict ``{model, ok, clarity, quality, reason}``, or None when the
-    judge is unavailable — fail-open. ``clarity`` is ``"OK"`` or ``"UNCLEAR"``
-    (None when the reply was unrecognized); ``ok`` is True for a clear request.
-    ``model_id`` pins a per-user judge.
-    """
-    base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
-    if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
-        try:
-            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
-        except ValueError:
-            timeout = _JUDGE_MIN_TIMEOUT
-    user_input = (user_input or "").strip()
-    if not user_input:
-        return {"model": None, "ok": True, "clarity": "OK",
-                "quality": None, "reason": "empty message"}
-    print(
-        f"[guardrail][request-judge] -> {base_url} model={model_id or 'auto'} "
-        f"user_input={repr(user_input[:200])}"
-    )
-    cand, content = _judge_completion(
-        "request-judge", _get_prompt("judge_request.txt"), user_input,
-        base_url, timeout, max_chars=max_chars, model_id=model_id,
-    )
-    if cand is None:
-        print("[guardrail][request-judge] judge unavailable — fail-open")
-        return None
-    clarity = _parse_request_verdict(content)
-    quality = _parse_quality(content)
-    result = {
-        "model": cand,
-        "ok": clarity != "UNCLEAR",
-        "clarity": clarity,
-        "quality": quality,
-        "reason": (content or "").strip()[:400],
-    }
-    print(
-        f"[guardrail][request-judge] model={cand} clarity={clarity or 'UNKNOWN'} "
         f"quality={quality} reason={result['reason'][:160]!r}"
     )
     return result
