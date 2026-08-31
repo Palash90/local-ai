@@ -462,7 +462,7 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
       if (selectingRef && selectingRef.current) return
       setMessage(st.message || 'Working...')
       if (st.reasoning) setReasoning(prev => (prev === st.reasoning ? prev : st.reasoning))
-    }, 1000)
+    }, 3000)
     return () => clearInterval(iv)
   }, [pending, onResolved, onLocationNeeded, selectingRef])
 
