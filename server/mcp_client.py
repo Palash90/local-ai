@@ -127,6 +127,14 @@ class MCPClientManager:
                 print(f"[MCP] Error fetching tools from '{name}': {e}")
         self._tools_version += 1
 
+    def is_mcp_tool(self, tool_name: str) -> bool:
+        """True if tool_name belongs to any connected MCP server."""
+        for tools in self._tools_cache.values():
+            for t in tools:
+                if t["name"] == tool_name or t["raw_name"] == tool_name:
+                    return True
+        return False
+
     def get_all_tools(self) -> List[Dict[str, Any]]:
         all_tools = []
         print("In get all_tools")

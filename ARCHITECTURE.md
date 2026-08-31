@@ -233,7 +233,7 @@ graph TD
     end
 
     subgraph ChatEndpoints ["Chat & Tasks"]
-        Client -->|"POST /api/chat\n{session_id, message, image?, audio?,\nresearch?, cpu?, mode?, no_tools?}"| Chat["→ {task_id}, queued per lane"]
+        Client -->|"POST /api/chat\n{session_id, message, image?, audio?,\nresearch?, cpu?, mode?, no_tools?, peer_review?}"| Chat["→ {task_id}, queued per lane"]
         Client -->|"GET /api/status/:task_id"| Poll["status/message/response/tools_used/image"]
         Client -->|"GET/POST/PUT/DELETE /api/tasks"| Tasks["To-dos + reminders (SQLite)"]
         Client -->|"GET /api/themes"| Themes["Theme log + stats"]
@@ -304,9 +304,9 @@ graph TD
     PauseCheck -- Yes --> MarkWaiting["queued tasks → status waiting"]
     MarkWaiting --> PauseWait["cond.wait 5s"] --> QueueLoop
     PauseCheck -- No --> PopTask["pop head → _current_task_ids[mode]"]
-    PopTask --> PostStart["event_post start\n(session, message, image, audio, user,\nclient_timestamp, research, no_tools,\nopenai_lane, _mcp)"]
+    PopTask --> PostStart["event_post start\n(session, message, image, audio, user,\nclient_timestamp, research, no_tools,\nopenai_lane, _mcp, _resumed)"]
     PostStart --> TaskDoneWait{"poll task status every 0.5s"}
-    TaskDoneWait -- "done or error" --> Clear["_current_task_ids[mode]=None\nnotify_all"] --> QueueLoop
+    TaskDoneWait -- "done / error / requeued" --> Clear["_current_task_ids[mode]=None\nnotify_all"] --> QueueLoop
 
     MCP["MCP gateway batches"] --> DBQ[("mcp_tasks SQLite table")] --> MW["_mcp_db_worker\n(polls → admits to the gpu/cpu lane\nwith the _mcp flag)"]
 ```
@@ -317,17 +317,29 @@ default, cpu when flagged) carrying `_mcp: true`; the **guardrail server**
 (:8083) is only where their L2/L3 judge calls execute — generation stays on
 the gpu/cpu lane.
 
+Tasks requeued by an emergency RAM evacuation (`_evacuate_ram`) ride the same
+loop with two extra pieces of state: the task status becomes the **non-terminal
+`requeued`** (so the UI keeps polling instead of seeing an error) and the queue
+entry carries **`_resumed: true`**. The worker releases on `requeued`, picks the
+entry back up once the servers are back, and the `start` event then skips
+`prepare_session` — the user message (plus any tool trail and steering turns
+from the interrupted attempt) is already in the session, so a resume never
+duplicates the user turn in the chat.
+
 ### 9. Event Loop Pipeline (features/orchestration.py)
 
 ```mermaid
 graph TD
     E1["_event_loop (single dispatcher)"] --> EvDispatch{"event type?"}
-    EvDispatch -- "start" --> EvStart["store task metadata"] --> Prep["prepare_session (features/sessions.py):\n1. mode = task_mode(task)\n2. ensure + load lane's server\n3. inject sys prompt + date + location\n4. inject user context\n5. append user msg, auto-name session"] --> Router["sampling router (llm.py):\ntiny greedy classify call →\ncreative/code/factual/chat →\nper-request temperature/top_k/top_p"]
+    EvDispatch -- "start" --> EvStart["store task metadata"] --> Resumed{"_resumed?\n(RAM-evacuation restart)"}
+    Resumed -- "no (fresh task)" --> Prep["prepare_session (features/sessions.py):\n1. mode = task_mode(task)\n2. ensure + load lane's server\n3. inject sys prompt + date + location\n4. inject user context\n5. append user msg, auto-name session"] --> Router["sampling router (llm.py):\ntiny greedy classify call →\ncreative/code/factual/chat →\nper-request temperature/top_k/top_p"]
     Router --> Round0["start_llm_round(0)"]
+    Resumed -- "yes (resume)" --> Round0
 
     EvDispatch -- "llm_ok" --> LLMOK{"tool_calls?"}
     LLMOK -- No --> VGate{"research or\nUI gpu answer?"}
     VGate -- Yes --> Critic2["run_verification_worker\n(features/critic.py):\nresearch citations / answer-quality\njudge with bounded re-runs\n→ then _finalize_task"]
+    VGate -- "no + cpu agent" --> Peer["run_peer_review_worker\n(features/critic.py): full cross-agent\ncritique round — the peer (kaya↔kolpo\nmap) reviews the reply in a dedicated\nLLM round DIRECTLY on the cpu llama\nserver (bypasses the lane queue, which\nis blocked waiting on this very task)\n→ _judge_result → _finalize_task"]
     VGate -- No --> Final["_finalize_task:\n1. L3 output judge (features/judge.py):\nstrict pattern block + per-user judge;\nMCP lane (_mcp / guardrail) fail-closed,\nUI lane fail-open\n2. append msg, save sessions,\nstatus done, refresh idle stamp"]
     LLMOK -- Yes --> SubmitTools["append assistant msg,\npending_tools = N,\nsubmit to lane's _tool_pools"]
 
@@ -376,10 +388,21 @@ graph TD
     Choose -- manage_tasks --> MT["SQLite tasks CRUD + reminders"]
     Choose -- track_theme --> TT["theme_log: log/check/stats (agent-only)"]
     Choose -- tool_details --> TD["return full TOOLS_DETAILED docs"]
-    Choose -- "mcp:* (mcp_client.py)" --> MCT["call external MCP server tool\n(mcp_config.json)"]
+    Choose -- "<server>__<tool>\n(mcp_client.py)" --> MCT["mcp_manager.is_mcp_tool →\ndispatch_mcp_tool (asyncio bridge,\nmcp_config.json server, 8k-char cap)"]
     Choose -- unknown --> Unk["error: unknown tool"]
     Search & Fetch & Img & Loc & RF & RI & UC & MT & TT & TD & MCT & Unk --> Post["event tool_ok / tool_err"]
 ```
+
+Outbound MCP tools (`mcp_config.json` servers — e.g. `codebase-search`, the
+`codebase-memory-mcp` knowledge graph over `/home/palash/git`) are merged into
+the wire tool list per session (`features/llm.py`; cache keyed on
+`mcp_manager._tools_version`, so a server restart invalidates all sessions).
+Dispatch is namespaced `<server>__<tool>`: `MCPClientManager.is_mcp_tool()`
+gates the branch above and `dispatch_mcp_tool()` bridges the call onto the
+client's asyncio loop (8k-char result cap). A repo yields no search results
+until indexed once via `index_repository`; the graph persists under
+`~/.cache/codebase-memory-mcp/`. The OpenAI lane pins `no_tools: true`, so only
+UI/agent-lane tasks ever see these tools.
 
 ### 12. Resource Management (features/monitoring.py)
 
@@ -394,9 +417,10 @@ graph TD
     Hot -- No --> Cool{"was hot and ≤ 75 C?"}
     Cool -- Yes --> Clear["_overheated = False"]
     TM --> RAM{"RAM ≥ 95%?"}
-    RAM -- Yes --> Evac["_evacuate_ram:\nrequeue in-flight to lane fronts,\nkill llama-servers + ComfyUI,\nwait ≤ 70%, restart_servers()"]
+    RAM -- Yes --> Evac["_evacuate_ram:\nrequeue in-flight to lane fronts\n(status requeued — non-terminal, UI keeps polling —\nentry flagged _resumed so the restart skips\nprepare_session and never re-appends the user msg),\nkill llama-servers + ComfyUI,\nwait ≤ 70%, restart_servers()"]
     IDLE["_idle_unload_loop (10s)"] --> ICheck{"per lane: loaded,\nidle > 300s, queue empty,\nnot _chat_generating?"}
     ICheck -- Yes --> ISave["save KV slot → unload lane"]
+    IMG["images.py post-render"] --> REC["recycle_comfyui (background thread):\nkill + reboot ComfyUI — --lowvram\nweights never return RAM otherwise\n(~8 GB held idle → evacuation trigger);\nCOMFYUI_RECYCLE_AFTER_RENDER=0 disables"]
     CM["_connection_manager"] --> DNS["GoDaddy DDNS AAAA update\n(when public IPv6 changes)"]
     CM --> HB["heartbeat POST to GCP VM\nover WireGuard (10s)"]
 ```
@@ -416,7 +440,7 @@ graph TD
     Strict & Judge --> Lane{"lane?"}
     Lane -- "MCP (_mcp / guardrail)" --> FC["fail-closed: mark failed, drop output,\nmcp_task_update LEVEL 3 bookkeeping"]
     Lane -- "UI" --> FO["fail-open: deliver + record note"]
-    Gen -->|"research answers"| Critic["features/critic.py:\neach (Author, Venue, Year) [url] citation\nre-searched + re-fetched, LLM-checked;\n<70/100 quality or missing cites →\nre-schedule ≤ 2× (judge prompts)"]
+    Gen -->|"research answers"| Critic["features/critic.py:\neach (Author, Venue, Year) [url] citation\nexistence-probed (direct fetch → bot-block\n→ search) + re-fetched, LLM-checked;\n<70/100 quality or missing cites →\nre-schedule ≤ 2× (judge prompts)"]
     RAM["RAM guard: every judge POST\n(judge.py _judge_completion +\nmcp_gateway._run_llm_verify) holds\nwhile a ComfyUI render is active —\njudge.wait_until_render_safe\n(600s cap + 30s cooldown) — so a\njudge model load can never collide\nwith image generation"]
     L2 -.-> RAM
     Judge -.-> RAM
@@ -429,3 +453,62 @@ run via `run_verification_worker` with bounded re-runs; the former
 input-request judge (pre-generation "request NN%" chip) was removed — its
 load colliding with image renders was the main trigger of emergency RAM
 evacuations.
+
+**Critic call budget & reasoning fallback** — `critic._critic_completion`
+issues the critic's LLM calls with `max_tokens=2048` (retry doubles to 4096).
+Reasoning-capable chat models can burn the whole token budget inside
+`reasoning_content` before emitting the verdict, which used to surface as
+`[critic] LLM call failed … empty content in response` and silently dropped
+every citation verdict (fail-open). On empty `content` the critic now judges
+on the reasoning text instead — the same fallback the L2 judge implements in
+`mcp_gateway._judge_call`.
+
+**Citation existence probe** — for a URL the research run never retrieved,
+`critic._citation_exists` decides "does this source exist at all?" in this
+order: (1) direct fetch of the URL (any page content → exists); (2) a
+bot-block in the fetch error (403/405/429/forbidden/captcha/cloudflare) →
+treated as existing but unfetchable; (3) the original SearXNG same-URL search,
+last resort only. The search-only probe was removed as the primary check
+because search indexes rarely return deep links (PMC article pages, hospital
+blogs) verbatim, which branded real sources "likely fabricated".
+
+**L2 judge precision caveat** — the input judge is a small model and can
+false-positive on imperative technical phrasing: "Debug this Rust program …
+identify the bug … it misbehaves at runtime" was classified HARMFUL while
+near-identical "This Rust code fails to compile … identify the exact bug"
+prompts passed. The L2 verdict path itself is fail-closed and working as
+designed; benign code-debugging workloads hitting `LEVEL 2 LLM VERIFICATION
+FAILED` are a judge-prompt/model-precision issue, not an infra failure
+(check the `[guardrail][L2] raw verdict:` log line to distinguish).
+
+**Confidence-gated restart ("start from scratch")** — research and UI
+generation answers whose verification outcome lands below the confidence bar
+get a full fresh re-run: the original message is re-submitted as a **new
+task** through the normal send path (a new user turn is appended and a fresh
+research/tool round starts), unlike the in-task `_reschedule` retry, which
+appends a hidden `_steering` turn and re-runs within the same task's bounded
+counters. Open issues being worked: the restart turn is visible in the UI as
+a duplicate user message, and the per-task retry counters do not carry over —
+a persistently low-confidence answer can chain restarts (each costing a full
+research round) with no global cap.
+
+**Agent (Kaya/Kolpo) verification** — two more layers on the CPU lane, both
+fail-open (they never block delivery):
+
+- *Offline story pipeline* (`self-chat.py`): after the deterministic gate, the
+  re-opened **editor line** grades the story against the task/genre checklist
+  (`VERDICT: CLEAN|FLAGGED / CONFIDENCE: NN/100 / FLAGS:`). FLAGGED stories are
+  discarded wholesale — sessions deleted, story files removed — and the
+  conversation restarts from scratch (up to `SELF_CHAT_EDITOR_RESTARTS`, then
+  RED with the flags). A CLEAN story below the confidence threshold
+  (`editor_min_confidence` task key / `SELF_CHAT_EDITOR_MIN_CONFIDENCE`, default
+  70) triggers one extra cross-critique revision + one re-review; pre/post
+  confidence is recorded in `.moderation.json` (written for GREEN too, so the
+  story site shows a badge with the confidence number for every story).
+- *Online agent replies* (cpu lane): `run_peer_review_worker` runs a full
+  cross-agent critique round (`AGENT_PEER_MAP`, default kaya↔kolpo) — the peer
+  reviews the reply in a dedicated LLM round directly on the cpu llama-server
+  and the PEER VERDICT / CONFIDENCE verdict becomes the reply's confidence
+  chip. Both layers resolve the per-agent judge model from the `user_judges`
+  table (`resolve_judge_model`), so bigger verification models can be assigned
+  to kolpo/kaya out-of-band.

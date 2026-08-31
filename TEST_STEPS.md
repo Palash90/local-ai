@@ -113,6 +113,7 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 **B4. Queue/lane behavior**
 - Issue multiple parallel `/api/chat` and confirm they serialize per lane, statuses go `queued`
 - Exceed `MAX_QUEUE_SIZE` (15) → 503
+- **RAM-evacuation resume**: with a task mid-flight, force RAM ≥ 95% (or wait for the monitor) → log shows `[ram] Requeued … to front of its lane`, task status becomes `requeued` (**non-terminal** — the UI pending bubble keeps polling, no error flash); after the servers restart the task resumes and finalizes. Assert: answer arrives **once**, and `GET /api/sessions/:id/messages` contains the user message **once** (the `start` event skipped `prepare_session` via `_resumed`)
 
 **B5. Model status**
 - `GET /api/model-status` → `{model, predicted_per_second, overheated, gpu_temp, ram_evacuating, max_context, reminder_count}`; assert values sane
@@ -192,6 +193,14 @@ And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; as
 - **Input guard on gateway**: `send_chat_message`/`start_chat_batch` with a jailbreak-pattern message (see §I list) → refused before any LLM call
 - **Cross-user isolation**: token for user A must not read user B's sessions/images via MCP tools
 
+### D2. Outbound MCP client (`server/mcp_client.py`, `mcp_config.json`)
+
+- Startup log shows `[MCP] Successfully connected to 'codebase-search' via stdio` (npx `codebase-memory-mcp@latest`)
+- A chat round exposes `codebase-search__*` tools to the model and a `search_graph` call executes (`tool_ok`, no `'MCPClientManager' object has no attribute 'is_mcp_tool'` crash)
+- Empty index behaves sanely: `list_projects` → `{"projects":[],...,"hint":"No projects indexed..."}` until `index_repository(repo_path=…)` runs; after indexing `local-ai`, `search_graph("is_mcp_tool")` returns `server/mcp_client.py`
+- Result truncation: a tool returning >8k chars is capped with an explicit `[Output truncated: …]` footer
+- Stale sessions: restart chat-webui → `_tools_version` bump forces the per-session tool cache to rebuild (no duplicated schemas across rounds)
+
 ---
 
 ## E. markdown_hosting (`:3002`) — story RBAC
@@ -202,6 +211,7 @@ And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; as
 - As **admin** (palash): + `admin_stories`; free/premium get 403 on admin collection
 - Unauthenticated → 401 on gated collections
 - `GET /story/<col>/<id>` → rendered HTML w/ KaTeX math + rewritten image `src="/media/..."`
+- External links in rendered stories → `<a target="_blank" rel="noopener noreferrer">` (open in a new tab); in-page `#anchors` stay in-tab
 - `GET /story/<col>/<id>/content` live-poll → incremental HTML
 - `GET /media/<col>/<id>/<file>` → image bytes (auth-gated)
 - **Admin DELETE** `/story/<col>/<id>` → removes folder; non-admin → 403
@@ -213,6 +223,11 @@ And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; as
 
 - `--dry-run` w/ default + a `--config` file → prints every task plan, checklist resolution, medium feasibility, missing files, unhandled placeholders; **no LLM call**. `--defaults` combines the default tasks with `--config`. (Valid flags are only `--config/--defaults/--dry-run/--gpu` — turn counts come from the task config, there is no `--turns` flag.)
 - Real short run (`--config tasklist.json` w/ 1 task, minimal turns in the task spec) → verify: agents log in (OIDC password grant via `oidc_password_grant`), sessions created, story file + moderation `.json` written to `~/local-ai-files/stories/...`, GREEN/RED verdict, auto-RED gate (duplicate/citation drop/wrong script/name leak)
+- **Editor gate (re-opened)**: after the deterministic gate the `editor` agent grades the story (`[editor-gate]` logs: `VERDICT: CLEAN|FLAGGED | CONFIDENCE: NN | flags: N`)
+  - Clean + confident story → `moderation.json` verdict **GREEN with a `confidence` field** (written for every story now, so the story site badge always shows)
+  - Force a FLAGGED path (add a temporarily impossible checklist rule to the task config) → `[editor-gate] FLAGGED … discarding the session and starting fresh` → new sessions/turns; discarded story `.md` files removed; `SELF_CHAT_EDITOR_RESTARTS` (default 2) exhausted → RED with the flags as reasons
+  - Clean but below threshold (`editor_min_confidence` task key / `SELF_CHAT_EDITOR_MIN_CONFIDENCE`, default 70) → `[editor-gate] … triggering the cross-critique revision round` → one revision + one re-review → moderation.json records pre→post confidence
+  - Editor outage fail-open: unset `SELF_CHAT_EDITOR_PASSWORD` → gate returns CLEAN/None, pipeline continues on the deterministic gate alone
 - CPU lane routing default; `--gpu` flag routes agents to GPU
 - Check **theme dedup**: run identical combo twice → second run must pick a different combo (theme tracker)
 
@@ -223,6 +238,7 @@ And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; as
 With a browser (or headed test) authenticated via SSO:
 1. Load `/` → SPA renders, sidebar lists sessions, `check-auth` populates identity
 2. New chat → message streams in; tool use shows actions (image, search)
+3. External links inside answers/story HTML → open in a **new tab** with `rel="noopener noreferrer"`; in-app anchors and `[FILE:…]` download chips stay in-tab
 3. Upload a file → appears as attachment; ask the model to read it
 4. Ask for an image → generation task shows status → image renders (VRAM unload/reload visible)
 5. Location prompt (LocationPrompt) when model calls `get_user_location`
@@ -270,6 +286,20 @@ With a browser (or headed test) authenticated via SSO:
 - Ask a research-mode question that yields `(Author, Venue, Year) [url]` citations → logs show per-citation re-search/re-fetch, `VERIFY_FETCH_CHARS`-bounded excerpts
 - Fabricated citation (prompt a specific fake source) → verdict flags it; quality < `VERIFY_QUALITY_GATE` (70) or missing cite → re-scheduled ≤ `VERIFY_MAX_RETRIES` (2), then declined/corrected — never silently delivered as verified
 - One URL cited for > `VERIFY_MAX_CITES_PER_URL` (3) distinct claims → over-reliance flagged
+- **Critic token budget / reasoning fallback**: with a reasoning-capable chat model on the lane, logs must NOT show repeated `[critic] LLM call failed … empty content in response`; on an empty `content` the log shows `empty content but reasoning present — judging on reasoning text` and the citation verdict still lands
+- **Existence probe** (`_citation_exists`): cite a real deep link that research never fetched (e.g. a `pmc.ncbi.nlm.nih.gov/articles/PMC…/` page) → the verification block must NOT flag it "likely fabricated"; the log shows the direct fetch succeeding (or `bot-blocked … treating as existing` for 403 hosts like tuftsmedicine.org) instead of a search-only miss
+- **Search-only probe regression**: a genuinely fake URL (404 + no search hits) must still be flagged "likely fabricated" — the probe's last-resort search path remains authoritative
+
+**I4. L2 judge false-positive sanity (benign code prompts)**
+- Submit "Debug this Rust program …" and "This Rust code fails to compile … identify the exact bug" variants via MCP batch → both must pass L2 (the imperative "Debug …" phrasing has been classified HARMFUL by the small judge model — if it recurs, tighten `judge_input.txt` rather than the pipeline)
+- A blocked item shows `verification_level: LEVEL 2 LLM VERIFICATION FAILED` with the judge's raw verdict in `logs/chat-webui.log` (`[guardrail][L2] raw verdict:`) — use that line to separate judge false positives from genuinely harmful inputs
+
+**I5. Agent peer review (cpu lane, Kaya/Kolpo replies)**
+- Requires the cpu lane (`FORCE_GPU_LANE=False` or explicit `mode:"cpu"`) — gpu-lane agent replies take the UI quality-judge branch instead
+- Chat as kaya (JWT) on the cpu lane → after the final answer, status shows `Peer review...` and logs show `[peer-review] kolpo verdict=PASS|FLAG confidence=NN notes=…`; the reply's message carries the ⚖ confidence chip from the peer verdict
+- The peer round runs **directly on the cpu llama-server** (`:8079/v1/chat/completions`) — assert no second `/api/chat` task is created (recursion guard) and the original task finalizes even if the peer round fails
+- Fail-open: unset `AGENT_PEER_MAP` (or review a user without a peer) → falls back to the per-user quality judge; kill :8079 mid-review → fallback path finalizes the reply
+- Per-agent judge: rows in the `user_judges` table (`kolpo`/`kaya` → bigger model) are picked up by `resolve_judge_model` within 30s — visible in `[L3] ... judge=` log lines
 
 ---
 
@@ -290,6 +320,7 @@ With a browser (or headed test) authenticated via SSO:
 **J4. Image VRAM choreography (gate + serialization)**
 - Fire 2 concurrent `generate_image` chats → `_image_queue` serializes them (one `image_active` at a time); during the render a normal chat request must NOT reload the GPU model into VRAM (`_image_active` gate) — assert no cudaMalloc OOM in logs
 - Judge calls during the render hold (`[judge] image render active`) and fire after ComfyUI finishes — a judge model load must never overlap a render (RAM-evacuation guard, see §I2)
+- **Post-render ComfyUI recycle**: after each render logs show `[comfyui] Recycling process to return render RAM` → old process killed → fresh boot (`[comfyui] Recycle complete`); ComfyUI RSS drops from multi-GB to base (~300 MB) — assert `free -m` no longer drifts upward across renders and no `[ram]` evacuation follows a render. Next render re-loads the model from disk (slower start, expected). `COMFYUI_RECYCLE_AFTER_RENDER=0` disables
 - After render: ComfyUI VRAM freed, GPU model reloaded, KV restored, ~5s cooldown observed
 
 ---

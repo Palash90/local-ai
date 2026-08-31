@@ -124,6 +124,7 @@ SHARES_FILE = None
 _active_tokens = None
 _agent_tokens = None
 _agent_users = None
+_agent_token_by_user = None
 _user_last_seen = None
 _user_last_seen_lock = None
 _data_lock = None
@@ -169,6 +170,7 @@ APP_STATE_NAMES = [
     "_active_tokens",
     "_agent_tokens",
     "_agent_users",
+    "_agent_token_by_user",
     "_user_last_seen",
     "_user_last_seen_lock",
     "_data_lock",
@@ -729,6 +731,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     _agent_tokens.add(t)
                 for u in usernames:
                     _agent_users.add(u)
+                # username → latest token so server-side flows (the cross-agent
+                # peer-review worker) can act as a registered agent. self-chat.py
+                # re-registers after every token heal, keeping this fresh.
+                for u, t in zip(usernames, tokens):
+                    if u and t:
+                        _agent_token_by_user[u] = t
             self.send_json({"ok": True})
         elif self.path == "/api/leaving":
             # Fired via navigator.sendBeacon on pagehide. With SSO the browser
@@ -817,6 +825,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # task so _finalize_task runs the fail-closed MCP L3 output
                 # judge (LEVEL 3 verification) instead of the UI fail-open one.
                 "_mcp": bool(MCP_USER) and user == MCP_USER,
+                # Server-side peer-review requests mark their tasks so the
+                # peer-review worker never recurses on its own round.
+                "_peer_review": bool(body.get("peer_review")),
             }
             # Route to the GPU lane (interactive UI users) or the lane chosen
             # by SELF_CHAT_MODE — cpu (self-chat agents on the RAM-backed CPU
@@ -858,6 +869,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "research": bool(body.get("research")),
                     "cpu": cpu_flagged,
                     "no_tools": bool(body.get("no_tools")),
+                    "_peer_review": bool(body.get("peer_review")),
                 }
             # Return the task_id immediately so the UI can enqueue the pending
             # message and poll /api/status/{task_id} for live progress ("Waiting

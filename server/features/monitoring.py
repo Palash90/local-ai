@@ -313,16 +313,12 @@ def restart_servers():
         print("[llama] Skipping guardrail llama-server start (no guardrail lane activity)")
 
 
-def ensure_comfyui_running():
-    try:
-        r = requests.get(f"{M.COMFYUI_URL}/prompt", timeout=3)
-        if r.status_code < 500:
-            return
-    except Exception:
-        pass
-    print("[comfyui] Not reachable — starting...")
-    M.kill_comfyui()
-    time.sleep(1)
+_comfyui_recycling = False
+_comfyui_recycle_lock = threading.Lock()
+
+
+def _launch_comfyui_and_wait():
+    """Spawn ComfyUI (--lowvram) and poll /prompt until it answers, ≤120s."""
     log_dir = os.path.expanduser("~/local-ai")
     comfy_log = open(os.path.join(log_dir, "comfyui.log"), "a")
     subprocess.Popen(
@@ -347,10 +343,79 @@ def ensure_comfyui_running():
             r = requests.get(f"{M.COMFYUI_URL}/prompt", timeout=3)
             if r.status_code < 500:
                 print("[comfyui] Healthy")
-                return
+                return True
         except Exception:
             pass
     print("[comfyui] Did not respond within 2 minutes")
+    return False
+
+
+def ensure_comfyui_running():
+    if _comfyui_recycling:
+        # A post-render recycle is rebooting ComfyUI in the background — wait
+        # it out instead of kill-restarting a mid-boot process.
+        print("[comfyui] Recycle in progress — waiting for the fresh process...")
+        deadline = time.time() + 120
+        while time.time() < deadline and _comfyui_recycling:
+            time.sleep(2)
+    try:
+        r = requests.get(f"{M.COMFYUI_URL}/prompt", timeout=3)
+        if r.status_code < 500:
+            return
+    except Exception:
+        pass
+    print("[comfyui] Not reachable — starting...")
+    M.kill_comfyui()
+    time.sleep(1)
+    _launch_comfyui_and_wait()
+
+
+def recycle_comfyui():
+    """Kill + reboot ComfyUI in the background after a render.
+
+    ComfyUI never returns its RAM after a render: with --lowvram the weights
+    stay resident and the Python allocator rarely hands pages back, so the
+    process sits at multi-GB RSS forever (observed ~8 GB on a 16 GB box) and
+    every render starts from that deficit — a major RAM-evacuation trigger.
+    The /free endpoint only drops VRAM; recycling the process is the only
+    reliable way to get that memory back.
+
+    Runs on a daemon thread so the image task finishes immediately; the NEXT
+    render pays the model load from disk (~seconds) instead of inheriting a
+    bloated process. A RAM evacuation overlapping the recycle self-heals:
+    whichever process survives, ``ensure_comfyui_running`` converges on a
+    healthy ComfyUI. Disable with COMFYUI_RECYCLE_AFTER_RENDER=0.
+    """
+    global _comfyui_recycling
+    if os.environ.get("COMFYUI_RECYCLE_AFTER_RENDER", "1").strip().lower() in (
+        "0",
+        "false",
+        "off",
+    ):
+        return
+    with _comfyui_recycle_lock:
+        if _comfyui_recycling:
+            return
+        _comfyui_recycling = True
+
+    def _recycle():
+        global _comfyui_recycling
+        try:
+            print("[comfyui] Recycling process to return render RAM", flush=True)
+            kill_comfyui()
+            time.sleep(2)
+            _launch_comfyui_and_wait()
+            print("[comfyui] Recycle complete — render RAM returned", flush=True)
+        except Exception as e:
+            print(
+                f"[comfyui] Recycle failed (next ensure_comfyui_running will "
+                f"retry): {e}",
+                flush=True,
+            )
+        finally:
+            _comfyui_recycling = False
+
+    threading.Thread(target=_recycle, daemon=True).start()
 
 
 def _idle_unload_loop():
@@ -398,7 +463,9 @@ def _evacuate_ram():
             if tid:
                 with M._data_lock:
                     t = M.tasks.get(tid)
-                    if t and t.get("status") not in ("done", "error"):
+                    # "requeued" = an earlier evacuation already queued the
+                    # entry — re-inserting would start the task twice.
+                    if t and t.get("status") not in ("done", "error", "requeued"):
                         entry = {
                             "task_id": tid,
                             "session_id": t.get("session_id", ""),
@@ -412,10 +479,20 @@ def _evacuate_ram():
                             "openai_lane": bool(t.get("openai_lane")),
                             "skip_ensure_llama": bool(t.get("skip_ensure_llama")),
                             "mode": t.get("mode"),
+                            # The first "start" already ran _prepare_session, so
+                            # the user message (plus any tool trail / steering
+                            # turns) is in the session — the resume must not
+                            # append it again.
+                            "_resumed": True,
                         }
                         M._task_queues[mode].insert(0, entry)
-                        t["status"] = "error"
-                        t["error"] = "Server ran out of RAM — requeued"
+                        # Non-terminal on purpose: the UI keeps polling while
+                        # the lane worker releases the task and picks the
+                        # requeued entry back up (see _queue_worker). "error"
+                        # here used to resolve the UI pending message AND
+                        # re-append the user message on restart.
+                        t["status"] = "requeued"
+                        t["message"] = "Server ran out of RAM — requeued"
                         t["_ram_evacuating"] = True
                         print(f"[ram] Requeued {mode} task {tid} to front of its lane")
     M.kill_llama_server()

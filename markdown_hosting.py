@@ -1,6 +1,7 @@
 import os
 import json
 import html
+import re
 import shutil
 import markdown
 from fastapi import FastAPI, HTTPException, Request, status
@@ -462,6 +463,12 @@ def render_story_html(collection: str, story_id: str, content: str) -> str:
     html_content = html_content.replace(
         '<table>', '<div class="table-wrap"><table>'
     ).replace('</table>', '</table></div>')
+    # Open external links in a new tab (internal anchors stay in-tab).
+    html_content = re.sub(
+        r'<a href="(https?://[^"]*)"',
+        r'<a href="\1" target="_blank" rel="noopener noreferrer"',
+        html_content,
+    )
     return html_content.replace('src="', f'src="/media/{collection}/{story_id}/')
 
 
