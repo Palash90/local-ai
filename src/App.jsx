@@ -224,6 +224,9 @@ export default function App() {
       const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined, undefined, research, cpu)
       const taskId = data.task_id
 
+      // /api/chat returns the task_id immediately; the PendingMessage below then
+      // self-polls /api/status/{task_id} to render live progress ("Waiting in
+      // line...", "Processing task...", "Generating image...", etc.).
       setPendingMessages(prev => ({
         ...prev,
         [taskId]: { sessionId: taskSid, status: 'working', message: 'Thinking...', taskId, reasoning: '', _userMsg: userMsg },
