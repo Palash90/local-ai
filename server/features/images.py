@@ -305,13 +305,13 @@ def generate_image(
         # without accidentally opening the gate for a concurrent chat round.
         with M._data_lock:
             M._image_active = False
+        # Return the render RAM ComfyUI retains (~8 GB with --lowvram):
+        # kill + reboot it before loading llama models so render RAM cannot
+        # overlap their allocations.
+        M.recycle_comfyui(wait=True)
         M.set_status(task_id, "Loading chat model...")
         M.load_llama_model("gpu")
         M.load_llama_model("guardrail")
-        # Return the render RAM ComfyUI retains (~8 GB with --lowvram):
-        # background-kill + reboot it so the next render starts lean. Async —
-        # this task is already done; only the NEXT render pays the model load.
-        M.recycle_comfyui()
     return result
 
 
@@ -569,11 +569,11 @@ def edit_image(
         # without accidentally opening the gate for a concurrent chat round.
         with M._data_lock:
             M._image_active = False
+        # Same post-render recycle as generate_image (see the comment there).
+        M.recycle_comfyui(wait=True)
         M.set_status(task_id, "Loading chat model...")
         M.load_llama_model("gpu")
         M.load_llama_model("guardrail")
-        # Same post-render recycle as generate_image (see the comment there).
-        M.recycle_comfyui()
 
     return result
 

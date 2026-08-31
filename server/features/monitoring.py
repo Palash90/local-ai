@@ -370,7 +370,7 @@ def ensure_comfyui_running():
     _launch_comfyui_and_wait()
 
 
-def recycle_comfyui():
+def recycle_comfyui(wait=False):
     """Kill + reboot ComfyUI in the background after a render.
 
     ComfyUI never returns its RAM after a render: with --lowvram the weights
@@ -380,9 +380,10 @@ def recycle_comfyui():
     The /free endpoint only drops VRAM; recycling the process is the only
     reliable way to get that memory back.
 
-    Runs on a daemon thread so the image task finishes immediately; the NEXT
-    render pays the model load from disk (~seconds) instead of inheriting a
-    bloated process. A RAM evacuation overlapping the recycle self-heals:
+    By default this runs on a daemon thread so the image task finishes
+    immediately. ``wait=True`` is used by image cleanup when llama models must
+    be loaded next: it prevents ComfyUI's render allocations from overlapping
+    those model loads. A RAM evacuation overlapping the recycle self-heals:
     whichever process survives, ``ensure_comfyui_running`` converges on a
     healthy ComfyUI. Disable with COMFYUI_RECYCLE_AFTER_RENDER=0.
     """
@@ -395,6 +396,9 @@ def recycle_comfyui():
         return
     with _comfyui_recycle_lock:
         if _comfyui_recycling:
+            if wait:
+                while _comfyui_recycling:
+                    time.sleep(0.5)
             return
         _comfyui_recycling = True
 
@@ -415,7 +419,10 @@ def recycle_comfyui():
         finally:
             _comfyui_recycling = False
 
-    threading.Thread(target=_recycle, daemon=True).start()
+    thread = threading.Thread(target=_recycle, daemon=True)
+    thread.start()
+    if wait:
+        thread.join()
 
 
 def _idle_unload_loop():

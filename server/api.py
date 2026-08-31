@@ -854,12 +854,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # Test-time override: never admit anything to the CPU lane.
                 mode = "gpu"
             entry["mode"] = mode
-            with _queue_locks[mode]:
-                if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:
-                    self.send_json({"error": "Server busy"}, status=503)
-                    return
-                _task_queues[mode].append(entry)
-                _queue_conds[mode].notify()
             with _data_lock:
                 tasks[task_id] = {
                     "status": "queued",
@@ -871,6 +865,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "no_tools": bool(body.get("no_tools")),
                     "_peer_review": bool(body.get("peer_review")),
                 }
+            # Publish the in-memory task before notifying the lane worker. The
+            # worker can post the start event immediately; inserting into the
+            # queue first creates a race where _event_loop drops that event
+            # because tasks[task_id] does not exist yet.
+            with _queue_locks[mode]:
+                if len(_task_queues[mode]) >= MAX_QUEUE_SIZE:
+                    with _data_lock:
+                        tasks.pop(task_id, None)
+                    self.send_json({"error": "Server busy"}, status=503)
+                    return
+                _task_queues[mode].append(entry)
+                _queue_conds[mode].notify()
             # Return the task_id immediately so the UI can enqueue the pending
             # message and poll /api/status/{task_id} for live progress ("Waiting
             # in line...", "Processing task...", "Generating image...", etc.).
