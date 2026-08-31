@@ -121,6 +121,8 @@ def _finalize_task(task_id, sid, msg_content, body):
         image_model = t.get("_image_model")
         verification = t.get("_verification")
         verification_duration = t.get("_verification_duration")
+        judge_result = t.get("_judge_result")
+        input_quality = t.get("_request_quality")
     image_url = f"/output/{image_filename}" if image_filename else None
     if image_url:
         print(f"[finalize] image_file='{image_filename}' → image_url='{image_url}' for task {task_id}")  # DEBUG
@@ -151,6 +153,11 @@ def _finalize_task(task_id, sid, msg_content, body):
     if verification is not None:
         msg_entry["_verification"] = verification
         msg_entry["_verification_duration"] = verification_duration
+    confidence = (judge_result or {}).get("quality")
+    if isinstance(confidence, int):
+        msg_entry["_confidence"] = confidence
+    if isinstance(input_quality, int):
+        msg_entry["_input_quality"] = input_quality
     mode = M.task_mode(task_id)
     with M._data_lock:
         if sid in M.sessions:

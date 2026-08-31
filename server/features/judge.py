@@ -553,6 +553,32 @@ _RES_VERDICT_UNSAFE = {"UNSAFE", "HARMFUL", "BLOCKED", "LEAK", "LEAKED", "PROHIB
 # plain word-token scan would split apart (e.g. "NO_CITATIONS" -> NO/CITATIONS).
 _RES_NO_CITES_LITERAL = ("NO_CITATIONS", "MISSING_CITATIONS", "NO_CITE")
 
+_QUALITY_RE = re.compile(
+    r"(?:QUALITY|CONFIDENCE|SCORE)\s*[:=]?\s*(\d{1,3}(?:[.,]\d+)?)"
+    r"(?:\s*/\s*(\d{1,3}))?",
+    re.IGNORECASE,
+)
+
+
+def _parse_quality(content):
+    """Extract a 0-100 quality/confidence score from a judge reply, or None.
+
+    Accepts ``QUALITY: 84/100``, ``Quality 84``, ``Confidence: 7/10`` etc. A
+    fraction (x/y) is normalized to the 0-100 scale; any value is clamped.
+    Returns None (never raises) when no usable score is present.
+    """
+    m = _QUALITY_RE.search(content or "")
+    if not m:
+        return None
+    try:
+        val = float(m.group(1).replace(",", "."))
+        den = m.group(2)
+        if den:
+            val = val / float(den) * 100.0
+        return max(0, min(100, int(round(val))))
+    except (ValueError, TypeError):
+        return None
+
 
 def _parse_research_verdict(content):
     """Interpret a free-form judge reply as a research-verification token:
@@ -575,6 +601,25 @@ def _parse_research_verdict(content):
     return None
 
 
+_RES_REQUEST_CLEAR = {"OK", "CLEAR", "UNDERSTANDABLE", "COMPLETE", "ACTIONABLE"}
+_RES_REQUEST_UNCLEAR = {"UNCLEAR", "VAGUE", "GARBLED", "CONFUSED", "AMBIGUOUS"}
+
+
+def _parse_request_verdict(content):
+    """Interpret a free-form judge reply as a request-clarity verdict:
+    OK / UNCLEAR, or None when nothing usable was said."""
+    words = re.findall(r"[A-Za-z']+", (content or "").upper())
+    negated = False
+    for w in words[:12]:
+        if w in _VERDICT_NEGATIONS:
+            negated = not negated
+        elif w in _RES_REQUEST_UNCLEAR:
+            return "OK" if negated else "UNCLEAR"
+        elif w in _RES_REQUEST_CLEAR:
+            return "OK" if not negated else "UNCLEAR"
+    return None
+
+
 def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
                                model_id=None, max_chars=8000):
     """Context-aware LLM judge for research answers.
@@ -585,13 +630,14 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
     (2) backs each claim with an inline ``(Author, Venue, Year) [url]``
     citation, and (3) is itself safe (no prohibited content, no leaking of
     internal instructions/prompts/system state). Replies with one token:
-    OK / NO_CITATIONS / UNSAFE.
+    OK / NO_CITATIONS / UNSAFE, plus a ``QUALITY: NN/100`` confidence score.
 
     Synchronous (requests). Returns a dict
-    ``{model, ok, citations, unsafe, reason}``, or None when the judge is
-    unavailable — fail-open, the research answer is still delivered (the
+    ``{model, ok, citations, unsafe, quality, reason}``, or None when the judge
+    is unavailable — fail-open, the research answer is still delivered (the
     deterministic pattern layer and the critic citation pass remain the hard
-    gates). ``model_id`` pins a per-user judge.
+    gates). ``model_id`` pins a per-user judge. The caller decides whether a
+    below-gate ``quality`` or a False ``citations`` triggers a re-run.
     """
     base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
@@ -602,7 +648,7 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
     answer = (answer or "").strip()
     if not answer:
         return {"model": None, "ok": True, "citations": True,
-                "unsafe": False, "reason": "empty answer"}
+                "unsafe": False, "quality": None, "reason": "empty answer"}
     print(
         f"[guardrail][research-verify] -> {base_url} model={model_id or 'auto'} "
         f"user_input={repr((user_input or '')[:200])} answer_len={len(answer)}"
@@ -619,11 +665,13 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
         print("[guardrail][research-verify] judge unavailable — fail-open")
         return None
     status = _parse_research_verdict(content)
+    quality = _parse_quality(content)
     result = {
         "model": cand,
         "ok": status == "OK",
         "citations": status == "OK",
         "unsafe": status == "UNSAFE",
+        "quality": quality,
         "reason": (content or "").strip()[:400],
     }
     if status is None:
@@ -631,7 +679,60 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
         result["reason"] = f"unrecognized judge reply: {result['reason']}"
     print(
         f"[guardrail][research-verify] model={cand} status={status or 'UNKNOWN'} "
-        f"reason={result['reason'][:160]!r}"
+        f"quality={quality} reason={result['reason'][:160]!r}"
+    )
+    return result
+
+
+def llm_verify_user_request(user_input, base_url=None, timeout=None,
+                            model_id=None, max_chars=4000):
+    """One LLM judge check of a UI user's own request.
+
+    Produces a quality/confidence score (0-100) plus a clarity verdict for the
+    user's message BEFORE generation — the interactive-chat analogue of the
+    L1/L2 checks the MCP gateway runs on its own lane. By contract this is
+    called OFF the hot path (background thread at admission): the result is
+    purely informational — recorded on the task and surfaced as a chip in the
+    assistant message header, never blocking generation.
+
+    Returns a dict ``{model, ok, clarity, quality, reason}``, or None when the
+    judge is unavailable — fail-open. ``clarity`` is ``"OK"`` or ``"UNCLEAR"``
+    (None when the reply was unrecognized); ``ok`` is True for a clear request.
+    ``model_id`` pins a per-user judge.
+    """
+    base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
+    if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
+        try:
+            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
+        except ValueError:
+            timeout = _JUDGE_MIN_TIMEOUT
+    user_input = (user_input or "").strip()
+    if not user_input:
+        return {"model": None, "ok": True, "clarity": "OK",
+                "quality": None, "reason": "empty message"}
+    print(
+        f"[guardrail][request-judge] -> {base_url} model={model_id or 'auto'} "
+        f"user_input={repr(user_input[:200])}"
+    )
+    cand, content = _judge_completion(
+        "request-judge", _get_prompt("judge_request.txt"), user_input,
+        base_url, timeout, max_chars=max_chars, model_id=model_id,
+    )
+    if cand is None:
+        print("[guardrail][request-judge] judge unavailable — fail-open")
+        return None
+    clarity = _parse_request_verdict(content)
+    quality = _parse_quality(content)
+    result = {
+        "model": cand,
+        "ok": clarity != "UNCLEAR",
+        "clarity": clarity,
+        "quality": quality,
+        "reason": (content or "").strip()[:400],
+    }
+    print(
+        f"[guardrail][request-judge] model={cand} clarity={clarity or 'UNKNOWN'} "
+        f"quality={quality} reason={result['reason'][:160]!r}"
     )
     return result
 

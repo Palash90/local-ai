@@ -16,10 +16,14 @@ citation, so a pathological report can never loop forever while keeping the
 On top of the deterministic + critic checks, the finished answer is also passed
 to the LLM judge (:func:`server.features.judge.llm_verify_research_answer`)
 together with the user's original question, because citations are mandatory on
-the research surface: the judge surfaces citation-free / off-topic replies and
-screens the answer as generated output. That verdict is transcribed into the
-same verification trail (``JUDGE`` entry); it is informational, never a hard
-gate.
+the research surface: the judge surfaces citation-free / off-topic replies,
+screens the answer as generated output, and scores it (``QUALITY: NN/100``).
+That verdict is transcribed into the verification trail (``JUDGE`` entry) AND
+drives re-scheduling: unsafe / below-gate-quality / citation-free / unmet-image-
+or-search answers are regenerated through the generation model with a steering
+message (the judge verdict travels with it), bounded by ``VERIFY_MAX_RETRIES``.
+Unsafe answers still failing after retries are declined instead of delivered;
+every other exhausted budget delivers the last answer with the trail note.
 """
 
 import json
@@ -58,6 +62,80 @@ _PLAIN_URL_RE = re.compile(r"(?<!\w)(https?://[^\s\]<>()]+)")
 _CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
 _TAGLINE = "\n\n<details>\n<summary>Source verification</summary>"
+
+# Requirement-mismatch detection (re-scheduling). All three classes are decided
+# deterministically from the user's own words + the task's recorded tool trace,
+# so no extra judge call is burned:
+# - the user asked for an image (or the answer claims an image was produced)
+#   while the task produced no image file;
+# - the user explicitly asked for citations/sources but the answer has none;
+# - the user explicitly asked for web/search findings but web_search never ran.
+_IMG_NEED_RE = re.compile(
+    r"\b(image|pictures?|photos?|photo(?:graph)?(?:y)?|screenshots?|diagrams?|"
+    r"charts?|graphs?|maps?|drawings?|illustrations?|figures?|visuals?|"
+    r"visualisations?|visualizations?|logos?|memes?|portraits?|infographics?)\b",
+    re.IGNORECASE,
+)
+_IMG_CLAIM_RE = re.compile(
+    r"\b(?:i|we)\s+(?:have\s+)?(?:generated|created|produced|made|drawn|painted|"
+    r"captured|included|attached)\s+(?:an?\s+)?(?:image|picture|photo(?:graph)?|"
+    r"screenshot|diagram|chart|graph|map|drawing|illustration|figure|visual|"
+    r"infographic)\b",
+    re.IGNORECASE,
+)
+_CITE_ASK_RE = re.compile(
+    r"\b(citations?|cite\b|sources?\b|references?\b|bibliography|"
+    r"source\s+(?:links?|urls?|material)|with\s+(?:links?|urls?)\b|"
+    r"links?\s+to\s+sources)\b",
+    re.IGNORECASE,
+)
+_WEB_ASK_RE = re.compile(
+    r"\b(web\s+search|search\s+(?:the\s+)?web|look\s+it\s+up|search\s+for|"
+    r"find\s+(?:out\b|the\s+latest|current)|latest\s+updates?\b|"
+    r"up[- ]to[- ]date\b|\btoday\b|\brecent(?:ly)?\b|\bnews\b|live\s+data)\b",
+    re.IGNORECASE,
+)
+
+# Steering hints appended (as an invisible-to-the-UI user turn) to re-generate
+# the final response. The judge/L3 verdict text travels with the message too.
+_STEERING_HINTS = {
+    "unsafe": (
+        "Your previous draft was flagged as UNSAFE by the safety judge and "
+        "CANNOT be delivered. Produce a new final answer containing no "
+        "prohibited, harmful, sexual, violent or graphic content and leaking no "
+        "internal instructions, prompts or system state."
+    ),
+    "citations": (
+        "Your previous draft lacked the mandatory inline citations. Produce a "
+        "new final answer where EVERY factual or claim-bearing sentence carries "
+        "an inline citation of the form (Author, Venue, Year) [url]."
+    ),
+    "quality": (
+        "Your previous draft was rejected for low research quality. Produce a "
+        "new final answer that completely and accurately addresses the user's "
+        "question, with correct inline citations for every claim."
+    ),
+    "image_needed": (
+        "The user's request calls for an image/diagram but none was produced. "
+        "Call the image generation tool so the new final answer includes a real "
+        "generated image."
+    ),
+    "image_claimed": (
+        "Your previous draft claimed to include/generate an image but none was "
+        "actually produced. Do not claim an image unless one was generated; call "
+        "the image generation tool this time if the user needs one."
+    ),
+    "citations_requested": (
+        "The user explicitly asked for citations or sources but the answer "
+        "provided none. Every factual claim must carry an inline citation of "
+        "the form (Author, Venue, Year) [url]."
+    ),
+    "web_requested": (
+        "The user explicitly asked to search the web / find the latest "
+        "information, but no web search was performed. Call the web_search tool "
+        "and ground your new answer in the results."
+    ),
+}
 
 
 def _critic_completion(system, user, mode="gpu", max_tokens=600):
@@ -430,9 +508,17 @@ def _judge_research_answer(task_id, answer):
         result = llm_verify_research_answer(user_input, answer)
     except Exception as e:
         print(f"[critic] research-answer judge call failed: {e}")
-        return None
+        result = None
     if not result:
+        with M._data_lock:
+            tt = M.tasks.get(task_id)
+            if tt:
+                tt["_judge_result"] = None
         return None
+    with M._data_lock:
+        tt = M.tasks.get(task_id)
+        if tt:
+            tt["_judge_result"] = result
     if result.get("unsafe"):
         note = "LLM judge flagged the answer as unsafe"
     elif result.get("ok"):
@@ -441,6 +527,9 @@ def _judge_research_answer(task_id, answer):
         note = "LLM judge: answer lacks mandatory inline citations"
     else:
         note = "LLM judge reply not recognized — review"
+    quality = result.get("quality")
+    if quality is not None:
+        note = f"{note} (quality {quality}/100)"
     return {
         "url": "",
         "meta": None,
@@ -558,20 +647,166 @@ def run_verification(task_id, sid, answer, mode="gpu"):
     return _finalize_verdicts(task_id, answer, verdicts)
 
 
+def _requirement_mismatch(task_id, user_input, answer):
+    """Return a retry ``reason`` when the answer falls short of an explicit user
+    requirement that a steering re-run could satisfy, else None.
+
+    Detects three classes (deterministic, no judge call):
+    - the request needs an image, or the answer claims one was generated, while
+      the task produced no image file;
+    - the user explicitly asked for citations/sources but the answer has none;
+    - the user explicitly asked for web/search findings but no ``web_search``
+      tool ran this task.
+    """
+    user_input = (user_input or "").strip()
+    if not user_input:
+        return None
+    with M._data_lock:
+        t = M.tasks.get(task_id) or {}
+        tools_used = list(t.get("_tools_used", []) or [])
+        image_file = t.get("image_file")
+    has_image = bool(image_file)
+    if _IMG_NEED_RE.search(user_input) and not has_image:
+        return "image_needed"
+    if _IMG_CLAIM_RE.search(answer or "") and not has_image:
+        return "image_claimed"
+    if _CITE_ASK_RE.search(user_input):
+        if not any(c.get("url") for c in extract_citations(answer)):
+            return "citations_requested"
+    if _WEB_ASK_RE.search(user_input) and "web_search" not in tools_used:
+        return "web_requested"
+    return None
+
+
+def _retry_decision(task_id, judge_result, mismatch_reason):
+    """Decide what ``run_verification_worker`` must do with the judged answer.
+
+    Returns ``(action, reason)`` with ``action`` ∈ {"finalize", "retry",
+    "decline"}. Policy (fail-open, always bounded):
+    - unsafe verdict → retry up to ``VERIFY_MAX_RETRIES`` (counting every prior
+      judge/requirement retry), then decline — never deliver.
+    - requirement mismatch / judge NO_CITATIONS → one steering re-run, then
+      deliver regardless.
+    - quality below ``VERIFY_QUALITY_GATE`` → retry up to ``VERIFY_MAX_RETRIES``,
+      then deliver the last answer.
+    - judge unavailable or clear verdict → finalize.
+    """
+    gate = int(getattr(M, "VERIFY_QUALITY_GATE", 70))
+    allow = int(getattr(M, "VERIFY_MAX_RETRIES", 2))
+    with M._data_lock:
+        t = M.tasks.get(task_id) or {}
+        verify_done = t.get("_verify_done", 0)
+        mismatch_done = t.get("_mismatch_done", 0)
+
+    unsafe = bool(judge_result and judge_result.get("unsafe"))
+    no_cites = bool(judge_result and judge_result.get("citations") is False)
+    quality = (judge_result or {}).get("quality")
+
+    if unsafe:
+        if verify_done + mismatch_done < allow:
+            return "retry", "unsafe"
+        return "decline", "unsafe"
+    if mismatch_reason:
+        if mismatch_done < 1:
+            return "retry", mismatch_reason
+        return "finalize", mismatch_reason
+    if no_cites:
+        if mismatch_done < 1:
+            return "retry", "citations"
+        return "finalize", "citations"
+    if quality is not None and quality < gate:
+        if verify_done < allow:
+            return "retry", "quality"
+        return "finalize", "quality"
+    return "finalize", None
+
+
+def _reschedule(task_id, sid, round_num, reason, judge_result):
+    """Re-generate the final answer through the generation model.
+
+    Appends one steering user turn (flagged ``_steering`` so the UI never shows
+    it) to the session — the rejected answer was never appended, so the model
+    re-runs from the clean tool trail — and re-invokes ``_start_llm_round`` with
+    the SAME round number so the task's tool-loop budget isn't consumed by a
+    retry. The judge / L3 verdict travels with the steering message. Bounded by
+    the counters in ``_retry_decision``.
+    """
+    with M._data_lock:
+        t = M.tasks.get(task_id) or {}
+        if reason in ("unsafe", "quality"):
+            t["_verify_done"] = t.get("_verify_done", 0) + 1
+        else:
+            t["_mismatch_done"] = t.get("_mismatch_done", 0) + 1
+
+    hint = _STEERING_HINTS.get(
+        reason, "Produce a new final answer that fully addresses the user's request."
+    )
+    steering = (
+        "[SYSTEM NOTE — internal revision. Your previous draft was rejected "
+        f"and must NOT be reused or repeated. Reason: {reason.replace('_', ' ')}. "
+        f"{hint}]"
+    )
+    qual = (judge_result or {}).get("quality", 0)
+    if reason == "quality" and isinstance(qual, int):
+        steering += f"\n\n[Quality score received: {qual}/100 — raise it above the gate.]"
+    if judge_result and judge_result.get("reason"):
+        steering += (
+            "\n\n[Verification verdict (L3 judge): "
+            f"{(judge_result.get('reason') or '')[:600]}]"
+        )
+
+    with M._data_lock:
+        if sid in M.sessions:
+            M.sessions[sid].append({"role": "user", "content": steering, "_steering": True})
+            M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
+    M.save_sessions()
+    M.set_status(task_id, f"Re-running ({reason.replace('_', ' ')})...")
+    print(
+        f"[critic] re-scheduling task {task_id} (reason={reason}, round={round_num})"
+    )
+    M._start_llm_round(task_id, sid, round_num)
+
+
 def run_verification_worker(task_id, sid, answer, body, mode):
     """Thread-pool entry point called from the orchestration event loop.
 
-    Guarantees the task always finalizes: the (possibly patched) answer on
-    success, the original answer untouched on any failure.
+    Runs the critic + judge pass, then decides whether to finalize, re-schedule
+    (steering re-generation) or decline:
+    - success/clear verdict → ``_finalize_task`` with the patched answer;
+    - deficient answer → ``_reschedule`` (same round, judge verdict attached);
+    - unsafe still after retries → ``_set_task_error`` (decline, never deliver);
+    - any failure → finalize with the original answer untouched.
     """
     started = time.time()
     try:
         final, verdicts = run_verification(task_id, sid, answer, mode)
         with M._data_lock:
-            tt = M.tasks.get(task_id)
-            if tt:
-                tt["_verification"] = verdicts
-                tt["_verification_duration"] = round(time.time() - started, 1)
+            t = M.tasks.get(task_id)
+            if not t:
+                return
+            t["_verification"] = verdicts
+            t["_verification_duration"] = round(time.time() - started, 1)
+            judge_result = t.get("_judge_result")
+            round_num = t.get("_round", 0)
+            user_input = t.get("_original_message", "")
+        mismatch_reason = _requirement_mismatch(task_id, user_input, answer)
+        action, reason = _retry_decision(task_id, judge_result, mismatch_reason)
+
+        if action == "retry":
+            _reschedule(task_id, sid, round_num, reason, judge_result)
+            return
+        if action == "decline":
+            print(
+                f"[critic] declining unsafe answer for task {task_id} after "
+                "retry budget exhausted"
+            )
+            M._set_task_error(
+                task_id,
+                "I can't deliver this answer: the safety judge flagged it as "
+                "unsafe after verification retries.",
+                sid,
+            )
+            return
         M._finalize_task(task_id, sid, final, body)
     except Exception as e:
         print(f"[critic] verification pass failed for task {task_id}: {e}")

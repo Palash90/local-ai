@@ -569,7 +569,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
     )
   }
 
-  if (msg.role === 'system' || msg.role === 'tool') return null
+  if (msg.role === 'system' || msg.role === 'tool' || msg._steering) return null
 
   const toolsUsed = msg._tools_used || []
   const searchDetails = msg._search_details || []
@@ -642,6 +642,12 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
       )}
       {role === 'bot' && msg._elapsed_ms != null && (
           <span className="msg-elapsed" title="Time from task start to completion">&#9202; {formatElapsed(msg._elapsed_ms)}</span>
+        )}
+        {role === 'bot' && msg._confidence != null && (
+          <span className="conf-badge" title="Confidence from the verification judge">&#9878; {msg._confidence}%</span>
+        )}
+        {role === 'bot' && msg._input_quality != null && (
+          <span className="conf-badge input" title="Confidence the judge had in understanding your request">request {msg._input_quality}%</span>
         )}
         {role === 'bot' && toolsUsed.length > 0 && (() => {
           let fetchIdx = 0

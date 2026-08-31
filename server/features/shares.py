@@ -112,11 +112,15 @@ _SNAPSHOT_KEYS = (
     "_tools_used",
     "_search_details",
     "_elapsed_ms",
+    "_confidence",
+    "_input_quality",
     "_timestamp",
 )
 
 
 def _snapshot_message(msg):
+    if msg.get("_steering"):
+        return None
     snap = {}
     for key in _SNAPSHOT_KEYS:
         if key in msg:

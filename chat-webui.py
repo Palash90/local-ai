@@ -81,6 +81,8 @@ from server.config import (  # noqa: F401
     VENV_PYTHON,
     VERIFY_FETCH_CHARS,
     VERIFY_MAX_CITES_PER_URL,
+    VERIFY_MAX_RETRIES,
+    VERIFY_QUALITY_GATE,
     VERIFY_RETRIES,
     build_sys_content,
 )

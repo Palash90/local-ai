@@ -391,6 +391,24 @@ html, body {
   white-space: nowrap;
 }
 
+.conf-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  padding: 1px 7px;
+  border-radius: 8px;
+  color: #9be39b;
+  background: rgba(83, 180, 83, 0.12);
+  border: 1px solid rgba(83, 180, 83, 0.3);
+}
+
+.conf-badge.input {
+  color: #ffd28a;
+  background: rgba(255, 178, 74, 0.12);
+  border: 1px solid rgba(255, 178, 74, 0.3);
+}
+
 .copy-btn {
   opacity: 0;
   transition: opacity .2s;

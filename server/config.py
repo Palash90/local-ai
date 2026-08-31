@@ -158,6 +158,13 @@ FORCE_GPU_LANE = True
 VERIFY_RETRIES = 2          # extra search/fetch attempts per citation
 VERIFY_FETCH_CHARS = 6000   # source text shown to the critic LLM per citation
 VERIFY_MAX_CITES_PER_URL = 3  # flag a source cited for more distinct claims than this
+# LLM judge re-scheduling of research answers. After the critic pass, the judge
+# scores the finished answer (verdict + QUALITY: NN/100). Below-quality, missing
+# citation, or requirement-mismatch answers are re-scheduled (regenerated via the
+# generation model with a steering message) up to these bounds; UNSAFE answers
+# that still fail after retries are declined instead of delivered.
+VERIFY_QUALITY_GATE = 70     # answers scoring below this (0-100) get re-scheduled
+VERIFY_MAX_RETRIES = 2       # max judge/quality re-runs before decline/deliver
 
 # Review-only self-chat roles that must NEVER call tools. The editor/moderator
 # are the same creative LLM as the story-writing agents, and with the tool list
