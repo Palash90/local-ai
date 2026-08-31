@@ -70,7 +70,6 @@ def _task_max_rounds(task_id):
 
 def _set_task_error(task_id, error, sid=None):
     mode = ""
-    is_mcp = False
     with M._data_lock:
         if task_id in M.tasks:
             d = M.tasks[task_id]
@@ -78,20 +77,13 @@ def _set_task_error(task_id, error, sid=None):
             if d.get("_started_at") is not None:
                 elapsed_ms = int((time.time() - d.get("_started_at")) * 1000)
             mode = d.get("mode", "")
-            is_mcp = bool(d.get("_mcp"))
-            # Preserve lane/mcp/user/round markers so recovery paths (mcp-db
-            # worker bookkeeping, tool-loop, critic reschedule) still work even
-            # though the task has errored.
             M.tasks[task_id] = {
                 "status": "error",
                 "error": str(error),
                 "session_id": d.get("session_id", sid),
                 "_elapsed_ms": elapsed_ms,
-                "mode": mode,
-                "_mcp": is_mcp,
-                "_user": d.get("_user"),
             }
-    if mode == "guardrail" or is_mcp:
+    if mode == "guardrail":
         try:
             from server.mcp_tasks_db import mcp_task_update
             mcp_task_update(task_id, status="error", reply=str(error)[:300])
@@ -130,6 +122,7 @@ def _finalize_task(task_id, sid, msg_content, body):
         verification = t.get("_verification")
         verification_duration = t.get("_verification_duration")
         judge_result = t.get("_judge_result")
+        input_quality = t.get("_request_quality")
     image_url = f"/output/{image_filename}" if image_filename else None
     if image_url:
         print(f"[finalize] image_file='{image_filename}' → image_url='{image_url}' for task {task_id}")  # DEBUG
@@ -163,6 +156,8 @@ def _finalize_task(task_id, sid, msg_content, body):
     confidence = (judge_result or {}).get("quality")
     if isinstance(confidence, int):
         msg_entry["_confidence"] = confidence
+    if isinstance(input_quality, int):
+        msg_entry["_input_quality"] = input_quality
     mode = M.task_mode(task_id)
     with M._data_lock:
         if sid in M.sessions:
@@ -198,72 +193,37 @@ def _finalize_task(task_id, sid, msg_content, body):
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
                 M.tasks[task_id]["_verification_duration"] = verification_duration
-    # L3 post-processing output judge. Runs for EVERY generated task — including
-    # the interactive UI (GPU) lane, which previously skipped it entirely — using
-    # the per-user judge so the right model screens each user's reply. The
-    # guardrail/MCP lane stays fail-closed (blocked output = marked failed); the
-    # UI lane is fail-open (a judge outage must never drop a user's reply, so an
-    # unavailable judge lets the answer through with a recorded note).
-    task_user = t.get("_user") or ""
-    is_mcp_lane = (mode == "guardrail") or bool(t.get("_mcp"))
-    try:
-        from server.input_guard import is_strict_output_blocked
-        from server.features.judge import mcp_output_judge, resolve_judge_model
+    if mode == "guardrail" or t.get("_mcp"):
+        try:
+            from server.mcp_tasks_db import mcp_task_update
+            from server.input_guard import is_strict_output_blocked
+            from server.features.judge import mcp_output_judge, resolve_judge_model
 
-        # MCP lane keeps the explicit MCP_USER judge; the UI lane resolves
-        # the judge per-user (empty/unknown degrades to the default judge).
-        if is_mcp_lane:
-            judge_model = resolve_judge_model(os.environ.get("MCP_USER", "") or task_user)
-        else:
-            judge_model = resolve_judge_model(task_user)
+            reply_text = msg_content or ""
+            print(f"[guardrail][L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}")
+            print(f"[guardrail][L3] msg_content={reply_text}")
 
-        reply_text = msg_content or ""
-        print(f"[L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}, lane={'guardrail/MCP' if is_mcp_lane else 'UI'}, judge={judge_model}")
-        print(f"[L3] msg_content={reply_text}")
-
-        print(f"[L3] checking strict output blocks")
-        blocked = is_strict_output_blocked(reply_text)
-        judge_verdict = None
-        if not blocked and reply_text.strip():
-            # LLM strict judge. On the guardrail/MCP lane it is fail-closed
-            # (self-heals by restarting the guardrail server and retrying);
-            # on the UI lane a judge outage degrades to a "screened" note so
-            # the reply is still delivered.
-            if is_mcp_lane:
-                judge_verdict = mcp_output_judge(
-                    reply_text, model_id=judge_model, fail_closed=True,
+            print(f"[guardrail][L3] checking strict output blocks")
+            blocked = is_strict_output_blocked(reply_text)
+            if not blocked and reply_text.strip():
+                # LLM strict judge (fail-closed; self-heals by restarting the
+                # guardrail server and retrying when the judge is unavailable).
+                blocked = mcp_output_judge(
+                    reply_text,
+                    model_id=resolve_judge_model(os.environ.get("MCP_USER", "")),
                 )
-            else:
-                judge_verdict = mcp_output_judge(
-                    reply_text, model_id=judge_model, fail_closed=False,
-                )
-            blocked = blocked or bool(judge_verdict)
-        if blocked:
-            print(f"[L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
-            if is_mcp_lane:
-                from server.mcp_tasks_db import mcp_task_update
+            if blocked:
+                print(f"[guardrail][L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
                 mcp_task_update(task_id, status="done", reply=reply_text,
                               verification_level="LEVEL 3 OUTPUT VERIFICATION FAILED",
                               failure_reason="Output blocked by strict filter")
             else:
-                with M._data_lock:
-                    tt = M.tasks.get(task_id)
-                    if tt:
-                        tt["_l3_verdict"] = "BLOCKED"
-                        tt.setdefault("_verification", []).append(
-                            {"url": "", "meta": None,
-                             "action": "BLOCKED",
-                             "note": "L3 output judge flagged the reply as blocked"}
-                        )
-        else:
-            print(f"[L3] PASSED: output approved by strict filter")
-            if is_mcp_lane:
-                from server.mcp_tasks_db import mcp_task_update
+                print(f"[guardrail][L3] PASSED: output approved by strict filter")
                 mcp_task_update(task_id, status="done", reply=reply_text,
                               verification_level="LEVEL 3 OUTPUT VERIFICATION PASSED")
-    except Exception as e:
-        print(f"[L3] error during output verification: {e}")
-        pass
+        except Exception as e:
+            print(f"[guardrail][L3] error during output verification: {e}")
+            pass
 
 
 def _event_post(ev_type, task_id, **data):
@@ -300,7 +260,7 @@ def _event_loop():
                     "_user": user,
                     "_client_timestamp": client_ts,
                     "mode": t.get("mode"),
-                    "_mcp": bool(data.get("_mcp")) or bool(t.get("_mcp")),
+                    "_mcp": bool(t.get("_mcp")),
                     "research": bool(data.get("research")),
                     "cpu": bool(data.get("cpu")),
                     "no_tools": bool(data.get("no_tools")),
@@ -394,24 +354,6 @@ def _event_loop():
                 print(f"[llm_ok] Message structure: content={repr(msg.get('content'))}, reasoning={repr(msg.get('reasoning_content'))}")
                 if t.get("research"):
                     M.set_status(task_id, "Verifying sources...")
-                    with M._data_lock:
-                        tt = M.tasks.get(task_id)
-                        if tt:
-                            tt["_state"] = "critic_running"
-                    M._tool_pools[mode].submit(
-                        M.run_verification_worker,
-                        task_id,
-                        sid,
-                        (msg.get("content") or ""),
-                        body,
-                        mode,
-                    )
-                elif mode == "gpu" and not t.get("openai_lane"):
-                    # Interactive UI (GPU) answers go through the same final-
-                    # answer quality gate + bounded re-run as research (see
-                    # critic.run_verification_worker), so every UI reply is
-                    # judged against the user's request before it is finalized.
-                    M.set_status(task_id, "Evaluating answer...")
                     with M._data_lock:
                         tt = M.tasks.get(task_id)
                         if tt:
@@ -591,10 +533,6 @@ def _queue_worker(mode):
             no_tools=item.get("no_tools"),
             openai_lane=item.get("openai_lane"),
             skip_ensure_llama=item.get("skip_ensure_llama"),
-            # Carry the MCP lane flag through the queue: the RAM/thermal pause
-            # paths below rewrite M.tasks[tid] to a minimal dict (dropping
-            # "_mcp"), so the entry itself must remain the source of truth.
-            _mcp=item.get("_mcp"),
         )
         # Wait for this task to finish (status becomes "done", "error" or "cancelled")
         # before dequeuing the next item IN THIS LANE. The other lane's worker

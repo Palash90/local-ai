@@ -403,6 +403,12 @@ html, body {
   border: 1px solid rgba(83, 180, 83, 0.3);
 }
 
+.conf-badge.input {
+  color: #ffd28a;
+  background: rgba(255, 178, 74, 0.12);
+  border: 1px solid rgba(255, 178, 74, 0.3);
+}
+
 .copy-btn {
   opacity: 0;
   transition: opacity .2s;

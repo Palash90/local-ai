@@ -113,6 +113,7 @@ _SNAPSHOT_KEYS = (
     "_search_details",
     "_elapsed_ms",
     "_confidence",
+    "_input_quality",
     "_timestamp",
 )
 

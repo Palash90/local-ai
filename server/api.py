@@ -64,6 +64,56 @@ def _get_identity_safe(headers):
         return None
 
 
+def _request_quality_worker(task_id, message, user):
+    """Non-blocking LLM judge check of a UI user's own request (Part C).
+
+    Produces a 0-100 quality/confidence score (+ clarity verdict) for the user's
+    message BEFORE generation and records it on the task, so the assistant
+    message header can surface it as a "Request quality" chip. Runs off the hot
+    path; best-effort only — never raises, never delays generation, and gives up
+    silently if the task has already finalized. Judge unavailable → no score.
+    """
+    try:
+        from server.features.judge import llm_verify_user_request, resolve_judge_model
+        from server.features.state import M
+    except Exception as e:
+        print(f"[request-judge] unavailable: {e}")
+        return
+    try:
+        result = llm_verify_user_request(
+            message, model_id=resolve_judge_model(user)
+        )
+    except Exception as e:
+        print(f"[request-judge] judge call failed for task {task_id}: {e}")
+        return
+    if not result:
+        return
+    quality = result.get("quality")
+    if not isinstance(quality, int):
+        return
+    ok = bool(result.get("ok"))
+    # The queue view (api.tasks) and the engine view (M.tasks) are separate
+    # dicts; write both so whichever finalize path reads it sees the score.
+    try:
+        for _ in range(50):
+            with _data_lock:
+                tv = tasks.get(task_id)
+                if tv and "error" not in tv:
+                    tv["_request_quality"] = quality
+                    tv["_request_quality_ok"] = ok
+            with M._data_lock:
+                tm = M.tasks.get(task_id)
+                if tm:
+                    tm["_request_quality"] = quality
+                    tm["_request_quality_ok"] = ok
+                    break
+            if tv and tv.get("status") in ("done", "error"):
+                break
+            time.sleep(0.1)
+    except Exception as e:
+        print(f"[request-judge] record failed for task {task_id}: {e}")
+
+
 def _snapshot_image_refs(msg):
     """Every uploads/|output/ image reference embedded in a share snapshot.
 
@@ -863,6 +913,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # message and poll /api/status/{task_id} for live progress ("Waiting
             # in line...", "Processing task...", "Generating image...", etc.).
             self.send_json({"task_id": task_id})
+            msg_text = (body.get("message") or "").strip()
+            if user not in _agent_users and mode != "guardrail" and msg_text:
+                threading.Thread(
+                    target=_request_quality_worker,
+                    args=(task_id, msg_text, user),
+                    daemon=True,
+                ).start()
         elif self.path == "/api/extract-file":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
