@@ -198,6 +198,15 @@ def _finalize_task(task_id, sid, msg_content, body):
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
                 M.tasks[task_id]["_verification_duration"] = verification_duration
+    # Persist completion before L3 verification. The in-memory task is already
+    # terminal at this point, so a verification failure must not leave the
+    # durable MCP row as "working" and cause it to be restarted on reload.
+    if t.get("_mcp"):
+        try:
+            from server.mcp_tasks_db import mcp_task_update
+            mcp_task_update(task_id, status="done", reply=msg_content or "")
+        except Exception as e:
+            print(f"[mcp_db] failed to persist completion for task {task_id}: {e}")
     # L3 post-processing output judge. Runs for EVERY generated task — including
     # the interactive UI (GPU) lane, which previously skipped it entirely — using
     # the per-user judge so the right model screens each user's reply. The
