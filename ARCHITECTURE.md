@@ -135,6 +135,7 @@ graph TD
         RV3["VERIFY_MAX_CITES_PER_URL = 3"]
         RV4["VERIFY_QUALITY_GATE = 70/100\nVERIFY_MAX_RETRIES = 2"]
         RV5["SAMPLING_BUCKETS: creative / code /\nfactual / chat (router picks per task)"]
+        RV6["Judge render gate:\nwait_until_render_safe — 600s cap\n+ 30s cooldown while _image_active"]
     end
 
     subgraph RCThreads ["Thread Pools and Locks"]
@@ -286,6 +287,14 @@ graph TD
     Enqueue --> ReturnTask["return {task_id} —\nclient polls /api/status/:id"]
 ```
 
+Tasks submitted by `MCP_USER` (the MCP service account) over `/api/chat` are
+flagged `_mcp: true` at admission (api.py), so the pipeline treats them exactly
+like gateway-admitted MCP tasks — most importantly the **fail-closed L3 output
+judge**. The flag rides through the queue's `start` event: the RAM/thermal
+pause paths rewrite queued task dicts down to a minimal placeholder, so the
+queue entry — not the pre-created task dict — is the source of truth for the
+flag.
+
 ### 8. Queue Workers (one per lane)
 
 ```mermaid
@@ -295,15 +304,18 @@ graph TD
     PauseCheck -- Yes --> MarkWaiting["queued tasks → status waiting"]
     MarkWaiting --> PauseWait["cond.wait 5s"] --> QueueLoop
     PauseCheck -- No --> PopTask["pop head → _current_task_ids[mode]"]
-    PopTask --> PostStart["event_post start\n(session, message, image, audio,\nuser, client_timestamp, research, no_tools)"]
+    PopTask --> PostStart["event_post start\n(session, message, image, audio, user,\nclient_timestamp, research, no_tools,\nopenai_lane, _mcp)"]
     PostStart --> TaskDoneWait{"poll task status every 0.5s"}
     TaskDoneWait -- "done or error" --> Clear["_current_task_ids[mode]=None\nnotify_all"] --> QueueLoop
 
-    MCP["MCP gateway batches"] --> DBQ[("mcp_tasks SQLite table")] --> MW["_mcp_db_worker\n(polls → admits to guardrail lane)"]
+    MCP["MCP gateway batches"] --> DBQ[("mcp_tasks SQLite table")] --> MW["_mcp_db_worker\n(polls → admits to the gpu/cpu lane\nwith the _mcp flag)"]
 ```
 
-The two human/agent lanes never wait behind each other. Guardrail-lane tasks
-arrive through the SQLite queue via `_mcp_db_worker`, not an in-memory list.
+The human/agent lanes never wait behind each other. MCP chat tasks arrive
+through the SQLite queue via `_mcp_db_worker` (routed onto the gpu lane by
+default, cpu when flagged) carrying `_mcp: true`; the **guardrail server**
+(:8083) is only where their L2/L3 judge calls execute — generation stays on
+the gpu/cpu lane.
 
 ### 9. Event Loop Pipeline (features/orchestration.py)
 
@@ -314,7 +326,9 @@ graph TD
     Router --> Round0["start_llm_round(0)"]
 
     EvDispatch -- "llm_ok" --> LLMOK{"tool_calls?"}
-    LLMOK -- No --> Final["_finalize_task:\n1. research answers → critic pass\n(citation re-verify, features/critic.py)\n2. L3 output judge (features/judge.py):\nstrict pattern block + per-user judge;\nMCP lane fail-closed, UI lane fail-open\n3. append msg, save sessions,\nstatus done, refresh idle stamp"]
+    LLMOK -- No --> VGate{"research or\nUI gpu answer?"}
+    VGate -- Yes --> Critic2["run_verification_worker\n(features/critic.py):\nresearch citations / answer-quality\njudge with bounded re-runs\n→ then _finalize_task"]
+    VGate -- No --> Final["_finalize_task:\n1. L3 output judge (features/judge.py):\nstrict pattern block + per-user judge;\nMCP lane (_mcp / guardrail) fail-closed,\nUI lane fail-open\n2. append msg, save sessions,\nstatus done, refresh idle stamp"]
     LLMOK -- Yes --> SubmitTools["append assistant msg,\npending_tools = N,\nsubmit to lane's _tool_pools"]
 
     EvDispatch -- "llm_err" --> LLMErr["_set_task_error → status error"]
@@ -393,12 +407,25 @@ graph TD
 graph TD
     In["User / agent / MCP input"] --> L1{"L1 pattern guard\n(server/input_guard.py, patterns from\nprompts/surface_attacks/, Fernet-optional)"}
     L1 -- "is_jailbreak_attempt /\nis_harmful_request" --> Block1["refuse (MCP gateway pre-batch;\nguardrail lane)"]
-    L1 -- pass --> Gen["generation (lanes as above)"]
-    Gen --> L3{"L3 output judge (orchestration._finalize_task)"}
+    L1 -- pass --> L2{"L2 input LLM judge\n(mcp_gateway._run_llm_verify\n→ judge.py → guardrail :8083,\nfail-closed: judge down = blocked)"}
+    L2 -- harmful --> Block2["refuse before generation"]
+    L2 -- pass --> Gen["generation (lanes as above)"]
+    Gen --> L3{"L3 output judge\n(orchestration._finalize_task:\nis_mcp_lane = mode 'guardrail'\nor task flagged _mcp)"}
     L3 --> Strict["is_strict_output_blocked reply"]
     L3 --> Judge["features/judge.mcp_output_judge\n(guardrail :8083, per-user judge model)"]
     Strict & Judge --> Lane{"lane?"}
-    Lane -- "MCP/guardrail" --> FC["fail-closed: mark failed, drop output"]
+    Lane -- "MCP (_mcp / guardrail)" --> FC["fail-closed: mark failed, drop output,\nmcp_task_update LEVEL 3 bookkeeping"]
     Lane -- "UI" --> FO["fail-open: deliver + record note"]
     Gen -->|"research answers"| Critic["features/critic.py:\neach (Author, Venue, Year) [url] citation\nre-searched + re-fetched, LLM-checked;\n<70/100 quality or missing cites →\nre-schedule ≤ 2× (judge prompts)"]
+    RAM["RAM guard: every judge POST\n(judge.py _judge_completion +\nmcp_gateway._run_llm_verify) holds\nwhile a ComfyUI render is active —\njudge.wait_until_render_safe\n(600s cap + 30s cooldown) — so a\njudge model load can never collide\nwith image generation"]
+    L2 -.-> RAM
+    Judge -.-> RAM
 ```
+
+All judge LLM calls share one choke point (`judge._judge_completion`) and one
+judge server (:8083). UI-lane extras beyond L3: the answer-quality judge (⚖
+confidence chip, `llm_verify_answer_quality`) and the research citation judge
+run via `run_verification_worker` with bounded re-runs; the former
+input-request judge (pre-generation "request NN%" chip) was removed — its
+load colliding with image renders was the main trigger of emergency RAM
+evacuations.

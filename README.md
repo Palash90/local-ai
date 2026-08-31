@@ -177,7 +177,8 @@ local-ai/
 │       ├── tasks_db.py      To-do tasks (SQLite) + manage_tasks tool handler
 │       ├── themes_db.py     Creative-combination tracker (dedup) + track_theme tool handler
 │       ├── users.py         Presence, per-user context files, agent registration
-│       ├── judge.py         LLM safety/quality judges (harmful in/out, research verify, quality)
+│       ├── judge.py         LLM safety/quality judges (harmful in/out, research verify, quality);
+│       │                    judge calls hold while an image render is active (RAM guard)
 │       ├── critic.py        Citation extraction + per-citation re-fetch verification
 │       ├── monitoring.py    Thermal/RAM/idle loops, server lifecycle, DDNS + GCP heartbeat
 │       ├── surface_loader.py Fernet-decryptable attack-surface pattern files
@@ -335,7 +336,13 @@ proxies to the backend for development.
   `prompts/surface_attacks/`), the L3 judge and the critic citation pass catch the
   common cases — MCP/guardrail traffic is screened fail-closed, but the interactive
   UI lane is deliberately **fail-open** (a judge outage must never drop a reply).
-  There is no kid-safe filter; choose your model accordingly.
+  Tasks submitted by `MCP_USER` over `/api/chat` are flagged `_mcp` and get the
+  same fail-closed L3 output judge as gateway-admitted MCP traffic. There is no
+  kid-safe filter; choose your model accordingly.
+- **Judge calls pause during image renders.** Every judge POST
+  (`judge.wait_until_render_safe`) holds while ComfyUI is generating, so a judge
+  model load can never collide with a render and trigger an emergency RAM
+  evacuation (600s cap, then proceed; 30s cooldown after the render).
 - **Image/file endpoints require identity.** `/output/…`, `/uploads/…` and
   `/api/image/…` answer only with valid SSO headers or a verified agent JWT. Public
   share pages load images exclusively through `/api/public/share/<token>/image/…`,
