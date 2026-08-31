@@ -542,7 +542,7 @@ def _judge_research_answer(task_id, answer):
 
 
 def _finalize_verdicts(task_id, answer, verdicts):
-    """Append the LLM research-answer judge verdict, then attach the
+    """Append the LLM final-answer judge verdict, then attach the
     verification trail. Returns (answer, verdicts)."""
     with M._data_lock:
         t = M.tasks.get(task_id) or {}
@@ -550,22 +550,86 @@ def _finalize_verdicts(task_id, answer, verdicts):
         jv = _judge_research_answer(task_id, answer)
         if jv:
             verdicts.append(jv)
+    elif answer and not t.get("research"):
+        # Interactive (non-research) answers get the general quality gate too,
+        # so every delivered reply is judged against the user's own request.
+        jv = _judge_answer_quality(task_id, answer)
+        if jv:
+            verdicts.append(jv)
     block = _build_verification_block(verdicts)
-    if block:
+    # Only research answers carry the visible source-verification trail (the
+    # citation-by-citation <details> block). Interactive/non-research answers
+    # are judged but their text is left untouched — the quality verdict is
+    # recorded on the task/verification trail, not spliced into the reply.
+    if block and t.get("research"):
         answer = answer.rstrip() + block
     return answer, verdicts
 
 
-def run_verification(task_id, sid, answer, mode="gpu"):
-    """Extract citations, verify each, patch the answer, return (final, verdicts).
+def _judge_answer_quality(task_id, answer):
+    """General final-answer quality judge for interactive (non-research)
+    answers. Graded against the user's request with a general rubric; the
+    verdict's ``quality`` drives the bounded re-run decision and ``unsafe``
+    drives a decline. Best-effort: any failure stores no verdict and never
+    blocks delivery."""
+    try:
+        from server.features.judge import llm_verify_answer_quality, resolve_judge_model
+    except Exception as e:
+        print(f"[critic] answer-quality judge unavailable: {e}")
+        return None
+    with M._data_lock:
+        t = M.tasks.get(task_id) or {}
+        user_input = t.get("_original_message", "")
+        user = t.get("_user", "")
+    try:
+        result = llm_verify_answer_quality(
+            user_input, answer,
+            model_id=resolve_judge_model(user or ""),
+        )
+    except Exception as e:
+        print(f"[critic] answer-quality judge call failed: {e}")
+        result = None
+    if not result:
+        with M._data_lock:
+            tt = M.tasks.get(task_id)
+            if tt:
+                tt["_judge_result"] = None
+        return None
+    with M._data_lock:
+        tt = M.tasks.get(task_id)
+        if tt:
+            tt["_judge_result"] = result
+    if result.get("unsafe"):
+        note = "LLM quality judge flagged the answer as unsafe"
+    else:
+        note = "LLM quality judge: answer addresses the user's request"
+    quality = result.get("quality")
+    if quality is not None:
+        note = f"{note} (quality {quality}/100)"
+    return {
+        "url": "",
+        "meta": None,
+        "action": "JUDGE",
+        "note": note,
+        "corrected_meta": None,
+        "reason": result.get("reason"),
+        "model": result.get("model"),
+    }
 
-    Research tasks only; non-research answers and citation-free answers pass
-    through untouched. Never raises.
+
+def run_verification(task_id, sid, answer, mode="gpu"):
+    """Verify a final generated answer and return (final, verdicts).
+
+    Every final answer is judged against the user's request: the citation
+    fact-check runs for answers carrying inline citations (research), and the
+    general quality judge runs for non-research answers. Citation-free and
+    non-research answers still pass through the final-answer judge via
+    ``_finalize_verdicts``. Never raises.
     """
     with M._data_lock:
         t = M.tasks.get(task_id) or {}
     verdicts = []
-    if not answer or not t.get("research"):
+    if not answer:
         return answer, verdicts
 
     paras = re.split(r"\s*\n\s*\n\s*", answer)

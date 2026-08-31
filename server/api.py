@@ -681,6 +681,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     sessions.pop(sid, None)
                     sessions_meta.pop(sid, None)
             if exists:
+                # Drop the deleted session's KV checkpoints (all lanes).
+                try:
+                    from server.features.llm import invalidate_session_kv
+                    for _m in ("gpu", "cpu", "guardrail"):
+                        invalidate_session_kv(_m, sid)
+                except Exception:
+                    pass
+            if exists:
                 with _effective_contexts_lock:
                     _effective_contexts.pop(sid, None)
             if exists:
@@ -897,7 +905,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "cpu": cpu_flagged,
                     "no_tools": bool(body.get("no_tools")),
                 }
-            self.send_json({"task_id": task_id})
+            # Synchronous, bounded final-answer gate for the interactive GPU
+            # (UI) lane: block until the task reaches a terminal state — which,
+            # for research and (now) every UI answer, includes the final-answer
+            # quality judge and its bounded re-runs — then return the resolved
+            # task so the client sees the judged result directly. Judge/re-run
+            # outages stay fail-open (task still finalizes), and the wait is
+            # bounded so a stuck request degrades to a pollable task_id rather
+            # than hanging the HTTP thread. Agent/self-chat and MCP lanes keep
+            # their existing immediate, queue-and-poll behaviour untouched.
+            sync = (mode == "gpu") and (user not in _agent_users)
+            if sync:
+                sync_timeout = int(os.environ.get("SYNC_CHAT_TIMEOUT", "3600"))
+                deadline = time.time() + sync_timeout
+                while time.time() < deadline:
+                    with _data_lock:
+                        t = tasks.get(task_id, {})
+                    if t.get("status") in ("done", "error", "cancelled"):
+                        break
+                    time.sleep(0.3)
+                resp = dict(t)
+                resp.setdefault("task_id", task_id)
+                self.send_json(resp)
+            else:
+                self.send_json({"task_id": task_id})
             msg_text = (body.get("message") or "").strip()
             if user not in _agent_users and mode != "guardrail" and msg_text:
                 threading.Thread(

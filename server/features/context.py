@@ -271,6 +271,8 @@ def _latest_read_image_url(messages):
             data = json.loads(content)
         except (TypeError, ValueError):
             continue
+        if not isinstance(data, dict):
+            continue
         if data.get("ok") is True and data.get("image_url"):
             return data["image_url"]
     return None
@@ -293,6 +295,14 @@ def prepare_context_for_llm(sid, messages, mode="gpu"):
     # print(f"[context] Session {sid} estimate {total} tokens exceeds threshold {M.AUTO_COMPACT_THRESHOLD}; building compressed context for LLM")
     compacted = compact_messages_copy(messages, mode=mode)
     context = trim_messages_for_context(compacted)
+    # The effective prefix sent to the LLM has changed, so any cached KV for
+    # this session no longer matches the new prompt — drop it so it is never
+    # restored. Best-effort (import lazily to avoid an import cycle).
+    try:
+        from server.features.llm import invalidate_session_kv
+        invalidate_session_kv(mode, sid)
+    except Exception:
+        pass
     # print(f"[context] Compressed context built; estimate after: {estimate_tokens(context)}")
     with M._effective_contexts_lock:
         M._effective_contexts[sid] = context

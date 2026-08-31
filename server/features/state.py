@@ -76,6 +76,14 @@ ACTIVE_WINDOW_SECONDS = 120
 _effective_contexts = {}
 _effective_contexts_lock = threading.Lock()
 
+# Per-session tool-cache so the (large, stable) built-in + MCP tool list is not
+# rebuilt on every LLM round. Keyed by ``(sid, is_agent)`` and invalidated via
+# ``mcp_manager._tools_version`` (see server/mcp_client.py). The per-session
+# rebuild is cheap, so eviction just drops the oldest entry.
+_tools_cache_per_session = {}
+_tools_cache_per_session_lock = threading.Lock()
+TOOLS_CACHE_MAX_ENTRIES = 2048
+
 _model_transition_lock = threading.Lock()
 _data_lock = threading.Lock()
 
@@ -157,6 +165,15 @@ _slot_checkpoints = {}
 # changed) and cleared once that KV is captured by save/restore. Gates whether
 # an unload snapshots the slot again.
 _slot_kv_dirty = {"gpu": False, "cpu": False, "guardrail": False}
+# Per-session KV-cache checkpoints (see llm.py). Maps (mode, sid) →
+# {"file", "model", "ts", "n_tokens"} so each chat session keeps its own
+# snapshot and is restored when the user returns to that session, instead of a
+# single shared per-lane snapshot. Kept alongside the per-lane
+# ``_slot_checkpoints``.
+_session_kv = {}
+# Which session currently owns the live KV in slot 0 of each lane (the session
+# whose prompt was most recently processed). None = no session resident yet.
+_slot_resident_sid = {"gpu": None, "cpu": None, "guardrail": None}
 _client_location = None
 _overheated = False
 _gpu_temp = None

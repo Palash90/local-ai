@@ -684,6 +684,62 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
     return result
 
 
+def llm_verify_answer_quality(user_input, answer, base_url=None, timeout=None,
+                              model_id=None, max_chars=8000):
+    """General interactive-answer quality judge (the post-generation gate).
+
+    Grades the finished answer against the user's own request with a general
+    rubric (complete, accurate, on-topic, helpful; no prohibited content). This
+    is the interactive-chat analogue of the research-surface judge and is used
+    as a bounded synchronous gate: a below-gate ``quality`` lets the caller
+    re-run generation; an ``unsafe`` verdict must never be delivered.
+
+    Synchronous (requests). Returns ``{model, ok, unsafe, quality, reason}``,
+    or None when the judge is unavailable — fail-open (the caller still delivers
+    with a recorded note rather than dropping the reply). ``model_id`` pins a
+    per-user judge.
+    """
+    base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
+    if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
+        try:
+            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
+        except ValueError:
+            timeout = _JUDGE_MIN_TIMEOUT
+    answer = (answer or "").strip()
+    if not answer:
+        return {"model": None, "ok": True, "unsafe": False,
+                "quality": None, "reason": "empty answer"}
+    print(
+        f"[guardrail][quality-judge] -> {base_url} model={model_id or 'auto'} "
+        f"user_input={repr((user_input or '')[:200])} answer_len={len(answer)}"
+    )
+    user_content = (
+        f"USER REQUEST:\n{(user_input or '').strip()}\n\n"
+        f"MODEL ANSWER:\n{answer}"
+    )
+    cand, content = _judge_completion(
+        "quality-judge", _get_prompt("judge_quality.txt"), user_content,
+        base_url, timeout, max_chars=max_chars, model_id=model_id,
+    )
+    if cand is None:
+        print("[guardrail][quality-judge] judge unavailable — fail-open")
+        return None
+    status = _parse_research_verdict(content)
+    quality = _parse_quality(content)
+    result = {
+        "model": cand,
+        "ok": status != "UNSAFE",
+        "unsafe": status == "UNSAFE",
+        "quality": quality,
+        "reason": (content or "").strip()[:400],
+    }
+    print(
+        f"[guardrail][quality-judge] model={cand} status={status or 'UNKNOWN'} "
+        f"quality={quality} reason={result['reason'][:160]!r}"
+    )
+    return result
+
+
 def llm_verify_user_request(user_input, base_url=None, timeout=None,
                             model_id=None, max_chars=4000):
     """One LLM judge check of a UI user's own request.

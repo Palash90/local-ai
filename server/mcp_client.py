@@ -29,6 +29,10 @@ class MCPClientManager:
         self.sessions: Dict[str, ClientSession] = {}
         self.transports: Dict[str, Any] = {}
         self._tools_cache: Dict[str, List[Dict[str, Any]]] = {}
+        # Monotonic counter bumped whenever the MCP tool set changes, so per-session
+        # tool caches (server/features/state.py:_tools_cache_per_session) can detect
+        # staleness and rebuild once instead of being invalidated per round.
+        self._tools_version = 0
 
     def load_configs(self) -> List[ServerConfig]:
         if not os.path.exists(self.config_path):
@@ -121,6 +125,7 @@ class MCPClientManager:
                 self._tools_cache[name] = tools
             except Exception as e:
                 print(f"[MCP] Error fetching tools from '{name}': {e}")
+        self._tools_version += 1
 
     def get_all_tools(self) -> List[Dict[str, Any]]:
         all_tools = []

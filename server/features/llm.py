@@ -13,8 +13,10 @@ other one.
 """
 
 import json
+import hashlib
 import os
 import subprocess
+import threading
 import time
 
 import requests
@@ -29,15 +31,47 @@ from server.mcp_client import mcp_manager
 # save overwrites the previous snapshot instead of filling the disk.
 _SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv", "guardrail": "guardrail_slot0.kv"}
 
+# Serializes per-session KV save/restore per lane. Only slot 0 exists on each
+# server, so concurrent swap calls (the CPU lane runs up to CPU_PARALLEL_SLOTS
+# workers) must not interleave save/restore on the shared slot.
+_SLOT_KV_LOCKS = {
+    "gpu": threading.Lock(),
+    "cpu": threading.Lock(),
+    "guardrail": threading.Lock(),
+}
+_SLOT_KV_FALLBACK_LOCK = threading.Lock()
 
-def slot_checkpoint_file(mode="gpu"):
-    """Checkpoint filename (relative to ``LLAMA_SLOT_SAVE_DIR``) for ``mode``."""
+
+def _session_slot_checkpoint_file(mode="gpu", sid=None):
+    """Per-session KV-checkpoint filename (relative to ``LLAMA_SLOT_SAVE_DIR``).
+
+    Each chat session keeps its own snapshot so switching sessions can restore
+    the right conversation prefix instead of re-prefilling from scratch. The
+    filename is derived (stably) from the session id so restarts find the same
+    file. Empty/missing sid falls back to the shared per-lane filename.
+    """
+    base = _SLOT_CHECKPOINT_FILES.get(mode, _SLOT_CHECKPOINT_FILES["gpu"])
+    sid = (sid or "").strip()
+    if not sid:
+        return base
+    h = hashlib.sha1(sid.encode("utf-8", "ignore")).hexdigest()[:16]
+    stem = base.rsplit(".", 1)[0]
+    return f"{stem}_sess_{h}.kv"
+
+
+def slot_checkpoint_file(mode="gpu", sid=None):
+    """Checkpoint filename (relative to ``LLAMA_SLOT_SAVE_DIR``) for ``mode``.
+
+    With a ``sid`` this is the session-scoped filename; without one it is the
+    shared per-lane filename (used before a session is known)."""
+    if sid:
+        return _session_slot_checkpoint_file(mode, sid)
     return _SLOT_CHECKPOINT_FILES.get(mode, _SLOT_CHECKPOINT_FILES["gpu"])
 
 
-def slot_checkpoint_path(mode="gpu"):
-    """Absolute path of the KV-checkpoint file for ``mode``."""
-    return os.path.join(M.LLAMA_SLOT_SAVE_DIR, slot_checkpoint_file(mode))
+def slot_checkpoint_path(mode="gpu", sid=None):
+    """Absolute path of the KV-checkpoint file for ``mode`` (and ``sid``)."""
+    return os.path.join(M.LLAMA_SLOT_SAVE_DIR, slot_checkpoint_file(mode, sid))
 
 
 def mark_slot_kv_dirty(mode="gpu"):
@@ -51,32 +85,35 @@ def mark_slot_kv_dirty(mode="gpu"):
         M._slot_kv_dirty[mode] = True
 
 
-def save_slot_checkpoint(mode="gpu"):
-    """Snapshot the llama-server's current KV cache to disk.
+def _lane_model_status(mode):
+    """Return the model status string for ``mode``."""
+    if mode == "cpu":
+        return M._cpu_model_status
+    if mode == "guardrail":
+        return M._guardrail_model_status
+    return M.model_status
 
-    Calls ``POST /slots/0?action=save`` so the KV of everything processed so
-    far survives an imminent model unload. Skipped when the model is not
-    loaded or no completion has run since the last save/restore (the on-disk
-    snapshot is already current). Failures (slot busy, media tokens in the
-    slot, feature unavailable) never block the caller — they just mean the
-    next reload re-prefills from scratch, exactly like before this
-    optimization existed.
-    """
+
+def _record_checkpoint(mode, filename, n_tokens, sid=None):
+    """Record a successful save into the per-lane and (when a sid is known)
+    per-session checkpoint registries."""
+    rec = {
+        "file": filename,
+        "model": M.server_model_id(mode),
+        "ts": time.time(),
+        "n_tokens": n_tokens,
+    }
     with M._data_lock:
-        if mode == "cpu":
-            ms = M._cpu_model_status
-        elif mode == "guardrail":
-            ms = M._guardrail_model_status
-        else:
-            ms = M.model_status
-        dirty = M._slot_kv_dirty.get(mode, False)
-        cp = M._slot_checkpoints.get(mode)
-    if ms != "chat_loaded":
-        return False
-    if not dirty and cp:
-        return True  # snapshot on disk already reflects the current KV
+        M._slot_checkpoints[mode] = dict(rec)
+        if sid:
+            M._session_kv[(mode, sid)] = dict(rec)
+    return rec
 
-    filename = slot_checkpoint_file(mode)
+
+def _save_slot_to_disk(mode, sid, filename, record=True):
+    """POST /slots/0?action=save to snapshot the lane's live KV to ``filename``.
+
+    Returns ``(ok, n_tokens)``. Failures are logged and never raise."""
     try:
         r = requests.post(
             f"{M.server_base(mode)}/slots/0?action=save",
@@ -87,39 +124,32 @@ def save_slot_checkpoint(mode="gpu"):
         )
         if r.status_code == 200:
             n_tokens = r.json().get("n_tokens", 0)
-            with M._data_lock:
-                M._slot_checkpoints[mode] = {
-                    "file": filename,
-                    "model": M.server_model_id(mode),
-                    "ts": time.time(),
-                    "n_tokens": n_tokens,
-                }
-                M._slot_kv_dirty[mode] = False
+            if record:
+                _record_checkpoint(mode, filename, n_tokens, sid=sid)
+                with M._data_lock:
+                    M._slot_kv_dirty[mode] = False
             print(
                 f"[llama] {mode} slot KV checkpointed ({n_tokens} tokens) -> {filename}"
             )
-            return True
+            return True, n_tokens
         print(
             f"[llama] {mode} slot KV save failed ({r.status_code}): {r.text[:200]}"
         )
     except Exception as e:
         print(f"[llama] {mode} slot KV save error: {e}")
-    return False
+    return False, 0
 
 
-def restore_slot_checkpoint(mode="gpu"):
-    """Restore the previously saved KV cache into slot 0 of ``mode``'s server.
+def _restore_slot_from_disk(mode, cp):
+    """POST /slots/0?action=restore to load the checkpoint ``cp`` into slot 0.
 
-    Called right after a model load. The restored prefix is only a *cache*:
-    the next completion still verifies its prompt against the restored tokens
-    and evaluates whatever is new, so a stale snapshot costs time but can
-    never produce wrong output.
-    """
-    with M._data_lock:
-        cp = dict(M._slot_checkpoints.get(mode) or {})
+    Returns True on success. Any failure is logged and the checkpoint is
+    dropped so it isn't retried every load; never raises."""
     if not cp:
         return False
-    filename = cp.get("file") or slot_checkpoint_file(mode)
+    filename = cp.get("file")
+    if not filename:
+        return False
     if not os.path.exists(os.path.join(M.LLAMA_SLOT_SAVE_DIR, filename)):
         with M._data_lock:
             M._slot_checkpoints.pop(mode, None)
@@ -134,7 +164,6 @@ def restore_slot_checkpoint(mode="gpu"):
         with M._data_lock:
             M._slot_checkpoints.pop(mode, None)
         return False
-
     try:
         r = requests.post(
             f"{M.server_base(mode)}/slots/0?action=restore",
@@ -160,6 +189,133 @@ def restore_slot_checkpoint(mode="gpu"):
     with M._data_lock:
         M._slot_checkpoints.pop(mode, None)
     return False
+
+
+def _lane_resident_sid(mode):
+    """Which session currently owns the live KV in slot 0 of ``mode``."""
+    with M._data_lock:
+        return M._slot_resident_sid.get(mode)
+
+
+def _set_lane_resident_sid(mode, sid):
+    with M._data_lock:
+        M._slot_resident_sid[mode] = sid
+
+
+def sync_session_slot(mode, sid):
+    """Re-point slot 0 of ``mode`` at the KV of session ``sid``.
+
+    Called right before a prompt for ``sid`` is sent. If the live slot already
+    holds ``sid``'s KV (same session continuing) this is a no-op. Otherwise it
+    snapshots the *current* resident session's KV to disk, then restores
+    ``sid``'s own snapshot into the slot (if one exists), so switching chat
+    sessions does not re-prefill the whole conversation.
+
+    Strictly best-effort and fail-open: any failure just means the next prompt
+    is evaluated from scratch (the pre-optimization behaviour) — it can never
+    produce wrong output or block delivery.
+    """
+    mode = mode or "gpu"
+    sid = (sid or "").strip()
+    if not sid:
+        return
+    if _lane_resident_sid(mode) == sid:
+        # Same session owns the slot — nothing to do.
+        return
+    with _SLOT_KV_LOCKS.get(mode, _SLOT_KV_FALLBACK_LOCK):
+        # Re-check under the lane lock in case another worker swapped the slot.
+        if _lane_resident_sid(mode) == sid:
+            return
+        # Snapshot whoever currently owns the slot.
+        old_sid = _lane_resident_sid(mode)
+        if old_sid:
+            file_old = slot_checkpoint_file(mode, old_sid)
+            _save_slot_to_disk(mode, old_sid, file_old, record=True)
+        # Restore the target session's snapshot (if we have one / a file exists).
+        with M._data_lock:
+            cp = dict(M._session_kv.get((mode, sid)) or {})
+        if cp and cp.get("file") and os.path.exists(
+            os.path.join(M.LLAMA_SLOT_SAVE_DIR, cp["file"])
+        ):
+            _restore_slot_from_disk(mode, cp)
+        _set_lane_resident_sid(mode, sid)
+
+
+def save_slot_checkpoint(mode="gpu", sid=None):
+    """Snapshot the llama-server's current KV cache to disk.
+
+    Called on unload. With a ``sid`` the snapshot is written to (and recorded
+    for) that session; without one it resolves to the session currently
+    resident in the slot (falling back to the shared per-lane file), so on
+    unload/reload the conversation the lane was actually serving is the one
+    that keeps its KV. Skipped when the model is not loaded or no completion
+    has run since the last save/restore. Failures never block the caller.
+    """
+    with M._data_lock:
+        ms = _lane_model_status(mode)
+        dirty = M._slot_kv_dirty.get(mode, False)
+        cp = M._slot_checkpoints.get(mode)
+    if ms != "chat_loaded":
+        return False
+    if not sid:
+        sid = _lane_resident_sid(mode)
+    if not dirty and cp:
+        return True  # snapshot on disk already reflects the current KV
+    filename = slot_checkpoint_file(mode, sid)
+    ok, _n = _save_slot_to_disk(mode, sid, filename, record=True)
+    return ok
+
+
+def restore_slot_checkpoint(mode="gpu", sid=None):
+    """Restore the previously saved KV cache into slot 0 of ``mode``'s server.
+
+    Called right after a model load. With a ``sid`` the session's own snapshot
+    is restored; without one it resolves to the resident session. The restored
+    prefix is only a *cache*: the next completion still verifies its prompt
+    against the restored tokens and evaluates whatever is new, so a stale
+    snapshot costs time but can never produce wrong output.
+    """
+    if not sid:
+        sid = _lane_resident_sid(mode)
+    with M._data_lock:
+        if sid:
+            cp = dict(M._session_kv.get((mode, sid)) or {})
+        else:
+            cp = dict(M._slot_checkpoints.get(mode) or {})
+        if not cp and not sid:
+            return False
+    if not cp:
+        return False
+    ok = _restore_slot_from_disk(mode, cp)
+    if ok and sid:
+        _set_lane_resident_sid(mode, sid)
+    return ok
+
+
+def invalidate_session_kv(mode, sid):
+    """Drop a session's KV checkpoint: remove its registry entry and delete the
+    on-disk snapshot file, so it is never restored.
+
+    Used when a session's conversation is materially rewritten (delete,
+    compaction, context reset) — the cached KV would no longer match the prompt
+    and restoring it would only cost a wasted round-trip. Safe no-op when no
+    checkpoint exists. Never raises.
+    """
+    sid = (sid or "").strip()
+    if not sid:
+        return
+    with M._data_lock:
+        cp = M._session_kv.pop((mode, sid), None)
+    if cp and cp.get("file"):
+        fpath = os.path.join(M.LLAMA_SLOT_SAVE_DIR, cp["file"])
+        try:
+            if os.path.exists(fpath):
+                os.remove(fpath)
+        except OSError as e:
+            print(f"[llama] invalidate_session_kv remove error: {e}")
+    # If this session still owns the live slot, it can no longer be restored.
+    if _lane_resident_sid(mode) == sid:
+        _set_lane_resident_sid(mode, None)
 
 
 def _consult_worker(*args, **kwargs):
@@ -573,6 +729,11 @@ def _inject_read_image(messages):
             data = json.loads(content)
         except (TypeError, ValueError):
             continue
+        # Tool result content may legitimately be a JSON array (e.g. the
+        # tool_details meta-tool dumps a list). Only a dict can carry an
+        # image_url — skip anything else instead of crashing.
+        if not isinstance(data, dict):
+            continue
         url = data.get("image_url") if data.get("ok") is True else None
         if not url:
             continue
@@ -669,16 +830,28 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         # Agents (Kaya/Kolpo pipeline) get the full tool set; humans never see
         # AGENT_ONLY_TOOLS (track_theme), saving its tokens on every turn.
         if task_user in M._agent_users:
-            wire_tools = M.TOOLS
+            base_tools = M.TOOLS
         else:
-            wire_tools = M.TOOLS_HUMAN
+            base_tools = M.TOOLS_HUMAN
 
-        print("before mcp tools call")
-        mcp_extras = mcp_manager.get_openai_tools()
-        print("after mcp tools call")
-
-        if mcp_extras:
-            wire_tools += list(wire_tools) + mcp_extras
+        # Per-session tool cache: the built-in + MCP tool list is stable within a
+        # session, but was previously rebuilt (and, due to `+=`, mutated the shared
+        # module-level list in place) on every LLM round — doubling the schemas each
+        # round once MCP tools existed and poisoning every later task. Build a fresh
+        # list once per session and reuse it; invalidate when the MCP tool set changes.
+        cache_key = (sid, task_user in M._agent_users)
+        with M._tools_cache_per_session_lock:
+            cached = M._tools_cache_per_session.get(cache_key)
+            if cached is not None and cached[0] == mcp_manager._tools_version:
+                wire_tools = cached[1]
+            else:
+                mcp_extras = mcp_manager.get_openai_tools()
+                tools = list(base_tools) + list(mcp_extras) if mcp_extras else list(base_tools)
+                M._tools_cache_per_session[cache_key] = (mcp_manager._tools_version, tools)
+                if len(M._tools_cache_per_session) > M.TOOLS_CACHE_MAX_ENTRIES:
+                    for _ in range(len(M._tools_cache_per_session) - M.TOOLS_CACHE_MAX_ENTRIES):
+                        M._tools_cache_per_session.pop(next(iter(M._tools_cache_per_session)), None)
+                wire_tools = tools
         # Sampling router: classify once on round 0, reuse for all rounds of
         # this task (stored under an underscore key so it stays private).
         with M._data_lock:
@@ -701,6 +874,13 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         }
         payload.update(sampling or {})
         payload["stream"] = True
+        # Re-point slot 0 at this session's KV (save the previous resident
+        # session, restore this one) before the prompt is evaluated, so each
+        # chat session keeps its own KV cache. Best-effort and fail-open.
+        try:
+            sync_session_slot(mode, sid)
+        except Exception as e:
+            print(f"[llama] sync_session_slot failed ({e}) — continuing without KV swap")
         M.mark_slot_kv_dirty(mode)
         r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
         if r.status_code != 200:
@@ -781,8 +961,8 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             )
     except Exception as e:
         err_text = str(e)
-        print(err_text)
-        traceback.format_exc()
+        print(f"[llm_round] task {task_id} error: {err_text}")
+        print(traceback.format_exc())
         if "image" in err_text.lower() or "vision" in err_text.lower():
             err_text = "The current model does not support image input. Please use a vision-capable model or send text-only messages."
         M._event_post("llm_err", task_id, error=err_text, round=round_num, sid=sid)
