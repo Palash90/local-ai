@@ -198,15 +198,7 @@ def _finalize_task(task_id, sid, msg_content, body):
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
                 M.tasks[task_id]["_verification_duration"] = verification_duration
-    # Persist completion before L3 verification. The in-memory task is already
-    # terminal at this point, so a verification failure must not leave the
-    # durable MCP row as "working" and cause it to be restarted on reload.
-    if t.get("_mcp"):
-        try:
-            from server.mcp_tasks_db import mcp_task_update
-            mcp_task_update(task_id, status="done", reply=msg_content or "")
-        except Exception as e:
-            print(f"[mcp_db] failed to persist completion for task {task_id}: {e}")
+    is_mcp_lane = (mode == "guardrail") or bool(t.get("_mcp"))
     # L3 post-processing output judge. Runs for EVERY generated task — including
     # the interactive UI (GPU) lane, which previously skipped it entirely — using
     # the per-user judge so the right model screens each user's reply. The
@@ -214,7 +206,6 @@ def _finalize_task(task_id, sid, msg_content, body):
     # UI lane is fail-open (a judge outage must never drop a user's reply, so an
     # unavailable judge lets the answer through with a recorded note).
     task_user = t.get("_user") or ""
-    is_mcp_lane = (mode == "guardrail") or bool(t.get("_mcp"))
     try:
         from server.input_guard import is_strict_output_blocked
         from server.features.judge import mcp_output_judge, resolve_judge_model
@@ -272,7 +263,12 @@ def _finalize_task(task_id, sid, msg_content, body):
                               verification_level="LEVEL 3 OUTPUT VERIFICATION PASSED")
     except Exception as e:
         print(f"[L3] error during output verification: {e}")
-        pass
+        # MCP output verification is fail-closed. Do not publish a successful
+        # task when L3 could not produce a verdict, but do persist the terminal
+        # failure so the MCP client is not left polling a permanent "working"
+        # row.
+        if is_mcp_lane:
+            M._set_task_error(task_id, f"L3 output verification failed: {e}", sid)
 
 
 def _event_post(ev_type, task_id, **data):
