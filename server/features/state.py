@@ -185,6 +185,13 @@ _client_location = None
 _overheated = False
 _gpu_temp = None
 _ram_evacuating = False
+# Dedicated flag set from the START of generate_image/edit_image until ComfyUI
+# finishes (free_comfyui_vram + reload). The image worker sets this BEFORE
+# unloading the llama model; unload_llama_model sets model_status="unloaded"
+# which now only tracks the lane's own model state, not the image gate. This
+# prevents a concurrent chat round from reloading the GPU model into VRAM
+# while ComfyUI is rendering.
+_image_active = False
 _users_cache = None
 _users_cache_time = 0
 

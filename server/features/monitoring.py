@@ -27,7 +27,7 @@ def model_status_snapshot():
     # The UI reports the interactive (GPU) server's state.
     with M._data_lock:
         return {
-            "model": M.model_status,
+            "model": "image_active" if M._image_active else M.model_status,
             "predicted_per_second": M._last_tps,
             "overheated": M._overheated,
             "gpu_temp": M._gpu_temp,
@@ -458,10 +458,11 @@ def _thermal_monitor():
             if not busy:
                 with M._data_lock:
                     ms = M.model_status
+                    img_active = M._image_active
                 if ms == "chat_loaded":
                     print("[thermal] Overheated — unloading GPU chat model")
                     M.unload_llama_model("gpu")
-                elif ms == "image_active":
+                elif img_active:
                     print("[thermal] Overheated — freeing ComfyUI VRAM")
                     M.free_comfyui_vram()
 
