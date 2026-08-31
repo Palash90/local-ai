@@ -587,6 +587,61 @@ def unload_llama_model(mode="gpu", model_id=None):
         return False
 
 
+def _wait_image_active_clear(timeout=600):
+    """Block the calling thread while an image generation/edit is using the GPU.
+
+    ``generate_image``/``edit_image`` set ``model_status="image_active"`` at the
+    start of their VRAM choreography and clear it only after ComfyUI finishes.
+    We must not load the GPU/guardrail model into VRAM during that window, or
+    ComfyUI is starved and times out. Polls (never blocks under
+    ``_model_transition_lock``) so the image path can complete and clear the flag.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with M._data_lock:
+            active = M.model_status == "image_active"
+        if not active:
+            return True
+        time.sleep(0.5)
+    print(f"[llama] _wait_image_active_clear: gave up after {timeout}s — proceeding anyway")
+    return False
+
+
+def _mark_chat_generating(mode, active):
+    """Track live GPU/guardrail LLM inference so image gen can avoid the GPU.
+
+    Only ``gpu``/``guardrail`` touch the single physical GPU; the CPU lane runs
+    on a separate server and never contends with ComfyUI. Every concurrent
+    inference increments with ``active=True`` (before the streaming POST) and
+    decrements with ``active=False`` in its ``finally``.
+    """
+    if mode not in ("gpu", "guardrail"):
+        return
+    with M._chat_generating_lock:
+        if active:
+            M._chat_generating += 1
+        else:
+            M._chat_generating = max(0, M._chat_generating - 1)
+
+
+def _wait_chat_generating_clear(timeout=600):
+    """Block while any GPU/guardrail LLM inference is streaming into VRAM.
+
+    Image generation must not unload the chat model (or let ComfyUI load its
+    own models) while a chat/judge round is mid-inference on the GPU — the
+    reverse of ``_wait_image_active_clear``.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with M._chat_generating_lock:
+            active = M._chat_generating > 0
+        if not active:
+            return True
+        time.sleep(0.5)
+    print(f"[llama] _wait_chat_generating_clear: gave up after {timeout}s — proceeding anyway")
+    return False
+
+
 def load_llama_model(mode="gpu", model_id=None):
     """Load the model on the llama-server for ``mode`` and wait for it to be
     ready, tracking the per-server model status and idle timestamp.
@@ -597,6 +652,15 @@ def load_llama_model(mode="gpu", model_id=None):
     judge calls are stateless single-shots, and per-user judges may differ
     from ``MODEL_ID_GUARDRAIL``, so a cached KV snapshot never applies.
     """
+    # Gate GPU/guardrail loads behind image generation. generate_image/edit_image
+    # set model_status="image_active" at the START (before unloading) and only
+    # clear it after ComfyUI has finished. Without this wait, a chat round can
+    # reload the GPU model into VRAM while ComfyUI is rendering — starving it of
+    # VRAM and causing [generate_image] TIMEOUT. We busy-wait here (not under
+    # _model_transition_lock) so the image path can still complete and clear the
+    # flag without deadlocking.
+    if mode in ("gpu", "guardrail"):
+        _wait_image_active_clear()
     with M._model_transition_lock:
         with M._data_lock:
             # Only a fresh load benefits from a restore: if the model is already
@@ -882,64 +946,68 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         except Exception as e:
             print(f"[llama] sync_session_slot failed ({e}) — continuing without KV swap")
         M.mark_slot_kv_dirty(mode)
-        r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
-        if r.status_code != 200:
-            err_body = r.text[:500] if r.text else f"HTTP {r.status_code}"
-            raise RuntimeError(f"LLM server returned {r.status_code}: {err_body}")
-        r.encoding = "utf-8"
-        reasoning_buf = ""
-        content_buf = ""
-        tool_calls_map = {}
-        with M._data_lock:
-            prev_reasoning = M.tasks.get(task_id, {}).get("reasoning", "")
-        for line in r.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data: "):
-                continue
-            data_str = line[6:]
-            if data_str.strip() == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data_str)
-            except json.JSONDecodeError:
-                continue
-            choices = chunk.get("choices", [])
-            if not choices:
-                continue
-            delta = choices[0].get("delta", {})
-            rc = delta.get("reasoning_content")
-            if rc:
-                reasoning_buf += rc
-                with M._data_lock:
-                    if task_id in M.tasks:
-                        M.tasks[task_id]["reasoning"] = prev_reasoning + reasoning_buf
-            c = delta.get("content")
-            if c:
-                content_buf += c
-            tc_list = delta.get("tool_calls")
-            if tc_list:
-                for tc in tc_list:
-                    idx = tc.get("index", 0)
-                    if idx not in tool_calls_map:
-                        fn = tc.get("function", {})
-                        tool_calls_map[idx] = {
-                            "index": idx,
-                            "id": tc.get("id", ""),
-                            "type": tc.get("type", "function"),
-                            "function": {
-                                "name": fn.get("name", ""),
-                                "arguments": fn.get("arguments", ""),
-                            },
-                        }
-                    else:
-                        existing = tool_calls_map[idx]
-                        if tc.get("id"):
-                            existing["id"] = tc["id"]
-                        fn = tc.get("function")
-                        if fn:
-                            if fn.get("name"):
-                                existing["function"]["name"] = fn["name"]
-                            if fn.get("arguments"):
-                                existing["function"]["arguments"] += fn["arguments"]
+        _mark_chat_generating(mode, True)
+        try:
+            r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
+            if r.status_code != 200:
+                err_body = r.text[:500] if r.text else f"HTTP {r.status_code}"
+                raise RuntimeError(f"LLM server returned {r.status_code}: {err_body}")
+            r.encoding = "utf-8"
+            reasoning_buf = ""
+            content_buf = ""
+            tool_calls_map = {}
+            with M._data_lock:
+                prev_reasoning = M.tasks.get(task_id, {}).get("reasoning", "")
+            for line in r.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                rc = delta.get("reasoning_content")
+                if rc:
+                    reasoning_buf += rc
+                    with M._data_lock:
+                        if task_id in M.tasks:
+                            M.tasks[task_id]["reasoning"] = prev_reasoning + reasoning_buf
+                c = delta.get("content")
+                if c:
+                    content_buf += c
+                tc_list = delta.get("tool_calls")
+                if tc_list:
+                    for tc in tc_list:
+                        idx = tc.get("index", 0)
+                        if idx not in tool_calls_map:
+                            fn = tc.get("function", {})
+                            tool_calls_map[idx] = {
+                                "index": idx,
+                                "id": tc.get("id", ""),
+                                "type": tc.get("type", "function"),
+                                "function": {
+                                    "name": fn.get("name", ""),
+                                    "arguments": fn.get("arguments", ""),
+                                },
+                            }
+                        else:
+                            existing = tool_calls_map[idx]
+                            if tc.get("id"):
+                                existing["id"] = tc["id"]
+                            fn = tc.get("function")
+                            if fn:
+                                if fn.get("name"):
+                                    existing["function"]["name"] = fn["name"]
+                                if fn.get("arguments"):
+                                    existing["function"]["arguments"] += fn["arguments"]
+        finally:
+            _mark_chat_generating(mode, False)
         print(f"[llm_round] Round {round_num} done: reasoning_buf={len(reasoning_buf)} chars, content_buf={len(content_buf)} chars, tool_calls={len(tool_calls_map)}")  # DEBUG
         msg = {
             "role": "assistant",

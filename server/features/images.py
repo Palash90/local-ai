@@ -75,6 +75,17 @@ def generate_image(
 ):
     print(f"\n[image] Generating image for task {task_id} with the prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image generation...")
+    # Wait for any active GPU/guardrail LLM inference to finish before we take
+    # over the GPU. The reverse of the image_active gate: we must NOT unload the
+    # chat model (or let ComfyUI load its own) while a chat round mid-inference.
+    M._wait_chat_generating_clear()
+    # Flag image generation NOW (before the unload below) so the chat pipeline's
+    # load_llama_model — which may run concurrently when the same task's next LLM
+    # round fires — blocks until ComfyUI is done. Without this early flag, a chat
+    # round reloads the GPU model into VRAM right after we unload it, leaving
+    # ComfyUI without free VRAM (seen as [generate_image] TIMEOUT after 300s).
+    with M._data_lock:
+        M.model_status = "image_active"
     # ComfyUI renders on the GPU, so unload both GPU and guardrail llama-servers.
     # The CPU server (self-chat agents) keeps running untouched.
     try:
@@ -213,7 +224,6 @@ def generate_image(
         print("No Image Model Selected Perfectly")
 
     with M._data_lock:
-        M.model_status = "image_active"
         M.tasks[task_id]["gen_prompt"] = prompt
         M.tasks[task_id]["_image_model"] = model
         M.tasks[task_id]["negative_prompt"] = negative_prompt
@@ -289,6 +299,10 @@ def generate_image(
     finally:
         M.set_status(task_id, "Freeing image generation VRAM...")
         M.free_comfyui_vram()
+        # Clear the image-active gate BEFORE reloading so load_llama_model (which
+        # blocks while image_active is set) can proceed here.
+        with M._data_lock:
+            M.model_status = "unloaded"
         M.set_status(task_id, "Loading chat model...")
         M.load_llama_model("gpu")
         M.load_llama_model("guardrail")
@@ -359,6 +373,15 @@ def edit_image(
 
     print(f"\n[image_edit] Editing image for task {task_id} with prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image editing...")
+    # Wait for any active GPU/guardrail LLM inference to finish before taking
+    # over the GPU (mirror of generate_image).
+    M._wait_chat_generating_clear()
+    # Flag image editing NOW (before the unload) so a concurrent chat round that
+    # calls load_llama_model blocks until ComfyUI is done (same reasoning as
+    # generate_image). Without it the GPU model can be reloaded into VRAM right
+    # after we unload it, starving ComfyUI of VRAM.
+    with M._data_lock:
+        M.model_status = "image_active"
     # ComfyUI renders on the GPU, so unload both GPU and guardrail llama-servers.
     # The CPU server (self-chat agents) keeps running untouched.
     print(f"[edit_image] Calling unload_llama_model(gpu), current status: {M.server_status('gpu')}")
@@ -457,7 +480,6 @@ def edit_image(
     }
 
     with M._data_lock:
-        M.model_status = "image_active"
         M.tasks[task_id]["gen_prompt"] = prompt
         M.tasks[task_id]["_image_model"] = model
         M.tasks[task_id]["negative_prompt"] = negative_prompt
@@ -535,6 +557,10 @@ def edit_image(
                 print(f"[edit_image] Failed to cleanup input file: {e}")
         M.set_status(task_id, "Freeing image generation VRAM...")
         M.free_comfyui_vram()
+        # Clear the image-active gate BEFORE reloading so load_llama_model (which
+        # blocks while image_active is set) can proceed here.
+        with M._data_lock:
+            M.model_status = "unloaded"
         M.set_status(task_id, "Loading chat model...")
         M.load_llama_model("gpu")
         M.load_llama_model("guardrail")
