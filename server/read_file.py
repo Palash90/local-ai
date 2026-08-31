@@ -151,6 +151,20 @@ def _save_pdf_markdown(file_path, text):
         return None
 
 
+def _format_ocr_markdown(text):
+    """Turn OCR page markers and loose spacing into readable Markdown."""
+    blocks = re.split(r"\n\s*\n", text.strip())
+    formatted = []
+    for block in blocks:
+        block = re.sub(r"[ \t]+\n", "\n", block.strip())
+        match = re.match(r"^\[Page (\d+)\]\s*(.*)$", block, flags=re.DOTALL)
+        if match:
+            formatted.append(f"## Page {match.group(1)}")
+            if match.group(2).strip():
+                formatted.append(match.group(2).strip())
+        elif block:
+            formatted.append(block)
+    return "\n\n".join(formatted)
 def read_file_text(file_path):
     ext = os.path.splitext(file_path)[1].lower()
     with open(file_path, "rb") as f:
@@ -176,6 +190,7 @@ def read_file_text(file_path):
                 print("[read_file] PDF text appears to be a watermark/overlay; starting OCR")
             text = _ocr_pdf(raw)
             if text.strip():
+                text = _format_ocr_markdown(text)
                 markdown_url = _save_pdf_markdown(file_path, text)
                 if markdown_url:
                     text += f"\n\n[Markdown saved: {markdown_url}]"

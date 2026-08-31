@@ -111,6 +111,7 @@ _SNAPSHOT_KEYS = (
     "_reasoning",
     "_tools_used",
     "_search_details",
+    "_artifacts",
     "_elapsed_ms",
     "_confidence",
     "_timestamp",

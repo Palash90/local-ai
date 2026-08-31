@@ -124,6 +124,7 @@ def _finalize_task(task_id, sid, msg_content, body):
             return
         tools_used = list(t.get("_tools_used", []))
         search_details = list(t.get("_search_details", []))
+        artifacts = list(t.get("_artifacts", []))
         image_filename = t.get("image_file")
         gen_prompt = t.get("gen_prompt")
         image_model = t.get("_image_model")
@@ -154,6 +155,7 @@ def _finalize_task(task_id, sid, msg_content, body):
         "_gen_prompt": gen_prompt,
         "_image_model": image_model,
         "_search_details": search_details,
+        "_artifacts": artifacts,
         "_research": bool(t.get("research")),
         "_elapsed_ms": elapsed_ms,
     }
@@ -192,6 +194,7 @@ def _finalize_task(task_id, sid, msg_content, body):
                 "gen_prompt": gen_prompt,
                 "_image_model": image_model,
                 "_search_details": search_details,
+                "_artifacts": artifacts,
                 "reasoning": reasoning,
                 "_elapsed_ms": elapsed_ms,
             }

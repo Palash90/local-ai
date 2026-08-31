@@ -310,6 +310,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self.send_json({"shares": list_shares(user)})
         elif self.path.startswith("/api/public/share/"):
+            file_route = re.match(
+                r"^/api/public/share/([A-Za-z0-9]+)/file/(.+)$", self.path
+            )
+            if file_route:
+                token, file_id = file_route.group(1), file_route.group(2)
+                rec = get_share(token)
+                normalized = file_id.strip("/")
+                if not rec or normalized not in _snapshot_image_refs(rec.get("message", {})):
+                    self.send_error(404)
+                    return
+                fpath = resolve_image_file(normalized)
+                if not fpath:
+                    self.send_error(404)
+                    return
+                ext = os.path.splitext(fpath)[1].lower()
+                content_type = mimetypes.types_map.get(ext, "application/octet-stream")
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Disposition", "attachment")
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                with open(fpath, "rb") as f:
+                    self._safe_write(f.read())
+                return
             img_route = re.match(
                 r"^/api/public/share/([A-Za-z0-9]+)/image/(.+)$", self.path
             )

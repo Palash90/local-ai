@@ -486,7 +486,24 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         if fpath.startswith(os.path.abspath(M.UPLOADS_DIR)) and os.path.exists(fpath):
             text = M.read_file_text(fpath)
             if text:
-                result = f"Content of {file_url}:\n\n{text}"
+                markdown_match = re.search(r"\[Markdown saved: (/[^]]+\.md)\]", text)
+                if markdown_match:
+                    artifact_url = markdown_match.group(1)
+                    artifact = {
+                        "type": "markdown",
+                        "name": os.path.basename(artifact_url),
+                        "mime_type": "text/markdown",
+                        "url": artifact_url,
+                    }
+                    with M._data_lock:
+                        task = M.tasks.get(task_id)
+                        if task:
+                            task.setdefault("_artifacts", []).append(artifact)
+                result = (
+                    f"Content of {file_url}:\n\n{text}\n\n"
+                    "This content came from PDF extraction/OCR. Preserve the original "
+                    "Unicode text, and use the page headings when quoting or formatting it."
+                )
             else:
                 result = f"Could not extract text from {file_url}. The file may contain only images."
         else:

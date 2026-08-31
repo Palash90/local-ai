@@ -326,6 +326,28 @@ function CopyButton({ text, genPrompt, imageUrl, forceShow }) {
   return <button className={'copy-btn' + (forceShow ? ' force-show' : '')} onClick={handleCopy}>{label}</button>
 }
 
+function ArtifactLinks({ artifacts, shareToken }) {
+  if (!Array.isArray(artifacts) || artifacts.length === 0) return null
+  return (
+    <div className="artifact-links">
+      <span className="artifact-links-label">Files</span>
+      {artifacts.map((artifact, index) => {
+        const url = typeof artifact?.url === 'string' ? artifact.url : ''
+        if (!url.startsWith('/')) return null
+        const name = artifact.name || 'Download file'
+        const link = shareToken
+          ? `/api/public/share/${shareToken}/file/${url.replace(/^\//, '')}`
+          : url
+        return (
+          <a key={`${url}-${index}`} className="file-chip" href={link} download={name} title={name}>
+            <span className="file-chip-name">{name}</span>
+          </a>
+        )
+      })}
+    </div>
+  )
+}
+
 let _activeAudio = null
 
 function SpeakButton({ text }) {
@@ -599,6 +621,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
   const genPrompt = msg._gen_prompt
   const imageUrl = toApiImage(msg._image_url, shareToken)
   const imageModel = msg._image_model
+  const artifacts = msg._artifacts || []
   const isUserImgUrl = typeof userImg === 'string' && (userImg.startsWith('/') || /^https?:/.test(userImg))
   const userImgSrc = userImg ? (isUserImgUrl ? toApiImage(userImg, shareToken) : 'data:image/jpeg;base64,' + userImg) : null
 
@@ -714,6 +737,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
           Prompt: {genPrompt}
         </div>
       )}
+      <ArtifactLinks artifacts={artifacts} shareToken={shareToken} />
       <ReasoningBlock text={msg._reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
       {text ? (
         <div
