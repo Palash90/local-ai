@@ -55,7 +55,7 @@ to run the services manually:
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 0.0.0.0 --port 8081 \
     --models-dir ~/local-ai-files/my-models/ \
-    --jinja -ngl 99 -fa on --ctx-size 32768 \
+    --jinja -ngl 99 -fa on --ctx-size 24576 \
     -ctk q8_0 -ctv q8_0 \
     --no-mmproj-offload
 
@@ -63,7 +63,7 @@ to run the services manually:
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 0.0.0.0 --port 8079 \
     --models-dir ~/local-ai-files/my-models/ \
-    --jinja --n-gpu-layers 0 -fa off --ctx-size 32768 \
+    --jinja --n-gpu-layers 0 -fa off --ctx-size 24576 \
     -ctk q8_0 -nkvo \
     --reasoning-budget 4096 \
     --no-mmproj-offload --device none
@@ -274,7 +274,7 @@ graph TD
         RCL1["GPU: --host 0.0.0.0 --port 8081\n--n-gpu-layers 99 -fa on --jinja"]
         RCL2["CPU: --host 0.0.0.0 --port 8079\n--n-gpu-layers 0 -fa off\n--device none --jinja"]
         RCL3["--models-dir ~/local-ai-files/my-models/"]
-        RCL4["GPU: --ctx-size 32768 (32K)\nCPU: --ctx-size 32768 (32K)"]
+        RCL4["GPU: --ctx-size 24576 (32K)\nCPU: --ctx-size 24576 (32K)"]
         RCL5["--reasoning-budget 4096\n(CPU server only)"]
         RCL6["-ctk q8_0 (KV cache quant, both)\n-ctv q8_0 (GPU only)\n-nkvo (CPU only)"]
         RCL7["--no-mmproj-offload on BOTH servers\n(multimodal projector stays in RAM —\notherwise its ~950 MiB on the 4 GiB card\nstarves the CPU server's worker buffers)"]
@@ -290,7 +290,7 @@ graph TD
 
     subgraph RCLimits ["Limits and Pools"]
         RL1["MAX_QUEUE_SIZE = 5 (per lane)"]
-        RL2["MAX_INPUT_TOKENS = 32768 (24K)"]
+        RL2["MAX_INPUT_TOKENS = 24576 (24K)"]
         RL3["_llm_pools: gpu 1 / cpu 4 workers\n(CPU_PARALLEL_SLOTS = 4)"]
         RL4["_tool_pools: gpu 2 / cpu 2 workers"]
         RL5["Max tool rounds = 10"]
@@ -511,7 +511,7 @@ graph TD
 ```mermaid
 graph TD
     StartRound0["start_llm_round\n(mode from task_mode)"] --> LLMWorker["_llm_worker\nin _llm_pools[mode]\n(gpu 1 / cpu 4 workers)"]
-    LLMWorker --> PayloadBuild["Build payload:\nmodel (mode's model id)\nmessages tools\ntool_choice auto\nmax_tokens 32768\nstream true\n(CPU server: --reasoning-budget 4096)"]
+    LLMWorker --> PayloadBuild["Build payload:\nmodel (mode's model id)\nmessages tools\ntool_choice auto\nmax_tokens 24576\nstream true\n(CPU server: --reasoning-budget 4096)"]
     PayloadBuild --> StreamReq["POST llama-server\n(mode's base: 8081 gpu / 8079 cpu)\nv1/chat/completions\nstream=True timeout=600s"]
     StreamReq --> StreamParse["Parse SSE stream:\n- reasoning_content delta\n  accumulate in reasoning_buf\n- content delta\n  accumulate in content_buf\n- tool_calls delta\n  reassemble by index[...]" ]
     StreamParse --> BuildAssistantMsg["Build assistant msg:\nrole assistant content\nreasoning_content tool_calls"]
