@@ -590,16 +590,17 @@ def unload_llama_model(mode="gpu", model_id=None):
 def _wait_image_active_clear(timeout=600):
     """Block the calling thread while an image generation/edit is using the GPU.
 
-    ``generate_image``/``edit_image`` set ``model_status="image_active"`` at the
-    start of their VRAM choreography and clear it only after ComfyUI finishes.
-    We must not load the GPU/guardrail model into VRAM during that window, or
-    ComfyUI is starved and times out. Polls (never blocks under
-    ``_model_transition_lock``) so the image path can complete and clear the flag.
+    ``generate_image``/``edit_image`` set ``_image_active = True`` at the
+    start of their VRAM choreography (before unloading) and clear it only
+    after ComfyUI finishes and VRAM is freed. We must not load the
+    GPU/guardrail model into VRAM during that window, or ComfyUI is starved
+    and times out. Polls (never blocks under ``_model_transition_lock``) so
+    the image path can complete and clear the flag.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
         with M._data_lock:
-            active = M.model_status == "image_active"
+            active = M._image_active
         if not active:
             return True
         time.sleep(0.5)
@@ -653,12 +654,12 @@ def load_llama_model(mode="gpu", model_id=None):
     from ``MODEL_ID_GUARDRAIL``, so a cached KV snapshot never applies.
     """
     # Gate GPU/guardrail loads behind image generation. generate_image/edit_image
-    # set model_status="image_active" at the START (before unloading) and only
-    # clear it after ComfyUI has finished. Without this wait, a chat round can
-    # reload the GPU model into VRAM while ComfyUI is rendering — starving it of
-    # VRAM and causing [generate_image] TIMEOUT. We busy-wait here (not under
-    # _model_transition_lock) so the image path can still complete and clear the
-    # flag without deadlocking.
+    # set _image_active=True at the START (before unloading) and only clear it
+    # after ComfyUI has finished and VRAM is freed. Without this wait, a chat
+    # round can reload the GPU model into VRAM while ComfyUI is rendering —
+    # starving it of VRAM and causing "VRAM grow failed". We busy-wait here
+    # (not under _model_transition_lock) so the image path can still complete
+    # and clear the flag without deadlocking.
     if mode in ("gpu", "guardrail"):
         _wait_image_active_clear()
     with M._model_transition_lock:
