@@ -863,10 +863,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "research": bool(body.get("research")),
                 "cpu": bool(body.get("cpu")) and bool(body.get("research")),
                 "no_tools": bool(body.get("no_tools")),
-                # MCP service account chatting over the HTTP API: flag the
-                # task so _finalize_task runs the fail-closed MCP L3 output
-                # judge (LEVEL 3 verification) instead of the UI fail-open one.
-                "_mcp": bool(MCP_USER) and user == MCP_USER,
             }
             # Route to the GPU lane (interactive UI users) or the lane chosen
             # by SELF_CHAT_MODE — cpu (self-chat agents on the RAM-backed CPU
@@ -909,10 +905,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "cpu": cpu_flagged,
                     "no_tools": bool(body.get("no_tools")),
                 }
-            # Return the task_id immediately so the UI can enqueue the pending
-            # message and poll /api/status/{task_id} for live progress ("Waiting
-            # in line...", "Processing task...", "Generating image...", etc.).
-            self.send_json({"task_id": task_id})
+            # Synchronous, bounded final-answer gate for the interactive GPU
+            # (UI) lane: block until the task reaches a terminal state — which,
+            # for research and (now) every UI answer, includes the final-answer
+            # quality judge and its bounded re-runs — then return the resolved
+            # task so the client sees the judged result directly. Judge/re-run
+            # outages stay fail-open (task still finalizes), and the wait is
+            # bounded so a stuck request degrades to a pollable task_id rather
+            # than hanging the HTTP thread. Agent/self-chat and MCP lanes keep
+            # their existing immediate, queue-and-poll behaviour untouched.
+            sync = (mode == "gpu") and (user not in _agent_users)
+            if sync:
+                sync_timeout = int(os.environ.get("SYNC_CHAT_TIMEOUT", "3600"))
+                deadline = time.time() + sync_timeout
+                while time.time() < deadline:
+                    with _data_lock:
+                        t = tasks.get(task_id, {})
+                    if t.get("status") in ("done", "error", "cancelled"):
+                        break
+                    time.sleep(0.3)
+                resp = dict(t)
+                resp.setdefault("task_id", task_id)
+                self.send_json(resp)
+            else:
+                self.send_json({"task_id": task_id})
             msg_text = (body.get("message") or "").strip()
             if user not in _agent_users and mode != "guardrail" and msg_text:
                 threading.Thread(
