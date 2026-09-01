@@ -3,6 +3,7 @@ import json
 import html
 import re
 import shutil
+from datetime import datetime
 import markdown
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exception_handlers import http_exception_handler
@@ -273,8 +274,11 @@ def moderation_badge(mod):
 def list_collection_stories(root: str):
     """Return [(genre_label | None, story_id)] for a collection root.
 
-    Legacy flat story folders (md directly inside root) are reported with
-    genre None; genre folders contain story subdirectories.
+    Layouts supported (dirs are story dirs iff they contain a .md directly):
+      <root>/<story>/                    legacy flat, genre None
+      <root>/<genre>/<story>/            legacy genre dirs
+      <root>/<genre>/<YYYY-MM-DD>/<story>/  date-bucketed genre dirs (current)
+      <root>/<genre>/<YYYY-MM>/<story>/  month-bucketed genre dirs (fallback)
     """
     entries = sorted(
         os.listdir(root),
@@ -282,20 +286,67 @@ def list_collection_stories(root: str):
         reverse=True,
     )
     items = []
+
+    def _has_md(folder):
+        try:
+            return any(f.endswith(".md") for f in os.listdir(folder))
+        except OSError:
+            return False
+
+    def _scan_stories(full, prefix, genre):
+        """Emit (genre, sid) for every story dir found under ``full``."""
+        for sub in sorted(os.listdir(full), reverse=True):
+            subfull = os.path.join(full, sub)
+            if not os.path.isdir(subfull):
+                continue
+            if _has_md(subfull):
+                items.append((genre, os.path.join(prefix, sub)))
+            else:
+                _scan_stories(subfull, os.path.join(prefix, sub), genre)
+
     for entry in entries:
         full = os.path.join(root, entry)
         if not os.path.isdir(full):
             continue
-        if any(f.endswith(".md") for f in os.listdir(full)):
+        if _has_md(full):
             items.append((None, entry))
-            continue
-        for sub in sorted(os.listdir(full), reverse=True):
-            subfull = os.path.join(full, sub)
-            if os.path.isdir(subfull) and any(
-                f.endswith(".md") for f in os.listdir(subfull)
-            ):
-                items.append((entry, os.path.join(entry, sub)))
+        else:
+            _scan_stories(full, entry, entry)
     return items
+
+
+# Timestamps are embedded in story folder names by self-chat.py as
+# ``<slug>_<YYYYMMDD>_<HHMMSS>`` (or ``story_r<N>_<YYYYMMDD>_<HHMMSS>``).
+_STORY_TS_RE = re.compile(r"(\d{8})[_-]?(\d{6})")
+_DISPLAY_TS_RE = re.compile(r"_(\d{8})[_-](\d{6})$")
+
+
+def _story_date(root: str, sid: str) -> datetime:
+    """Best-effort date for a story, preferring the folder-embedded timestamp."""
+    m = _STORY_TS_RE.search(sid)
+    if m:
+        try:
+            return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+        except ValueError:
+            pass
+    # Date-bucket path segment fallback: <genre>/<YYYY-MM-DD>/<story>/ (or MM).
+    bm = re.search(r"(\d{4})-(\d{2})-(\d{2})", sid) or re.search(
+        r"(\d{4})-(\d{2})", sid
+    )
+    if bm:
+        try:
+            return datetime(*[int(g) for g in bm.groups()]) if len(bm.groups()) == 3 else datetime(int(bm.group(1)), int(bm.group(2)), 1)
+        except ValueError:
+            pass
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(os.path.join(root, sid)))
+    except OSError:
+        return datetime.min
+
+
+def _clean_display_name(folder: str) -> str:
+    """Strip the trailing ``_<YYYYMMDD>_<HHMMSS>`` uniquifier for display."""
+    return re.sub(_DISPLAY_TS_RE, "", folder) or folder
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -316,22 +367,42 @@ async def index(request: Request):
             continue
         grouped = {}
         for genre, sid in items:
-            grouped.setdefault(genre, []).append(sid)
+            grouped.setdefault(genre, []).append((sid, _story_date(root, sid)))
         sections = []
-        for genre, sids in grouped.items():
-            heading = f"<h3>{genre.replace('_', ' ').title()}</h3>" if genre else ""
-            lis = []
-            for sid in sids:
-                badge = moderation_badge(story_moderation(os.path.join(root, sid)))
-                
-                # Safely quote path segments for URLs and escape HTML text display
-                encoded_sid = "/".join(quote(part) for part in sid.split("/"))
-                display_name = html.escape(sid.split("/")[-1])
-                
-                lis.append(
-                    f'<li><a href="/story/{name}/{encoded_sid}">{display_name}</a>{badge}</li>'
+        for genre, stories in grouped.items():
+            # First level: genre heading. Second level: month buckets with
+            # stories newest-first inside each bucket.
+            heading = (
+                f"<h3>{genre.replace('_', ' ').title()}</h3>" if genre else ""
+            )
+            buckets = {}
+            for sid, dt in stories:
+                key = (dt.year, dt.month) if dt.year > 1970 else (0, 0)
+                buckets.setdefault(key, []).append((dt, sid))
+            genre_html = []
+            for key in sorted(buckets, reverse=True):
+                dated = sorted(buckets[key], key=lambda ds: ds[0], reverse=True)
+                lis = []
+                for dt, sid in dated:
+                    badge = moderation_badge(
+                        story_moderation(os.path.join(root, sid))
+                    )
+                    encoded_sid = "/".join(quote(part) for part in sid.split("/"))
+                    label = html.escape(_clean_display_name(sid.split("/")[-1]))
+                    stamp = (
+                        f'<span class="story-date">{dt.strftime("%Y-%m-%d")}</span>'
+                        if key[0] > 0
+                        else ""
+                    )
+                    lis.append(
+                        f'<li><a href="/story/{name}/{encoded_sid}">{label}</a>'
+                        f"{badge}{stamp}</li>"
+                    )
+                block_label = (
+                    dated[0][0].strftime("%B %Y") if key[0] > 0 else "Date unknown"
                 )
-            sections.append(heading + "<ul>" + "".join(lis) + "</ul>")
+                genre_html.append(f"<h4>{block_label}</h4><ul>{''.join(lis)}</ul>")
+            sections.append(heading + "".join(genre_html))
         cards.append(
             f"<h2>{name.replace('_', ' ').title()}</h2>" + "".join(sections)
         )
@@ -356,10 +427,13 @@ async def index(request: Request):
             * {{ box-sizing: border-box; }}
             html {{ -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }}
             body {{ font-family: Georgia, 'Times New Roman', serif; font-size: 18px; max-width: 40em; margin: 0 auto; padding: 16px; line-height: 1.7; background: #fafafa; color: #111; }}
-            h1, h2, h3 {{ color: #333; line-height: 1.3; }}
+            h1, h2, h3, h4 {{ color: #333; line-height: 1.3; }}
+            h4 {{ margin: .9em 0 .3em; font-size: 1.02em; }}
+            h4 + ul {{ margin-top: .3em; }}
             ul {{ margin: 0 0 1.2em; padding-left: 1.4em; }}
             li {{ margin-bottom: 0.6em; }}
             a {{ color: #06c; text-decoration: none; }}
+            .story-date {{ color: #777; font-size: 14px; margin-left: 6px; }}
             .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; font-family: sans-serif; font-size: 14px; }}
             .topbar .logged {{ margin: 0; color: #555; }}
             .topbar .login {{ display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
@@ -387,8 +461,9 @@ async def index(request: Request):
             }}
             @media (prefers-color-scheme: dark) {{
                 body {{ background: #16181d; color: #e6e6e6; }}
-                h1, h2, h3 {{ color: #f0f0f0; }}
+                h1, h2, h3, h4 {{ color: #f0f0f0; }}
                 a {{ color: #7ab8ff; }}
+                .story-date {{ color: #999; }}
                 .topbar .logged {{ color: #aaa; }}
                 .topbar .login-toggle a {{ color: #7ab8ff; }}
                 .topbar input {{ background: #1f232b; border-color: #3a3f4a; color: #e6e6e6; }}

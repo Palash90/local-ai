@@ -611,6 +611,7 @@ def _judge_research_answer(task_id, answer):
         result = llm_verify_research_answer(
             user_input, answer,
             model_id=resolve_judge_model(user or ""),
+            allow_gpu_fallback=M.task_mode(task_id) == "gpu",
         )
     except Exception as e:
         print(f"[critic] research-answer judge call failed: {e}")
@@ -691,6 +692,7 @@ def _judge_answer_quality(task_id, answer):
         result = llm_verify_answer_quality(
             user_input, answer,
             model_id=resolve_judge_model(user or ""),
+            allow_gpu_fallback=M.task_mode(task_id) == "gpu",
         )
     except Exception as e:
         print(f"[critic] answer-quality judge call failed: {e}")

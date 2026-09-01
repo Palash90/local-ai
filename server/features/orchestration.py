@@ -239,6 +239,7 @@ def _finalize_task(task_id, sid, msg_content, body):
             else:
                 judge_verdict = mcp_output_judge(
                     reply_text, model_id=judge_model, fail_closed=False,
+                    allow_gpu_fallback=(mode == "gpu"),
                 )
             blocked = blocked or bool(judge_verdict)
         if blocked:

@@ -357,9 +357,10 @@ def task_mode(task_id):
         return "guardrail"
     if M.FORCE_GPU_LANE:
         return "gpu"
-    if user in M._agent_users and mode in ("gpu", "cpu"):
+    is_agent_user = user in M._agent_users or user in M.KNOWN_AGENT_USERS
+    if is_agent_user and mode in ("gpu", "cpu"):
         return mode
-    return M.SELF_CHAT_MODE if user in M._agent_users else "gpu"
+    return M.SELF_CHAT_MODE if is_agent_user else "gpu"
 
 
 def server_base(mode):

@@ -104,6 +104,16 @@ EDITOR_DEFAULT_MIN_CONFIDENCE = int(
     os.environ.get("SELF_CHAT_EDITOR_MIN_CONFIDENCE", "70")
 )
 
+# Creative alignment handshake: before the first turn, one agent reviews the
+# resolved topic/tone pack (and may adjust the tone/angle), the partner
+# cross-checks with veto power, and the agreed decision + both reasons are
+# injected into every turn prompt. Disable with SELF_CHAT_ALIGNMENT=0.
+CREATIVE_ALIGNMENT = os.environ.get("SELF_CHAT_ALIGNMENT", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
 EDITOR_CONTRACT = """
 
 ───────────────────────────────────────────────────────────────────────────────
@@ -692,6 +702,184 @@ def format_cast_block(cast):
         "every generated image must show only these named characters."
     )
     return "\n".join(lines)
+
+
+_ALIGNMENT_PROPOSER_PROMPT = """
+[CREATIVE ALIGNMENT — proposal phase]
+The production system resolved this round's creative pack from the curated
+pools. You are the first reviewer. You may keep it, or sharpen the tone and
+angle — the topic itself stays as resolved.
+
+Task: %task%
+Genre / Dynamic / Tone: %genre% / %relationship% / %mood%
+Resolved attributes:
+%round_summary%
+%cast%
+
+Reply in EXACTLY this shape (nothing else, plain text):
+DECISION: ACCEPT or ADJUST
+ADJUSTED_TONE: <one line, only when ADJUST — a sharper tone/angle for the SAME topic>
+REASON: <one line why>
+"""
+
+_ALIGNMENT_CHECKER_PROMPT = """
+[CREATIVE ALIGNMENT — cross-check phase]
+Your partner reviewed this round's creative pack:
+
+Task: %task%
+Genre / Dynamic / Tone: %genre% / %relationship% / %mood%
+Resolved attributes:
+%round_summary%
+%cast%
+
+Partner (%proposer%) decision: %decision%
+Partner's reason: %reason%
+Proposed tone adjustment: %adjusted%
+
+Cross-check their decision. Reply in EXACTLY this shape (nothing else, plain
+text):
+VERDICT: AGREE or VETO
+ALTERNATIVE_TONE: <one line, only when VETO — your alternative tone/angle>
+REASON: <one line why>
+"""
+
+
+def _parse_alignment_reply(text):
+    """Tolerant parse of an alignment reply (bold markers tolerated)."""
+    text = (text or "").strip()
+    out = {}
+    m = re.search(
+        r"DECISION\s*\*{0,2}\s*:\s*\*{0,2}\s*(ACCEPT|ADJUST|KEEP|CHANGE)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        word = m.group(1).upper()
+        out["decision"] = "ADJUST" if word in ("ADJUST", "CHANGE") else "ACCEPT"
+    m = re.search(
+        r"ADJUSTED_TONE\s*\*{0,2}\s*:\s*\*{0,2}\s*(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        out["adjusted"] = m.group(1).strip()[:200]
+    m = re.search(
+        r"ALTERNATIVE_TONE\s*\*{0,2}\s*:\s*\*{0,2}\s*(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        out["alternative"] = m.group(1).strip()[:200]
+    m = re.search(
+        r"REASON\s*\*{0,2}\s*:\s*\*{0,2}\s*(.+)", text, flags=re.IGNORECASE
+    )
+    if m:
+        out["reason"] = m.group(1).strip()[:200]
+    m = re.search(
+        r"VERDICT\s*\*{0,2}\s*:\s*\*{0,2}\s*(AGREE|VETO|APPROVE|DISAGREE)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        word = m.group(1).upper()
+        out["verdict"] = "AGREE" if word in ("AGREE", "APPROVE") else "VETO"
+    return out
+
+
+def run_creative_alignment(
+    proposer_name,
+    proposer_token,
+    proposer_session,
+    checker_name,
+    checker_token,
+    checker_session,
+    task,
+    genre,
+    relationship,
+    mood,
+    round_fields,
+    cast_block,
+):
+    """One-round topic/tone cross-check between the two agents.
+
+    The proposer reviews the resolved creative pack and may adjust the
+    tone/angle; the partner cross-checks with veto power (a veto without an
+    alternative keeps the resolved pack). Fail-open: any login/LLM/parse
+    failure returns no override and no note, matching the historical behavior.
+    """
+    if round_fields:
+        round_summary = "\n".join(
+            f"- {k}: {str(v)[:120]}" for k, v in list(round_fields.items())[:12]
+        )
+    else:
+        round_summary = "- (no round-scoped attributes resolved)"
+
+    def _fill(template, extra=None):
+        s = template.replace("%task%", task)
+        s = s.replace("%genre%", genre)
+        s = s.replace("%relationship%", relationship)
+        s = s.replace("%mood%", mood)
+        s = s.replace("%round_summary%", round_summary)
+        s = s.replace("%cast%", cast_block or "")
+        for k, v in (extra or {}).items():
+            s = s.replace(k, str(v)[:200])
+        return s
+
+    try:
+        proposal = _parse_alignment_reply(
+            call_llm(
+                proposer_token,
+                proposer_session,
+                _fill(_ALIGNMENT_PROPOSER_PROMPT),
+                no_tools=True,
+            )["text"]
+        )
+        proposal.setdefault("decision", "ACCEPT")
+        decision = proposal["decision"]
+        adjusted = proposal.get("adjusted", "")
+        reason = proposal.get("reason", "")
+
+        check = _parse_alignment_reply(
+            call_llm(
+                checker_token,
+                checker_session,
+                _fill(
+                    _ALIGNMENT_CHECKER_PROMPT,
+                    {
+                        "%proposer%": proposer_name,
+                        "%decision%": decision,
+                        "%reason%": reason or "(none given)",
+                        "%adjusted%": adjusted or "(none)",
+                    },
+                ),
+                no_tools=True,
+            )["text"]
+        )
+        verdict = check.get("verdict", "AGREE")
+
+        tone_override = None
+        if decision == "ADJUST" and verdict == "AGREE" and adjusted:
+            tone_override = adjusted
+        elif verdict == "VETO":
+            tone_override = check.get("alternative") or None
+        note_lines = [
+            f"- {proposer_name}: {decision}"
+            + (f" — {reason}" if reason else ""),
+            f"- {checker_name}: {verdict}"
+            + (f" — {check.get('reason', '')}" if check.get("reason") else ""),
+        ]
+        print(
+            f"[alignment] {proposer_name}: {decision}"
+            + (f" ({adjusted[:60]})" if adjusted else "")
+            + f" | {checker_name}: {verdict}"
+        )
+        return {
+            "tone_override": tone_override,
+            "note": "\n".join(note_lines),
+        }
+    except Exception as e:
+        print(f"[alignment] handshake failed (fail-open): {e}")
+        return {"tone_override": None, "note": ""}
 
 
 def _resolve_field_value(spec, task, master):
@@ -1357,11 +1545,7 @@ def verify_task_fulfillment(
     # claim — never at a site root or section page. Checked on the story body
     # only (the auto-appended citations section may legitimately keep landing
     # pages when a search returned nothing deeper).
-    story_body = re.sub(
-        r"(?is)(?:^|\n)\s*#{1,6}\s+(?:citations?\s*(?:&|and)?\s*)?references?\b.*$",
-        "",
-        check_text,
-    )
+    story_body = strip_model_citations(check_text)
     cited_urls = set(re.findall(r"\[[^\]]*\]\((https?://[^)\s]+)\)", story_body))
     cited_urls |= set(re.findall(r"\[(https?://[^\]\s)]+)\]", story_body))
     landing_cites = sorted(u for u in cited_urls if _is_landing_url(u))
@@ -1371,6 +1555,23 @@ def verify_task_fulfillment(
             f"pages (e.g. {landing_cites[0]}) instead of specific article links — "
             "replace each with the exact article URL that supports the claim, "
             "or remove the citation."
+        )
+
+    # One URL cannot back a dozen separate claims — that is a search-results
+    # dump, not sourcing (mirrors the server critic's per-URL budget).
+    max_cites = 3
+    cite_counts = {}
+    for u in re.findall(r"\[[^\]]*\]\((https?://[^)\s]+)\)", story_body):
+        cite_counts[u] = cite_counts.get(u, 0) + 1
+    for u in re.findall(r"\[(https?://[^\]\s)]+)\]", story_body):
+        cite_counts[u] = cite_counts.get(u, 0) + 1
+    over = {u: n for u, n in cite_counts.items() if n > max_cites}
+    if over:
+        worst = max(over.items(), key=lambda kv: kv[1])
+        problems.append(
+            f"{worst[1]} separate claims cite the same URL ({worst[0]}) — "
+            "each claim needs its own specific article URL; search for the "
+            "individual articles and cite those."
         )
 
     if not check_language_script(check_text, language):
@@ -1788,19 +1989,32 @@ def run_editor_review(
         )
         text = result["text"] or ""
         verdict = "CLEAN"
-        m = re.search(r"VERDICT\s*:\s*(CLEAN|FLAGGED)", text, flags=re.IGNORECASE)
+        # Tolerant parsing: models bold the labels ("**VERDICT**: CLEAN") and
+        # sometimes drop the "/100" suffix or add "Score" — both used to fall
+        # through and leave confidence None (moderation "n/a/100").
+        m = re.search(
+            r"VERDICT\s*\*{0,2}\s*:\s*\*{0,2}\s*(CLEAN|FLAGGED)",
+            text,
+            flags=re.IGNORECASE,
+        )
         if m:
             verdict = m.group(1).upper()
         elif re.search(r"\bFLAGGED\b", text, flags=re.IGNORECASE):
             verdict = "FLAGGED"
         confidence = None
         m = re.search(
-            r"CONFIDENCE\s*:\s*(\d{1,3})\s*(?:/|out of\s*)?100?",
+            r"CONFIDENCE(?:\s+SCORE|\s+LEVEL)?\s*\*{0,2}\s*:\s*\*{0,2}\s*"
+            r"(\d{1,3})(?:\s*(?:/\s*100|out of\s*100|%|100))?",
             text,
             flags=re.IGNORECASE,
         )
         if m:
             confidence = max(0, min(100, int(m.group(1))))
+        else:
+            print(
+                "[editor-gate] no parseable CONFIDENCE line in editor reply — "
+                "recorded as n/a"
+            )
         flags = []
         m = re.search(
             r"FLAGS?\s*:\s*\n((?:\s*[-*•].*(?:\n|$))+)",
@@ -1812,6 +2026,10 @@ def run_editor_review(
                 ln.strip().lstrip("-*• ").strip()
                 for ln in m.group(1).strip().splitlines()
                 if ln.strip().lstrip("-*• ").strip()
+            ]
+            flags = [
+                f for f in flags
+                if f.lower() not in ("none", "no flags", "n/a", "-", "—")
             ]
         if verdict == "FLAGGED" and not flags:
             flags = ["Editor flagged the story without naming the violated item"]
@@ -2133,6 +2351,39 @@ def _conversation_attempt(
         f"{AGENT_NAMES['B']} round {round_number}",
         system_prompt=s,
     )
+
+    # Creative alignment handshake: one agent reviews the resolved topic/tone
+    # pack (may adjust the tone/angle), the partner cross-checks with veto
+    # power. The agreed decision + both reasons are injected into every turn
+    # prompt. Fail-open; proposer alternates by round parity.
+    if CREATIVE_ALIGNMENT:
+        proposer_is_a = round_number % 2 == 0
+        handshake = run_creative_alignment(
+            AGENT_NAMES["A"] if proposer_is_a else AGENT_NAMES["B"],
+            token_a if proposer_is_a else token_b,
+            session_a if proposer_is_a else session_b,
+            AGENT_NAMES["B"] if proposer_is_a else AGENT_NAMES["A"],
+            token_b if proposer_is_a else token_a,
+            session_b if proposer_is_a else session_a,
+            task,
+            genre,
+            relationship,
+            mood,
+            round_fields,
+            cast_block,
+        )
+        if handshake.get("tone_override") or handshake.get("note"):
+            lines = ["[AGREED CREATIVE DIRECTION — jointly cross-checked before turn 1]"]
+            if handshake.get("tone_override"):
+                lines.append(
+                    f"TONE DIRECTIVE (overrides the default tone): {handshake['tone_override']}"
+                )
+            lines.append(handshake["note"])
+            alignment_block = "\n".join(lines)
+            cast_block = (
+                f"{cast_block}\n\n{alignment_block}" if cast_block else alignment_block
+            )
+            print(f"[alignment] {alignment_block.splitlines()[0]} injected into turn prompts")
 
     transcript = []
     counts = {"A": 0, "B": 0}
@@ -2546,7 +2797,11 @@ def start_story(
     folder_name = f"{slugify(title)}_{timestamp}"
     genre_dir = os.path.join(base_dir, slugify(genre))
     os.makedirs(genre_dir, exist_ok=True)
-    stories_dir = os.path.join(genre_dir, folder_name)
+    # Date bucket layer <genre>/<YYYY-MM-DD>/<story>/ so the hosting index can
+    # group stories chronologically (e.g. "August 2026").
+    bucket_dir = os.path.join(genre_dir, now.strftime("%Y-%m-%d"))
+    os.makedirs(bucket_dir, exist_ok=True)
+    stories_dir = os.path.join(bucket_dir, folder_name)
     os.makedirs(stories_dir, exist_ok=True)
     fname = os.path.join(stories_dir, f"story_r{round_number}_{timestamp}.md")
     roles = roles or ["free"]
@@ -2692,6 +2947,15 @@ _LANDING_SEGMENT_RE = re.compile(
     r"^(section|sections|category|categories|topics?|tags?|archive|index)$"
 )
 
+# URL path segments that mark a site-internal search/category/listing page —
+# never an individual article ("flipkart.com/q/fashion-tops",
+# "nykaafashion.com/women/tops/c/4497", "meesho.com/tops-ladies/pl/3ja").
+_STRUCTURAL_PATH_SEGMENTS = {
+    "q", "s", "c", "pl", "pr", "p", "products", "product", "category",
+    "categories", "collection", "collections", "shop", "store", "search",
+    "browse", "listings", "listing", "tagged",
+}
+
 
 def _is_landing_url(url):
     """True for site roots and section/landing pages rather than single articles.
@@ -2702,13 +2966,18 @@ def _is_landing_url(url):
     the same search returned nothing better (see ``collect_citations``).
     """
     try:
-        path = urlparse(url).path or "/"
+        parsed = urlparse(url)
+        path = parsed.path or "/"
     except (ValueError, AttributeError):
         return False
     path = path.rstrip("/")
     if not path:
         return True
     segs = [s for s in path.split("/") if s]
+    if not segs:
+        return True
+    if any(seg.lower() in _STRUCTURAL_PATH_SEGMENTS for seg in segs):
+        return True
     if len(segs) == 1:
         seg = segs[0].lower()
         # One clean segment with no file extension and no digits ("/technology")
@@ -2716,7 +2985,7 @@ def _is_landing_url(url):
         # ID, or a hyphenated multi-part path.
         if "." not in seg and not re.search(r"\d", seg) and len(seg) <= 40:
             return True
-    if segs and _LANDING_SEGMENT_RE.match(segs[0].lower()):
+    if _LANDING_SEGMENT_RE.match(segs[0].lower()):
         return True
     return False
 
@@ -2746,11 +3015,26 @@ def strip_model_citations(text):
 
     Only finalize_story() may emit that section, and it is built exclusively from
     web-search results. Model-authored variants (images, placeholder links, double
-    hashes, bare "## References" headings) are dropped so they can never leak
-    into the published section.
+    hashes, bare "## References" headings, localized headings like
+    "## संदर्भ (References)") are dropped so they can never leak into the
+    published section.
     """
     text = re.sub(
         r"(?i)(?:^|\n)\s*#{1,6}\s+(?:citations?\s*(?:&|and)?\s*)?references?\b.*$",
+        "",
+        text,
+        flags=re.DOTALL,
+    )
+    text = re.sub(
+        r"(?i)(?:^|\n)\s*#{1,6}\s+sources?\s*(?:&|and)?\s*(?:references?)?\b.*$",
+        "",
+        text,
+        flags=re.DOTALL,
+    )
+    # Localized heading with the English word in parentheses:
+    # "## संदर्भ (References)" / "## रेफरेंस (Citations)"
+    text = re.sub(
+        r"(?i)(?:^|\n)\s*#{1,6}\s+[^(\n]{0,40}\(\s*(?:citations?|references?|sources?)\s*\).*$",
         "",
         text,
         flags=re.DOTALL,
@@ -2838,6 +3122,38 @@ _DEEP_SOURCE_PROMPT = (
 )
 
 
+def beautify_inline_citations(text):
+    """Convert chat-lane citation syntax into proper markdown links.
+
+    Agents write research-style inline citations — ``(Author, Venue, Year)
+    [url]`` — and occasionally doubled ``[url](url)`` variants. In the story
+    markdown that renders as raw bracketed text or a link whose label is the
+    URL itself. Rewrite every variant to ``[Author, Venue, Year](url)`` so the
+    published page shows a clean, clickable citation.
+    """
+    # (meta) [label](url)  ->  [meta](url)   (covers the doubled [url](url))
+    text = re.sub(
+        r"\(([^()]{2,80})\)\s*\[[^\]]*\]\((https?://[^)\s]+)\)",
+        r"[\1](\2)",
+        text,
+    )
+    # (meta) [url]  ->  [meta](url)
+    text = re.sub(
+        r"\(([^()]{2,80})\)\s*\[(https?://[^\]\s)]+)\]",
+        r"[\1](\2)",
+        text,
+    )
+
+    # Bare [url] with no metadata  ->  [host](url)
+    def _bare(m):
+        url = m.group(1)
+        host = urlparse(url).netloc or url
+        return f"[{host}]({url})"
+
+    text = re.sub(r"\[(https?://[^\]\s)]+)\]", _bare, text)
+    return text
+
+
 def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     speaker = entry.get("speaker", "Unknown")
     raw_text = strip_verification_chrome(entry.get("text", ""))
@@ -2891,6 +3207,7 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     cleaned = clean_speaker_text(speaker, content)
     cleaned = scrub_agent_names(cleaned)
     cleaned = strip_model_citations(cleaned)
+    cleaned = beautify_inline_citations(cleaned)
     cleaned = strip_image_markers(cleaned)
     lines = [
         f'<small style="color:#888">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n',
@@ -3221,6 +3538,7 @@ def run_cross_critique(
             revised = extract_markdown_fence(result["text"])
             if revised:
                 revised = scrub_agent_names(revised)
+                revised = beautify_inline_citations(revised)
                 revised = normalize_markdown_lines(revised)
                 revised = sanitize_story_images(revised, stories_dir)
                 revised = strip_image_markers(revised)
@@ -3434,6 +3752,11 @@ def run_forever():
     try:
         while True:
             spec = TASKS[task_index % len(TASKS)]
+            # Re-register on every task: a chat-webui restart wipes the
+            # in-memory agent registry, and without this the pipeline would
+            # silently fall back to the GPU lane until the next self-chat
+            # restart.
+            register_agent_tokens([token_a, token_b], [USERNAME_A, USERNAME_B])
             task = spec["task"]
             mediums = spec["mediums"]
             languages = spec["languages"]

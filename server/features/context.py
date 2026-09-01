@@ -21,10 +21,32 @@ def strip_html(text):
 def _text_tokens(s):
     if not s:
         return 0
-    # Multilingual/non-ASCII characters eat up far more tokens (~2 chars per token vs ~4 for English)
-    non_ascii = sum(1 for ch in s if ord(ch) > 0x7F)
-    divisor = 2.0 if non_ascii > len(s) * 0.15 else 4.0
-    return int(len(s) / divisor)
+    # Token density varies hugely by script. ASCII English ≈ 4 chars/token;
+    # accented Latin ≈ 2; Indic scripts (Devanagari/Bengali), Thai and CJK
+    # tokenize at roughly ONE token per character — assuming English density
+    # for Hindi text under-counted sessions by 2-3x and let oversized
+    # prompts reach llama-server (exceed_context_size_error).
+    ascii_chars = 0
+    wide_chars = 0
+    other_chars = 0
+    for ch in s:
+        o = ord(ch)
+        if o < 0x80:
+            ascii_chars += 1
+        elif (
+            0x0900 <= o <= 0x097F  # Devanagari
+            or 0x0980 <= o <= 0x09FF  # Bengali
+            or 0x0A00 <= o <= 0x0A7F  # Gurmukhi
+            or 0x0A80 <= o <= 0x0AFF  # Gujarati
+            or 0x0B80 <= o <= 0x0BFF  # Tamil
+            or 0x0E00 <= o <= 0x0E7F  # Thai
+            or 0x3000 <= o <= 0x30FF  # CJK punctuation/kana
+            or 0x4E00 <= o <= 0x9FFF  # CJK ideographs
+        ):
+            wide_chars += 1
+        else:
+            other_chars += 1
+    return int(ascii_chars / 4 + wide_chars + other_chars / 2) + 1
 
 
 def estimate_tokens(messages, include_tools=True):
@@ -59,16 +81,46 @@ def estimate_tokens(messages, include_tools=True):
     return max(1, total)
 
 
-def trim_messages_for_context(messages):
+def _hard_truncate_messages(messages, budget):
+    """Last-resort content truncation.
+
+    Popping the oldest message stops helping when one huge message (e.g. a
+    tool result carrying full page text) alone exceeds the budget. Halve the
+    largest string content (keeping head and tail) until the estimate fits.
+    Works on copies — the stored session is never mutated.
+    """
+    msgs = list(messages)
+    for _ in range(20):
+        if estimate_tokens(msgs) <= budget:
+            break
+        biggest, size = None, 0
+        for i, msg in enumerate(msgs):
+            c = msg.get("content")
+            if isinstance(c, str) and len(c) > size:
+                biggest, size = i, len(c)
+        if biggest is None:
+            break
+        body = msgs[biggest]["content"]
+        keep = max(1000, len(body) // 4)
+        trimmed_body = (
+            body[:keep] + "\n...[older tool output truncated]...\n" + body[-keep:]
+        )
+        msgs[biggest] = {**msgs[biggest], "content": trimmed_body}
+    return msgs
+
+
+def trim_messages_for_context(messages, mode="gpu"):
+    budget = M.prompt_token_budget(mode)
     trimmed = list(messages)
     sys_msg = None
     if trimmed and trimmed[0].get("role") == "system":
         sys_msg = trimmed.pop(0)
-    while estimate_tokens(trimmed) > M.MAX_INPUT_TOKENS and len(trimmed) > 1:
+    while estimate_tokens(trimmed) > budget and len(trimmed) > 1:
         trimmed.pop(0)
     if sys_msg:
         trimmed.insert(0, sys_msg)
-    return trimmed
+    # A single giant message can survive the pop loop — cut its content.
+    return _hard_truncate_messages(trimmed, budget)
 
 
 def _summarize_with_llm(text, mode="gpu"):
@@ -119,6 +171,11 @@ def compact_messages_copy(messages, keep_messages=6, mode="gpu"):
             content = " ".join(parts)
         if not content:
             continue
+        # The summarizer runs on the same lane-size ctx: cap what we feed it
+        # or the compression call itself 400s with exceed_context_size.
+        if _text_tokens(compact_text) + _text_tokens(content) > 2400:
+            compact_text += "[...older messages omitted...]\n\n"
+            break
         compact_text += f"[{role}]: {content}\n\n"
     if not compact_text.strip():
         return ([sys_msg] + msgs) if sys_msg else msgs
@@ -288,13 +345,13 @@ def prepare_context_for_llm(sid, messages, mode="gpu"):
     messages = _reference_historical_images(messages)
     total = estimate_tokens(messages)
     if total <= M.AUTO_COMPACT_THRESHOLD:
-        context = trim_messages_for_context(messages)
+        context = trim_messages_for_context(messages, mode)
         with M._effective_contexts_lock:
             M._effective_contexts.pop(sid, None)
         return context
     # print(f"[context] Session {sid} estimate {total} tokens exceeds threshold {M.AUTO_COMPACT_THRESHOLD}; building compressed context for LLM")
     compacted = compact_messages_copy(messages, mode=mode)
-    context = trim_messages_for_context(compacted)
+    context = trim_messages_for_context(compacted, mode)
     # The effective prefix sent to the LLM has changed, so any cached KV for
     # this session no longer matches the new prompt — drop it so it is never
     # restored. Best-effort (import lazily to avoid an import cycle).

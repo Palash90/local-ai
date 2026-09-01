@@ -146,13 +146,17 @@ SELF_CHAT_MODE = os.environ.get("SELF_CHAT_MODE", "cpu").strip().lower()
 if SELF_CHAT_MODE not in ("cpu", "gpu"):
     SELF_CHAT_MODE = "cpu"
 
-# Test-time flag: flip to True (manually) to keep EVERY request on the fast GPU
-# lane and never admit anything — including self-chat agents — to the slow CPU
-# lane. During testing it is easier to wait a few seconds for the GPU than to
-# endure CPU speed. A real web-UI human request never goes to the CPU lane
+# Test-time flag: when True, every request is admitted to the fast GPU lane
+# and nothing — including self-chat agents — reaches the slow CPU lane.
+# Defaults to False; enable temporarily via FORCE_GPU_LANE=true in .env for
+# testing. A real web-UI human request never goes to the CPU lane
 # regardless of this flag: that invariant is enforced unconditionally at
 # admission and in task_mode().
-FORCE_GPU_LANE = True
+FORCE_GPU_LANE = os.environ.get("FORCE_GPU_LANE", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # Research self-verification ("critic" pass). After a research answer is
 # generated, each inline "(Author, Venue, Year) [url]" citation is re-fetched
@@ -343,6 +347,18 @@ MCP_USER = os.environ.get("MCP_USER", "")
 # key user is reviewed by the value user before finalization.
 AGENT_PEER_MAP = json.loads(
     os.environ.get("AGENT_PEER_MAP", '{"kaya": "kolpo", "kolpo": "kaya"}')
+)
+
+# Agent usernames known to the system regardless of the in-memory token
+# registry. Lane routing must never depend on the registry alone: a
+# chat-webui restart wipes it, and unregistered agents then silently fall
+# back to the GPU lane (smaller ctx → exceed_context_size_error).
+KNOWN_AGENT_USERS = set(
+    u.strip()
+    for u in os.environ.get(
+        "AGENT_USERNAMES", "kolpo,kaya,editor,moderator"
+    ).split(",")
+    if u.strip()
 )
 
 LLAMA_SERVER_ARGS_GUARDRAIL = [

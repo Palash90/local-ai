@@ -17,7 +17,7 @@ import queue as _queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from server.config import CPU_PARALLEL_SLOTS
+from server.config import CPU_PARALLEL_SLOTS, MAX_OUTPUT_TOKENS, REASONING_BUDGET
 
 
 class _Registry:
@@ -205,6 +205,25 @@ _users_cache_time = 0
 # context meter and the /api/model-status payload reflect the real budget.
 MAX_INPUT_TOKENS = 24576
 AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
+
+# Hard llama-server context PER SLOT (keep in sync with the "--ctx-size" /
+# "--parallel" values in LLAMA_*_ARGS, server/config.py — llama-server splits
+# the total ctx across parallel slots; the CPU server reports
+# n_slots=4 / n_ctx_slot=32768, the guardrail lane runs --parallel 2).
+LANE_CTX_SIZES = {"gpu": 24576, "cpu": 32768, "guardrail": 8192}
+PROMPT_BUDGET_MARGIN = 1024
+
+
+def prompt_token_budget(mode="gpu"):
+    """Tokens actually usable for MESSAGES on a lane.
+
+    The model context must also hold the generation (MAX_OUTPUT_TOKENS) and
+    reasoning (REASONING_BUDGET) tokens plus a safety margin for estimator
+    error — otherwise llama-server 400s with exceed_context_size_error even
+    when the trim believed the prompt fit.
+    """
+    ctx = LANE_CTX_SIZES.get(mode, MAX_INPUT_TOKENS)
+    return max(4096, ctx - MAX_OUTPUT_TOKENS - REASONING_BUDGET - PROMPT_BUDGET_MARGIN)
 
 # Monitoring constants.
 TEMP_THRESHOLD_ON = 90

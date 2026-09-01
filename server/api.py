@@ -33,6 +33,7 @@ from server.config import (
     COMFYUI_OUTPUT,
     FORCE_GPU_LANE,
     IMG_PATH,
+    KNOWN_AGENT_USERS,
     MCP_USER,
     SELF_CHAT_MODE,
     UPLOADS_DIR,
@@ -866,8 +867,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # and honored server-side only when research is set).
             cpu_flagged = entry["cpu"]
             mode = body.get("mode")
-            if mode not in ("gpu", "cpu", "guardrail") or user not in _agent_users:
-                mode = SELF_CHAT_MODE if user in _agent_users else "gpu"
+            # The in-memory registry is wiped by every chat-webui restart;
+            # KNOWN_AGENT_USERS keeps routing stable across restarts so a
+            # running self-chat pipeline never silently lands on the GPU lane.
+            is_agent_user = user in _agent_users or user in KNOWN_AGENT_USERS
+            if mode not in ("gpu", "cpu", "guardrail") or not is_agent_user:
+                mode = SELF_CHAT_MODE if is_agent_user else "gpu"
             if cpu_flagged:
                 mode = "cpu"
             # Explicit mode override: allows callers (e.g. MCP gateway for
