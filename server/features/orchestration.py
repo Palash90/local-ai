@@ -8,6 +8,7 @@ import time
 
 from server.features.context import resolve_image_path
 from server.features.state import M
+from server.features.toolstrip import strip_tool_call_text
 
 
 def set_status(task_id, message):
@@ -341,6 +342,14 @@ def _event_loop():
             round_num = data["round"]
             body = data["body"]
             msg = body["choices"][0]["message"]
+            raw_content = msg.get("content") or ""
+            cleaned_content = strip_tool_call_text(raw_content)
+            if cleaned_content != raw_content:
+                # The model leaked tool-call markup as plain text (happens on
+                # no-tool rounds whose history still shows past tool
+                # exchanges). Strip it before judging, storing or streaming.
+                msg["content"] = cleaned_content
+                print(f"[llm_ok] Stripped inline tool-call markup from content ({len(raw_content)} -> {len(cleaned_content)} chars) for task {task_id}")  # DEBUG
             mode = M.task_mode(task_id)
             with M._data_lock:
                 if mode == "cpu":
@@ -411,6 +420,43 @@ def _event_loop():
             else:
                 print(f"[llm_ok] Round {round_num}: LLM generated final response (no tool calls) for task {task_id}")  # DEBUG
                 print(f"[llm_ok] Message structure: content={repr(msg.get('content'))}, reasoning={repr(msg.get('reasoning_content'))}")
+                if raw_content and not cleaned_content:
+                    # Content was *pure* tool-call spam. Reject the draft the
+                    # same way the critic does — it was never appended to the
+                    # session, so the retry re-runs from the clean trail with
+                    # a steering note (bounded by _toolspam_done).
+                    with M._data_lock:
+                        tt = M.tasks.get(task_id)
+                        spam_done = (tt.get("_toolspam_done", 0) + 1) if tt else 0
+                        if tt:
+                            tt["_toolspam_done"] = spam_done
+                    if spam_done > 2:
+                        M._set_task_error(
+                            task_id,
+                            "Model repeatedly emitted tool-call markup instead of a reply",
+                            sid,
+                        )
+                        continue
+                    with M._data_lock:
+                        if sid in M.sessions:
+                            M.sessions[sid].append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "[SYSTEM NOTE — internal revision. Your previous draft was "
+                                        "rejected and must NOT be reused or repeated. Reason: it was "
+                                        "raw tool-call markup instead of a reply. Answer in plain "
+                                        "language without any tool-call syntax.]"
+                                    ),
+                                    "_steering": True,
+                                }
+                            )
+                            M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
+                    M.save_sessions()
+                    M.set_status(task_id, "Re-running (tool-call markup)...")
+                    print(f"[llm_ok] content was pure tool-call markup — re-scheduling task {task_id} (round={round_num})")  # DEBUG
+                    M._start_llm_round(task_id, sid, round_num)
+                    continue
                 if t.get("research"):
                     M.set_status(task_id, "Verifying sources...")
                     with M._data_lock:

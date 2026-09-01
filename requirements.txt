@@ -8,3 +8,4 @@ websockets
 cryptography
 requests
 starlette
+sqlite-vec==0.1.9

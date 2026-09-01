@@ -43,11 +43,13 @@ from server.config import (  # noqa: F401
     LLAMA_BASE,
     LLAMA_BASE_CPU,
     LLAMA_BASE_GUARDRAIL,
+    LLAMA_BASE_EMBED,
     LLAMA_GEMMA_NGL,
     LLAMA_QWEN_NGL,
     LLAMA_SERVER_ARGS,
     LLAMA_SERVER_ARGS_CPU,
     LLAMA_SERVER_ARGS_GUARDRAIL,
+    LLAMA_SERVER_ARGS_EMBED,
     LLAMA_SERVER_PATH,
     LLAMA_SLOT_SAVE_DIR,
     LLAMA_URL,
@@ -57,6 +59,7 @@ from server.config import (  # noqa: F401
     MODEL_ID,
     MODEL_ID_CPU,
     MODEL_ID_GUARDRAIL,
+    MODEL_ID_EMBED,
     MCP_USER,
     PER_MESSAGE_OVERHEAD,
     PORT,
@@ -277,6 +280,7 @@ from server.features.monitoring import (  # noqa: E402
     ensure_comfyui_running,
     recycle_comfyui,
     ensure_llama_server,
+    ensure_embed_ready,
     get_gpu_temp,
     get_ram_usage,
     kill_comfyui,
@@ -345,6 +349,11 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[startup] ERROR: SearXNG is not reachable at {SEARXNG_URL} ({e}). Web search will not work. Exiting.")
         sys.exit(1)
+    # Eagerly bring up the embedding llama-server (8084) and load nomic so the
+    # page-cache vector layer is ready at boot rather than stalling on the first
+    # embedding call. Runs on a daemon thread so a slow model load never blocks
+    # startup; ensure_embed_ready degrades to keyed-only cache if it can't come up.
+    threading.Thread(target=ensure_embed_ready, daemon=True).start()
     threading.Thread(target=_event_loop, daemon=True).start()
     # One queue worker per lane: GPU (interactive UI users) and CPU (self-chat
     # agents) now run fully independently, so an agent task can never make a

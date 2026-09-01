@@ -20,7 +20,7 @@ import requests
 
 from server.features.state import M
 
-_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8083"}
+_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8083", "embed": "8084"}
 
 
 def model_status_snapshot():
@@ -126,6 +126,7 @@ def restart_llama_server(mode):
         "gpu": M.LLAMA_SERVER_ARGS,
         "cpu": M.LLAMA_SERVER_ARGS_CPU,
         "guardrail": M.LLAMA_SERVER_ARGS_GUARDRAIL,
+        "embed": M.LLAMA_SERVER_ARGS_EMBED,
     }[mode]
     _start_llama_process(args, mode)
 
@@ -136,6 +137,64 @@ def ensure_llama_server(mode):
         return
     print(f"[llama] {mode} llama-server not reachable — starting...")
     restart_llama_server(mode)
+
+
+_embed_ready_lock = threading.Lock()
+_embed_starting = False
+
+
+def _embed_ready_now(model_id=None):
+    base = M.server_base("embed")
+    model_id = (model_id or "").strip() or M.MODEL_ID_EMBED
+    return M.is_llama_alive(base) and M.is_model_ready(base, model_id)
+
+
+def ensure_embed_ready(timeout=240, model_id=None):
+    """Start the embedding llama-server (8084) and load nomic into it.
+
+    The embed server is process-alive after boot, but with ``--models-dir`` and
+    no ``--model`` it does not serve /embedding until nomic is loaded via
+    ``POST /models/load``. This helper ensures the server is up and the model is
+    resident, waiting and polling (never thundering-herding — only the first
+    concurrent caller issues the load).
+
+    Returns True when nomic is ready to serve embeddings, False otherwise.
+    """
+    global _embed_starting
+    model_id = (model_id or "").strip() or M.MODEL_ID_EMBED
+    base = M.server_base("embed")
+    if _embed_ready_now(model_id):
+        return True
+    with _embed_ready_lock:
+        if _embed_ready_now(model_id):
+            return True
+        if _embed_starting:
+            pass  # another caller owns the load; poll below
+        else:
+            _embed_starting = True
+            try:
+                ensure_llama_server("embed")
+                try:
+                    r = requests.post(
+                        f"{base}/models/load",
+                        json={"model": model_id},
+                        timeout=180,
+                    )
+                    print(
+                        f"[embed] nomic load POST -> {r.status_code} {r.text[:120]}"
+                    )
+                except Exception as e:
+                    print(f"[embed] nomic load POST failed: {e}")
+            finally:
+                _embed_starting = False
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _embed_ready_now(model_id):
+            print(f"[embed] nomic ready on {base} ({model_id})")
+            return True
+        time.sleep(2)
+    print(f"[embed] nomic not ready within {timeout}s on {base} — degrading to keyed cache")
+    return False
 
 
 _guardrail_ready_lock = threading.Lock()
@@ -311,6 +370,9 @@ def restart_servers():
         _start_llama_process(M.LLAMA_SERVER_ARGS_GUARDRAIL, "guardrail")
     else:
         print("[llama] Skipping guardrail llama-server start (no guardrail lane activity)")
+    # Embedding llama-server is always started: the page-cache vector layer is
+    # a core retrieval feature, not tied to any task lane.
+    _start_llama_process(M.LLAMA_SERVER_ARGS_EMBED, "embed")
 
 
 _comfyui_recycling = False

@@ -399,6 +399,7 @@ server {
         auth_request_set $authentik_name $upstream_http_x_authentik_name;
         auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
         error_page 401 = @ak-sso-ai;
+        error_page 502 503 504 = @service_unavailable;
 
         proxy_pass http://127.0.0.1:3001/;
         proxy_http_version 1.1;
@@ -443,6 +444,7 @@ server {
         auth_request_set $authentik_name $upstream_http_x_authentik_name;
         auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
         error_page 401 = @ak-sso-ai;
+        error_page 502 503 504 = @service_unavailable;
 
         proxy_pass http://127.0.0.1:3001/api/;
         proxy_http_version 1.1;
@@ -471,6 +473,7 @@ server {
 
         # Fall back to guest mode without blocking 401
         error_page 401 = @stories_guest;
+        error_page 502 503 504 = @service_unavailable;
 
         rewrite ^/stories/(.*)$ /$1 break;
         proxy_pass http://127.0.0.1:3002;
@@ -506,6 +509,7 @@ server {
         auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
 
         error_page 401 = @free_content_guest;
+        error_page 502 503 504 = @service_unavailable;
 
         proxy_pass http://127.0.0.1:3002;
         proxy_set_header Host $http_host;
@@ -525,6 +529,7 @@ server {
         auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
 
         error_page 401 = @free_content_guest;
+        error_page 502 503 504 = @service_unavailable;
 
         proxy_pass http://127.0.0.1:3002;
         proxy_set_header Host $http_host;
@@ -554,6 +559,7 @@ server {
 
         # Redirect to SSO login on 401
         error_page 401 = @ak-sso-ai;
+        error_page 502 503 504 = @service_unavailable;
 
         proxy_pass http://127.0.0.1:3002;
         proxy_set_header Host $http_host;

@@ -395,6 +395,33 @@ LLAMA_URL_MCP = LLAMA_URL_GUARDRAIL
 MODEL_ID_MCP = MODEL_ID_GUARDRAIL
 LLAMA_SERVER_ARGS_MCP = LLAMA_SERVER_ARGS_GUARDRAIL
 
+# Dedicated embedding llama-server (port 8084). Serves the nomic 137M embedding
+# model through llama.cpp's /embedding endpoint; the vector layer of the page
+# cache (server/features/page_cache.py) posts to it so persisted pages/searches
+# can be recalled semantically without Ollama or the chat CPU model.
+LLAMA_BASE_EMBED = "http://localhost:8084"
+MODEL_ID_EMBED = "nomic-embed-text-v1.5.Q8_0"
+LLAMA_SERVER_ARGS_EMBED = [
+    "--host", "127.0.0.1",
+    "--port", "8084",
+    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    # Restrict this process to embedding only (no chat/completion) and use
+    # mean pooling + L2 normalisation, which is how nomic embeddings modelcard
+    # expects retrieval vectors to be produced.
+    "--embedding",
+    "--pooling", "mean",
+    "--embd-normalize", "2",
+    "--n-gpu-layers", "0",
+    "-fa", "off",
+    # Embedding prompts are tiny (title+text prefix); a short ctx keeps RAM and
+    # prefill modest. 8K supports a few thousand-token documents comfortably.
+    "--ctx-size", "8192",
+    # Use spare CPU without starving the concurrent chat CPU model on 8079.
+    "-t", "6",
+    "-tb", "6",
+    "--device", "none",
+]
+
 FILES_DIR = os.path.expanduser("~/local-ai-files")
 SESSIONS_DIR = os.path.join(FILES_DIR, "session")
 SESSIONS_FILE = os.path.join(SESSIONS_DIR, "sessions.json")
@@ -405,6 +432,9 @@ PROMPT_PATH = os.path.expanduser("~/local-ai-files/sys_prompt.txt")
 # Unified SQLite database: tasks, theme_log and MCP batches all live in this
 # one file (see server/db.py). Override at runtime with LOCAL_AI_DB.
 APP_DB = os.path.expanduser("~/local-ai-files/local_ai.db")
+# Persistent page/search cache (see server/features/page_cache.py). Lives with
+# the app DB, outside the repo; override at runtime with LOCAL_AI_PAGE_CACHE.
+PAGE_CACHE_DB = os.path.expanduser("~/local-ai-files/page_cache.db")
 IMAGE_TOKEN_COST = 1200
 AUDIO_TOKEN_COST = 800
 PER_MESSAGE_OVERHEAD = 4

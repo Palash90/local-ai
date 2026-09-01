@@ -368,6 +368,8 @@ def server_base(mode):
         return M.LLAMA_BASE_CPU
     if mode == "guardrail":
         return M.LLAMA_BASE_GUARDRAIL
+    if mode == "embed":
+        return M.LLAMA_BASE_EMBED
     return M.LLAMA_BASE
 
 
@@ -376,6 +378,8 @@ def server_url(mode):
         return M.LLAMA_URL_CPU
     if mode == "guardrail":
         return M.LLAMA_URL_GUARDRAIL
+    if mode == "embed":
+        return M.LLAMA_BASE_EMBED
     return M.LLAMA_URL
 
 

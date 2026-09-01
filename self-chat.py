@@ -2594,6 +2594,8 @@ def _conversation_attempt(
                 for r in s.get("results") or []:
                     title = r.get("title") or r.get("url") or ""
                     url = r.get("url", "")
+                    if _is_ad_url(url):
+                        continue
                     if deep_shared and _is_landing_url(url):
                         continue
                     snippet = (r.get("snippet") or r.get("content") or "")[:200]
@@ -2943,51 +2945,11 @@ def embed_story_image(img_url, stories_dir, round_number, speaker, idx):
     return local_name
 
 
-_LANDING_SEGMENT_RE = re.compile(
-    r"^(section|sections|category|categories|topics?|tags?|archive|index)$"
+from server.features.urlclassify import (
+    is_ad_url as _is_ad_url,
+    is_landing_url as _is_landing_url,
+    scrub_search_results,
 )
-
-# URL path segments that mark a site-internal search/category/listing page —
-# never an individual article ("flipkart.com/q/fashion-tops",
-# "nykaafashion.com/women/tops/c/4497", "meesho.com/tops-ladies/pl/3ja").
-_STRUCTURAL_PATH_SEGMENTS = {
-    "q", "s", "c", "pl", "pr", "p", "products", "product", "category",
-    "categories", "collection", "collections", "shop", "store", "search",
-    "browse", "listings", "listing", "tagged",
-}
-
-
-def _is_landing_url(url):
-    """True for site roots and section/landing pages rather than single articles.
-
-    Search engines answer generic "top news" queries with outlet homepages and
-    section pages (``/``, ``/technology/``, ``/section/technology``). Such a URL
-    can never back a specific claim, so it is only useful as a citation when
-    the same search returned nothing better (see ``collect_citations``).
-    """
-    try:
-        parsed = urlparse(url)
-        path = parsed.path or "/"
-    except (ValueError, AttributeError):
-        return False
-    path = path.rstrip("/")
-    if not path:
-        return True
-    segs = [s for s in path.split("/") if s]
-    if not segs:
-        return True
-    if any(seg.lower() in _STRUCTURAL_PATH_SEGMENTS for seg in segs):
-        return True
-    if len(segs) == 1:
-        seg = segs[0].lower()
-        # One clean segment with no file extension and no digits ("/technology")
-        # is a section page; real article slugs almost always carry a date, an
-        # ID, or a hyphenated multi-part path.
-        if "." not in seg and not re.search(r"\d", seg) and len(seg) <= 40:
-            return True
-    if _LANDING_SEGMENT_RE.match(segs[0].lower()):
-        return True
-    return False
 
 
 def collect_citations(citations, searches):
@@ -3000,14 +2962,59 @@ def collect_citations(citations, searches):
         # Prefer article-level links: when one search returned both deep
         # article URLs and landing pages, only the deep links can source a
         # claim — the landing pages are dropped from that search's citations.
-        has_deep = any(url and not _is_landing_url(url) for url, _ in found)
+        has_deep = any(
+            url and not _is_landing_url(url) and not _is_ad_url(url)
+            for url, _ in found
+        )
         for url, title in found:
             if not url or url in citations:
+                continue
+            # Ad/promo links (shopping, downloads, quotes, app stores, company
+            # profiles) are dropped unconditionally — unlike a landing page they
+            # are never acceptable even as a last-resort fallback citation.
+            if _is_ad_url(url):
+                print(f"[citations] Dropping ad/promo result: {url}")
                 continue
             if has_deep and _is_landing_url(url):
                 print(f"[citations] Dropping landing-page result: {url}")
                 continue
             citations[url] = (title or url, query)
+
+
+def strip_ad_links(text):
+    """Remove promotional/ad links from story text.
+
+    An inline ``[label](ad-url)`` citation becomes just its label text (the
+    sentence stays coherent without the clickable ad URL), and a bare
+    ``[ad-url]`` marker is dropped outright. Newline-separated References
+    entries are welded back together so no dangling blank lines remain.
+    """
+    if not text:
+        return text
+
+    def _fix(m):
+        label = m.group(1).strip()
+        url = m.group(2)
+        if not _is_ad_url(url):
+            return m.group(0)
+        if label == url or url in label:
+            return ""
+        return label
+
+    text = re.sub(r"\[([^\]]*)\]\((https?://[^)\s]+)\)", _fix, text)
+
+    def _bare(m):
+        url = m.group(1)
+        return "" if _is_ad_url(url) else m.group(0)
+
+    text = re.sub(r"\[(https?://[^\]\s)]+)\]", _bare, text)
+
+    text = re.sub(
+        r"\n\n(?=[-\d]+\.\s+[^[]*\(https?://[^)\s]+\))",
+        "\n",
+        text,
+    )
+    return text
 
 
 def strip_model_citations(text):
@@ -3208,6 +3215,7 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     cleaned = scrub_agent_names(cleaned)
     cleaned = strip_model_citations(cleaned)
     cleaned = beautify_inline_citations(cleaned)
+    cleaned = strip_ad_links(cleaned)
     cleaned = strip_image_markers(cleaned)
     lines = [
         f'<small style="color:#888">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n',
@@ -3230,14 +3238,24 @@ def finalize_story(fname, stories_dir, citations):
     sanitize_story_file(fname, stories_dir)
     if citations:
         lines = ["\n---\n\n## Citations & References\n\n"]
+        kept = 0
         for num, (url, (title, query)) in enumerate(citations.items(), start=1):
+            # Ad/promo URLs must never reach a published References section.
+            if _is_ad_url(url):
+                print(f"[references] Dropping ad/promo citation: {url}")
+                continue
+            kept += 1
             lines.append(
-                f"{num}. [{title}]({url})"
+                f"{kept}. [{title}]({url})"
                 + (f" *(source: {query})*" if query else "")
                 + "\n"
             )
-        with open(fname, "a", encoding="utf-8") as f:
-            f.writelines(lines)
+        lines.append("\n")
+        if kept:
+            with open(fname, "a", encoding="utf-8") as f:
+                f.writelines(lines)
+        else:
+            print("[references] All citations were ad/promo links — no section written.")
     print(f"Saved story to {fname}")
 
 
@@ -3539,6 +3557,7 @@ def run_cross_critique(
             if revised:
                 revised = scrub_agent_names(revised)
                 revised = beautify_inline_citations(revised)
+                revised = strip_ad_links(revised)
                 revised = normalize_markdown_lines(revised)
                 revised = sanitize_story_images(revised, stories_dir)
                 revised = strip_image_markers(revised)

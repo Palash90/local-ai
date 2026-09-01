@@ -10,7 +10,6 @@ proxied raw to llama-server.
 """
 
 import json
-import re
 import threading
 import time
 import uuid
@@ -29,6 +28,7 @@ from server.features.openai_adapter import (
     stream_tool_calls,
     format_tool_calls_for_response,
 )
+from server.features.toolstrip import strip_tool_call_text as _strip_tool_call_text
 
 
 # ---------------------------------------------------------------------------
@@ -59,34 +59,6 @@ def _require_api_key(handler):
         return None
     return {"key": token}
 
-
-# ---------------------------------------------------------------------------
-# Tool-call text stripping
-# ---------------------------------------------------------------------------
-
-_TOOL_CALL_TAG_RE = re.compile(
-    r"<\|?\s*tool_call\s*\|?>\s*(.*?)\s*<\|?\s*tool_call\s*\|?>",
-    flags=re.DOTALL | re.IGNORECASE,
-)
-
-
-def _strip_tool_call_text(text):
-    """Remove inline tool-call tags the model emits as *text* when tools are
-    disabled (e.g. the OpenAI lane sends ``tools: []`` + ``tool_choice: none``,
-    but a model trained to use tools may still leak ``<|tool_call|>`` variants
-    into its content).  Such tags are meaningless to an OpenAI client, so drop
-    them wholesale.  If the content is *only* tool-call spam, return an empty
-    string so the caller signals a stop rather than echoing junk to the caller.
-    """
-    if not text:
-        return text
-    stripped = _TOOL_CALL_TAG_RE.sub("", text).strip()
-    return stripped
-
-
-# ---------------------------------------------------------------------------
-# GET /v1
-# ---------------------------------------------------------------------------
 
 def handle_v1_root(handler):
     """Return a basic API info response for GET /v1/."""

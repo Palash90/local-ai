@@ -14,6 +14,8 @@ import asyncio
 
 from server.mcp_client import mcp_manager, dispatch_mcp_tool 
 from server.features.state import M
+from server.features.urlclassify import scrub_search_results
+from server.features import page_cache
 
 # How many search results to hand back to the LLM, and how many of the top
 # ones to enrich with the full page text (via fetch_page) so the LLM sees real
@@ -136,6 +138,29 @@ def _doc_result(final_url, title, text, max_chars, chunk=1, page_images=None):
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _finish_doc(canon_key, final_url, title, text, max_chars, chunk,
+                doc_type="web", page_images=None):
+    """Build the fetch payload AND persist the full page under ``canon_key``.
+
+    Only successfully fetched pages reach this point, so the persisted entry is
+    guaranteed to have passed the SSRF guard. Pages are stored once with their
+    full (pre-chunk) text; every later ``fetch_page(chunk=N)`` re-reads that
+    single copy instead of hitting the site again.
+    """
+    try:
+        page_cache.page_put(
+            canon_key,
+            final_url,
+            title or "",
+            text or "",
+            doc_type=doc_type,
+            page_images=page_images,
+        )
+    except Exception as e:
+        print(f"[fetch_page] cache write failed: {e}")
+    return _doc_result(final_url, title, text, max_chars, chunk, page_images)
+
+
 def _render_pdf_pages(doc, url):
     """Render image-only PDF pages (scanned) to PNG files the model can view.
 
@@ -256,8 +281,6 @@ def _parse_excel(raw, url):
 # fetches are paced globally so bursts from the research agents cannot get
 # the upstream engines rate-limited or CAPTCHA'd. Cache reads take only
 # _CACHE_LOCK and never wait on pacing or on an in-flight fetch.
-SEARCH_CACHE_TTL = 86400
-SEARCH_FRESH_TTL = 300
 SEARCH_CACHE_MAX = 256
 SEARCH_SIMILARITY_THRESHOLD = 0.7
 SEARCH_MIN_INTERVAL = 5.0
@@ -268,32 +291,25 @@ _SEARCH_LAST_FETCH = 0.0
 _SEARCH_CACHE = {}
 _IN_FLIGHT = {}
 
-_FRESH_QUERY_RE = re.compile(
-    r"\b(?:today|tonight|yesterday|now|current(?:ly)?|latest|breaking|"
-    r"recent(?:ly)?|news|headlines?|live|updates?|this\s+(?:week|month|year)|"
-    r"\d{4})\b",
-    re.IGNORECASE,
-)
-
 
 def _search_cache_get(norm_query, query, now):
     """Lock-free cache lookup; caller must hold _CACHE_LOCK."""
-    fresh = bool(_FRESH_QUERY_RE.search(query))
+    ttl = page_cache.regex_ttl(query)
     entry = _SEARCH_CACHE.get(norm_query)
     if entry:
+        # Prefer the per-entry TTL fixed when the answer was cached (which may
+        # have come from the LLM classifier); fall back to the regex default.
         age = now - entry[0]
-        if age <= (SEARCH_FRESH_TTL if fresh else SEARCH_CACHE_TTL):
+        if age <= (entry[2] if len(entry) > 2 else ttl):
             payload = dict(entry[1])
             payload["cached_result"] = True
             return payload
-    if fresh:
-        return None
     tokens = set(norm_query.split())
     if not tokens:
         return None
     best_key, best_score = None, 0.0
-    for key, (cached_at, _) in _SEARCH_CACHE.items():
-        if now - cached_at > SEARCH_CACHE_TTL:
+    for key, (cached_at, _, store_ttl) in _SEARCH_CACHE.items():
+        if now - cached_at > store_ttl:
             continue
         cand = set(key.split())
         if not cand:
@@ -308,10 +324,12 @@ def _search_cache_get(norm_query, query, now):
     return None
 
 
-def _search_cache_store(norm_query, payload):
+def _search_cache_store(norm_query, payload, ttl=None):
     snapshot = json.loads(json.dumps(payload))
+    if ttl is None:
+        ttl = page_cache.regex_ttl(norm_query)
     with _CACHE_LOCK:
-        _SEARCH_CACHE[norm_query] = (time.monotonic(), snapshot)
+        _SEARCH_CACHE[norm_query] = (time.monotonic(), snapshot, ttl)
         while len(_SEARCH_CACHE) > SEARCH_CACHE_MAX:
             oldest = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])
             del _SEARCH_CACHE[oldest]
@@ -336,6 +354,130 @@ def _pace_outbound_request():
         if wait > 0:
             time.sleep(wait)
         _SEARCH_LAST_FETCH = time.monotonic()
+
+
+# Semantic web_search reuse. When a query has no exact keyed-cache match we ask
+# the vector layer for previously-fetched pages whose meaning resembles the
+# query, then reuse them as the result set. Only high-confidence hits are used;
+# below this score the query degrades to a live SearXNG fetch.
+_SEMANTIC_HIT_MIN_SCORE = 0.60
+_SEMANTIC_HIT_K = 5
+
+# TTL the LLM is allowed to return, in seconds.
+_LLM_TTL_MIN = 60
+_LLM_TTL_MAX = 30 * 24 * 3600
+# Few-shot prompt for the raw /completion endpoint. The chat models here think
+# unconditionally (channel templates) and burn the token budget before the
+# JSON ever appears, so the classifier uses base-style completion instead:
+# examples teach the judgment, a GBNF grammar guarantees the shape, and the
+# shared prefix stays prompt-cached (cache_reuse) for ~0.5s classifications.
+_LLM_TTL_FEWSHOT = (
+    "Classify how long a web-search answer stays valid.\n"
+    'Query: latest breaking news headlines -> {"ttl_seconds": 300}\n'
+    'Query: how to bake sourdough bread -> {"ttl_seconds": 2592000}\n'
+    'Query: nvidia stock price right now -> {"ttl_seconds": 60}\n'
+    'Query: python asyncio tutorial -> {"ttl_seconds": 2592000}\n'
+    'Query: premier league results from yesterday -> {"ttl_seconds": 3600}\n'
+)
+_LLM_TTL_GRAMMAR = (
+    'root ::= "{" [ ]*"\\\"ttl_seconds\\\""[ ]*":"[ ]*[0-9]+ "}"'
+)
+_LLM_TTL_TIMEOUT = 10
+# Lanes tried in order for the TTL classification. The GPU lane serves every
+# interactive chat (web_search's only caller), the CPU/guardrail lanes serve
+# agent runs. All three sit behind lazy routers that would happily START a
+# multi-GB model load for our little request, so each lane is gated on
+# ``is_model_ready`` first: an unloaded lane is skipped, never poked.
+_LLM_TTL_LANES = ("gpu", "guardrail", "cpu")
+
+
+def _llm_ttl(query, default_ttl):
+    """Ask the LLM how long this query's answer stays fresh.
+
+    Returns seconds for the cache. On any failure (no loaded lane, malformed
+    reply) falls back to ``default_ttl`` so a classifier hiccup never blocks a
+    search. Uses grammar-constrained raw completion: one tiny decode pass,
+    immune to thinking-mode token burn. Only lanes with an already-loaded
+    model are used — this call must never itself trigger a model load.
+    """
+    payload = {
+        "prompt": _LLM_TTL_FEWSHOT + f"Query: {query} ->",
+        "n_predict": 16,
+        "temperature": 0.1,
+        "grammar": _LLM_TTL_GRAMMAR,
+        "cache_reuse": 256,
+    }
+    r = None
+    for lane in _LLM_TTL_LANES:
+        url = M.server_url(lane)
+        base = url[: -len("/v1/chat/completions")] if url.endswith(
+            "/v1/chat/completions"
+        ) else url
+        model_id = M.server_model_id(lane)
+        if not M.is_model_ready(base, model_id):
+            continue
+        try:
+            r = requests.post(
+                f"{base}/completion",
+                json=dict(payload, model=model_id),
+                timeout=_LLM_TTL_TIMEOUT,
+            )
+            if r.status_code == 200:
+                break
+            print(f"[ttl] {lane} lane HTTP {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            print(f"[ttl] {lane} lane unavailable: {e}")
+    else:
+        print("[ttl] no loaded LLM lane, using regex default")
+        return default_ttl
+    try:
+        content = r.json().get("content") or ""
+        start, end = content.find("{"), content.rfind("}")
+        if start == -1 or end == -1:
+            print(f"[ttl] classifier non-JSON: {content[:80]!r}")
+            return default_ttl
+        raw = int(json.loads(content[start : end + 1]).get("ttl_seconds") or 0)
+        if raw <= 0:
+            print(f"[ttl] classifier returned non-positive TTL: {raw!r}")
+            return default_ttl
+    except Exception as e:
+        print(f"[ttl] classifier failed, using default: {e}")
+        return default_ttl
+    ttl = max(_LLM_TTL_MIN, min(_LLM_TTL_MAX, raw))
+    print(f"[ttl] LLM TTL for {query!r} -> {ttl}s")
+    return ttl
+
+
+def _semantic_search_hit(query, min_score=_SEMANTIC_HIT_MIN_SCORE,
+                         k=_SEMANTIC_HIT_K):
+    """Return a web_search payload built from vector-cached pages, or None.
+
+    ``page_semantic`` returns pages already fetched/stored (with real nomic
+    embeddings). If the top hits clear ``min_score`` we can answer the query
+    from them instead of the network.
+    """
+    hits = page_cache.page_semantic(query, k=k, min_score=min_score)
+    if not hits:
+        return None
+    results = []
+    for h in hits:
+        results.append(
+            {
+                "title": h["title"] or h["url"],
+                "url": h["url"],
+                "snippet": h.get("snippet") or "",
+                "semantic_score": h["score"],
+            }
+        )
+    if not results:
+        return None
+    payload = {
+        "results": results,
+        "search_date": datetime.now().strftime("%Y-%m-%d %A"),
+        "query": query,
+        "semantic_recall": True,
+    }
+    return payload
 
 
 def web_search(query, current_time=None, current_location=None):
@@ -374,6 +516,26 @@ def web_search(query, current_time=None, current_location=None):
     if hit is not None:
         print("Web-search cache hit")
         return json.dumps(hit)
+    if hit is None:
+        # Persistent (cross-restart) cache: a query answered before this
+        # process started should never cost another SearXNG request.
+        hit = page_cache.search_get(norm_query)
+        if hit is not None:
+            _search_cache_store(norm_query, hit, ttl=hit.get("_ttl"))
+            print("Web-search cache hit (persistent)")
+            return json.dumps(hit)
+    if hit is None:
+        # Semantic recall: this query shares no exact key with a cached search,
+        # but we may have already fetched pages (via fetch_page or enrichment)
+        # whose meaning matches the query. Reuse those instead of another
+        # SearXNG call — the whole point of the vector layer.
+        hit = _semantic_search_hit(clean_query)
+        if hit is not None:
+            if owns_slot:
+                _finish_inflight(norm_query, inflight)
+            _search_cache_store(norm_query, hit)
+            print("Web-search cache hit (semantic)")
+            return json.dumps(hit)
     if not owns_slot:
         # An identical fetch is already running: wait for its result
         # instead of duplicating the request.
@@ -409,14 +571,26 @@ def web_search(query, current_time=None, current_location=None):
                 "snippet": x.get("content", "") or x.get("snippet", ""),
             }
         )
+    # Scrub ads/promo and orphan landing pages BEFORE this result set is handed
+    # to the LLM (it is also what gets recorded as _search_details and later
+    # re-read by the story pipeline). The model should never see a shopping,
+    # download, quote, or company-profile URL as a possible source.
+    formatted = scrub_search_results(formatted)
     payload = _respond(formatted)
+    # Ask the LLM how long this answer stays fresh so the next identical query
+    # re-fetches at the right time ("breaking news" -> seconds, "how to" -> days),
+    # rather than a fixed regex heuristic. Falls back to the regex default if
+    # the classifier call fails or the LLM is unreachable. Computed once and
+    # used for both the in-memory and persistent stores.
+    ttl = _llm_ttl(query, page_cache.regex_ttl(query))
     # Cache the raw results before enrichment so waiters can pick them up,
     # then re-store the enriched version once page fetching completes.
-    _search_cache_store(norm_query, payload)
+    _search_cache_store(norm_query, payload, ttl=ttl)
     _finish_inflight(norm_query, inflight)
     enriched = _enrich_top_results(formatted)
     payload["results"] = enriched
-    _search_cache_store(norm_query, payload)
+    _search_cache_store(norm_query, payload, ttl=ttl)
+    page_cache.search_put(norm_query, query, payload, ttl=ttl)
     return json.dumps(payload)
 
 
@@ -506,6 +680,18 @@ def _fetch_page_impl(url, max_chars=24000, chunk=1):
         chunk = max(1, int(chunk or 1))
     except (TypeError, ValueError):
         chunk = 1
+    canon_url = url.split("#", 1)[0] or url
+    cached = page_cache.page_get(canon_url)
+    if cached is not None:
+        print(f"[fetch_page] cache hit for {canon_url}")
+        return _doc_result(
+            cached["final_url"],
+            cached["title"],
+            cached["text"],
+            max_chars,
+            chunk,
+            cached["page_images"],
+        )
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -544,13 +730,20 @@ def _fetch_page_impl(url, max_chars=24000, chunk=1):
 
         if kind == "pdf":
             text, doc_title, page_images = _parse_pdf(raw, url)
-            return _doc_result(r.url, doc_title, text, max_chars, chunk, page_images)
+            return _finish_doc(
+                canon_url, r.url, doc_title, text, max_chars, chunk,
+                doc_type="pdf", page_images=page_images,
+            )
         if kind == "csv":
             text, doc_title = _parse_csv(raw, url)
-            return _doc_result(r.url, doc_title, text, max_chars, chunk)
+            return _finish_doc(
+                canon_url, r.url, doc_title, text, max_chars, chunk, doc_type="csv"
+            )
         if kind == "excel":
             text, doc_title = _parse_excel(raw, url)
-            return _doc_result(r.url, doc_title, text, max_chars, chunk)
+            return _finish_doc(
+                canon_url, r.url, doc_title, text, max_chars, chunk, doc_type="excel"
+            )
         if kind == "excel_xls_unsupported":
             return json.dumps(
                 {
@@ -590,7 +783,9 @@ def _fetch_page_impl(url, max_chars=24000, chunk=1):
         main = soup.find("main") or soup.find("article") or soup.find("body") or soup
         text = main.get_text(separator="\n", strip=True)
         text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-        return _doc_result(r.url, title, text, max_chars, chunk)
+        return _finish_doc(
+            canon_url, r.url, title, text, max_chars, chunk, doc_type="web"
+        )
     except Exception as e:
         print(f"[fetch_page] Failed: {e}")
         return json.dumps({"url": url, "error": f"Failed to fetch page: {e}"})
