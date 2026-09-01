@@ -42,7 +42,13 @@ if not CACHE_DIR:
 EMBED_URL = os.environ.get("LOCAL_AI_EMBED_URL", "http://localhost:8084").rstrip("/")
 EMBED_MODEL = os.environ.get("LOCAL_AI_EMBED_MODEL", "nomic-embed-text-v1.5.Q8_0")
 EMBED_DIM = int(os.environ.get("LOCAL_AI_EMBED_DIM", "768"))
-EMBED_BUDGET_CHARS = 6000
+# Page text handed to the embedder is truncated to this many characters
+# BEFORE the request. nomic-embed-text-v1.5 has a native 2048-token window and
+# the server rejects longer inputs; 3000 chars stays inside it even for the
+# densest real-world text (~1.5 chars/token for CJK/code), while ordinary
+# prose (~4 chars/token) keeps ~750 tokens of the article body — plenty of
+# retrieval signal for semantic recall.
+EMBED_BUDGET_CHARS = 3000
 
 SEARCH_FRESH_TTL = 300
 SEARCH_STALE_TTL = 30 * 24 * 3600
@@ -263,6 +269,52 @@ def page_get(url):
     }
 
 
+def _backfill_vecs(conn, limit=4):
+    """Re-vectorize cached pages whose embedding is missing.
+
+    A transient embed-server outage (RAM starvation, restart race) used to
+    leave a page cached but semantically blind for its whole TTL — the store
+    failure degraded gracefully but was never retried. Heal lazily instead of
+    with a startup pass: the vector layer's only consumer (``page_semantic``)
+    backfills a bounded batch of orphans before querying, so coverage recovers
+    as semantic recall is actually used. Returns the number healed.
+    """
+    try:
+        rows = conn.execute(
+            f"SELECT p.url, p.title, p.text FROM pages p "
+            f"LEFT JOIN {_VEC_TABLE} v ON v.url = p.url "
+            "WHERE v.url IS NULL LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except Exception as e:
+        print(f"[page_cache] vector backfill lookup failed: {e}")
+        return 0
+    if not rows:
+        return 0
+    fixed = 0
+    for r in rows:
+        try:
+            vecs = _request_embeddings(
+                [f"{r['title']} :: {r['text']}"[:EMBED_BUDGET_CHARS]]
+            )
+            if not vecs:
+                break  # provider down — stop, don't hammer it
+            conn.execute(
+                f"INSERT OR REPLACE INTO {_VEC_TABLE}(url, embedding) VALUES (?, ?)",
+                (r["url"], json.dumps(vecs[0])),
+            )
+            fixed += 1
+        except Exception as e:
+            print(f"[page_cache] vector backfill failed for {r['url']}: {e}")
+            break
+    if fixed:
+        conn.commit()
+        print(
+            f"[page_cache] backfilled {fixed}/{len(rows)} missing page vector(s)"
+        )
+    return fixed
+
+
 def page_semantic(query, k=5, min_score=0.6):
     """Return cached pages whose embedding is close to ``query``.
 
@@ -278,6 +330,8 @@ def page_semantic(query, k=5, min_score=0.6):
     with _lock:
         conn = _connect()
         try:
+            # Heal pages cached during an embed outage before querying.
+            _backfill_vecs(conn)
             rows = conn.execute(
                 f"SELECT url, distance FROM {_VEC_TABLE} "
                 "WHERE embedding MATCH ? AND k = ?",

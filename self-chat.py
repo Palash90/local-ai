@@ -2948,6 +2948,7 @@ def embed_story_image(img_url, stories_dir, round_number, speaker, idx):
 from server.features.urlclassify import (
     is_ad_url as _is_ad_url,
     is_landing_url as _is_landing_url,
+    is_ugc_url as _is_ugc_url,
     scrub_search_results,
 )
 
@@ -2974,6 +2975,9 @@ def collect_citations(citations, searches):
             # are never acceptable even as a last-resort fallback citation.
             if _is_ad_url(url):
                 print(f"[citations] Dropping ad/promo result: {url}")
+                continue
+            if _is_ugc_url(url):
+                print(f"[citations] Dropping social/forum result: {url}")
                 continue
             if has_deep and _is_landing_url(url):
                 print(f"[citations] Dropping landing-page result: {url}")
@@ -3243,6 +3247,11 @@ def finalize_story(fname, stories_dir, citations):
             # Ad/promo URLs must never reach a published References section.
             if _is_ad_url(url):
                 print(f"[references] Dropping ad/promo citation: {url}")
+                continue
+            # Social/forum threads (Reddit, Quora, X, ...) may inform the
+            # story but a formal report never cites a comment thread.
+            if _is_ugc_url(url):
+                print(f"[references] Dropping social/forum citation: {url}")
                 continue
             kept += 1
             lines.append(

@@ -55,6 +55,13 @@ SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL", "").strip().rstrip("/")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 REASONING_BUDGET = 2048
+# The judge lane emits one short verdict per call, but judges are thinking
+# models: a 2048-token reasoning budget means a worst case of ~3 minutes of
+# CPU decode per verdict — far past the judge timeout, so research-verify
+# persistently read-timed-out and failed its retry. 512 reasoning tokens is
+# still generous headroom for a verdict while keeping worst-case latency
+# inside it.
+GUARDRAIL_REASONING_BUDGET = 512
 MAX_OUTPUT_TOKENS = 8192
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,7 +177,7 @@ VERIFY_MAX_CITES_PER_URL = 3  # flag a source cited for more distinct claims tha
 # citation, or requirement-mismatch answers are re-scheduled (regenerated via the
 # generation model with a steering message) up to these bounds; UNSAFE answers
 # that still fail after retries are declined instead of delivered.
-VERIFY_QUALITY_GATE = 70     # answers scoring below this (0-100) get re-scheduled
+VERIFY_QUALITY_GATE = 80     # answers scoring below this (0-100) get re-scheduled
 VERIFY_MAX_RETRIES = 2       # max judge/quality re-runs before decline/deliver
 
 # Review-only self-chat roles that must NEVER call tools. The editor/moderator
@@ -378,7 +385,7 @@ LLAMA_SERVER_ARGS_GUARDRAIL = [
     "-t", "4",
     "-tb", "4",
     "--cache-reuse", "256",
-    "--reasoning-budget", str(REASONING_BUDGET),
+    "--reasoning-budget", str(GUARDRAIL_REASONING_BUDGET),
     "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
     "--temp", "1.0",
     "--top-p", "0.95",
@@ -413,9 +420,13 @@ LLAMA_SERVER_ARGS_EMBED = [
     "--embd-normalize", "2",
     "--n-gpu-layers", "0",
     "-fa", "off",
-    # Embedding prompts are tiny (title+text prefix); a short ctx keeps RAM and
-    # prefill modest. 8K supports a few thousand-token documents comfortably.
-    "--ctx-size", "8192",
+    # nomic-embed-text-v1.5 has a NATIVE 2048-token window (n_ctx_train); the
+    # server rejects longer inputs even with a larger --ctx-size. Match the
+    # model: window, batch, and micro-batch all 2048. Page text is truncated
+    # to EMBED_BUDGET_CHARS in page_cache before it ever reaches here.
+    "--ctx-size", "2048",
+    "-b", "2048",
+    "-ub", "2048",
     # Use spare CPU without starving the concurrent chat CPU model on 8079.
     "-t", "6",
     "-tb", "6",

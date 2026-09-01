@@ -21,7 +21,7 @@ from server.features import page_cache
 # ones to enrich with the full page text (via fetch_page) so the LLM sees real
 # content instead of only engine snippets.
 WEB_SEARCH_RESULT_LIMIT = 10
-WEB_SEARCH_ENRICH_TOP = 2
+WEB_SEARCH_ENRICH_TOP = 6
 WEB_SEARCH_ENRICH_CHARS = 6000
 WEB_SEARCH_ENRICH_TIMEOUT = 25
 
@@ -575,7 +575,7 @@ def web_search(query, current_time=None, current_location=None):
     # to the LLM (it is also what gets recorded as _search_details and later
     # re-read by the story pipeline). The model should never see a shopping,
     # download, quote, or company-profile URL as a possible source.
-    formatted = scrub_search_results(formatted)
+    formatted = scrub_search_results(formatted, query=query)
     payload = _respond(formatted)
     # Ask the LLM how long this answer stays fresh so the next identical query
     # re-fetches at the right time ("breaking news" -> seconds, "how to" -> days),

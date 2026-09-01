@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, useCallback, useEffect, memo } from 'react'
+import { createPortal } from 'react-dom'
 import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import DOMPurify from 'dompurify'
@@ -156,7 +157,7 @@ function ShareButton({ sessionId, msgIndex, forceShow }) {
           </svg>
         )}
       </button>
-      {share && (
+      {share && createPortal(
         <div className="share-modal-overlay" onClick={() => setShare(null)}>
           <div className="share-modal" onClick={e => e.stopPropagation()}>
             <div className="share-modal-header">
@@ -176,7 +177,8 @@ function ShareButton({ sessionId, msgIndex, forceShow }) {
               <a className="share-open-link" href={share.url} target="_blank" rel="noreferrer">Open</a>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
       {error && <span className="share-error" role="alert">{error}</span>}
     </>
@@ -750,7 +752,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
           <em>(No response text generated)</em>
         </div>
       ) : null}
-      {pageModal && (
+      {pageModal && createPortal(
         <div className="page-modal-overlay" onClick={() => setPageModal(null)}>
           <div className="page-modal" onClick={e => e.stopPropagation()}>
             <div className="page-modal-header">
@@ -773,7 +775,8 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   )

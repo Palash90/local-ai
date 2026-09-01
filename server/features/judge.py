@@ -348,6 +348,86 @@ def wait_until_render_safe(timeout=_RENDER_WAIT_TIMEOUT, cooldown=_RENDER_COOLDO
     return time.time() < deadline
 
 
+# ── Judge-model call serialization (CPU judge lane) ──────────────────────────
+# The guardrail server hosts several judge models (MCP verify, per-user judges,
+# the configured default) but only ONE may be resident at a time — a swap
+# unloads the previous weights. Unloading while another judge's POST is still
+# in flight resets that connection ("proxy error: Failed to read connection")
+# and fail-closed judges then BLOCK benign traffic. These helpers count
+# in-flight calls per claimed model so a swap waits until the old judge's
+# calls have drained — the same one-thing-at-a-time discipline as the GPU task
+# queue. Same-model calls never wait (the server runs --parallel 2).
+
+_JUDGE_USE = threading.Condition()
+_JUDGE_STATE = {"model": "", "in_flight": 0}
+
+
+def _acquire_judge_model(model_id, label):
+    """Claim the judge lane for ``model_id`` — waiting as long as it takes.
+
+    CPU-side judges are background work: when a DIFFERENT judge model has
+    calls in flight, we simply wait until its last call drains (bounded by
+    the per-POST timeouts), then swap. No deadline, no racing an unload past
+    a live request — slow but steady beats a reset connection that fail-closed
+    judges turn into a BLOCKED verdict. A heartbeat keeps the wait visible in
+    the logs. Never raises.
+    """
+    started = time.time()
+    last_beat = 0.0
+    with _JUDGE_USE:
+        while True:
+            # A RAM evacuation is tearing everything down (often because a
+            # render + a judge load tipped the box over) — loading judge
+            # weights into that storm is exactly how renders get killed
+            # mid-flight. Wait it out; the evacuation always ends.
+            evacuating = False
+            try:
+                from server.features.state import M
+                with M._data_lock:
+                    evacuating = bool(M._ram_evacuating)
+            except Exception:
+                evacuating = False
+            cur = _JUDGE_STATE["model"]
+            if evacuating:
+                if time.time() - last_beat >= 30.0:
+                    print(
+                        f"[guardrail][{label}] RAM evacuation in progress — "
+                        "holding judge call",
+                        flush=True,
+                    )
+                    last_beat = time.time()
+                _JUDGE_USE.wait(1)
+                continue
+            if not cur or cur == model_id or _JUDGE_STATE["in_flight"] == 0:
+                _JUDGE_STATE["model"] = model_id
+                _JUDGE_STATE["in_flight"] += 1
+                if time.time() - started > 1.0:
+                    print(
+                        f"[guardrail][{label}] judge lane free after "
+                        f"{time.time() - started:.0f}s — proceeding with "
+                        f"'{model_id}'",
+                        flush=True,
+                    )
+                return
+            if time.time() - last_beat >= 30.0:
+                print(
+                    f"[guardrail][{label}] judge lane busy on '{cur}' "
+                    f"({_JUDGE_STATE['in_flight']} call(s) in flight) — "
+                    "waiting for it to complete",
+                    flush=True,
+                )
+                last_beat = time.time()
+            _JUDGE_USE.wait(1)
+
+
+def _release_judge_model(model_id):
+    """Drop one in-flight call for ``model_id`` and wake swap waiters."""
+    with _JUDGE_USE:
+        if _JUDGE_STATE["model"] == model_id:
+            _JUDGE_STATE["in_flight"] = max(0, _JUDGE_STATE["in_flight"] - 1)
+        _JUDGE_USE.notify_all()
+
+
 # ── GPU fallback for UI-lane post-generation judges ─────────────────────────
 # The guardrail judge server is CPU-only and shared by every lane: MCP batch
 # verification (L2/L3) and the Kaya/Kolpo agent output judges each keep their
@@ -505,7 +585,7 @@ def _judge_completion(label, system_prompt, user_content, base_url, timeout,
         # a tight timeout here would fail-closed-block benign traffic after
         # every idle unload. Mirrors SAMPLING_ROUTER_TIMEOUT=90 in config.py.
         try:
-            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
+            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "240"))
         except ValueError:
             timeout = _JUDGE_MIN_TIMEOUT
     user_content = (user_content or "").strip()
@@ -543,9 +623,36 @@ def _judge_completion(label, system_prompt, user_content, base_url, timeout,
             [cached] if cached else None
         ) or _judge_candidates(base_url, forced=model_id)
 
-    if (model_id or "").strip():
-        ensure_judge_ready(base_url, model_id=model_id)
+    # Serialize cross-model judge usage: hold the lane for the model we are
+    # about to ensure/POST so a concurrent call on a DIFFERENT judge model
+    # waits for our calls to drain instead of unloading weights under us.
+    # GPU-fallback calls are exempt (the GPU lane has its own queue).
+    claimed_model = (model_id or "").strip() or (
+        candidates[0] if candidates else ""
+    )
+    claimed = bool(claimed_model) and not gpu_base
+    if claimed:
+        _acquire_judge_model(claimed_model, label)
+    try:
+        if (model_id or "").strip():
+            ensure_judge_ready(base_url, model_id=model_id)
+        return _judge_post_loop(
+            label, system_prompt, user_content, base_url, timeout,
+            max_chars, model_id, candidates, cache_key, gpu_base,
+        )
+    finally:
+        if claimed:
+            _release_judge_model(claimed_model)
 
+
+def _judge_post_loop(label, system_prompt, user_content, base_url, timeout,
+                     max_chars, model_id, candidates, cache_key, gpu_base):
+    """Raw POST + retry loop; the caller holds the judge-lane claim."""
+    try:
+        import requests
+    except Exception as e:
+        print(f"[guardrail][{label}] requests unavailable: {e}")
+        return None, None
     max_tokens = _judge_max_tokens()
     last_err = ""
     attempts = 0
@@ -631,7 +738,7 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
     """
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         try:
-            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
+            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "240"))
         except ValueError:
             timeout = _JUDGE_MIN_TIMEOUT
     text = (text or "").strip()
@@ -726,7 +833,7 @@ def mcp_output_judge(text, timeout=None, fail_closed=True, model_id=None,
     # fails fast (connection refused), so this only tolerates slow starts.
     if timeout is None or timeout < 240:
         try:
-            env_timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
+            env_timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "240"))
         except ValueError:
             env_timeout = _JUDGE_MIN_TIMEOUT
         timeout = max(240, env_timeout)
@@ -840,7 +947,7 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
     base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         try:
-            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
+            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "240"))
         except ValueError:
             timeout = _JUDGE_MIN_TIMEOUT
     answer = (answer or "").strip()
@@ -902,7 +1009,7 @@ def llm_verify_answer_quality(user_input, answer, base_url=None, timeout=None,
     base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         try:
-            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "90"))
+            timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "240"))
         except ValueError:
             timeout = _JUDGE_MIN_TIMEOUT
     answer = (answer or "").strip()

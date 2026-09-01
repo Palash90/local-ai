@@ -373,6 +373,18 @@ def restart_servers():
     # Embedding llama-server is always started: the page-cache vector layer is
     # a core retrieval feature, not tied to any task lane.
     _start_llama_process(M.LLAMA_SERVER_ARGS_EMBED, "embed")
+    # Keep nomic RESIDENT instead of lazily loaded. After a RAM evacuation the
+    # restarted server would otherwise pull the model on the first embedding
+    # request — which is exactly when RAM is tightest and a failed load shows
+    # up as page-cache 500s. It is a small CPU model and always wanted, so
+    # preload it here (idempotent; concurrent boot callers wait, not herd).
+    try:
+        if ensure_embed_ready(timeout=120):
+            print("[restart] nomic preloaded on http://localhost:8084")
+        else:
+            print("[restart] nomic preload incomplete — will lazy-load on first use")
+    except Exception as e:
+        print(f"[restart] nomic preload failed (will lazy-load): {e}")
 
 
 _comfyui_recycling = False
