@@ -75,6 +75,30 @@ PASSWORD_B = os.environ.get("SELF_CHAT_B_PASSWORD", _SHARED_PASSWORD)
 
 STOP_PHRASE = "[END CONVERSATION]"
 POLL_INTERVAL_SECONDS = 5.0
+
+# The chat server (chat-webui.py) occasionally dies and is restarted by its
+# supervisor (see server logs — a broken llama-server stream can take the whole
+# process down). A restart wipes in-memory state, so an in-flight self-chat
+# request fails with a connection error or a 404 "session not found" until the
+# server is back and its sessions have reloaded from disk. Retry so a single
+# transient failure does not abandon an entire round:
+#   SELF_CHAT_RETRY_ATTEMPTS  per-request retries (exponential backoff),
+#   SELF_CHAT_REPLAY_ATTEMPTS  re-submits of a message whose task died
+#                              mid-flight on a restarted server.
+RETRY_ATTEMPTS = max(1, int(os.environ.get("SELF_CHAT_RETRY_ATTEMPTS", "8")))
+RETRY_BACKOFF_START = 1.0
+RETRY_BACKOFF_MAX = 30.0
+REPLAY_ATTEMPTS = max(1, int(os.environ.get("SELF_CHAT_REPLAY_ATTEMPTS", "2")))
+
+# Story-level cast continuity. Off by default (each run gets fresh characters
+# for variety); enable to reuse the FIRST-resolved cast of a task on every
+# later encounter (and across restarts via the JSON registry), so a recurring
+# character like "Barnaby" stays the same person. A task may opt in alone via
+# ``"pin_cast": true`` in its tasks.json spec.
+#   SELF_CHAT_PIN_CAST=1  pin every task's cast.
+PIN_CAST = os.environ.get("SELF_CHAT_PIN_CAST", "0") == "1"
+CAST_REGISTRY_PATH = os.path.expanduser("~/local-ai-files/cast_registry.json")
+
 SLEEP_BETWEEN_TURNS = 30.0
 MAX_MESSAGES_PER_AGENT = 10
 AGENT_NAMES = {"A": "Kolpo", "B": "Kaya"}
@@ -90,6 +114,7 @@ PASSWORD_MODERATOR = os.environ.get("SELF_CHAT_MODERATOR_PASSWORD", _SHARED_PASS
 EDITOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/editor.txt"
 MODERATOR_PROMPT_FILE = "/home/palash/local-ai-files/contexts/moderator.txt"
 CRITIQUE_PROMPT_FILE = "/home/palash/local-ai-files/contexts/critique.txt"
+THEME_JUDGE_PROMPT_FILE = "/home/palash/local-ai-files/contexts/theme_judge.txt"
 
 # Kaya↔Kolpo cross-critique: at most this many retries on the same failing spot
 # before giving up and letting the deterministic gate auto-RED the story.
@@ -281,6 +306,11 @@ def _parse_tasks(items):
         research_turns = int(item.get("research_turns") or 1)
         if research_turns < 1:
             research_turns = 1
+        # Theme coherence judge: on by default for every task; a task opts
+        # out with "theme_judge": false, and may point at a custom judge
+        # persona with "theme_judge_prompt": <file>.
+        theme_judge = bool(item.get("theme_judge", True))
+        theme_judge_prompt = (item.get("theme_judge_prompt") or "").strip() or None
         editor_min_confidence = EDITOR_DEFAULT_MIN_CONFIDENCE
         if item.get("editor_min_confidence") is not None:
             try:
@@ -314,6 +344,8 @@ def _parse_tasks(items):
                 "turns": turns,
                 "research": research,
                 "research_turns": research_turns,
+                "theme_judge": theme_judge,
+                "theme_judge_prompt": theme_judge_prompt,
                 "editor_min_confidence": editor_min_confidence,
             }
         )
@@ -503,6 +535,61 @@ def _merge_value_defs(spec, master, _seen=None):
     return merged
 
 
+def _refs_of(spec):
+    """Normalize a spec's ``ref`` / ``refs`` into a single deduped list."""
+    ref = spec.get("ref")
+    refs = spec.get("refs")
+    if refs is not None:
+        if isinstance(refs, (str, bytes)):
+            refs = [refs]
+        else:
+            refs = list(refs)
+        if ref is not None and ref not in refs:
+            refs.insert(0, ref)
+    elif ref is not None:
+        refs = [ref]
+    else:
+        refs = []
+    return refs
+
+
+def _resolve_compose_value(task, name, spec, master):
+    """Pick ONE value from EACH referenced pool and join them together.
+
+    Used by the ``selector: "compose"`` field spec. Every ``ref``/``refs``
+    pool contributes exactly one value (honouring the pool's own selector,
+    e.g. ``roundrobin`` vs ``random``), which makes a field like character
+    appearance draw simultaneously from the face, eye, nose, body-type and
+    attire pools into one rich descriptor. The parts are joined with the
+    spec's ``separator`` (or ``, ``). Because the resolution is deterministic
+    per round, the same character keeps every facet stable and regenerable
+    throughout a story.
+    """
+    parts = []
+    for pool_key in _refs_of(spec):
+        entry = master.get(pool_key) if isinstance(master, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        sub = _merge_value_defs(entry, master, {pool_key})
+        value = _pick_detail_value(task, name, sub)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            parts.extend(str(v).strip() for v in value if str(v or "").strip())
+        else:
+            s = str(value).strip()
+            if s:
+                parts.append(s)
+    if not parts:
+        return None
+    sep = spec.get("separator")
+    return sep.join(parts) if sep else ", ".join(parts)
+
+
+def _is_compose(spec):
+    return str((spec or {}).get("selector") or "").strip().lower() == "compose"
+
+
 def _pick_when_branch(table, value):
     """Select a ``when`` branch by exact match on a resolved value.
 
@@ -658,50 +745,240 @@ def _pick_character_name(task, field_name, names, skip=()):
     return values[idx]
 
 
-def build_cast(task, details_spec, round_fields):
+def _resolve_trait_value(task, trait_field_name, spec, master):
+    """Resolve a single character trait field (appearance, attire, etc.)."""
+    if _is_compose(spec):
+        return _resolve_compose_value(task, trait_field_name, spec, master)
+    merged = _merge_value_defs(spec, master)
+    return _pick_detail_value(task, trait_field_name, merged)
+
+
+def _trait_label(spec):
+    """Human-readable label for a character trait (e.g. 'hero appearance' →
+    'appearance').  Strips the character-role prefix when present."""
+    label = str(spec.get("name") or "").strip()
+    for prefix in ("hero ", "companion ", "protagonist ", "sidekick "):
+        if label.lower().startswith(prefix):
+            label = label[len(prefix):]
+            break
+    return label
+
+
+def build_cast(task, details_spec, round_fields, master=None):
     """Decide and NAME the story's characters for this round.
 
-    Returns a list of ``(label, species, name)`` triples: one per field flagged
-    ``character: true``, expanded into ``count`` members when the field carries a
-    count. Species come from the already-resolved per-round value pool (a list
-    means a multi-member slot); names are assigned deterministically from the
-    field's ``names`` list (rotating across rounds, never reused within a round),
-    so the cast — including its size — is fixed and repeatable before a single
-    word of story is written.
+    Returns a list of dicts, one per character, each carrying:
+
+    - ``name``: the assigned character name (round-robin'd across rounds,
+      never reused within a round)
+    - ``label``: the character-role label from the first matching spec
+      (e.g. "hero", "hero's companion")
+    - ``species``: the resolved species/appearance value from the pool
+    - ``traits``: a dict of ``{trait_label: resolved_value}`` for every
+      Per-Round, non-species ``character: true`` field that shares this
+      character's ``names`` list (appearance, body type, attire, ...).
+      Per-Turn character fields (e.g. a per-scene expression) are excluded
+      so they never get pinned into the immutable identity block.
+
+    Characters are identified by grouping ``character: true`` fields that
+    share the same ``names`` list.  The name is resolved ONCE per group
+    (via the species field's round-robin state) and reused for all trait
+    fields, so "Barnaby" always looks like "Barnaby" throughout the round.
     """
-    cast = []
+    if master is None:
+        master = MASTER_DETAILS
+
     fields = round_fields or {}
-    for spec in _character_fields(details_spec):
-        label = str(spec.get("name") or "").strip()
-        value = fields.get(label, spec.get("value"))
-        species_list = value if isinstance(value, (list, tuple)) else [value]
+    specs = _character_fields(details_spec)
+    if not specs:
+        return []
+
+    # Group by shared names list → one group = one character.
+    groups = []
+    seen = set()
+    for spec in specs:
+        names_key = tuple(spec.get("names") or [])
+        if names_key in seen:
+            continue
+        seen.add(names_key)
+        members = [s for s in specs if tuple(s.get("names") or []) == names_key]
+        groups.append((names_key, members))
+
+    cast = []
+    for names_key, members in groups:
+        species_spec = None
+        trait_specs = []
+        for s in members:
+            if s.get("ref") and not species_spec:
+                species_spec = s
+            else:
+                trait_specs.append(s)
+
+        if species_spec is None:
+            continue
+
+        label = str(species_spec.get("name") or "").strip()
+        species_value = fields.get(label, species_spec.get("value"))
+        species_list = (
+            species_value if isinstance(species_value, (list, tuple)) else [species_value]
+        )
         used = set()
         for species in species_list:
             species = str(species or "").strip()
             if not species:
                 continue
-            name = _pick_character_name(task, label, spec.get("names"), skip=used)
+            name = _pick_character_name(task, label, species_spec.get("names"), skip=used)
             if name:
                 used.add(name)
-            cast.append((label, species, name or species))
+
+            traits = {}
+            for ts in trait_specs:
+                if not _spec_in_filter(ts, "Per Round"):
+                    # Per-turn fields (e.g. expression) vary per scene and must
+                    # never be frozen into the immutable character identity.
+                    continue
+                trait_label = _trait_label(ts)
+                value = fields.get(str(ts.get("name") or "").strip())
+                if value is None:
+                    value = _resolve_trait_value(task, trait_label, ts, master)
+                if isinstance(value, (list, tuple)):
+                    parts = [str(v).strip() for v in value if str(v or "").strip()]
+                    value = ", ".join(parts)
+                if value:
+                    traits[trait_label] = str(value).strip()
+
+            cast.append({
+                "name": name or species,
+                "label": label,
+                "species": species,
+                "traits": traits,
+            })
     return cast
 
 
 def format_cast_block(cast):
-    """Render the decided-and-named cast as an immutable per-turn directive."""
+    """Render the decided-and-named cast as an immutable per-turn directive.
+
+    Each character is listed as::
+
+        - {name} — the {label}, {species}, {trait1}, {trait2}, ...
+
+    Traits (appearance, body type, attire, etc.) are appended when present,
+    giving the writers a consistent physical reference throughout the round.
+    """
     if not cast:
         return ""
     lines = [
         "## Characters (already decided and named for this story — immutable)",
     ]
-    for label, species, name in cast:
-        lines.append(f"- {name} — the {label}, {species}")
+    for entry in cast:
+        parts = [f"{entry['name']} — the {entry['label']}, {entry['species']}"]
+        for trait_label, trait_value in entry.get("traits", {}).items():
+            parts.append(trait_value)
+        lines.append("- " + ", ".join(parts))
     lines.append(
         "HARD RULE: These are the ONLY characters in this story. Never create, "
         "name, or depict any additional character in the text or in any image; "
-        "every generated image must show only these named characters."
+        "every generated image must show only these named characters. Their "
+        "name, species, face, body type, hairstyle, and attire stay constant; "
+        "only expressions and poses may vary per scene."
     )
     return "\n".join(lines)
+
+
+def format_character_sheet(cast):
+    """Render the cast as a compact canonical sheet for image generation.
+
+    Unlike :func:`format_cast_block`, this has no prose/directives: it is the
+    machine-readable identity used to force consistent characters into every
+    ``generate_image`` / ``edit_image`` call (one entry per character, facets
+    comma-joined, characters newline-separated).
+    """
+    if not cast:
+        return ""
+    entries = []
+    for entry in cast:
+        parts = [f"{entry['name']} (the {entry['label']}, {entry['species']})"]
+        for trait_value in entry.get("traits", {}).values():
+            parts.append(trait_value)
+        entries.append(", ".join(parts))
+    return "\n".join(entries)
+
+
+_pinned_cast = {}
+
+
+def _load_cast_registry():
+    """Read persisted pinned casts (``{task: {fields, cast}}``) at startup."""
+    try:
+        if os.path.isfile(CAST_REGISTRY_PATH):
+            with open(CAST_REGISTRY_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"[cast] Could not load cast registry: {e}")
+    return {}
+
+
+def _save_cast_registry(registry):
+    """Persist pinned casts so characters survive self-chat restarts."""
+    try:
+        os.makedirs(os.path.dirname(CAST_REGISTRY_PATH), exist_ok=True)
+        with open(CAST_REGISTRY_PATH, "w", encoding="utf-8") as f:
+            json.dump(registry, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[cast] Could not persist cast registry: {e}")
+
+
+_pinned_cast.update(_load_cast_registry())
+
+
+def _pin_enabled_for(spec):
+    """True when this task's cast should be pinned across encounters."""
+    return PIN_CAST or bool((spec or {}).get("pin_cast"))
+
+
+def _apply_pin(task, round_fields):
+    """Overlay a task's pinned character fields onto freshly-resolved fields.
+
+    Keeps the theme combo, the rendered details, and the end cast consistent
+    when a pinned cast is being reused.
+    """
+    pinned = _pinned_cast.get(task)
+    if not pinned:
+        return round_fields
+    fields = pinned.get("fields") or {}
+    if not fields:
+        return round_fields
+    return {**(round_fields or {}), **fields}
+
+
+def _resolve_cast_for_round(spec, task, details_spec, round_fields):
+    """Cast for a round, honouring cast pinning.
+
+    Character tasks get their cast resolved exactly once here (advancing the
+    round-robin name/trait state) rather than inside the conversation attempt.
+    With pinning enabled, the resolved cast is registered on first contact and
+    reused verbatim on every later encounter; otherwise it is re-rolled fresh
+    each round for variety.
+    """
+    if not _character_fields(details_spec):
+        return None
+    if _pin_enabled_for(spec):
+        pinned = _pinned_cast.get(task)
+        if pinned:
+            return pinned.get("cast") or []
+        cast = build_cast(task, details_spec, round_fields)
+        fields = {}
+        for s in _character_fields(details_spec):
+            fname = str(s.get("name") or "").strip()
+            if fname and fname in round_fields:
+                fields[fname] = round_fields[fname]
+        _pinned_cast[task] = {"fields": fields, "cast": cast}
+        _save_cast_registry(_pinned_cast)
+        print(f"[cast] Pinned '{task}' cast to {CAST_REGISTRY_PATH}")
+        return cast
+    return build_cast(task, details_spec, round_fields)
 
 
 _ALIGNMENT_PROPOSER_PROMPT = """
@@ -789,16 +1066,15 @@ def _parse_alignment_reply(text):
 def run_creative_alignment(
     proposer_name,
     proposer_token,
-    proposer_session,
     checker_name,
     checker_token,
-    checker_session,
     task,
     genre,
     relationship,
     mood,
     round_fields,
     cast_block,
+    system_prompt=None,
 ):
     """One-round topic/tone cross-check between the two agents.
 
@@ -806,6 +1082,11 @@ def run_creative_alignment(
     tone/angle; the partner cross-checks with veto power (a veto without an
     alternative keeps the resolved pack). Fail-open: any login/LLM/parse
     failure returns no override and no note, matching the historical behavior.
+
+    Both handshake calls run in throwaway sessions (like the editor gate and
+    other internal one-shot calls) so the control prompts and VERDICT replies
+    never land in the round sessions — keeping the UI transcript clean and the
+    story-turn history unpolluted.
     """
     if round_fields:
         round_summary = "\n".join(
@@ -825,11 +1106,18 @@ def run_creative_alignment(
             s = s.replace(k, str(v)[:200])
         return s
 
+    proposer_session_id = None
+    checker_session_id = None
     try:
+        proposer_session_id = create_session(
+            proposer_token,
+            f"{proposer_name} — creative alignment",
+            system_prompt=system_prompt,
+        )
         proposal = _parse_alignment_reply(
             call_llm(
                 proposer_token,
-                proposer_session,
+                proposer_session_id,
                 _fill(_ALIGNMENT_PROPOSER_PROMPT),
                 no_tools=True,
             )["text"]
@@ -839,10 +1127,15 @@ def run_creative_alignment(
         adjusted = proposal.get("adjusted", "")
         reason = proposal.get("reason", "")
 
+        checker_session_id = create_session(
+            checker_token,
+            f"{checker_name} — creative alignment",
+            system_prompt=system_prompt,
+        )
         check = _parse_alignment_reply(
             call_llm(
                 checker_token,
-                checker_session,
+                checker_session_id,
                 _fill(
                     _ALIGNMENT_CHECKER_PROMPT,
                     {
@@ -880,6 +1173,11 @@ def run_creative_alignment(
     except Exception as e:
         print(f"[alignment] handshake failed (fail-open): {e}")
         return {"tone_override": None, "note": ""}
+    finally:
+        if proposer_session_id and not keep_sessions:
+            delete_session(proposer_token, proposer_session_id)
+        if checker_session_id and not keep_sessions:
+            delete_session(checker_token, checker_session_id)
 
 
 def _resolve_field_value(spec, task, master):
@@ -898,6 +1196,10 @@ def _resolve_field_value(spec, task, master):
             refs[0] if isinstance(refs, list) and refs else spec.get("ref") or ""
         )
         name = str(first_ref or "").strip()
+
+    if _is_compose(merged):
+        # Compose before merging pools away: each ref contributes one pick.
+        return name, _resolve_compose_value(task, name, spec, master)
 
     value = _pick_detail_value(task, name, merged)
     return name, value
@@ -1264,7 +1566,8 @@ def load_tasks():
 
 
 def checklist_for(genre, role, task_checklist=None):
-    """role is 'editor' or 'moderator'. A task's own checklist wins, then the
+    """role is 'editor', 'moderator', or 'theme' (the theme coherence judge).
+    A task's own checklist wins, then the
     genre's entry, then the 'default' entry, then nothing."""
     items = (task_checklist or {}).get(role)
     if not items:
@@ -1272,9 +1575,11 @@ def checklist_for(genre, role, task_checklist=None):
         items = entry.get(role)
     if not items:
         items = GENRE_CHECKLISTS.get("default", {}).get(role) or []
-    items.append(
-        "Remove any out-of-character planning or meta-discussion between the collaborators (e.g. 'let's write about X', 'I'll cover Y, you do Z') that is not part of the narrative/content itself — the final piece must read as continuous, in-universe content only."
-    )
+    items = list(items or [])
+    if role in ("editor", "moderator"):
+        items.append(
+            "Remove any out-of-character planning or meta-discussion between the collaborators (e.g. 'let's write about X', 'I'll cover Y, you do Z') that is not part of the narrative/content itself — the final piece must read as continuous, in-universe content only."
+        )
     return "\n".join(f"- {item}" for item in items)
 
 
@@ -1366,6 +1671,14 @@ def run_dry_run():
         print(indent(checklist_for(genre, "editor", checklist)))
         print("  moderator checklist (resolved):")
         print(indent(checklist_for(genre, "moderator", checklist)))
+        judge_state = "ON" if spec.get("theme_judge", True) else "OFF"
+        custom = spec.get("theme_judge_prompt")
+        print(
+            f"  theme judge: {judge_state} (guardrail lane, every round + turn roll)"
+            + (f" — custom prompt: {custom}" if custom else "")
+        )
+        print("  theme checklist (resolved):")
+        print(indent(checklist_for(genre, "theme", checklist)))
         print("ENVIRONMENT")
         print(f"  tasks source:        {TASKS_SOURCE}")
         print(
@@ -1420,6 +1733,14 @@ def run_dry_run():
             "%details%",
             "%checklist%",
             "%cast%",
+        },
+        THEME_JUDGE_PROMPT_FILE: {
+            "%task%",
+            "%genre%",
+            "%mediums%",
+            "%language%",
+            "%combo%",
+            "%checklist%",
         },
     }
     for path, placeholders in handled.items():
@@ -1681,6 +2002,47 @@ def auth_headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+class _TaskLostError(RuntimeError):
+    """A submitted task vanished because the chat server restarted mid-flight."""
+
+
+def _http_retry(method, url, *, what="request", extra_retry_status=(), **kwargs):
+    """Issue an HTTP request, retrying transient server failures.
+
+    Retries on connection errors, timeouts, HTTP 429, 5xx, and any status code
+    listed in ``extra_retry_status`` (e.g. the 404 a just-restarted server
+    returns for a session that has not reloaded from disk yet). Backoff grows
+    exponentially up to ``RETRY_BACKOFF_MAX``; after ``RETRY_ATTEMPTS`` attempts
+    the last error is raised so callers keep their existing failure semantics.
+    """
+    retry_status = set(extra_retry_status) | {429} | set(range(500, 600))
+    last_error = None
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            resp = requests.request(method, url, **kwargs)
+        except requests.exceptions.RequestException as e:
+            last_error = e
+        else:
+            if resp.status_code in retry_status:
+                label = (
+                    "Client" if resp.status_code < 500 else "Server"
+                )
+                last_error = requests.exceptions.HTTPError(
+                    f"{resp.status_code} {label} Error: {resp.reason} for url: {url}"
+                )
+            else:
+                return resp
+        print(
+            f"[retry] {what} failed on attempt {attempt}/{RETRY_ATTEMPTS}: "
+            f"{last_error}"
+        )
+        if attempt < RETRY_ATTEMPTS:
+            time.sleep(
+                min(RETRY_BACKOFF_START * (2 ** (attempt - 1)), RETRY_BACKOFF_MAX)
+            )
+    raise last_error
+
+
 def create_session(
     token, name, system_prompts=None, context_tokens=None, system_prompt=None
 ):
@@ -1691,22 +2053,32 @@ def create_session(
         body["context_tokens"] = context_tokens
     if system_prompt:
         body["system_prompt"] = system_prompt
-    resp = requests.post(
+    resp = _http_retry(
+        "POST",
         f"{BASE_URL}/api/sessions",
         json=body,
         headers=auth_headers(token),
         timeout=15,
+        what="create session",
     )
     resp.raise_for_status()
     return resp.json()["session_id"]
 
 
 def delete_session(token, session_id):
-    resp = requests.delete(
-        f"{BASE_URL}/api/sessions/{session_id}",
-        headers=auth_headers(token),
-        timeout=15,
-    )
+    try:
+        resp = _http_retry(
+            "DELETE",
+            f"{BASE_URL}/api/sessions/{session_id}",
+            headers=auth_headers(token),
+            timeout=15,
+            what=f"delete session {session_id[:8]}",
+        )
+    except requests.exceptions.RequestException as e:
+        print(
+            f"Warning: could not delete session {session_id} (HTTP error: {e})"
+        )
+        return False
     if resp.status_code != 200:
         print(
             f"Warning: could not delete session {session_id} (HTTP {resp.status_code})"
@@ -1767,8 +2139,15 @@ def wait_for_user_to_leave():
 """
 
 
-def call_llm(
-    token, session_id, message, image_b64=None, no_tools=False, research=False
+def _call_llm_raw(
+    token,
+    session_id,
+    message,
+    image_b64=None,
+    no_tools=False,
+    research=False,
+    mode=None,
+    character_sheet=None,
 ):
     headers = auth_headers(token)
 
@@ -1777,8 +2156,17 @@ def call_llm(
         "message": message,
         "client_timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+    if character_sheet:
+        # Canonical character identity for this story; the server pins it into
+        # every image-generation prompt so characters never drift between
+        # generate_image calls.
+        payload["character_sheet"] = character_sheet
     if args.gpu:
         payload["mode"] = "gpu"
+    if mode:
+        # Explicit lane pin (e.g. "guardrail" for the theme judge) — honored
+        # server-side over the agent-user default routing.
+        payload["mode"] = mode
     if image_b64:
         payload["image"] = image_b64
     if no_tools:
@@ -1786,11 +2174,14 @@ def call_llm(
     if research:
         payload["research"] = True
 
-    submit_respo = requests.post(
+    submit_respo = _http_retry(
+        "POST",
         f"{BASE_URL}/api/chat",
         json=payload,
         headers=headers,
         timeout=30,
+        what=f"submit chat for session {session_id[:8]}",
+        extra_retry_status=(404,),
     )
     submit_respo.raise_for_status()
     task_id = submit_respo.json()["task_id"]
@@ -1799,11 +2190,22 @@ def call_llm(
 
     while True:
         # Re-resolve headers every poll: a long CPU generation can outlive
-        # the token, and each poll must carry a still-valid bearer.
-        status_resp = requests.get(
-            status_url, headers=auth_headers(token), timeout=40
-        )
-        status_resp.raise_for_status()
+        # the token, and each poll must carry a still-valid bearer. The poll
+        # itself is retried so a server restart mid-generation does not kill
+        # the round.
+        try:
+            status_resp = _http_retry(
+                "GET",
+                status_url,
+                headers=auth_headers(token),
+                timeout=40,
+                what=f"status poll for {task_id[:8]}",
+            )
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(
+                f"Lost connection to chat server while waiting for task "
+                f"{task_id}: {e}"
+            ) from e
         data = status_resp.json()
 
         status = data.get("status")
@@ -1816,7 +2218,47 @@ def call_llm(
             }
         if status == "error":
             raise RuntimeError(f"Task failed: {data}")
+        if status == "unknown":
+            # The server restarted before this task finished and its in-memory
+            # task table no longer contains it. Re-submit the same message on
+            # the same session (previous turns are unaffected).
+            raise _TaskLostError(f"Task {task_id} was lost on a server restart: {data}")
         time.sleep(POLL_INTERVAL_SECONDS)
+
+
+def call_llm(
+    token,
+    session_id,
+    message,
+    image_b64=None,
+    no_tools=False,
+    research=False,
+    mode=None,
+    character_sheet=None,
+):
+    """Like _call_llm_raw, but re-submits the message if the task dies on a
+    server restart, so a flapping chat server cannot abandon a round."""
+    last_error = None
+    for replay in range(1, REPLAY_ATTEMPTS + 1):
+        try:
+            return _call_llm_raw(
+                token,
+                session_id,
+                message,
+                image_b64=image_b64,
+                no_tools=no_tools,
+                research=research,
+                mode=mode,
+                character_sheet=character_sheet,
+            )
+        except _TaskLostError as e:
+            last_error = e
+            print(
+                f"[retry] Task lost after a chat-server restart "
+                f"(replay {replay}/{REPLAY_ATTEMPTS}); re-submitting the message"
+            )
+            time.sleep(POLL_INTERVAL_SECONDS)
+    raise last_error
 
 
 def build_input(
@@ -1916,6 +2358,117 @@ def _write_moderation(
         json.dump(data, f, indent=2)
     print(f"[editor-gate] Moderation {verdict} saved to {verdict_path}")
     return data
+
+
+def run_theme_judge(
+    token,
+    task,
+    genre,
+    relationship="",
+    mood="",
+    persona_details=None,
+    round_fields=None,
+    turn_fields=None,
+    mediums=None,
+    language="",
+    checklist=None,
+    prompt_file=None,
+):
+    """Coherence gate for one rolled theme combination.
+
+    Called by run_forever before reserving the round combination, and by
+    run_single_conversation before reserving a per-turn combination, so no
+    rolled pack reaches the Kaya/Kolpo pipeline (or the dedup tracker)
+    unjudged. The call is pinned to the guardrail lane (a small fast model
+    on its own server) so it never queues behind story generation.
+
+    Fail-open: any prompt/LLM/parse failure yields COHERENT — the judge can
+    veto a roll, but a broken judge must never stall the pipeline.
+    Returns ``{verdict, reason}``.
+    """
+    combo_lines = []
+    if relationship or mood:
+        combo_lines.append(f"Relationship: {relationship} | Mood: {mood}")
+    kaya = (persona_details or {}).get("Kaya", {}) or {}
+    kolpo = (persona_details or {}).get("Kolpo", {}) or {}
+    if kaya or kolpo:
+        combo_lines.append(
+            f"Kaya: {kaya.get('role', '?')} — {kaya.get('persona', '?')}\n"
+            f"Kolpo: {kolpo.get('role', '?')} — {kolpo.get('persona', '?')}"
+        )
+    for label, fields in (
+        ("Round fields", round_fields),
+        ("Turn fields", turn_fields),
+    ):
+        if fields:
+            rendered = ", ".join(
+                f"{k}: {v if isinstance(v, str) else ', '.join(str(x) for x in v)}"
+                for k, v in fields.items()
+            )
+            combo_lines.append(f"{label}: {rendered}")
+    combo_text = "\n".join(combo_lines) or "- (no attributes rolled)"
+
+    try:
+        prompt = open(
+            prompt_file or THEME_JUDGE_PROMPT_FILE, encoding="utf-8"
+        ).read()
+    except OSError as e:
+        print(f"[theme-judge] Could not read prompt file: {e} — accepting roll")
+        return {"verdict": "COHERENT", "reason": f"prompt unavailable: {e}"}
+
+    context_tokens = {
+        "%task%": task,
+        "%genre%": genre,
+        "%mediums%": ", ".join(mediums or []),
+        "%language%": language or "",
+        "%combo%": combo_text,
+        "%checklist%": checklist_for(genre, "theme", checklist),
+    }
+    for key, value in context_tokens.items():
+        prompt = prompt.replace(key, value)
+
+    session_id = None
+    try:
+        session_id = create_session(
+            token, "Theme judge", system_prompt=prompt, context_tokens=context_tokens
+        )
+        wait_for_user_to_leave()
+        result = call_llm(
+            token,
+            session_id,
+            "Judge the rolled combination above and give your verdict.",
+            no_tools=True,
+            mode="guardrail",
+        )
+        text = result["text"] or ""
+        # INCOHERENT contains COHERENT as a substring — the optional (IN)?
+        # group must be checked, and the bare fallbacks try INCOHERENT first.
+        m = re.search(
+            r"VERDICT\s*\*{0,2}\s*:\s*\*{0,2}\s*(IN)?COHERENT",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            verdict = "INCOHERENT" if m.group(1) else "COHERENT"
+        elif re.search(r"\bINCOHERENT\b", text, flags=re.IGNORECASE):
+            verdict = "INCOHERENT"
+        elif re.search(r"\bCOHERENT\b", text, flags=re.IGNORECASE):
+            verdict = "COHERENT"
+        else:
+            verdict = "COHERENT"
+        reason = ""
+        rm = re.search(
+            r"REASON\s*\*{0,2}\s*:\s*\*{0,2}\s*(.+)", text, flags=re.IGNORECASE
+        )
+        if rm:
+            reason = rm.group(1).strip()[:160]
+        return {"verdict": verdict, "reason": reason}
+    except Exception as e:
+        print(f"[theme-judge] Judge failed (fail-open): {e}")
+        return {"verdict": "COHERENT", "reason": f"judge error: {e}"}
+    finally:
+        if session_id and not keep_sessions:
+            delete_session(token, session_id)
 
 
 def run_editor_review(
@@ -2079,6 +2632,9 @@ def run_single_conversation(
     research=False,
     research_turns=1,
     editor_min_confidence=None,
+    theme_judge=True,
+    theme_judge_prompt=None,
+    cast=None,
 ):
     """Driver: run the conversation, then apply the editor gate.
 
@@ -2124,6 +2680,9 @@ def run_single_conversation(
             per_turn_task=per_turn_task,
             research=research,
             research_turns=research_turns,
+            theme_judge=theme_judge,
+            theme_judge_prompt=theme_judge_prompt,
+            cast=cast,
         )
         if result["red"]:
             return (
@@ -2298,6 +2857,9 @@ def _conversation_attempt(
     per_turn_task=False,
     research=False,
     research_turns=1,
+    theme_judge=True,
+    theme_judge_prompt=None,
+    cast=None,
 ):
     medium = random.sample(mediums, 2 if len(mediums) > 1 else 1)
     language = random.choice(languages)
@@ -2325,7 +2887,12 @@ def _conversation_attempt(
     print(f"[persona] Kolpo: {kolpo_info.get('role')} — {kolpo_info.get('persona')}")
 
     # Decide and name the story's characters once per round, before any turn.
-    cast_block = format_cast_block(build_cast(task, details_spec, round_fields))
+    # A pre-resolved cast list may be injected by run_forever (pinned casts),
+    # otherwise it is resolved here from this round's fields.
+    if cast is None:
+        cast = build_cast(task, details_spec, round_fields)
+    cast_block = format_cast_block(cast)
+    character_sheet = format_character_sheet(cast)
     if cast_block:
         print(f"[cast] {cast_block.splitlines()[1]} ...")
 
@@ -2361,16 +2928,15 @@ def _conversation_attempt(
         handshake = run_creative_alignment(
             AGENT_NAMES["A"] if proposer_is_a else AGENT_NAMES["B"],
             token_a if proposer_is_a else token_b,
-            session_a if proposer_is_a else session_b,
             AGENT_NAMES["B"] if proposer_is_a else AGENT_NAMES["A"],
             token_b if proposer_is_a else token_a,
-            session_b if proposer_is_a else session_a,
             task,
             genre,
             relationship,
             mood,
             round_fields,
             cast_block,
+            system_prompt=s,
         )
         if handshake.get("tone_override") or handshake.get("note"):
             lines = ["[AGREED CREATIVE DIRECTION — jointly cross-checked before turn 1]"]
@@ -2413,9 +2979,12 @@ def _conversation_attempt(
         if per_turn_task:
             # Resolve this turn's per-turn detail fields, re-rolling until the
             # FULL combination (round scope fields + per-turn fields + mood +
-            # persona) has not already been produced. Round scope fields were
-            # resolved once for the whole round, so the character never changes
-            # mid-story.
+            # persona) has not already been produced AND the coherence judge
+            # accepts it. Round scope fields were resolved once for the whole
+            # round (and judged with the persona before turn 1), so a veto here
+            # re-rolls the per-turn fields only — the character never changes
+            # mid-story. The judge runs before the theme_api("log") reservation
+            # below, so a vetoed turn combo is never blacklisted.
             turn_fields = {}
             for attempt in range(MAX_THEME_REROLL):
                 turn_fields = resolve_details_fields(
@@ -2427,12 +2996,35 @@ def _conversation_attempt(
                     persona_details,
                     {**(round_fields or {}), **turn_fields},
                 )
-                if not check_combo_used(token_a, combo, level="turn"):
-                    break
-                print(
-                    f"[theme] Turn combination already used (attempt {attempt + 1}); "
-                    f"re-rolling per-turn details"
-                )
+                if check_combo_used(token_a, combo, level="turn"):
+                    print(
+                        f"[theme] Turn combination already used (attempt {attempt + 1}); "
+                        f"re-rolling per-turn details"
+                    )
+                    continue
+                if theme_judge:
+                    judged = run_theme_judge(
+                        token_a,
+                        task,
+                        genre,
+                        relationship=relationship,
+                        mood=mood,
+                        persona_details=persona_details,
+                        round_fields=round_fields,
+                        turn_fields=turn_fields,
+                        mediums=medium,
+                        language=language,
+                        checklist=checklist,
+                        prompt_file=theme_judge_prompt,
+                    )
+                    print(
+                        f"[theme-judge] Turn {message_number} roll {attempt + 1}: "
+                        f"{judged['verdict']}"
+                        + (f" ({judged['reason']})" if judged["reason"] else "")
+                    )
+                    if judged["verdict"] == "INCOHERENT":
+                        continue
+                break
             else:
                 print(
                     "[theme] Exhausted per-turn re-roll attempts; proceeding with the last combination"
@@ -2488,6 +3080,7 @@ def _conversation_attempt(
             prompt,
             image_b64=shared_image_b64,
             research=in_research_phase,
+            character_sheet=character_sheet,
         )
         reply = result["text"]
         if not reply.strip():
@@ -2498,6 +3091,7 @@ def _conversation_attempt(
                 prompt,
                 image_b64=shared_image_b64,
                 research=in_research_phase,
+                character_sheet=character_sheet,
             )
             reply = result["text"]
             if not reply.strip():
@@ -2523,6 +3117,7 @@ def _conversation_attempt(
                 prompt,
                 image_b64=shared_image_b64,
                 research=in_research_phase,
+                character_sheet=character_sheet,
             )
             reply = result["text"]
 
@@ -2530,8 +3125,13 @@ def _conversation_attempt(
             # A research turn that ends without a single article-level URL
             # degenerates into homepage citations for every claim in the
             # deliverable. Re-prompt for targeted searches (bounded) before
-            # accepting the turn.
-            for _ in range(2):
+            # accepting the turn. The base RESEARCH MODE block still ends
+            # with "then end with [NEXT TURN: ...]", so each retry strips
+            # that hand-off sentence from the prompt and appends
+            # _DEEP_SOURCE_PROMPT (which also explicitly overrides it) —
+            # the agent is never told to hand off AND not to hand off at
+            # the same time.
+            for _ in range(_DEEP_SOURCE_RETRIES):
                 if _turn_has_deep_source(result.get("searches")):
                     break
                 print(
@@ -2539,16 +3139,38 @@ def _conversation_attempt(
                     f"{message_number}: no article-level URLs in search "
                     "results — re-prompting for targeted searches"
                 )
+                retry_prompt = re.sub(
+                    r",\s*then end with\s*\[NEXT TURN:\s*[^\]]+\]\.?",
+                    "",
+                    prompt,
+                    count=1,
+                )
                 result = call_llm(
                     token,
                     session,
-                    prompt + "\n" + _DEEP_SOURCE_PROMPT,
+                    retry_prompt + "\n" + _DEEP_SOURCE_PROMPT,
                     image_b64=shared_image_b64,
                     research=True,
+                    character_sheet=character_sheet,
                 )
                 reply = result["text"]
                 if not reply.strip():
                     break
+            if not _turn_has_deep_source(result.get("searches")):
+                if turn_theme_id:
+                    theme_api(
+                        "complete",
+                        token_a,
+                        operation="complete",
+                        theme_id=turn_theme_id,
+                    )
+                    print(f"[theme] Marked turn {turn_theme_id} completed")
+                print(
+                    f"Round {round_number} ended: {AGENT_NAMES[current_speaker]} "
+                    f"research turn {message_number} still produced no "
+                    "article-level source URLs after retries\n"
+                )
+                break
 
         if turn_theme_id:
             theme_api("complete", token_a, operation="complete", theme_id=turn_theme_id)
@@ -3123,13 +3745,18 @@ def _turn_has_deep_source(searches):
     return False
 
 
+_DEEP_SOURCE_RETRIES = 2
+
 _DEEP_SOURCE_PROMPT = (
-    "[SYSTEM ERROR: Your searches returned no article-level source URLs "
-    "(empty result sets, homepages, or section pages only). Do NOT hand off "
-    "yet. Run new web_search calls with specific, article-targeting queries "
-    "(exact event/story names, or site + topic) until your results include "
-    "2-3 article URLs (deep links, not homepages), then share your findings "
-    "with those exact URLs.]"
+    "[SYSTEM ERROR: Disregard the earlier instruction to end your turn "
+    "with the [NEXT TURN: ...] hand-off tag. Do NOT hand off yet. Your "
+    "searches returned no article-level source URLs (empty result sets, "
+    "homepages, or section pages only). Run new web_search calls with "
+    "specific, article-targeting queries (exact event/story names, or "
+    "site + topic) until your results include 2-3 article URLs (deep "
+    "links, not homepages). Once your results contain those, share your "
+    "findings with those exact URLs, and only then end your turn with "
+    "the [NEXT TURN: ...] hand-off tag naming your partner.]"
 )
 
 
@@ -3817,6 +4444,8 @@ def run_forever():
             round_fields = resolve_details_fields(
                 details_spec, task, MASTER_DETAILS, freq_filter="Per Round"
             )
+            if _pin_enabled_for(spec):
+                round_fields = _apply_pin(task, round_fields)
             details = resolve_details(
                 details_spec,
                 task,
@@ -3826,31 +4455,83 @@ def run_forever():
             )
             per_turn_task = _has_per_turn_details(details_spec)
 
-            # Deterministic variety: for round-scoped tasks, resolve the
-            # combination (round detail fields + mood + genre + role + persona)
-            # and re-roll the persona until it has not already been produced in
-            # this self-chat window. Tasks with genuine per-turn details skip
-            # round-level reservation — variety is enforced turn-by-turn inside
-            # run_single_conversation, which also pins the identity fields.
+            # Deterministic variety: roll the combination (round detail fields
+            # + mood + genre + role + persona) and re-roll until it has not
+            # already been produced in this self-chat window. Tasks with
+            # genuine per-turn details skip round-level reservation — variety
+            # is enforced turn-by-turn inside run_single_conversation, which
+            # also pins the identity fields — but the pinned persona + round
+            # fields are still judged once here before turn 1, so a persona
+            # that clashes with the genre cannot cause a veto storm on every
+            # per-turn roll later.
+            #
+            # The coherence judge runs BEFORE any theme_api("log") reservation:
+            # a vetoed combo must stay available for future rolls, and the
+            # Kaya/Kolpo pipeline must never see a pack it would have rejected.
+            # A veto re-rolls fields AND persona together (the mismatch often
+            # lives in the fields — persona alone cannot fix it); a dedup
+            # collision keeps re-rolling persona only. Fail-open: a broken
+            # judge accepts the roll.
+            theme_judge_on = spec.get("theme_judge", True)
             combo = {}
-            for attempt in range(4):
+            attempt = 0
+            while attempt < 4:
+                attempt += 1
                 relationship, mood, persona_details = pick_persona_round_robin(
                     PERSONA_POOL, genre, GENRE_PERSONA_MAP, task_roles=spec.get("roles")
                 )
-                if per_turn_task:
-                    break
-                combo = build_combo_dict(genre, mood, persona_details, round_fields)
-                if not check_combo_used(token_a, combo):
-                    break
-                print(
-                    f"[theme] Combination already used (attempt {attempt + 1}); "
-                    f"re-rolling persona for variety"
-                )
+                if not per_turn_task:
+                    combo = build_combo_dict(genre, mood, persona_details, round_fields)
+                    if check_combo_used(token_a, combo):
+                        print(
+                            f"[theme] Combination already used (attempt {attempt}); "
+                            f"re-rolling persona for variety"
+                        )
+                        continue
+                if theme_judge_on:
+                    judged = run_theme_judge(
+                        token_a,
+                        task,
+                        genre,
+                        relationship=relationship,
+                        mood=mood,
+                        persona_details=persona_details,
+                        round_fields=round_fields,
+                        mediums=mediums,
+                        language=", ".join(languages),
+                        checklist=checklist,
+                        prompt_file=spec.get("theme_judge_prompt"),
+                    )
+                    print(
+                        f"[theme-judge] Round {round_number} roll {attempt}: "
+                        f"{judged['verdict']}"
+                        + (f" ({judged['reason']})" if judged["reason"] else "")
+                    )
+                    if judged["verdict"] == "INCOHERENT":
+                        round_fields = resolve_details_fields(
+                            details_spec, task, MASTER_DETAILS, freq_filter="Per Round"
+                        )
+                        if _pin_enabled_for(spec):
+                            round_fields = _apply_pin(task, round_fields)
+                        details = resolve_details(
+                            details_spec,
+                            task,
+                            MASTER_DETAILS,
+                            freq_filter="Per Round",
+                            preferred=round_fields,
+                        )
+                        continue
+                break
             else:
                 print(
                     "[theme] Exhausted re-roll attempts; proceeding with the last combination"
                 )
             persona = (relationship, mood, persona_details)
+
+            # Resolve (and possibly pin) the named cast for this round so every
+            # turn shares the same immutable characters, and images are forced
+            # to the canonical sheet by the chat server.
+            cast = _resolve_cast_for_round(spec, task, details_spec, round_fields)
 
             # Share what has already been worked on with the agents BEFORE the
             # task starts, so they coordinate through the tracker.
@@ -3909,6 +4590,9 @@ def run_forever():
                     research=spec.get("research"),
                     research_turns=spec.get("research_turns") or 1,
                     editor_min_confidence=spec.get("editor_min_confidence"),
+                    theme_judge=spec.get("theme_judge", True),
+                    theme_judge_prompt=spec.get("theme_judge_prompt"),
+                    cast=cast,
                 )
             except Exception as e:
                 traceback.print_exc()

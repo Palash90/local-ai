@@ -21,6 +21,66 @@
         {
           "name": "topic",
           "ref": "news_topics"
+        },
+        {
+          "name": "anchor",
+          "ref": "human_narrator",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
+        },
+        {
+          "name": "anchor appearance",
+          "refs": [
+            "feature_face_shape",
+            "feature_eye_shape",
+            "feature_eye_color",
+            "feature_skin_tone_texture",
+            "feature_neutral_body_build",
+            "feature_hairstyle_neutral",
+            "feature_hair_color_neutral",
+            "feature_neutral_distinguishing_marks"
+          ],
+          "selector": "compose",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
+        },
+        {
+          "name": "anchor attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
         }
       ],
       "genre": "News Bytes",
@@ -70,6 +130,57 @@
             "a mystery scientists are still solving",
             "a recent breakthrough explained simply",
             "a myth that turned out to be true"
+          ]
+        },
+        {
+          "name": "hero",
+          "ref": "kids_scientist",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "hero appearance",
+          "ref": "character_appearance",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "hero attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
           ]
         }
       ],
@@ -129,6 +240,66 @@
             "gujia",
             "halwa"
           ]
+        },
+        {
+          "name": "storyteller",
+          "ref": "human_narrator",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
+        },
+        {
+          "name": "storyteller appearance",
+          "refs": [
+            "feature_face_shape",
+            "feature_eye_shape",
+            "feature_eye_color",
+            "feature_skin_tone_texture",
+            "feature_neutral_body_build",
+            "feature_hairstyle_neutral",
+            "feature_hair_color_neutral",
+            "feature_neutral_distinguishing_marks"
+          ],
+          "selector": "compose",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
+        },
+        {
+          "name": "storyteller attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
         }
       ],
       "genre": "Food & Recipes",
@@ -162,6 +333,66 @@
         {
           "name": "tone",
           "ref": "mood_horror"
+        },
+        {
+          "name": "hero",
+          "ref": "human_hero",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "hero appearance",
+          "refs": [
+            "feature_face_shape",
+            "feature_eye_shape",
+            "feature_eye_color",
+            "feature_skin_tone_texture",
+            "feature_neutral_body_build",
+            "feature_hairstyle_neutral",
+            "feature_hair_color_neutral",
+            "feature_neutral_distinguishing_marks"
+          ],
+          "selector": "compose",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "hero attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
         }
       ],
       "genre": "Adventure & Horror",
@@ -198,6 +429,66 @@
         {
           "name": "trope",
           "ref": "trope_horror"
+        },
+        {
+          "name": "protagonist",
+          "ref": "human_hero",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "protagonist appearance",
+          "refs": [
+            "feature_face_shape",
+            "feature_eye_shape",
+            "feature_eye_color",
+            "feature_skin_tone_texture",
+            "feature_neutral_body_build",
+            "feature_hairstyle_neutral",
+            "feature_hair_color_neutral",
+            "feature_neutral_distinguishing_marks"
+          ],
+          "selector": "compose",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "protagonist attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
         }
       ],
       "genre": "Adventure & Horror",
@@ -243,6 +534,66 @@
             "an oral retelling by a village elder",
             "a researcher's investigation"
           ]
+        },
+        {
+          "name": "detective",
+          "ref": "human_narrator",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
+        },
+        {
+          "name": "detective appearance",
+          "refs": [
+            "feature_face_shape",
+            "feature_eye_shape",
+            "feature_eye_color",
+            "feature_skin_tone_texture",
+            "feature_neutral_body_build",
+            "feature_hairstyle_neutral",
+            "feature_hair_color_neutral",
+            "feature_neutral_distinguishing_marks"
+          ],
+          "selector": "compose",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
+        },
+        {
+          "name": "detective attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
         }
       ],
       "genre": "Adventure & Horror",
@@ -284,6 +635,66 @@
             "a sci-fi thriller chapter",
             "a confidential lab report breakdown"
           ]
+        },
+        {
+          "name": "investigator",
+          "ref": "human_hero",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "investigator appearance",
+          "refs": [
+            "feature_face_shape",
+            "feature_eye_shape",
+            "feature_eye_color",
+            "feature_skin_tone_texture",
+            "feature_neutral_body_build",
+            "feature_hairstyle_neutral",
+            "feature_hair_color_neutral",
+            "feature_neutral_distinguishing_marks"
+          ],
+          "selector": "compose",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "investigator attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
         }
       ],
       "genre": "Sci-Fi",
@@ -315,6 +726,66 @@
         {
           "name": "tone",
           "ref": "mood_horror"
+        },
+        {
+          "name": "rescuer",
+          "ref": "human_hero",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "rescuer appearance",
+          "refs": [
+            "feature_face_shape",
+            "feature_eye_shape",
+            "feature_eye_color",
+            "feature_skin_tone_texture",
+            "feature_neutral_body_build",
+            "feature_hairstyle_neutral",
+            "feature_hair_color_neutral",
+            "feature_neutral_distinguishing_marks"
+          ],
+          "selector": "compose",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "rescuer attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
         }
       ],
       "genre": "Adventure",
@@ -383,6 +854,66 @@
         {
           "name": "image",
           "value": "Include exactly one absurd, humorously stylized image illustration matching the target corporate trope."
+        },
+        {
+          "name": "everyman",
+          "ref": "office_everyman",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Dave",
+            "Priyanka",
+            "Chen",
+            "Bella",
+            "Omar",
+            "Isha",
+            "Felix",
+            "Nina"
+          ]
+        },
+        {
+          "name": "everyman appearance",
+          "refs": [
+            "feature_face_shape",
+            "feature_eye_shape",
+            "feature_eye_color",
+            "feature_skin_tone_texture",
+            "feature_neutral_body_build",
+            "feature_hairstyle_neutral",
+            "feature_hair_color_neutral",
+            "feature_neutral_distinguishing_marks"
+          ],
+          "selector": "compose",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Dave",
+            "Priyanka",
+            "Chen",
+            "Bella",
+            "Omar",
+            "Isha",
+            "Felix",
+            "Nina"
+          ]
+        },
+        {
+          "name": "everyman attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Dave",
+            "Priyanka",
+            "Chen",
+            "Bella",
+            "Omar",
+            "Isha",
+            "Felix",
+            "Nina"
+          ]
         }
       ],
       "genre": "Satire",
@@ -435,6 +966,72 @@
         {
           "name": "hero's companion",
           "ref": "story_animals",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Pip",
+            "Daisy",
+            "Rusty",
+            "Bella",
+            "Momo",
+            "Biscuit",
+            "Sparks",
+            "Willa"
+          ]
+        },
+        {
+          "name": "hero appearance",
+          "ref": "character_appearance",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "hero attire",
+          "ref": "character_attire",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Barnaby",
+            "Noor",
+            "Milo",
+            "Luna",
+            "Toto",
+            "Zara",
+            "Cookie",
+            "Rumi"
+          ]
+        },
+        {
+          "name": "companion appearance",
+          "ref": "character_appearance",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Pip",
+            "Daisy",
+            "Rusty",
+            "Bella",
+            "Momo",
+            "Biscuit",
+            "Sparks",
+            "Willa"
+          ]
+        },
+        {
+          "name": "companion attire",
+          "ref": "character_attire",
           "selector": "random",
           "change_freq": "Per Round",
           "character": true,
@@ -511,7 +1108,18 @@
         },
         {
           "name": "hero",
-          "ref": "kids_hero"
+          "ref": "farm_child",
+          "character": true,
+          "names": [
+            "Asha",
+            "Tom",
+            "Mei",
+            "Ravi",
+            "Cora",
+            "Emeka",
+            "Suki",
+            "Ali"
+          ]
         },
         {
           "name": "time",
@@ -524,6 +1132,91 @@
         {
           "name": "image",
           "value": "Include exactly one warm, child-friendly embedded image illustration of the farm scene."
+        },
+        {
+          "name": "hero appearance",
+          "ref": "character_appearance",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Asha",
+            "Tom",
+            "Mei",
+            "Ravi",
+            "Cora",
+            "Emeka",
+            "Suki",
+            "Ali"
+          ]
+        },
+        {
+          "name": "hero attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Asha",
+            "Tom",
+            "Mei",
+            "Ravi",
+            "Cora",
+            "Emeka",
+            "Suki",
+            "Ali"
+          ]
+        },
+        {
+          "name": "companion",
+          "ref": "story_animals",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Pip",
+            "Daisy",
+            "Rusty",
+            "Bella",
+            "Momo",
+            "Biscuit",
+            "Sparks",
+            "Willa"
+          ]
+        },
+        {
+          "name": "companion appearance",
+          "ref": "character_appearance",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Pip",
+            "Daisy",
+            "Rusty",
+            "Bella",
+            "Momo",
+            "Biscuit",
+            "Sparks",
+            "Willa"
+          ]
+        },
+        {
+          "name": "companion attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Pip",
+            "Daisy",
+            "Rusty",
+            "Bella",
+            "Momo",
+            "Biscuit",
+            "Sparks",
+            "Willa"
+          ]
         }
       ],
       "genre": "Bedtime Stories",
@@ -564,6 +1257,66 @@
             "an unsung hero local perspective",
             "a day-in-the-life narrative adaptation",
             "a heartwarming community drama"
+          ]
+        },
+        {
+          "name": "narrator",
+          "ref": "human_narrator",
+          "selector": "roundrobin",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
+        },
+        {
+          "name": "narrator appearance",
+          "refs": [
+            "feature_face_shape",
+            "feature_eye_shape",
+            "feature_eye_color",
+            "feature_skin_tone_texture",
+            "feature_neutral_body_build",
+            "feature_hairstyle_neutral",
+            "feature_hair_color_neutral",
+            "feature_neutral_distinguishing_marks"
+          ],
+          "selector": "compose",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
+          ]
+        },
+        {
+          "name": "narrator attire",
+          "ref": "generic_ethnic_attire",
+          "selector": "random",
+          "change_freq": "Per Round",
+          "character": true,
+          "names": [
+            "Meera",
+            "Jonah",
+            "Priya",
+            "Elliot",
+            "Zoya",
+            "Marcus",
+            "Tara",
+            "Samir"
           ]
         }
       ],

@@ -480,11 +480,46 @@ def _semantic_search_hit(query, min_score=_SEMANTIC_HIT_MIN_SCORE,
     return payload
 
 
+_CATEGORY_RE = (
+    (re.compile(r"news|updates?\b|today|latest|breaking|announ[ce]|unveil",
+                re.I), "news"),
+    (re.compile(r"python|javascript|typescript|github|gitlab|git\b|docker|"
+                r"kubernetes|linux|unix|apache|nginx|devops|cloud|"
+                r"programming|developer|open.?source|bug\b|debug|compile|"
+                r"deploy|server|database|sql\b|terminal|command.?line|script|"
+                r"django|flask|react|angular|node\b|rails|laravel|spring\b|"
+                r"tensorflow|pytorch|\bAI\b|\bLLM\b|model\s+weights|error",
+                re.I), "it"),
+    (re.compile(r"arxiv|paper|research|study|journal|scientific|physics|"
+                r"mathematics?|mathematical|chemistry|chemical|biology|"
+                r"genome|quantum|neuron|astronom|cosmolog|doi\b|experiment|"
+                r"hypothesis|theorem|calculus|peer.?review", re.I), "science"),
+)
+
+
+def _pick_categories(query):
+    """Best-guess SearXNG categories for a query.
+
+    Returns ``general`` plus any specific category the query clearly matches
+    (news/it/science), so a search never gets locked to a single narrow engine
+    pool — a bare ``categories=it`` only searches github/stackoverflow and can
+    return empty results for queries that merely mention an ``AI``-style token.
+    """
+    cats = ["general"]
+    matched = [cat for rx, cat in _CATEGORY_RE if rx.search(query or "")]
+    cats += [cat for cat in ("news", "it", "science") if cat in matched]
+    return ",".join(cats)
+
+
 def web_search(query, current_time=None, current_location=None):
     ts = datetime.now()
     clean_query = (query or "").strip()
     norm_query = " ".join(re.findall(r"[a-z0-9]+", clean_query.lower()))
     params = {"q": clean_query, "format": "json"}
+    cats = _pick_categories(clean_query)
+    if cats:
+        params["categories"] = cats
+    print(f"[web_search] categories={cats!r} for {clean_query!r}")
     # Keep the backend URL private; only expose the public search URL in tool
     # output that may be shown to the user or passed through to the model.
     search_url = f"{M.SEARXNG_PUBLIC_URL}?{urlencode(params)}"

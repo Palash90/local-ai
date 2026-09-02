@@ -848,6 +848,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "research": bool(body.get("research")),
                 "cpu": bool(body.get("cpu")) and bool(body.get("research")),
                 "no_tools": bool(body.get("no_tools")),
+                # Canonical character identity for pipeline-authored stories.
+                # Pinned into image-generation prompts so the same person is
+                # regenerated consistently across generate_image/edit_image.
+                "character_sheet": body.get("character_sheet"),
                 # MCP service account chatting over the HTTP API: flag the
                 # task so _finalize_task runs the fail-closed MCP L3 output
                 # judge (LEVEL 3 verification) instead of the UI fail-open one.
@@ -895,6 +899,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "cpu": cpu_flagged,
                     "no_tools": bool(body.get("no_tools")),
                     "_peer_review": bool(body.get("peer_review")),
+                    "character_sheet": body.get("character_sheet"),
                 }
             # Publish the in-memory task before notifying the lane worker. The
             # worker can post the start event immediately; inserting into the

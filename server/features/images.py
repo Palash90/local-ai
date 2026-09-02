@@ -585,9 +585,25 @@ def _enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index)
     / free / reload) and the ``image_active`` model status never race, even when
     CPU and GPU chat lanes process tasks concurrently. The job carries its
     originating session so the finished image lands in the right conversation.
+
+    Pipeline-authored stories ship a ``character_sheet`` on the task: the
+    canonical cast identity is prepended to the render prompt so an LLM's
+    drifting prose can never change a character's name, face, body type, or
+    attire between generate_image/edit_image calls.
     """
     with M._data_lock:
         image_b64 = M.tasks.get(task_id, {}).get("_original_image")
+        sheet = M.tasks.get(task_id, {}).get("character_sheet")
+    if sheet:
+        base_prompt = str(args.get("prompt") or "").strip()
+        canonical = (
+            "[CANONICAL CHARACTER REFERENCE - keep these characters exactly as "
+            "specified; never change their name, species, face, body type, "
+            "hairstyle, or attire, and show no other named characters]:\n"
+            + str(sheet)
+        )
+        args = dict(args)
+        args["prompt"] = (canonical + "\n\n" + base_prompt).strip() if base_prompt else canonical
     M.set_status(task_id, "Queued for image generation...")
     M._image_queue.put(
         {

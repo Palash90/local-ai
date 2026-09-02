@@ -803,5 +803,159 @@
             "Pensive seated pose: Seated against a stone pillar or ledge, leaning forward slightly with hands folded gracefully on her lap and an contemplative gaze.",
             "Over-the-shoulder glance: Walking away from the camera and glancing back over her shoulder, framing the intricate details of the back blouse and pallu drape."
         ]
+    },
+    "character_appearance": {
+        "selector": "random",
+        "values": [
+            "round warm face with bright curious eyes and a dusting of freckles",
+            "lean angular features with sharp cheekbones and watchful dark eyes",
+            "soft plump cheeks with a button nose and wide sparkling eyes",
+            "tall slender frame with long limbs and an alert upright posture",
+            "small compact build with nimble hands and a quick mischievous grin",
+            "gentle oval face with long lashes and a calm steady gaze",
+            "lanky gangly frame with untidy hair and a gap-toothed smile",
+            "broad sturdy build with broad shoulders and kind crinkled eyes"
+        ]
+    },
+    "character_attire": {
+        "selector": "random",
+        "values": [
+            "a well-worn linen shirt with rolled-up sleeves and patched trousers",
+            "a bright woven shawl draped over a simple cotton frock",
+            "a fitted vest over a crisp collared shirt with neat brass buttons",
+            "a flowing ankle-length dress with embroidered floral hems",
+            "a hooded traveling cloak clasped with a plain wooden brooch",
+            "striped pyjamas with a frayed hem and one sock pulled higher than the other",
+            "a paint-splattered apron over a faded favourite t-shirt",
+            "a tidy school uniform with a slightly crooked tie and scuffed shoes"
+        ]
+    },
+    "character_expression": {
+        "selector": "random",
+        "values": [
+            "wide-eyed wonder as though seeing the world for the first time",
+            "a warm conspiratorial grin as though sharing a secret joke",
+            "soft sleepy contentment with eyelids drooping and a peaceful half-smile",
+            "furrowed brow and pursed lips deep in thought",
+            "bright open-mouthed delight at something unexpected",
+            "a cautious sideways glance with one eyebrow slightly raised",
+            "calm serene composure with hands clasped and a gentle nod",
+            "cheerful mischievous sparkle with dimples showing"
+        ]
+    },
+    "human_hero": {
+        "selector": "roundrobin",
+        "values": [
+            "a weathered wilderness ranger",
+            "a retired field medic with steady hands",
+            "a soft-spoken marine biologist",
+            "a pragmatic bicycle courier",
+            "an eager rookie geologist",
+            "a battle-worn volunteer firefighter",
+            "a calm deep-sea truck driver",
+            "a watchful mountain climber"
+        ]
+    },
+    "human_narrator": {
+        "selector": "roundrobin",
+        "values": [
+            "a grizzled radio anchor with a husky drawl",
+            "a soft-hearted café owner narrating local tales",
+            "a meticulous clerk who keeps a weather-worn journal",
+            "an over-caffeinated morning show host",
+            "a patient village schoolteacher",
+            "a wry mail courier who knows everyone's business",
+            "a moonlighting food blogger with a sharp palate",
+            "a small-town librarian with an eye for detail"
+        ]
+    },
+    "office_everyman": {
+        "selector": "roundrobin",
+        "values": [
+            "a mid-level coordinator juggling three overlapping meetings",
+            "a junior analyst who reads memos out loud to himself",
+            "a beleaguered support lead whose inbox never sleeps",
+            "an efficiency-obsessed project manager with color-coded sticky notes",
+            "a sales rep allergic to silent video calls",
+            "a facilities manager who knows every unbooked room",
+            "a data intern who smells of energy drinks",
+            "a standup-host cynic who documents every 'let's circle back'"
+        ]
+    },
+    "kids_scientist": {
+        "selector": "roundrobin",
+        "values": [
+            "a curious eight-year-old with a battered notebook",
+            "a bright thirteen-year-old who builds tiny robots",
+            "a bespectacled kid who lines up pebbles like experiments",
+            "a bold young collector of leaves and feathers",
+            "a quiet child who whispers hypotheses to her teddy bear",
+            "a freckled kid who mixes baking-soda volcanoes at breakfast",
+            "a tow-headed tinkerer taking apart broken clocks",
+            "a shy sketchbook artist who draws constellations on her palms"
+        ]
+    },
+    "farm_child": {
+        "selector": "roundrobin",
+        "values": [
+            "a wide-eyed child visitor in patched overalls",
+            "a shy city cousin discovering barn smells",
+            "a giggling short-haired kid chasing chickens",
+            "a quiet notebook-drawing child who pets every calf",
+            "an energetic mud-splashed kid with pigtails",
+            "a cautious kid who befriends the oldest goat",
+            "a sunburned freckled kid with a bread-roll stash",
+            "a sleepy toddler in a too-big sun hat"
+        ]
+    },
+    "feature_neutral_body_build": {
+        "selector": "random",
+        "values": [
+            "compact sturdy build",
+            "tall lean frame",
+            "athletic toned silhouette",
+            "softer rounded build",
+            "wiry agile frame",
+            "broad solid build"
+        ]
+    },
+    "feature_hairstyle_neutral": {
+        "selector": "random",
+        "values": [
+            "closely cropped dark hair",
+            "long unruly waves pulled into a loose ponytail",
+            "thick wavy hair tucked under a worn cap",
+            "neat side part with unruly bangs",
+            "a messy bun held together with a pencil",
+            "short tight curls",
+            "shoulder-length straight hair streaked with gray",
+            "a shaved head with a single narrow braid"
+        ]
+    },
+    "feature_hair_color_neutral": {
+        "selector": "random",
+        "values": [
+            "ink-black hair",
+            "chestnut brown hair",
+            "salt-and-pepper streaked hair",
+            "auburn hair",
+            "platinum blond hair",
+            "dark indigo-black hair",
+            "warm brown hair",
+            "rust-red hair"
+        ]
+    },
+    "feature_neutral_distinguishing_marks": {
+        "selector": "random",
+        "values": [
+            "a thin scar across the left eyebrow",
+            "a silver ring through the upper ear",
+            "a faded ink tattoo on the wrist",
+            "a weathered watch worn backward on the left wrist",
+            "a small crescent-moon birthmark behind the ear",
+            "permanently ink-stained fingertips",
+            "a sun-faded bandana tied above the elbow",
+            "a dented utility lighter clipped to a belt loop"
+        ]
     }
 }
