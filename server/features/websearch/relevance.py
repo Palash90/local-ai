@@ -230,6 +230,20 @@ def _semantic_relevance(results, query):
     return scored[:WEB_SEARCH_RESULT_LIMIT], low_conf
 
 
+def filter_relevance(results, query):
+    """Apply lexical screening before optional semantic scoring.
+
+    The lexical gate is intentionally first: embeddings can be noisy for short
+    acronym-heavy queries, while a matching content term is a useful minimum
+    signal. It also avoids spending two embedding passes on obvious junk.
+    """
+    results, lexical_low_conf = _lexical_filter(results, query)
+    if not results:
+        return results, lexical_low_conf
+    results, semantic_low_conf = _semantic_relevance(results, query)
+    return results, lexical_low_conf or semantic_low_conf
+
+
 def _screen_cached_payload(payload, query):
     """Revalidate cached results because cache keys may predate relevance gates."""
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
@@ -240,15 +254,7 @@ def _screen_cached_payload(payload, query):
     if not results:
         return screened
     
-    # Try semantic filtering if embedder available, else fall back to lexical
-    texts = [query] + [
-        f"{r.get('title') or ''} :: {r.get('snippet') or ''}"[:280] for r in results
-    ]
-    vecs = page_cache.embed_texts(texts)
-    if vecs and len(vecs) == len(texts):
-        results, low_confidence = _semantic_relevance(results, query)
-    else:
-        results, low_confidence = _lexical_filter(results, query)
+    results, low_confidence = filter_relevance(results, query)
     
     screened["results"] = results
     if low_confidence:

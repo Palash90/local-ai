@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import json
+import os
 import re
 import threading
 import time
@@ -32,7 +33,13 @@ WEB_SEARCH_ENRICH_TIMEOUT = 25
 # _CACHE_LOCK and never wait on pacing or on an in-flight fetch.
 SEARCH_CACHE_MAX = 256
 SEARCH_SIMILARITY_THRESHOLD = 0.7
-SEARCH_MIN_INTERVAL = 5.0
+# Keep requests to the local SearXNG instance spaced out. SearXNG fans one
+# request out to several upstream engines, so a short interval here can still
+# trigger upstream 429/403 responses when multiple queries arrive together.
+# Override for a trusted/private deployment with WEB_SEARCH_MIN_INTERVAL.
+SEARCH_MIN_INTERVAL = max(
+    1.0, float(os.environ.get("WEB_SEARCH_MIN_INTERVAL", "20"))
+)
 SEARCH_INFLIGHT_WAIT = 30
 _CACHE_LOCK = threading.Lock()
 _PACE_LOCK = threading.Lock()
@@ -408,6 +415,12 @@ def web_search(query, current_time=None, current_location=None):
             if allow_cached_results
             else None
         )
+        # A failed/low-confidence search must not poison the cache for its TTL.
+        # Treat it as a miss so the next request can try SearXNG again.
+        if hit is not None and (
+            not hit.get("results") or hit.get("low_confidence")
+        ):
+            hit = None
         if hit is None and allow_cached_results:
             inflight = _IN_FLIGHT.get(norm_query)
             if inflight is None:
@@ -420,7 +433,7 @@ def web_search(query, current_time=None, current_location=None):
         # Persistent (cross-restart) cache: a query answered before this
         # process started should never cost another SearXNG request.
         hit = page_cache.search_get(norm_query)
-        if hit is not None:
+        if hit is not None and hit.get("results") and not hit.get("low_confidence"):
             _search_cache_store(norm_query, hit, ttl=hit.get("_ttl"))
             print("Web-search cache hit (persistent)")
             return json.dumps(_screen_cached_payload(hit, clean_query))
@@ -483,15 +496,7 @@ def web_search(query, current_time=None, current_location=None):
     if not formatted:
         low_confidence = False
     else:
-        # Try semantic filtering if embedder available, else fall back to lexical
-        texts = [query] + [
-            f"{r.get('title') or ''} :: {r.get('snippet') or ''}"[:280] for r in formatted
-        ]
-        vecs = page_cache.embed_texts(texts)
-        if vecs and len(vecs) == len(texts):
-            formatted, low_confidence = _semantic_relevance(formatted, query)
-        else:
-            formatted, low_confidence = relevance._lexical_filter(formatted, query)
+        formatted, low_confidence = relevance.filter_relevance(formatted, query)
     payload = _respond(formatted, low_confidence=low_confidence)
     # Ask the LLM how long this answer stays fresh so the next identical query
     # re-fetches at the right time ("breaking news" -> seconds, "how to" -> days),
