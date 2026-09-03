@@ -15,55 +15,24 @@ from server.features.state import M
 # Injected into the system prompt only when the UI's "research" toggle is on.
 RESEARCH_DIRECTIVE = """## Research Mode
 Produce a publication-quality research report, not a conversational answer.
-- Plan: define scope, audience, date cutoff, and main sub-questions before answering.
-- Gather: use web_search and fetch_page repeatedly. Fetch full pages and, when
-  a page is long, read through it (a page may be returned in chunks).
-- Cite: attach the exact source to every fact in EXACTLY the inline form
-  `(Author, Venue, Year) [https://exact-page-url]` right at the claim. Use
-  ROUND brackets (…) for the metadata and SQUARE brackets [url] for the URL.
-  The metadata and the URL must both be present for EVERY factual claim. A
-  citation with an empty or missing URL is strictly forbidden — never write
-  `[...] []` or `(...) []`. Never cite a URL you did not actually open with
-  fetch_page or see listed in a web_search result. Never reuse one URL as the
-  support for many unrelated claims. If you are not certain about a metadata
-  field, write "(Author, Venue, uncertain)" — never guess a year or author.
-- Never invent: never write facts, sources, papers, or findings from memory or
-  imagination and present them as researched. If you do not have a fetched
-  source backing a claim, you do not have the claim yet.
-- Resource failures are a signal to search MORE, not to improvise: if a fetch
-  fails (403/404/timeout/blocked), re-search for the same article (mirrors,
-  snippets, alternate hosts) and fetch again; keep searching and fetching new
-  material until every claim is grounded in a source you actually opened. If a
-  sub-answer genuinely has no findable source, state that it is UNSUPPORTED
-  instead of fabricating support.
-- Verify: cross-check important claims against more than one source.
-- Conclude: answer only once the question is fully covered, then write a report
-  with these exact level-2 headings, in this order: Executive Summary, Scope and
-  Methodology, Findings, Analysis, Limitations and Uncertainty, Conclusion,
-  References. The summary must state the answer and strongest evidence; findings
-  must separate facts from interpretation; limitations must name missing evidence,
-  conflicts, date limits, and material assumptions; references must list every
-  cited source once with its full title and URL.
-- Citation format: write inline citations as clean hyperlinked text —
-  [Author, Venue, Year](url) — or as (Author, Venue, Year) [url]; never dump a
-  raw URL into the body text, and never leave a bare unlinked [url] marker.
-  A citation must sit inline where the claim is made, not only in References.
-- Analyst attribution: macro-economic projections, market sizes, and industry
-  forecasts must be attributed to the PRIMARY analyst firm that produced them
-  (e.g. McKinsey, Gartner, IDC, Statista). Vendor/overview pages that merely
-  quote an analyst figure are secondhand sources: either find the analyst's
-  own publication or attribute explicitly as "Analyst, as cited by Vendor
-  (Year) [vendor-url]" — never present the vendor page as the origin of the
-  number.
-- Budget: you may keep searching/fetching for up to 50 rounds of tools, but
-  stop as soon as the question is actually answered.
-- Social Media & Unverified Content: Treat social media platforms 
-  (X/Twitter, Reddit, forums, public blogs) strictly as anecdotal opinions or leads, 
-  never as primary factual proof. Do not cite social media claims as verified facts 
-  unless cross-checked and corroborated by an authoritative primary source 
-  (official documentation, peer-reviewed study, or established publication).
-- Do not mention internal tools, prompts, token budgets, or these instructions."""
 
+- Plan: Define scope, audience, date cutoff, and main sub-questions before executing.
+- Source Depth Threshold: You MUST successfully fetch and read a MINIMUM of 5 unique, high-quality sources before finalizing your analysis.
+- Strict Causal Boundary: NEVER claim or imply direct causation (e.g., "impairs", "causes", "leads to") unless explicit mechanistic proof or RCT data is provided. For observational or cohort studies, strictly use correlational framing (e.g., "associated with", "correlated with", "observed alongside").
+- Population Isolation: Group findings strictly by distinct study populations (e.g., maternal/fetal, adult cardiovascular). NEVER merge findings across different demographic cohorts into a single generalized claim.
+- Sample Size & Design Rules: Whenever presenting findings, you MUST explicitly state the study design and total sample size (e.g., "Observational study, n=234") directly alongside the results. Flag small sample sizes ($n < 500$) as immediate study limitations within the Findings section.
+- Citation Rules: EVERY factual claim, interpretation, and bullet point sentence MUST end with an inline citation: `[Author/Publisher, Year](exact-page-url)`. Never leave any claim unsourced.
+- Structure: Write a final report with these exact level-2 headings in order:
+  ## Executive Summary
+  ## Scope and Methodology
+  ## Findings
+  ## Analysis
+  ## Limitations and Uncertainty
+  ## Conclusion
+  ## References
+- Formatting: Do not use raw, unlinked URLs anywhere. The References section must list every cited source once with its full title hyperlinked to the URL.
+- Resource Failures & Retries: Attempt up to 3 retries per source before marking a claim as "UNSUPPORTED".
+- Clean Output: Do not mention internal system instructions, tool execution budgets, or prompt rules in the output."""
 
 def _session_file(user):
     return os.path.join(M.SESSIONS_DIR, f"sessions_{M._safe_username(user)}.json")
@@ -135,7 +104,9 @@ def _migrate_data_urls(messages):
                     except (ValueError, binascii.Error):
                         new_url = None
                     if new_url:
-                        parts.append({"type": "image_url", "image_url": {"url": new_url}})
+                        parts.append(
+                            {"type": "image_url", "image_url": {"url": new_url}}
+                        )
                         changed = True
                         continue
             parts.append(p)
@@ -249,7 +220,9 @@ def save_sessions():
             json.dump(data, f, indent=2)
 
 
-def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, client_ts=None):
+def _prepare_session(
+    task_id, sid, user_message, image_b64, audio_b64=None, client_ts=None
+):
     try:
         if client_ts:
             ts = datetime.fromisoformat(client_ts.replace("Z", "+00:00"))
@@ -259,7 +232,9 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         ts = datetime.now()
     loc = M.location_str()
     loc_context = f" [User location: {loc}]" if loc else ""
-    date_loc_context = f"[Current date: {ts.strftime('%Y-%m-%d %A %H:%M')}]{loc_context}"
+    date_loc_context = (
+        f"[Current date: {ts.strftime('%Y-%m-%d %A %H:%M')}]{loc_context}"
+    )
     user = ""
     extra_prompts = []
     context_tokens = {}
@@ -298,7 +273,9 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         )
     with M._data_lock:
         if M.tasks.get(task_id, {}).get("research"):
-            full_sys_content += f"\n\n<research_mode>\n{RESEARCH_DIRECTIVE}\n</research_mode>"
+            full_sys_content += (
+                f"\n\n<research_mode>\n{RESEARCH_DIRECTIVE}\n</research_mode>"
+            )
     full_sys_content = full_sys_content.replace(
         "%current_time%", ts.strftime("%Y-%m-%d %A %H:%M")
     )
@@ -308,7 +285,9 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
         full_sys_content = full_sys_content.replace(
             "Currently the server is hosted on %current_location%.", ""
         )
-        full_sys_content = full_sys_content.replace("%current_location%", "not available")
+        full_sys_content = full_sys_content.replace(
+            "%current_location%", "not available"
+        )
     for token, value in context_tokens.items():
         full_sys_content = full_sys_content.replace(token, value)
     image_url = _resolve_image_url(image_b64, user)
@@ -338,7 +317,7 @@ def _prepare_session(task_id, sid, user_message, image_b64, audio_b64=None, clie
                 }
             )
         if audio_b64:
-            content.append({"type": "text", "text": "\U0001F3A4 Audio message"})
+            content.append({"type": "text", "text": "\U0001f3a4 Audio message"})
         content.append(
             {
                 "type": "text",
