@@ -1,1336 +1,1387 @@
-{
-  "tasks": [
+[
     {
-      "task": "Flash News Daily Briefing",
-      "inactive": false,
-      "research": true,
-      "turns": 2,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search for top daily news updates. Provide a concise, neutral summary covering multiple distinct items with explicit citations."
-        },
-        {
-          "name": "date",
-          "selector": "date"
-        },
-        {
-          "name": "research level",
-          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
-        },
-        {
-          "name": "topic",
-          "ref": "news_topics"
-        },
-        {
-          "name": "anchor",
-          "ref": "human_narrator",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        },
-        {
-          "name": "anchor appearance",
-          "refs": [
-            "feature_face_shape",
-            "feature_eye_shape",
-            "feature_eye_color",
-            "feature_skin_tone_texture",
-            "feature_neutral_body_build",
-            "feature_hairstyle_neutral",
-            "feature_hair_color_neutral",
-            "feature_neutral_distinguishing_marks"
-          ],
-          "selector": "compose",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        },
-        {
-          "name": "anchor attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        }
-      ],
-      "genre": "News Bytes",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text"
-      ]
+        "task": "Flash News Daily Briefing",
+        "inactive": false,
+        "research": true,
+        "turns": 2,
+        "details": [
+            {
+                "name": "format",
+                "value": "Use this exact structure: title, date, 3-5 distinct news items, 2-3 concise sentences per item, inline citations, neutral tone. Do not add a separate references section."
+            },
+            {
+                "name": "research",
+                "value": "Perform a web search for top daily news updates. Provide a concise, neutral summary covering multiple distinct items with explicit citations."
+            },
+            {
+                "name": "date",
+                "selector": "date"
+            },
+            {
+                "name": "research level",
+                "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+            },
+            {
+                "name": "topic",
+                "ref": "news_topics"
+            },
+            {
+                "name": "anchor",
+                "ref": "human_narrator",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            },
+            {
+                "name": "anchor appearance",
+                "refs": [
+                    "feature_face_shape",
+                    "feature_eye_shape",
+                    "feature_eye_color",
+                    "feature_skin_tone_texture",
+                    "feature_neutral_body_build",
+                    "feature_hairstyle_neutral",
+                    "feature_hair_color_neutral",
+                    "feature_neutral_distinguishing_marks"
+                ],
+                "selector": "compose",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            },
+            {
+                "name": "anchor attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            }
+        ],
+        "genre": "News Bytes",
+        "roles": [
+            "free"
+        ],
+        "languages": [
+            "English",
+            "bengali",
+            "Hindi"
+        ],
+        "mediums": [
+            "text"
+        ]
     },
     {
-      "task": "A science article for kids",
-      "inactive": false,
-      "research": true,
-      "turns": 6,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a research for a fascinating, real-world science update or curious fact, then write the research report in an engaging kids story format."
-        },
-        {
-          "name": "topic",
-          "selector": "roundrobin",
-          "values": [
-            "animals and wildlife",
-            "space and astronomy",
-            "oceans and climate",
-            "the human body",
-            "technology and robots",
-            "fun with science"
-          ]
-        },
-        {
-          "name": "research level",
-          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
-        },
-        {
-          "name": "angle",
-          "selector": "random",
-          "values": [
-            "a surprising 'did you know' fact",
-            "a mystery scientists are still solving",
-            "a recent breakthrough explained simply",
-            "a myth that turned out to be true"
-          ]
-        },
-        {
-          "name": "hero",
-          "ref": "kids_scientist",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "hero appearance",
-          "ref": "character_appearance",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "hero attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        }
-      ],
-      "genre": "Education",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text",
-        "image"
-      ]
+        "task": "A science article for kids",
+        "inactive": false,
+        "research": true,
+        "turns": 6,
+        "details": [
+            {
+                "name": "format",
+                "value": "An engaging, child-friendly science article featuring narrative storytelling, clear simple explanations, interactive questions, a concluding fun fact, and one educational embedded illustration matching the topic."
+            },
+            {
+                "name": "research",
+                "value": "Perform a research for a fascinating, real-world science update or curious fact, then write the research report in an engaging kids story format."
+            },
+            {
+                "name": "topic",
+                "selector": "roundrobin",
+                "values": [
+                    "animals and wildlife",
+                    "space and astronomy",
+                    "oceans and climate",
+                    "the human body",
+                    "technology and robots",
+                    "fun with science"
+                ]
+            },
+            {
+                "name": "research level",
+                "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+            },
+            {
+                "name": "angle",
+                "selector": "random",
+                "values": [
+                    "a surprising 'did you know' fact",
+                    "a mystery scientists are still solving",
+                    "a recent breakthrough explained simply",
+                    "a myth that turned out to be true"
+                ]
+            },
+            {
+                "name": "hero",
+                "ref": "kids_scientist",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "hero appearance",
+                "ref": "character_appearance",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "hero attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "image",
+                "value": "Include exactly one child-friendly educational illustration matching the scientific topic and the hero, generated via the real image-generation tool call and embedded in the final article."
+            }
+        ],
+        "genre": "Education",
+        "roles": [
+            "free"
+        ],
+        "languages": [
+            "English",
+            "bengali",
+            "Hindi"
+        ],
+        "mediums": [
+            "text",
+            "image"
+        ]
     },
     {
-      "task": "Exotic Recipe & Cultural Story",
-      "inactive": false,
-      "research": true,
-      "turns": 5,
-      "details": [
-        {
-          "name": "research on",
-          "value": "exotic dishes around world"
-        },
-        {
-          "name": "structure",
-          "value": "Draft a detailed recipe guide for a real exotic dish: exact ingredient list with clear measurements, numbered step-by-step preparation instructions, and brief cultural context about its significance. Embed an image matching the finished dish."
-        },
-        {
-          "name": "research level",
-          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
-        },
-        {
-          "name": "festival",
-          "selector": "roundrobin",
-          "values": [
-            "Diwali",
-            "Eid",
-            "Durga Puja",
-            "Pongal",
-            "Christmas",
-            "Bengali New Year"
-          ]
-        },
-        {
-          "name": "sweet",
-          "selector": "random",
-          "values": [
-            "gulab jamun",
-            "sandesh",
-            "rasgulla",
-            "payesh",
-            "barfi",
-            "gujia",
-            "halwa"
-          ]
-        },
-        {
-          "name": "storyteller",
-          "ref": "human_narrator",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        },
-        {
-          "name": "storyteller appearance",
-          "refs": [
-            "feature_face_shape",
-            "feature_eye_shape",
-            "feature_eye_color",
-            "feature_skin_tone_texture",
-            "feature_neutral_body_build",
-            "feature_hairstyle_neutral",
-            "feature_hair_color_neutral",
-            "feature_neutral_distinguishing_marks"
-          ],
-          "selector": "compose",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        },
-        {
-          "name": "storyteller attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        }
-      ],
-      "genre": "Food & Recipes",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "image",
-        "text"
-      ]
+        "task": "Exotic Recipe & Cultural Story",
+        "inactive": false,
+        "research": true,
+        "turns": 5,
+        "details": [
+            {
+                "name": "format",
+                "value": "Use this exact structure: Title, Cultural History section, Ingredients List with precise measurements, Step-by-Step Instructions, and an Embedded Dish Image."
+            },
+            {
+                "name": "research on",
+                "value": "exotic dishes around world"
+            },
+            {
+                "name": "structure",
+                "value": "Draft a detailed recipe guide for a real exotic dish: exact ingredient list with clear measurements, numbered step-by-step preparation instructions, and brief cultural context about its significance. Embed an image matching the finished dish."
+            },
+            {
+                "name": "research level",
+                "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+            },
+            {
+                "name": "festival",
+                "selector": "roundrobin",
+                "values": [
+                    "Diwali",
+                    "Eid",
+                    "Durga Puja",
+                    "Pongal",
+                    "Christmas",
+                    "Bengali New Year"
+                ]
+            },
+            {
+                "name": "sweet",
+                "selector": "random",
+                "values": [
+                    "gulab jamun",
+                    "sandesh",
+                    "rasgulla",
+                    "payesh",
+                    "barfi",
+                    "gujia",
+                    "halwa"
+                ]
+            },
+            {
+                "name": "storyteller",
+                "ref": "human_narrator",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            },
+            {
+                "name": "storyteller appearance",
+                "refs": [
+                    "feature_face_shape",
+                    "feature_eye_shape",
+                    "feature_eye_color",
+                    "feature_skin_tone_texture",
+                    "feature_neutral_body_build",
+                    "feature_hairstyle_neutral",
+                    "feature_hair_color_neutral",
+                    "feature_neutral_distinguishing_marks"
+                ],
+                "selector": "compose",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            },
+            {
+                "name": "storyteller attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            }
+        ],
+        "genre": "Food & Recipes",
+        "roles": [
+            "free"
+        ],
+        "languages": [
+            "English",
+            "bengali",
+            "Hindi"
+        ],
+        "mediums": [
+            "image",
+            "text"
+        ]
     },
     {
-      "task": "Bone-Chilling Real-World Adventure",
-      "inactive": false,
-      "research": true,
-      "turns": 7,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a deep research for a real historical survival, exploration, or wilderness incident. Write a suspenseful, realistic narrative capturing the psychological dread and physical struggle. All core events must remain grounded in verified real-world facts."
-        },
-        {
-          "name": "setting",
-          "ref": "setting_adventure"
-        },
-        {
-          "name": "tone",
-          "ref": "mood_horror"
-        },
-        {
-          "name": "hero",
-          "ref": "human_hero",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "hero appearance",
-          "refs": [
-            "feature_face_shape",
-            "feature_eye_shape",
-            "feature_eye_color",
-            "feature_skin_tone_texture",
-            "feature_neutral_body_build",
-            "feature_hairstyle_neutral",
-            "feature_hair_color_neutral",
-            "feature_neutral_distinguishing_marks"
-          ],
-          "selector": "compose",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "hero attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        }
-      ],
-      "genre": "Adventure & Horror",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text"
-      ]
+        "task": "Bone-Chilling Real-World Adventure",
+        "inactive": false,
+        "research": true,
+        "turns": 7,
+        "details": [
+            {
+                "name": "format",
+                "value": "Immersive short narrative story with descriptive prose, intense pacing, vivid sensory details, and grounded historical accuracy."
+            },
+            {
+                "name": "research",
+                "value": "Perform a deep research for a real historical survival, exploration, or wilderness incident. Write a suspenseful, realistic narrative capturing the psychological dread and physical struggle. All core events must remain grounded in verified real-world facts."
+            },
+            {
+                "name": "setting",
+                "ref": "setting_adventure"
+            },
+            {
+                "name": "tone",
+                "ref": "mood_horror"
+            },
+            {
+                "name": "hero",
+                "ref": "human_hero",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "hero appearance",
+                "refs": [
+                    "feature_face_shape",
+                    "feature_eye_shape",
+                    "feature_eye_color",
+                    "feature_skin_tone_texture",
+                    "feature_neutral_body_build",
+                    "feature_hairstyle_neutral",
+                    "feature_hair_color_neutral",
+                    "feature_neutral_distinguishing_marks"
+                ],
+                "selector": "compose",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "hero attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            }
+        ],
+        "genre": "Adventure & Horror",
+        "roles": [
+            "premium"
+        ],
+        "languages": [
+            "English",
+            "bengali",
+            "Hindi"
+        ],
+        "mediums": [
+            "text"
+        ]
     },
     {
-      "task": "Psychological Horror Short Story",
-      "inactive": false,
-      "research": true,
-      "turns": 6,
-      "details": [
-        {
-          "name": "research",
-          "value": "Extensive research on contemporary events around psychological horror, nerotic behaviours"
-        },
-        {
-          "name": "style",
-          "value": "Craft an atmospheric horror tale centered on psychological tension, isolation, or supernatural uncanny elements. Focus on sensory horror, pacing, and creeping dread rather than shock value. Ensure the narrative resolves with an unsettling climax."
-        },
-        {
-          "name": "setting",
-          "ref": "setting_horror"
-        },
-        {
-          "name": "trope",
-          "ref": "trope_horror"
-        },
-        {
-          "name": "protagonist",
-          "ref": "human_hero",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "protagonist appearance",
-          "refs": [
-            "feature_face_shape",
-            "feature_eye_shape",
-            "feature_eye_color",
-            "feature_skin_tone_texture",
-            "feature_neutral_body_build",
-            "feature_hairstyle_neutral",
-            "feature_hair_color_neutral",
-            "feature_neutral_distinguishing_marks"
-          ],
-          "selector": "compose",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "protagonist attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        }
-      ],
-      "genre": "Adventure & Horror",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali"
-      ],
-      "mediums": [
-        "image",
-        "text"
-      ]
+        "task": "Psychological Horror Short Story",
+        "inactive": false,
+        "research": true,
+        "turns": 6,
+        "details": [
+            {
+                "name": "format",
+                "value": "Atmospheric psychological fiction prose accompanied by one illustrative scene image, structured with escalating suspense and an unsettling climax."
+            },
+            {
+                "name": "research",
+                "value": "Extensive research on contemporary events around psychological horror, nerotic behaviours"
+            },
+            {
+                "name": "style",
+                "value": "Craft an atmospheric horror tale centered on psychological tension, isolation, or supernatural uncanny elements. Focus on sensory horror, pacing, and creeping dread rather than shock value. Ensure the narrative resolves with an unsettling climax."
+            },
+            {
+                "name": "setting",
+                "ref": "setting_horror"
+            },
+            {
+                "name": "trope",
+                "ref": "trope_horror"
+            },
+            {
+                "name": "protagonist",
+                "ref": "human_hero",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "protagonist appearance",
+                "refs": [
+                    "feature_face_shape",
+                    "feature_eye_shape",
+                    "feature_eye_color",
+                    "feature_skin_tone_texture",
+                    "feature_neutral_body_build",
+                    "feature_hairstyle_neutral",
+                    "feature_hair_color_neutral",
+                    "feature_neutral_distinguishing_marks"
+                ],
+                "selector": "compose",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "protagonist attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            }
+        ],
+        "genre": "Adventure & Horror",
+        "roles": [
+            "premium"
+        ],
+        "languages": [
+            "English",
+            "bengali"
+        ],
+        "mediums": [
+            "image",
+            "text"
+        ]
     },
     {
-      "task": "Historical Mystery & Unsolved Legend",
-      "inactive": false,
-      "research": true,
-      "turns": 6,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search for a famous unsolved historical mystery or local folklore. Draft an intriguing narrative exploration around the event that balances historical facts with atmospheric storytelling."
-        },
-        {
-          "name": "mystery",
-          "selector": "roundrobin",
-          "values": [
-            "a vanished civilization",
-            "an unsolved disappearance",
-            "a cursed artifact",
-            "a sea or lake legend",
-            "a lost treasure"
-          ]
-        },
-        {
-          "name": "frame",
-          "selector": "random",
-          "values": [
-            "a detective's cold-case notes",
-            "a traveler's journal",
-            "an oral retelling by a village elder",
-            "a researcher's investigation"
-          ]
-        },
-        {
-          "name": "detective",
-          "ref": "human_narrator",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        },
-        {
-          "name": "detective appearance",
-          "refs": [
-            "feature_face_shape",
-            "feature_eye_shape",
-            "feature_eye_color",
-            "feature_skin_tone_texture",
-            "feature_neutral_body_build",
-            "feature_hairstyle_neutral",
-            "feature_hair_color_neutral",
-            "feature_neutral_distinguishing_marks"
-          ],
-          "selector": "compose",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        },
-        {
-          "name": "detective attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        }
-      ],
-      "genre": "Adventure & Horror",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text"
-      ]
+        "task": "Historical Mystery & Unsolved Legend",
+        "inactive": false,
+        "research": true,
+        "turns": 6,
+        "details": [
+            {
+                "name": "format",
+                "value": "Investigative narrative framework (e.g. journal entries or cold-case notes) integrating real historical facts, key theories, and lingering unsolved questions."
+            },
+            {
+                "name": "research",
+                "value": "Perform a web search for a famous unsolved historical mystery or local folklore. Draft an intriguing narrative exploration around the event that balances historical facts with atmospheric storytelling."
+            },
+            {
+                "name": "mystery",
+                "selector": "roundrobin",
+                "values": [
+                    "a vanished civilization",
+                    "an unsolved disappearance",
+                    "a cursed artifact",
+                    "a sea or lake legend",
+                    "a lost treasure"
+                ]
+            },
+            {
+                "name": "frame",
+                "selector": "random",
+                "values": [
+                    "a detective's cold-case notes",
+                    "a traveler's journal",
+                    "an oral retelling by a village elder",
+                    "a researcher's investigation"
+                ]
+            },
+            {
+                "name": "detective",
+                "ref": "human_narrator",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            },
+            {
+                "name": "detective appearance",
+                "refs": [
+                    "feature_face_shape",
+                    "feature_eye_shape",
+                    "feature_eye_color",
+                    "feature_skin_tone_texture",
+                    "feature_neutral_body_build",
+                    "feature_hairstyle_neutral",
+                    "feature_hair_color_neutral",
+                    "feature_neutral_distinguishing_marks"
+                ],
+                "selector": "compose",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            },
+            {
+                "name": "detective attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            },
+            {
+                "name": "image",
+                "value": "Include exactly one atmospheric evidence or location illustration matching the historical mystery, generated via the real image-generation tool call and embedded in the final narrative. Do not present the illustration as proof of an unverified theory."
+            }
+        ],
+        "genre": "Adventure & Horror",
+        "roles": [
+            "premium"
+        ],
+        "languages": [
+            "English",
+            "bengali",
+            "Hindi"
+        ],
+        "mediums": [
+            "image",
+            "text"
+        ]
     },
     {
-      "task": "Cybernetic Breakthrough Investigation",
-      "inactive": false,
-      "research": true,
-      "turns": 4,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search on recent cybernetic breakthroughs, ensuring all core facts trace directly to search results."
-        },
-        {
-          "name": "domain",
-          "ref": "scifi_domain"
-        },
-        {
-          "name": "research level",
-          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
-        },
-        {
-          "name": "format",
-          "selector": "random",
-          "values": [
-            "an investigative reporter's log",
-            "a sci-fi thriller chapter",
-            "a confidential lab report breakdown"
-          ]
-        },
-        {
-          "name": "investigator",
-          "ref": "human_hero",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "investigator appearance",
-          "refs": [
-            "feature_face_shape",
-            "feature_eye_shape",
-            "feature_eye_color",
-            "feature_skin_tone_texture",
-            "feature_neutral_body_build",
-            "feature_hairstyle_neutral",
-            "feature_hair_color_neutral",
-            "feature_neutral_distinguishing_marks"
-          ],
-          "selector": "compose",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "investigator attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        }
-      ],
-      "genre": "Sci-Fi",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali"
-      ],
-      "mediums": [
-        "text"
-      ]
+        "task": "Cybernetic Breakthrough Investigation",
+        "inactive": false,
+        "research": true,
+        "turns": 4,
+        "details": [
+            {
+                "name": "format",
+                "selector": "random",
+                "values": [
+                    "an investigative reporter's log",
+                    "a sci-fi thriller chapter",
+                    "a confidential lab report breakdown"
+                ]
+            },
+            {
+                "name": "research",
+                "value": "Perform a web search on recent cybernetic breakthroughs, ensuring all core facts trace directly to search results."
+            },
+            {
+                "name": "domain",
+                "ref": "scifi_domain"
+            },
+            {
+                "name": "research level",
+                "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+            },
+            {
+                "name": "investigator",
+                "ref": "human_hero",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "investigator appearance",
+                "refs": [
+                    "feature_face_shape",
+                    "feature_eye_shape",
+                    "feature_eye_color",
+                    "feature_skin_tone_texture",
+                    "feature_neutral_body_build",
+                    "feature_hairstyle_neutral",
+                    "feature_hair_color_neutral",
+                    "feature_neutral_distinguishing_marks"
+                ],
+                "selector": "compose",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "investigator attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            }
+        ],
+        "genre": "Sci-Fi",
+        "roles": [
+            "free"
+        ],
+        "languages": [
+            "English",
+            "bengali"
+        ],
+        "mediums": [
+            "text"
+        ]
     },
     {
-      "task": "Extreme Wilderness Rescue Expedition",
-      "inactive": false,
-      "research": true,
-      "turns": 4,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search to research a real historical survival or wilderness incident. Ground the physical struggle and atmospheric danger in verified facts."
-        },
-        {
-          "name": "setting",
-          "ref": "setting_adventure"
-        },
-        {
-          "name": "tone",
-          "ref": "mood_horror"
-        },
-        {
-          "name": "rescuer",
-          "ref": "human_hero",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "rescuer appearance",
-          "refs": [
-            "feature_face_shape",
-            "feature_eye_shape",
-            "feature_eye_color",
-            "feature_skin_tone_texture",
-            "feature_neutral_body_build",
-            "feature_hairstyle_neutral",
-            "feature_hair_color_neutral",
-            "feature_neutral_distinguishing_marks"
-          ],
-          "selector": "compose",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "rescuer attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        }
-      ],
-      "genre": "Adventure",
-      "roles": [
-        "premium"
-      ],
-      "languages": [
-        "English",
-        "bengali",
-        "Hindi"
-      ],
-      "mediums": [
-        "text"
-      ]
+        "task": "Extreme Wilderness Rescue Expedition",
+        "inactive": false,
+        "research": true,
+        "turns": 4,
+        "details": [
+            {
+                "name": "format",
+                "value": "High-stakes survival action narrative written in chronological scene logs, focusing on real physical hazards and rescue techniques."
+            },
+            {
+                "name": "research",
+                "value": "Perform a web search to research a real historical survival or wilderness incident. Ground the physical struggle and atmospheric danger in verified facts."
+            },
+            {
+                "name": "setting",
+                "ref": "setting_adventure"
+            },
+            {
+                "name": "tone",
+                "ref": "mood_horror"
+            },
+            {
+                "name": "rescuer",
+                "ref": "human_hero",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "rescuer appearance",
+                "refs": [
+                    "feature_face_shape",
+                    "feature_eye_shape",
+                    "feature_eye_color",
+                    "feature_skin_tone_texture",
+                    "feature_neutral_body_build",
+                    "feature_hairstyle_neutral",
+                    "feature_hair_color_neutral",
+                    "feature_neutral_distinguishing_marks"
+                ],
+                "selector": "compose",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "rescuer attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            }
+        ],
+        "genre": "Adventure",
+        "roles": [
+            "premium"
+        ],
+        "languages": [
+            "English",
+            "bengali",
+            "Hindi"
+        ],
+        "mediums": [
+            "text"
+        ]
     },
     {
-      "task": "Satire column on different office cultures",
-      "inactive": false,
-      "turns": 3,
-      "research": true,
-      "details": [
-        {
-          "name": "research",
-          "value": "Find currently active themes which can present some witty humor across different office cultures"
-        },
-        {
-          "name": "style",
-          "value": "Draft a witty, humorous satirical piece focusing strictly on institutional work culture as a whole — do not name, reference, or caricature any real company, brand, or individual."
-        },
-        {
-          "name": "target",
-          "selector": "roundrobin",
-          "values": [
-            "reply-all email threads",
-            "endless status meetings",
-            "buzzword-heavy memos",
-            "open-plan offices",
-            "performance reviews"
-          ]
-        },
-        {
-          "name": "angle",
-          "selector": "random",
-          "values": [
-            "a 'day in the life' narrative",
-            "a mock corporate memo",
-            "a series of absurd office observations",
-            "a parody of corporate advice columns"
-          ]
-        },
-        {
-          "name": "time_setting",
-          "ref": "time_of_day",
-          "change_freq": "Per Round"
-        },
-        {
-          "name": "lighting",
-          "ref": "lighting_ambience",
-          "change_freq": "Per Round"
-        },
-        {
-          "name": "art_medium",
-          "ref": "feature_art_medium",
-          "change_freq": "Per Round"
-        },
-        {
-          "name": "image",
-          "value": "Include exactly one absurd, humorously stylized image illustration matching the target corporate trope."
-        },
-        {
-          "name": "everyman",
-          "ref": "office_everyman",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Dave",
-            "Priyanka",
-            "Chen",
-            "Bella",
-            "Omar",
-            "Isha",
-            "Felix",
-            "Nina"
-          ]
-        },
-        {
-          "name": "everyman appearance",
-          "refs": [
-            "feature_face_shape",
-            "feature_eye_shape",
-            "feature_eye_color",
-            "feature_skin_tone_texture",
-            "feature_neutral_body_build",
-            "feature_hairstyle_neutral",
-            "feature_hair_color_neutral",
-            "feature_neutral_distinguishing_marks"
-          ],
-          "selector": "compose",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Dave",
-            "Priyanka",
-            "Chen",
-            "Bella",
-            "Omar",
-            "Isha",
-            "Felix",
-            "Nina"
-          ]
-        },
-        {
-          "name": "everyman attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Dave",
-            "Priyanka",
-            "Chen",
-            "Bella",
-            "Omar",
-            "Isha",
-            "Felix",
-            "Nina"
-          ]
-        }
-      ],
-      "genre": "Satire",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English"
-      ],
-      "mediums": [
-        "image",
-        "text"
-      ]
+        "task": "Satire column on different office cultures",
+        "inactive": false,
+        "turns": 3,
+        "research": true,
+        "details": [
+            {
+                "name": "format",
+                "value": "Satirical column text paired with one absurd image illustration matching the specific corporate trope."
+            },
+            {
+                "name": "research",
+                "value": "Find currently active themes which can present some witty humor across different office cultures"
+            },
+            {
+                "name": "style",
+                "value": "Draft a witty, humorous satirical piece focusing strictly on institutional work culture as a whole — do not name, reference, or caricature any real company, brand, or individual."
+            },
+            {
+                "name": "target",
+                "selector": "roundrobin",
+                "values": [
+                    "reply-all email threads",
+                    "endless status meetings",
+                    "buzzword-heavy memos",
+                    "open-plan offices",
+                    "performance reviews"
+                ]
+            },
+            {
+                "name": "angle",
+                "selector": "random",
+                "values": [
+                    "a 'day in the life' narrative",
+                    "a mock corporate memo",
+                    "a series of absurd office observations",
+                    "a parody of corporate advice columns"
+                ]
+            },
+            {
+                "name": "time_setting",
+                "ref": "time_of_day",
+                "change_freq": "Per Round"
+            },
+            {
+                "name": "lighting",
+                "ref": "lighting_ambience",
+                "change_freq": "Per Round"
+            },
+            {
+                "name": "art_medium",
+                "ref": "feature_art_medium",
+                "change_freq": "Per Round"
+            },
+            {
+                "name": "image",
+                "value": "Include exactly one absurd, humorously stylized image illustration matching the target corporate trope."
+            },
+            {
+                "name": "everyman",
+                "ref": "office_everyman",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Dave",
+                    "Priyanka",
+                    "Chen",
+                    "Bella",
+                    "Omar",
+                    "Isha",
+                    "Felix",
+                    "Nina"
+                ]
+            },
+            {
+                "name": "everyman appearance",
+                "refs": [
+                    "feature_face_shape",
+                    "feature_eye_shape",
+                    "feature_eye_color",
+                    "feature_skin_tone_texture",
+                    "feature_neutral_body_build",
+                    "feature_hairstyle_neutral",
+                    "feature_hair_color_neutral",
+                    "feature_neutral_distinguishing_marks"
+                ],
+                "selector": "compose",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Dave",
+                    "Priyanka",
+                    "Chen",
+                    "Bella",
+                    "Omar",
+                    "Isha",
+                    "Felix",
+                    "Nina"
+                ]
+            },
+            {
+                "name": "everyman attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Dave",
+                    "Priyanka",
+                    "Chen",
+                    "Bella",
+                    "Omar",
+                    "Isha",
+                    "Felix",
+                    "Nina"
+                ]
+            }
+        ],
+        "genre": "Satire",
+        "roles": [
+            "free"
+        ],
+        "languages": [
+            "English"
+        ],
+        "mediums": [
+            "image",
+            "text"
+        ]
     },
     {
-      "task": "A bedtime story for kids",
-      "inactive": false,
-      "research": true,
-      "turns": 5,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform a web search to find one recent, real, lighthearted news event appropriate for children aged 5 to 12. Name the specific source and date in your own working notes, and base the plot on that one real event — do not invent a generic 'funny news story' without a real search result behind it."
-        },
-        {
-          "name": "research level",
-          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
-        },
-        {
-          "name": "audience age",
-          "ref": "kids_age_group",
-          "change_freq": "Per Round"
-        },
-        {
-          "name": "hero",
-          "ref": "kids_hero",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "hero's companion",
-          "ref": "story_animals",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Pip",
-            "Daisy",
-            "Rusty",
-            "Bella",
-            "Momo",
-            "Biscuit",
-            "Sparks",
-            "Willa"
-          ]
-        },
-        {
-          "name": "hero appearance",
-          "ref": "character_appearance",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "hero attire",
-          "ref": "character_attire",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Barnaby",
-            "Noor",
-            "Milo",
-            "Luna",
-            "Toto",
-            "Zara",
-            "Cookie",
-            "Rumi"
-          ]
-        },
-        {
-          "name": "companion appearance",
-          "ref": "character_appearance",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Pip",
-            "Daisy",
-            "Rusty",
-            "Bella",
-            "Momo",
-            "Biscuit",
-            "Sparks",
-            "Willa"
-          ]
-        },
-        {
-          "name": "companion attire",
-          "ref": "character_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Pip",
-            "Daisy",
-            "Rusty",
-            "Bella",
-            "Momo",
-            "Biscuit",
-            "Sparks",
-            "Willa"
-          ]
-        },
-        {
-          "name": "setting",
-          "ref": "setting_cozy",
-          "change_freq": "Per Round"
-        },
-        {
-          "name": "time of day",
-          "ref": "time_of_day",
-          "change_freq": "Per Round"
-        },
-        {
-          "name": "lighting_ambience",
-          "ref": "lighting_ambience",
-          "change_freq": "Per Round"
-        },
-        {
-          "name": "mood",
-          "ref": "mood_cozy",
-          "change_freq": "Per Round"
-        },
-        {
-          "name": "image",
-          "value": "Include exactly one warm, child-friendly embedded image illustration, generated via the real image-generation tool call (not just described in prose), matching the climax scene and reflecting the hero, companion, setting, and lighting specified above."
-        }
-      ],
-      "genre": "Bedtime Stories",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "bengali",
-        "English"
-      ],
-      "mediums": [
-        "image",
-        "text"
-      ]
+        "task": "A bedtime story for kids",
+        "inactive": false,
+        "research": true,
+        "turns": 5,
+        "details": [
+            {
+                "name": "format",
+                "value": "Gentle bedtime narrative prose with soft pacing, ending in a soothing conclusion alongside one warm embedded visual illustration."
+            },
+            {
+                "name": "research",
+                "value": "Perform a web search to find one recent, real, lighthearted news event appropriate for children aged 5 to 12. Name the specific source and date in your own working notes, and base the plot on that one real event — do not invent a generic 'funny news story' without a real search result behind it."
+            },
+            {
+                "name": "research level",
+                "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+            },
+            {
+                "name": "audience age",
+                "ref": "kids_age_group",
+                "change_freq": "Per Round"
+            },
+            {
+                "name": "hero",
+                "ref": "kids_hero",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "hero's companion",
+                "ref": "story_animals",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Pip",
+                    "Daisy",
+                    "Rusty",
+                    "Bella",
+                    "Momo",
+                    "Biscuit",
+                    "Sparks",
+                    "Willa"
+                ]
+            },
+            {
+                "name": "hero appearance",
+                "ref": "character_appearance",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "hero attire",
+                "ref": "character_attire",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Barnaby",
+                    "Noor",
+                    "Milo",
+                    "Luna",
+                    "Toto",
+                    "Zara",
+                    "Cookie",
+                    "Rumi"
+                ]
+            },
+            {
+                "name": "companion appearance",
+                "ref": "character_appearance",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Pip",
+                    "Daisy",
+                    "Rusty",
+                    "Bella",
+                    "Momo",
+                    "Biscuit",
+                    "Sparks",
+                    "Willa"
+                ]
+            },
+            {
+                "name": "companion attire",
+                "ref": "character_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Pip",
+                    "Daisy",
+                    "Rusty",
+                    "Bella",
+                    "Momo",
+                    "Biscuit",
+                    "Sparks",
+                    "Willa"
+                ]
+            },
+            {
+                "name": "setting",
+                "ref": "setting_cozy",
+                "change_freq": "Per Round"
+            },
+            {
+                "name": "time of day",
+                "ref": "time_of_day",
+                "change_freq": "Per Round"
+            },
+            {
+                "name": "lighting_ambience",
+                "ref": "lighting_ambience",
+                "change_freq": "Per Round"
+            },
+            {
+                "name": "mood",
+                "ref": "mood_cozy",
+                "change_freq": "Per Round"
+            },
+            {
+                "name": "image",
+                "value": "Include exactly one warm, child-friendly embedded image illustration, generated via the real image-generation tool call (not just described in prose), matching the climax scene and reflecting the hero, companion, setting, and lighting specified above."
+            }
+        ],
+        "genre": "Bedtime Stories",
+        "roles": [
+            "free"
+        ],
+        "languages": [
+            "bengali",
+            "English"
+        ],
+        "mediums": [
+            "image",
+            "text"
+        ]
     },
     {
-      "task": "A day at the farm",
-      "inactive": false,
-      "turns": 4,
-      "research": true,
-      "details": [
-        {
-          "name": "research",
-          "value": "Perform research on different farms across world. Describe an ordinary, warm day on a small countryside farm through the eyes of a child visitor."
-        },
-        {
-          "name": "animals",
-          "selector": "random_multi",
-          "count": {
-            "selector": "random",
-            "values": [
-              2,
-              3
-            ]
-          },
-          "ref": "story_animals"
-        },
-        {
-          "name": "hero",
-          "ref": "farm_child",
-          "character": true,
-          "names": [
-            "Asha",
-            "Tom",
-            "Mei",
-            "Ravi",
-            "Cora",
-            "Emeka",
-            "Suki",
-            "Ali"
-          ]
-        },
-        {
-          "name": "time",
-          "ref": "time_of_day"
-        },
-        {
-          "name": "mood",
-          "ref": "mood_cozy"
-        },
-        {
-          "name": "image",
-          "value": "Include exactly one warm, child-friendly embedded image illustration of the farm scene."
-        },
-        {
-          "name": "hero appearance",
-          "ref": "character_appearance",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Asha",
-            "Tom",
-            "Mei",
-            "Ravi",
-            "Cora",
-            "Emeka",
-            "Suki",
-            "Ali"
-          ]
-        },
-        {
-          "name": "hero attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Asha",
-            "Tom",
-            "Mei",
-            "Ravi",
-            "Cora",
-            "Emeka",
-            "Suki",
-            "Ali"
-          ]
-        },
-        {
-          "name": "companion",
-          "ref": "story_animals",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Pip",
-            "Daisy",
-            "Rusty",
-            "Bella",
-            "Momo",
-            "Biscuit",
-            "Sparks",
-            "Willa"
-          ]
-        },
-        {
-          "name": "companion appearance",
-          "ref": "character_appearance",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Pip",
-            "Daisy",
-            "Rusty",
-            "Bella",
-            "Momo",
-            "Biscuit",
-            "Sparks",
-            "Willa"
-          ]
-        },
-        {
-          "name": "companion attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Pip",
-            "Daisy",
-            "Rusty",
-            "Bella",
-            "Momo",
-            "Biscuit",
-            "Sparks",
-            "Willa"
-          ]
-        }
-      ],
-      "genre": "Bedtime Stories",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali"
-      ],
-      "mediums": [
-        "image",
-        "text"
-      ]
+        "task": "A day at the farm",
+        "inactive": false,
+        "turns": 4,
+        "research": true,
+        "details": [
+            {
+                "name": "format",
+                "value": "Descriptive first-person or close third-person narrative prose capturing sensory countryside farm details, paired with one embedded farm illustration."
+            },
+            {
+                "name": "research",
+                "value": "Perform research on different farms across world. Describe an ordinary, warm day on a small countryside farm through the eyes of a child visitor."
+            },
+            {
+                "name": "animals",
+                "selector": "random_multi",
+                "count": {
+                    "selector": "random",
+                    "values": [
+                        2,
+                        3
+                    ]
+                },
+                "ref": "story_animals"
+            },
+            {
+                "name": "hero",
+                "ref": "farm_child",
+                "character": true,
+                "names": [
+                    "Asha",
+                    "Tom",
+                    "Mei",
+                    "Ravi",
+                    "Cora",
+                    "Emeka",
+                    "Suki",
+                    "Ali"
+                ]
+            },
+            {
+                "name": "time",
+                "ref": "time_of_day"
+            },
+            {
+                "name": "mood",
+                "ref": "mood_cozy"
+            },
+            {
+                "name": "image",
+                "value": "Include exactly one warm, child-friendly embedded image illustration of the farm scene."
+            },
+            {
+                "name": "hero appearance",
+                "ref": "character_appearance",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Asha",
+                    "Tom",
+                    "Mei",
+                    "Ravi",
+                    "Cora",
+                    "Emeka",
+                    "Suki",
+                    "Ali"
+                ]
+            },
+            {
+                "name": "hero attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Asha",
+                    "Tom",
+                    "Mei",
+                    "Ravi",
+                    "Cora",
+                    "Emeka",
+                    "Suki",
+                    "Ali"
+                ]
+            },
+            {
+                "name": "companion",
+                "ref": "story_animals",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Pip",
+                    "Daisy",
+                    "Rusty",
+                    "Bella",
+                    "Momo",
+                    "Biscuit",
+                    "Sparks",
+                    "Willa"
+                ]
+            },
+            {
+                "name": "companion appearance",
+                "ref": "character_appearance",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Pip",
+                    "Daisy",
+                    "Rusty",
+                    "Bella",
+                    "Momo",
+                    "Biscuit",
+                    "Sparks",
+                    "Willa"
+                ]
+            },
+            {
+                "name": "companion attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Pip",
+                    "Daisy",
+                    "Rusty",
+                    "Bella",
+                    "Momo",
+                    "Biscuit",
+                    "Sparks",
+                    "Willa"
+                ]
+            }
+        ],
+        "genre": "Bedtime Stories",
+        "roles": [
+            "free"
+        ],
+        "languages": [
+            "English",
+            "bengali"
+        ],
+        "mediums": [
+            "image",
+            "text"
+        ]
     },
     {
-      "task": "Headline Adapted Human Interest Narrative",
-      "inactive": false,
-      "research": true,
-      "turns": 4,
-      "details": [
-        {
-          "name": "date",
-          "selector": "date"
-        },
-        {
-          "name": "research",
-          "value": "Perform a web search to find a recent lighthearted or remarkable real-world news story, then adapt it into an engaging character-driven narrative."
-        },
-        {
-          "name": "research level",
-          "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
-        },
-        {
-          "name": "angle",
-          "selector": "random",
-          "values": [
-            "an unsung hero local perspective",
-            "a day-in-the-life narrative adaptation",
-            "a heartwarming community drama"
-          ]
-        },
-        {
-          "name": "narrator",
-          "ref": "human_narrator",
-          "selector": "roundrobin",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        },
-        {
-          "name": "narrator appearance",
-          "refs": [
-            "feature_face_shape",
-            "feature_eye_shape",
-            "feature_eye_color",
-            "feature_skin_tone_texture",
-            "feature_neutral_body_build",
-            "feature_hairstyle_neutral",
-            "feature_hair_color_neutral",
-            "feature_neutral_distinguishing_marks"
-          ],
-          "selector": "compose",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        },
-        {
-          "name": "narrator attire",
-          "ref": "generic_ethnic_attire",
-          "selector": "random",
-          "change_freq": "Per Round",
-          "character": true,
-          "names": [
-            "Meera",
-            "Jonah",
-            "Priya",
-            "Elliot",
-            "Zoya",
-            "Marcus",
-            "Tara",
-            "Samir"
-          ]
-        }
-      ],
-      "genre": "News Turned Stories",
-      "roles": [
-        "free"
-      ],
-      "languages": [
-        "English",
-        "bengali"
-      ],
-      "mediums": [
-        "text"
-      ]
+        "task": "Headline Adapted Human Interest Narrative",
+        "inactive": false,
+        "research": true,
+        "turns": 4,
+        "details": [
+            {
+                "name": "format",
+                "value": "Character-driven feature story layout beginning with headline context followed by an emotional narrative arc."
+            },
+            {
+                "name": "date",
+                "selector": "date"
+            },
+            {
+                "name": "research",
+                "value": "Perform a web search to find a recent lighthearted or remarkable real-world news story, then adapt it into an engaging character-driven narrative."
+            },
+            {
+                "name": "research level",
+                "value": "[CRITICAL] extensive - minimum 20 sources to read and summarize recursively before writing"
+            },
+            {
+                "name": "angle",
+                "selector": "random",
+                "values": [
+                    "an unsung hero local perspective",
+                    "a day-in-the-life narrative adaptation",
+                    "a heartwarming community drama"
+                ]
+            },
+            {
+                "name": "narrator",
+                "ref": "human_narrator",
+                "selector": "roundrobin",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            },
+            {
+                "name": "narrator appearance",
+                "refs": [
+                    "feature_face_shape",
+                    "feature_eye_shape",
+                    "feature_eye_color",
+                    "feature_skin_tone_texture",
+                    "feature_neutral_body_build",
+                    "feature_hairstyle_neutral",
+                    "feature_hair_color_neutral",
+                    "feature_neutral_distinguishing_marks"
+                ],
+                "selector": "compose",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            },
+            {
+                "name": "narrator attire",
+                "ref": "generic_ethnic_attire",
+                "selector": "random",
+                "change_freq": "Per Round",
+                "character": true,
+                "names": [
+                    "Meera",
+                    "Jonah",
+                    "Priya",
+                    "Elliot",
+                    "Zoya",
+                    "Marcus",
+                    "Tara",
+                    "Samir"
+                ]
+            }
+        ],
+        "genre": "News Turned Stories",
+        "roles": [
+            "free"
+        ],
+        "languages": [
+            "English",
+            "bengali"
+        ],
+        "mediums": [
+            "text"
+        ]
     }
-  ]
-}
+]
