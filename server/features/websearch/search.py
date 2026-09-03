@@ -93,6 +93,8 @@ def _search_cache_store(norm_query, payload, ttl=None):
 
 
 def _finish_inflight(norm_query, event):
+    if event is None:
+        return
     event.set()
     with _CACHE_LOCK:
         if _IN_FLIGHT.get(norm_query) is event:
@@ -443,6 +445,7 @@ def web_search(query, current_time=None, current_location=None):
         return payload
 
     owns_slot = False
+    inflight = None
     with _CACHE_LOCK:
         hit = (
             _search_cache_get(norm_query, clean_query, time.monotonic())
