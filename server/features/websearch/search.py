@@ -25,6 +25,7 @@ WEB_SEARCH_RESULT_LIMIT = 10
 WEB_SEARCH_ENRICH_TOP = 6
 WEB_SEARCH_ENRICH_CHARS = 6000
 WEB_SEARCH_ENRICH_TIMEOUT = 25
+GOOGLE_SEARCH_TIMEOUT = 10
 # Search-result cache and outbound pacing for web_search. Non-time-sensitive
 # results are reused for a day for exact and near-duplicate queries;
 # time-sensitive queries are only reused within a short window. Outbound
@@ -331,6 +332,39 @@ def _apply_location_scoping(clean_query, current_location, params):
             params["q"] = f"{clean_query} {place}"
 
 
+def _google_custom_search(query):
+    """Search Google Custom Search JSON API when SearXNG lacks good results."""
+    api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    cx = os.environ.get("GOOGLE_CSE_ID", "").strip()
+    if not api_key or not cx:
+        return None
+    try:
+        response = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={
+                "key": api_key,
+                "cx": cx,
+                "q": query,
+                "num": WEB_SEARCH_RESULT_LIMIT,
+            },
+            timeout=GOOGLE_SEARCH_TIMEOUT,
+        )
+        response.raise_for_status()
+        items = response.json().get("items", [])
+    except Exception as e:
+        print(f"[google_search] unavailable: {e}")
+        return None
+    return [
+        {
+            "title": item.get("title", ""),
+            "url": item.get("link", ""),
+            "snippet": item.get("snippet", ""),
+        }
+        for item in items
+        if item.get("link")
+    ]
+
+
 def _has_explicit_place(query):
     """True when the query already names a city/country/place."""
     return any(re.search(rf"(^| ){re.escape(place)}( |$)",
@@ -497,6 +531,16 @@ def web_search(query, current_time=None, current_location=None):
         low_confidence = False
     else:
         formatted, low_confidence = relevance.filter_relevance(formatted, query)
+    if low_confidence or not formatted:
+        google_results = _google_custom_search(clean_query)
+        if google_results:
+            google_results = scrub_search_results(google_results, query=query)
+            google_results, google_low_confidence = relevance.filter_relevance(
+                google_results, query
+            )
+            if google_results:
+                formatted = google_results
+                low_confidence = google_low_confidence
     payload = _respond(formatted, low_confidence=low_confidence)
     # Ask the LLM how long this answer stays fresh so the next identical query
     # re-fetches at the right time ("breaking news" -> seconds, "how to" -> days),
