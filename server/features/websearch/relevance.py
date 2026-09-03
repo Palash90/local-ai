@@ -134,6 +134,23 @@ def _strong_overlap(qtoks, rtoks):
     return bool(overlap & strong)
 
 
+def _lexical_filter(results, query):
+    """Filter results by keyword overlap only (no embedder needed).
+    
+    Returns (filtered_results, low_confidence).
+    """
+    if not results:
+        return results, False
+    qtoks = _query_tokens(query)
+    filtered = []
+    for r in results:
+        rtoks = _result_tokens(r)
+        if _strong_overlap(qtoks, rtoks) and _location_matches(query, r):
+            filtered.append(r)
+    low_conf = len(filtered) < REL_MIN_CREDIBLE_RESULTS
+    return filtered[:WEB_SEARCH_RESULT_LIMIT], low_conf
+
+
 _PLACE_ALIASES = {
     "bengaluru": ("bengaluru", "bangalore"),
     "bangalore": ("bengaluru", "bangalore"),
@@ -191,7 +208,7 @@ def _semantic_relevance(results, query):
     Returns (results, low_confidence). Results below ``REL_MIN_SEMANTIC`` are
     HARD-DROPPED (never kept just so the list is non-empty — a surviving junk
     result like a Real Madrid page makes the model latch onto it). On embed
-    failure returns (results, False) untouched so the caller keeps the lexical
+    failure returns (results, True) untouched so the caller keeps the lexical
     survivors rather than emptying the list over a transient outage.
     """
     if not results:
@@ -201,29 +218,7 @@ def _semantic_relevance(results, query):
     ]
     vecs = page_cache.embed_texts(texts)
     if not vecs or len(vecs) != len(texts):
-        return results, False
-    qv = vecs[0]
-    scored = []
-    for r, rv in zip(results, vecs[1:]):
-        r["relevance"] = round(_cosine(qv, rv), 3)
-        if r["relevance"] >= REL_MIN_SEMANTIC:
-            scored.append(r)
-    scored.sort(key=lambda r: r.get("relevance", 0.0), reverse=True)
-    low_conf = len(scored) < REL_MIN_CREDIBLE_RESULTS
-    return scored[:WEB_SEARCH_RESULT_LIMIT], low_conf
-
-
-def _filter_relevant_results(results, query):
-    if not results:
-        return results, False
-    texts = [query] + [
-        f"{r.get('title') or ''} :: {r.get('snippet') or ''}"[:280] for r in results
-    ]
-    vecs = page_cache.embed_texts(texts)
-    if not vecs or len(vecs) != len(texts):
-        # Embedder unavailable: treat survivor set as low confidence to prevent gibberish pass-through
         return results, True
-    
     qv = vecs[0]
     scored = []
     for r, rv in zip(results, vecs[1:]):
@@ -240,7 +235,21 @@ def _screen_cached_payload(payload, query):
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         return payload
     screened = dict(payload)
-    results, low_confidence = _filter_relevant_results(payload["results"], query)
+    results = payload["results"]
+    
+    if not results:
+        return screened
+    
+    # Try semantic filtering if embedder available, else fall back to lexical
+    texts = [query] + [
+        f"{r.get('title') or ''} :: {r.get('snippet') or ''}"[:280] for r in results
+    ]
+    vecs = page_cache.embed_texts(texts)
+    if vecs and len(vecs) == len(texts):
+        results, low_confidence = _semantic_relevance(results, query)
+    else:
+        results, low_confidence = _lexical_filter(results, query)
+    
     screened["results"] = results
     if low_confidence:
         screened.pop("fallback_fetch_url", None)

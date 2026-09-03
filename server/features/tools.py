@@ -12,7 +12,6 @@ from server.features.websearch import fetch_page, web_search
 from server.features.websearch import relevance as _relevance
 
 # Private names remain available to older focused checks and integrations.
-_filter_relevant_results = _relevance._filter_relevant_results
 _screen_cached_payload = _relevance._screen_cached_payload
 
 

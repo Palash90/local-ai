@@ -480,7 +480,18 @@ def web_search(query, current_time=None, current_location=None):
     # dictionary-for-"overview") before the LLM ever sees it, and flag the
     # set as low-confidence when few credible results survive so the model
     # reports UNSUPPORTED instead of improvising.
-    formatted, low_confidence = _filter_relevant_results(formatted, query)
+    if not formatted:
+        low_confidence = False
+    else:
+        # Try semantic filtering if embedder available, else fall back to lexical
+        texts = [query] + [
+            f"{r.get('title') or ''} :: {r.get('snippet') or ''}"[:280] for r in formatted
+        ]
+        vecs = page_cache.embed_texts(texts)
+        if vecs and len(vecs) == len(texts):
+            formatted, low_confidence = _semantic_relevance(formatted, query)
+        else:
+            formatted, low_confidence = relevance._lexical_filter(formatted, query)
     payload = _respond(formatted, low_confidence=low_confidence)
     # Ask the LLM how long this answer stays fresh so the next identical query
     # re-fetches at the right time ("breaking news" -> seconds, "how to" -> days),
@@ -532,5 +543,5 @@ def _enrich_top_results(results):
     return results
 
 
-_filter_relevant_results = relevance._filter_relevant_results
+_semantic_relevance = relevance._semantic_relevance
 _screen_cached_payload = relevance._screen_cached_payload
