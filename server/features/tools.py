@@ -147,7 +147,15 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             if t:
                 t.setdefault("_tools_used", []).append(tool_name)
                 try:
-                    t.setdefault("_search_details", []).append(json.loads(result))
+                    search_payload = json.loads(result)
+                    t.setdefault("_search_details", []).append(search_payload)
+                    # An empty low-confidence search cannot provide evidence.
+                    # Prevent a research model from issuing dozens of variant
+                    # searches and appending the same failure until context is
+                    # exhausted; the next LLM round must answer unsupported.
+                    if search_payload.get("low_confidence") and not search_payload.get("results"):
+                        t["no_tools"] = True
+                        t["_search_exhausted"] = True
                 except Exception:
                     pass
         llm_result = (

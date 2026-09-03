@@ -7,12 +7,8 @@ Run with::
 
 import json
 import os
-
-from server.features.state import M
 from server.features import state
 
-import os
-from server.features import state
 
 class MockEntrypoint:
     SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8080")
@@ -33,13 +29,15 @@ class MockEntrypoint:
 
 state._Registry.entrypoint = MockEntrypoint()
 
-state._Registry.entrypoint = MockEntrypoint()
-
 def main():
     from server.features.websearch.search import web_search
 
     print("--- WebSearch Live Relevance Checker ---")
-    user_query = input("Enter the search query you want to check: ").strip()
+    try:
+        user_query = input("Enter the search query you want to check: ").strip()
+    except EOFError:
+        print("No query entered. Exiting.")
+        return
     if not user_query:
         print("No query entered. Exiting.")
         return

@@ -50,6 +50,7 @@ _IN_FLIGHT = {}
 
 
 def _search_cache_get(norm_query, query, now):
+    return None
     """Lock-free cache lookup; caller must hold _CACHE_LOCK."""
     ttl = page_cache.regex_ttl(query)
     entry = _SEARCH_CACHE.get(norm_query)
@@ -354,7 +355,8 @@ def _google_custom_search(query):
         response.raise_for_status()
         items = response.json().get("items", [])
     except Exception as e:
-        print(f"[google_search] unavailable: {e}")
+        # The exception URL can contain the GOOGLE_API_KEY query parameter.
+        print(f"[google_search] unavailable: {type(e).__name__}")
         return None
     return [
         {
@@ -481,11 +483,17 @@ def web_search(query, current_time=None, current_location=None):
         # SearXNG call — the whole point of the vector layer.
         hit = _semantic_search_hit(clean_query)
         if hit is not None:
-            if owns_slot:
-                _finish_inflight(norm_query, inflight)
-            _search_cache_store(norm_query, hit)
-            print("Web-search cache hit (semantic)")
-            return json.dumps(_screen_cached_payload(hit, clean_query))
+            screened = _screen_cached_payload(hit, clean_query)
+            if screened.get("results") and not screened.get("low_confidence"):
+                if owns_slot:
+                    _finish_inflight(norm_query, inflight)
+                _search_cache_store(norm_query, screened)
+                print("Web-search cache hit (semantic)")
+                return json.dumps(screened)
+            # A semantically similar page that fails query screening is not a
+            # result. Continue to live SearXNG instead of repeatedly returning
+            # the same empty low-confidence payload and growing LLM context.
+            print("[web_search] semantic cache hit rejected by relevance gate")
     if not owns_slot and allow_cached_results:
         # An identical fetch is already running: wait for its result
         # instead of duplicating the request.

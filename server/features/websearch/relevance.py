@@ -111,7 +111,13 @@ def _result_tokens(entry):
         ]
     ).lower()
     text = text.replace("_", " ")
-    return set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", text)) or set()
+    tokens = set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", text))
+    # Search engines often pluralize acronyms (``RVO`` -> ``RVOs``). Keep a
+    # conservative singular form so exact-topic matching is not lost.
+    tokens |= {
+        token[:-1] for token in tokens if token.endswith("s") and len(token) > 3
+    }
+    return tokens or set()
 
 
 # High-frequency, highly ambiguous English words that routinely cause false
@@ -163,6 +169,13 @@ _PLACE_ALIASES = {
     "us": ("united states", "usa", "us"),
 }
 
+_CITY_HINTS = {
+    "bengaluru", "bangalore", "mumbai", "delhi", "kolkata", "chennai",
+    "hyderabad", "pune", "london", "paris", "new york", "tokyo", "boston",
+    "seattle", "sydney", "melbourne", "toronto", "singapore", "bangkok",
+    "dubai",
+}
+
 
 def _requested_places(query):
     """Return explicitly named places in a query, including known aliases."""
@@ -179,10 +192,20 @@ def _location_matches(query, entry):
     requested = _requested_places(query)
     if not requested:
         return True
+    requested_cities = requested & {
+        alias for place in _CITY_HINTS
+        for alias in _PLACE_ALIASES.get(place, (place,))
+    }
+    # Country context is a soft scope: authoritative sources often omit the
+    # country from their title/snippet. City context remains hard-scoped to
+    # prevent a London page from answering a Kolkata query.
+    if not requested_cities:
+        return True
     text = " ".join(
         str(entry.get(key, "") or "")
         for key in ("title", "page_title", "snippet")
     ).lower()
+    text = re.sub(r"\bu\.?s\.?\b", "us", text)
     url = str(entry.get("url", "") or "").lower()
     return any(
         re.search(rf"(^|[^a-z]){re.escape(place)}([^a-z]|$)", text)
