@@ -16,6 +16,7 @@ from server.features.urlclassify import scrub_search_results
 from server.features.websearch import fetch_page
 from server.features.websearch import relevance
 from server.features.websearch import vector_store as page_cache
+from server.features.websearch.relevance import _query_tokens
 
 _PLACE_HINTS = relevance._PLACE_HINTS
 

@@ -64,7 +64,7 @@ def _pick_categories(query):
 # credible. Genuinely relevant hits sit 0.5-0.85; the keyword-only junk cases
 # (Real Madrid vs traffic scored ~0.37, dictionary page vs quantum ~0.2) sit
 # below it, so 0.40 is a deliberate gap that drops them while keeping real hits.
-REL_MIN_SEMANTIC = 0.40
+REL_MIN_SEMANTIC = 0.65
 # If fewer than this many results survive BOTH gates we surface the (possibly
 # empty) survivor set with ``low_confidence=True`` and a re-search directive so
 # the model never fixates on an irrelevant single result (e.g. Real Madrid in
@@ -214,35 +214,25 @@ def _semantic_relevance(results, query):
 
 
 def _filter_relevant_results(results, query):
-    """Apply lexical + semantic relevance gating; return (results, low_confidence)."""
     if not results:
         return results, False
-    qtoks = _query_tokens(query)
-    # Location gate is authoritative for explicit place queries. Generic
-    # topical similarity must not turn a Kolkata query into a London/TfL hit.
-    location_kept = [r for r in results if _location_matches(query, r)]
-    if _requested_places(query):
-        if not location_kept:
-            return [], True
-        results = location_kept
-    # Lexical gate is AUTHORITATIVE: a result sharing no meaningful token with
-    # the query (Real-Madrid-for-"real-time traffic", dictionary-for-"overview")
-    # is junk and is hard-dropped — never handed back just to avoid an empty
-    # list, because the model will then fixate on the irrelevant page.
-    if qtoks:
-        kept = [r for r in results if _strong_overlap(qtoks, _result_tokens(r))]
-        if kept:
-            results = kept
-        else:
-            return [], True
-    # Semantic gate: drop low-similarity survivors; degrade gracefully to the
-    # lexical survivors if the embed server is briefly unavailable.
-    try:
-        results, low_conf = _semantic_relevance(results, query)
-    except Exception as e:
-        print(f"[web_search] relevance screening failed: {e}")
-        results, low_conf = results, False
-    return results[:WEB_SEARCH_RESULT_LIMIT], low_conf
+    texts = [query] + [
+        f"{r.get('title') or ''} :: {r.get('snippet') or ''}"[:280] for r in results
+    ]
+    vecs = page_cache.embed_texts(texts)
+    if not vecs or len(vecs) != len(texts):
+        # Embedder unavailable: treat survivor set as low confidence to prevent gibberish pass-through
+        return results, True
+    
+    qv = vecs[0]
+    scored = []
+    for r, rv in zip(results, vecs[1:]):
+        r["relevance"] = round(_cosine(qv, rv), 3)
+        if r["relevance"] >= REL_MIN_SEMANTIC:
+            scored.append(r)
+    scored.sort(key=lambda r: r.get("relevance", 0.0), reverse=True)
+    low_conf = len(scored) < REL_MIN_CREDIBLE_RESULTS
+    return scored[:WEB_SEARCH_RESULT_LIMIT], low_conf
 
 
 def _screen_cached_payload(payload, query):

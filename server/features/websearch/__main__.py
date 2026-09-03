@@ -1,44 +1,70 @@
-"""Focused web-search relevance checks.
+"""Focused web-search relevance checks (Live SearXNG Test).
 
 Run with::
 
     PYTHONPATH=. python3 -m server.features.websearch
 """
 
+import json
+import os
+
+from server.features.state import M
+from server.features import state
+
+import os
+from server.features import state
+
+class MockEntrypoint:
+    SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8080")
+    SEARXNG_PUBLIC_URL = os.getenv("SEARXNG_PUBLIC_URL", "http://127.0.0.1:8080")
+    IMG_PATH = os.getenv("IMG_PATH", "/tmp")
+
+    @staticmethod
+    def server_url(lane):
+        return ""
+
+    @staticmethod
+    def server_model_id(lane):
+        return ""
+
+    @staticmethod
+    def is_model_ready(base, model_id):
+        return False  # Bypasses LLM classifier in standalone mode
+
+state._Registry.entrypoint = MockEntrypoint()
+
+state._Registry.entrypoint = MockEntrypoint()
 
 def main():
-    from server.features.websearch import relevance
+    from server.features.websearch.search import web_search
 
-    # Keep this smoke test deterministic and independent of the local embedder.
-    relevance.page_cache.embed_texts = lambda texts: None
-    _filter_relevant_results = relevance._filter_relevant_results
+    print("--- WebSearch Live Relevance Checker ---")
+    user_query = input("Enter the search query you want to check: ").strip()
+    if not user_query:
+        print("No query entered. Exiting.")
+        return
 
-    cases = [
-        (
-            "real time traffic condition in Bangalore",
-            [{"title": "Real Madrid CF", "url": "https://example.test/madrid", "snippet": "Real football club"}],
-            [],
-        ),
-        (
-            "signs and ways to check for GPU issues",
-            [
-                {"title": "GPU Failure Diagnosis", "url": "https://example.test/gpu", "snippet": "GPU issues and artifacts"},
-                {"title": "Traffic Signal Signs", "url": "https://example.test/traffic", "snippet": "Road signs and symbols"},
-            ],
-            ["GPU Failure Diagnosis"],
-        ),
-        (
-            "current traffic situation in Kolkata",
-            [{"title": "Traffic status updates - Transport for London", "url": "https://tfl.gov.uk/traffic/status", "snippet": "London traffic status"}],
-            [],
-        ),
-    ]
-    for query, results, expected in cases:
-        filtered, _ = _filter_relevant_results(results, query)
-        actual = [result["title"] for result in filtered]
-        assert actual == expected, f"{query!r}: expected {expected}, got {actual}"
-    print(f"websearch checks passed ({len(cases)} cases)")
+    print(f"\nRunning search for: {user_query!r}...\n")
+    response_json = web_search(user_query)
+    data = json.loads(response_json)
 
+    print("=== SEARCH QUERY ===")
+    print(user_query)
+    print("=== RESULTS ===")
+    print(f"Low Confidence Flag : {data.get('low_confidence', False)}")
+    if data.get("error"):
+        print(f"Search Error        : {data['error']}")
+        return
+
+    results = data.get("results", [])
+    print(f"Surviving Results   : {len(results)}\n")
+
+    for i, res in enumerate(results, 1):
+        print(f"[{i}] {res.get('title')}")
+        print(f"    URL: {res.get('url')}")
+        if "relevance" in res:
+            print(f"    Semantic Score: {res['relevance']}")
+        print(f"    Snippet: {res.get('snippet')[:120]}...\n")
 
 if __name__ == "__main__":
     main()

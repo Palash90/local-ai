@@ -13,6 +13,15 @@ import requests
 from server.features.state import M
 from server.features.websearch import vector_store as page_cache
 
+_TEXTISH_TYPES = (
+    "text/html",
+    "text/plain",
+    "application/xhtml+xml",
+    "application/xml",
+    "text/xml",
+    "application/json",
+)
+
 def _decode_response_text(raw):
     for enc in ("utf-8-sig", "utf-8", "latin-1"):
         try:

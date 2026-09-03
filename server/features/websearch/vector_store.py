@@ -156,7 +156,7 @@ def _request_embeddings(texts):
     parse simple and robust. Returns a list of vectors (one per text) or None
     on any failure so callers degrade to the keyed cache.
     """
-    import requests  # noqa: PLC0415
+    import requests
 
     vectors = []
     for text in texts:
@@ -164,7 +164,7 @@ def _request_embeddings(texts):
             r = requests.post(
                 _EMBED_BUDGET_URL,
                 json={"model": EMBED_MODEL, "input": [text]},
-                timeout=20,
+                timeout=2,
             )
             r.raise_for_status()
             rows = r.json()
