@@ -3,11 +3,15 @@ use_default_settings: true
 # Explicitly enable engines that ship disabled upstream
 engines:
   - name: bing
-    disabled: false
+    disabled: true
   - name: mojeek
     disabled: false
-  - name: google scholar
+  - name: qwant
     disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: google scholar
+    disabled: true
 
 server:
   secret_key: "GENERATE_A_RANDOM_32_BYTE_HEX_STRING" # Replace this!
