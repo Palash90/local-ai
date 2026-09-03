@@ -33,6 +33,42 @@ def _task_user(task_id):
         return M.tasks.get(task_id, {}).get("_user", "")
 
 
+def _source_footer(search_details):
+    """Build a deterministic citation footer from sources actually retrieved."""
+    sources = []
+    seen = set()
+    retrieved_at = None
+    for detail in search_details:
+        if not isinstance(detail, dict):
+            continue
+        retrieved_at = retrieved_at or detail.get("retrieved_at")
+        candidates = detail.get("results", [])
+        if detail.get("tool") == "fetch_page":
+            candidates = [detail]
+        for source in candidates:
+            if not isinstance(source, dict):
+                continue
+            url = source.get("url", "")
+            if not url or url in seen or "/search" in url:
+                continue
+            if detail.get("tool") == "fetch_page" and not source.get("content"):
+                continue
+            if detail.get("tool") != "fetch_page" and not source.get("full_content"):
+                continue
+            seen.add(url)
+            sources.append((source.get("title") or source.get("page_title") or url, url))
+            if len(sources) >= 5:
+                break
+        if len(sources) >= 5:
+            break
+    if not sources:
+        return ""
+    stamp = f" (retrieved {retrieved_at})" if retrieved_at else ""
+    lines = [f"\n\n---\n**Sources{stamp}:**"]
+    lines.extend(f"- [{title}]({url})" for title, url in sources)
+    return "\n".join(lines)
+
+
 def _image_bytes_b64(image):
     """Normalize an uploaded image to base64 bytes.
 
@@ -142,11 +178,21 @@ def _finalize_task(task_id, sid, msg_content, body):
     elapsed_ms = None
     if started_at is not None:
         elapsed_ms = int((time.time() - started_at) * 1000)
-    reasoning = (
-        body.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
-    )
-    if not msg_content and reasoning:
+    with M._data_lock:
+        task_timings = dict(M.tasks.get(task_id, {}).get("_timings", {}))
+    if elapsed_ms is not None:
+        task_timings["total_ms"] = elapsed_ms
+    print(f"[latency] task={task_id} total_ms={elapsed_ms} timings={task_timings}", flush=True)
+    if not msg_content:
         msg_content = "(No response content generated)"
+    reasoning = body.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
+    source_timestamp = next(
+        (d.get("retrieved_at") for d in reversed(search_details)
+         if isinstance(d, dict) and d.get("retrieved_at")),
+        None,
+    )
+    if search_details and "**Sources" not in msg_content:
+        msg_content = msg_content.rstrip() + _source_footer(search_details)
     msg_entry = {
         "role": "assistant",
         "content": msg_content,
@@ -160,6 +206,8 @@ def _finalize_task(task_id, sid, msg_content, body):
         "_research": bool(t.get("research")),
         "_elapsed_ms": elapsed_ms,
     }
+    if source_timestamp:
+        msg_entry["_source_retrieved_at"] = source_timestamp
     if verification is not None:
         msg_entry["_verification"] = verification
         msg_entry["_verification_duration"] = verification_duration
@@ -196,9 +244,12 @@ def _finalize_task(task_id, sid, msg_content, body):
                 "_image_model": image_model,
                 "_search_details": search_details,
                 "_artifacts": artifacts,
-                "reasoning": reasoning,
                 "_elapsed_ms": elapsed_ms,
+                "timings": task_timings,
+                "reasoning": reasoning,
             }
+            if source_timestamp:
+                M.tasks[task_id]["source_retrieved_at"] = source_timestamp
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
                 M.tasks[task_id]["_verification_duration"] = verification_duration
@@ -228,7 +279,12 @@ def _finalize_task(task_id, sid, msg_content, body):
         print(f"[L3] checking strict output blocks")
         blocked = is_strict_output_blocked(reply_text)
         judge_verdict = None
-        if not blocked and reply_text.strip():
+        # Simple UI turns already skipped the quality judge; skip the (also
+        # expensive, CPU-serialized) L3 LLM strict judge too, keeping only the
+        # fast deterministic pattern scan. Non-simple / MCP / guardrail lanes
+        # always run the LLM judge.
+        simple_lane_skip = (mode == "gpu" and not is_mcp_lane and M.is_simple_round_task(t))
+        if not blocked and reply_text.strip() and not simple_lane_skip:
             # LLM strict judge. On the guardrail/MCP lane it is fail-closed
             # (self-heals by restarting the guardrail server and retrying);
             # on the UI lane a judge outage degrades to a "screened" note so
@@ -364,9 +420,6 @@ def _event_loop():
                     if tt:
                         tt.setdefault("_tools_used", [])
                         tt.setdefault("_search_details", [])
-                        rc = msg.get("reasoning_content", "")
-                        if rc:
-                            tt["reasoning"] = rc
                 pending = len(msg["tool_calls"])
                 is_openai = t.get("openai_lane")
                 print(f"[llm_ok] Round {round_num}: LLM requested {pending} tool(s) for task {task_id}" + (" (OpenAI lane: client will execute)" if is_openai else ""))  # DEBUG
@@ -419,7 +472,7 @@ def _event_loop():
                             t2["_terminal"] = True
             else:
                 print(f"[llm_ok] Round {round_num}: LLM generated final response (no tool calls) for task {task_id}")  # DEBUG
-                print(f"[llm_ok] Message structure: content={repr(msg.get('content'))}, reasoning={repr(msg.get('reasoning_content'))}")
+                print(f"[llm_ok] Message structure: content={repr(msg.get('content'))}")
                 if raw_content and not cleaned_content:
                     # Content was *pure* tool-call spam. Reject the draft the
                     # same way the critic does — it was never appended to the
@@ -476,19 +529,35 @@ def _event_loop():
                     # answer quality gate + bounded re-run as research (see
                     # critic.run_verification_worker), so every UI reply is
                     # judged against the user's request before it is finalized.
-                    M.set_status(task_id, "Evaluating answer...")
+                    # But short, low-stakes turns (a one-line answer to a short
+                    # question) skip the extra quality-judge LLM inference and
+                    # finalize immediately — the deterministic pattern blockers
+                    # still run in _finalize_task.
+                    simple = M.is_simple_round_task(t)
                     with M._data_lock:
                         tt = M.tasks.get(task_id)
-                        if tt:
-                            tt["_state"] = "critic_running"
-                    M._tool_pools[mode].submit(
-                        M.run_verification_worker,
-                        task_id,
-                        sid,
-                        (msg.get("content") or ""),
-                        body,
-                        mode,
-                    )
+                        if not tt or tt.get("status") in ("done", "error", "cancelled"):
+                            continue
+                    if simple:
+                        print(
+                            f"[llm_ok] simple GPU round — skipping quality judge "
+                            f"for task {task_id}"
+                        )
+                        M._finalize_task(task_id, sid, (msg.get("content") or ""), body)
+                    else:
+                        M.set_status(task_id, "Evaluating answer...")
+                        with M._data_lock:
+                            tt = M.tasks.get(task_id)
+                            if tt:
+                                tt["_state"] = "critic_running"
+                        M._tool_pools[mode].submit(
+                            M.run_verification_worker,
+                            task_id,
+                            sid,
+                            (msg.get("content") or ""),
+                            body,
+                            mode,
+                        )
                 elif (
                     mode == "cpu"
                     and t.get("_user") in M._agent_users
@@ -665,7 +734,10 @@ def _queue_worker(mode):
             M._current_task_ids[mode] = item["task_id"]
             with M._data_lock:
                 if item["task_id"] in M.tasks:
+                    queued_at = M.tasks[item["task_id"]].get("_queued_at")
                     M.tasks[item["task_id"]]["_started_at"] = time.time()
+                    if queued_at is not None:
+                        M.tasks[item["task_id"]].setdefault("_timings", {})["queue_ms"] = int((time.time() - queued_at) * 1000)
         M._event_post(
             "start",
             item["task_id"],

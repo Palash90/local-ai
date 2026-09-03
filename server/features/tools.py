@@ -362,6 +362,14 @@ def _pace_outbound_request():
 # below this score the query degrades to a live SearXNG fetch.
 _SEMANTIC_HIT_MIN_SCORE = 0.60
 _SEMANTIC_HIT_K = 5
+# Semantic page recall is unsafe for live or location-sensitive requests: a
+# cached London traffic page is semantically close to Kolkata traffic while
+# being factually useless.
+_SEMANTIC_RECALL_UNSAFE_RE = re.compile(
+    r"\b(?:traffic|weather|nearby|local|live|current(?:ly)?|now|latest|"
+    r"breaking|today|tonight|news|updates?)\b",
+    re.IGNORECASE,
+)
 
 # TTL the LLM is allowed to return, in seconds.
 _LLM_TTL_MIN = 60
@@ -456,6 +464,8 @@ def _semantic_search_hit(query, min_score=_SEMANTIC_HIT_MIN_SCORE,
     embeddings). If the top hits clear ``min_score`` we can answer the query
     from them instead of the network.
     """
+    if _SEMANTIC_RECALL_UNSAFE_RE.search(query or ""):
+        return None
     hits = page_cache.page_semantic(query, k=k, min_score=min_score)
     if not hits:
         return None
@@ -511,55 +521,372 @@ def _pick_categories(query):
     return ",".join(cats)
 
 
+# ---------------------------------------------------------------------------
+# Result relevance gating.
+#
+# SearXNG (especially the local instance) does naive token matching and will
+# happily return keyword-only junk for a multi-word query — the "real-time
+# traffic" → Real Madrid and "quantum computing overview" → dictionary-of-the-
+# -word-`overview` failures seen in production. Two layers run on every fresh
+# search before results reach the LLM:
+#   1. lexical: drop results sharing no meaningful content token with the query;
+#   2. semantic: score each surviving result against the query with the local
+#      nomic embedding server and drop low-similarity hits.
+# Both degrade gracefully: if the tokenizer/embed server is unavailable we keep
+# the results rather than empty the list, but we still surface ``low_confidence``
+# so the LLM is told to treat the set as unreliable instead of improvising.
+# ---------------------------------------------------------------------------
+
+# Semantic similarity (cosine 0..1) a result must reach to be considered
+# credible. Genuinely relevant hits sit 0.5-0.85; the keyword-only junk cases
+# (Real Madrid vs traffic scored ~0.37, dictionary page vs quantum ~0.2) sit
+# below it, so 0.40 is a deliberate gap that drops them while keeping real hits.
+REL_MIN_SEMANTIC = 0.40
+# If fewer than this many results survive BOTH gates we surface the (possibly
+# empty) survivor set with ``low_confidence=True`` and a re-search directive so
+# the model never fixates on an irrelevant single result (e.g. Real Madrid in
+# a Bangalore traffic query).
+REL_MIN_CREDIBLE_RESULTS = 2
+
+# Content words that deserve no query token (role-filler / vague-intent words
+# that match unrelated dictionary pages, e.g. "overview", "research", "report").
+_QUERY_STOPWORDS = set(
+    """
+    a an the of on in to for and or but about with at by from via
+    what who when where why how is are was were be been being do does did
+    can could will would should shall may might must have has had
+    this that these those it its there here
+    overview summary general basics fundamental fundamentals introduction
+    detail details comprehensive research report find information info explain
+    explainer guide explain write about
+    """.split()
+)
+
+
+def _query_tokens(query):
+    """Lowercased, stopword-stripped meaningful query terms.
+
+    Hyphenated compounds are kept intact (``real-time`` stays ONE token so the
+    query never over-matches the word ``real``, e.g. against "Real Madrid" in a
+    traffic search); underscores are collapsed to plain tokens.
+    """
+    q = (query or "").lower()
+    q = q.replace("_", " ")
+    toks = set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", q))
+    return toks - _QUERY_STOPWORDS
+
+
+def _result_tokens(entry):
+    """Lowercased meaningful tokens from a result's title + snippet."""
+    text = " ".join(
+        [
+            entry.get("title", "") or "",
+            entry.get("page_title", "") or "",
+            entry.get("snippet", "") or "",
+        ]
+    ).lower()
+    text = text.replace("_", " ")
+    return set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", text)) or set()
+
+
+# High-frequency, highly ambiguous English words that routinely cause false
+# keyword "matches" (e.g. the standalone "real" from a space-separated
+# "real time" query colliding with "Real Madrid"). A result whose ONLY overlap
+# with the query is on these weak tokens counts as having NO overlap at all.
+_WEAK_TOKENS = {
+    "real", "top", "best", "new", "latest", "more", "today", "result",
+    "results", "big", "info", "information", "page", "main", "item", "items",
+    "list", "article",
+}
+
+
+def _strong_overlap(qtoks, rtoks):
+    """True if the token overlap includes at least one non-weak query token."""
+    overlap = qtoks & rtoks
+    if not overlap:
+        return False
+    strong = qtoks - _WEAK_TOKENS
+    return bool(overlap & strong)
+
+
+_PLACE_ALIASES = {
+    "bengaluru": ("bengaluru", "bangalore"),
+    "bangalore": ("bengaluru", "bangalore"),
+    "kolkata": ("kolkata", "calcutta"),
+    "calcutta": ("kolkata", "calcutta"),
+    "mumbai": ("mumbai", "bombay"),
+    "bombay": ("mumbai", "bombay"),
+    "united states": ("united states", "usa", "us"),
+    "usa": ("united states", "usa", "us"),
+    "us": ("united states", "usa", "us"),
+}
+
+
+def _requested_places(query):
+    """Return explicitly named places in a query, including known aliases."""
+    q = (query or "").lower()
+    places = []
+    for place in _PLACE_HINTS:
+        if re.search(rf"(^| ){re.escape(place)}( |$)", q):
+            places.extend(_PLACE_ALIASES.get(place, (place,)))
+    return set(places)
+
+
+def _location_matches(query, entry):
+    """Reject a result that cannot be about an explicitly requested place."""
+    requested = _requested_places(query)
+    if not requested:
+        return True
+    text = " ".join(
+        str(entry.get(key, "") or "")
+        for key in ("title", "page_title", "snippet")
+    ).lower()
+    url = str(entry.get("url", "") or "").lower()
+    return any(
+        re.search(rf"(^|[^a-z]){re.escape(place)}([^a-z]|$)", text)
+        or place.replace(" ", "") in url
+        for place in requested
+    )
+
+
+def _cosine(a, b):
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _semantic_relevance(results, query):
+    """Score results against the query with the embed server.
+
+    Returns (results, low_confidence). Results below ``REL_MIN_SEMANTIC`` are
+    HARD-DROPPED (never kept just so the list is non-empty — a surviving junk
+    result like a Real Madrid page makes the model latch onto it). On embed
+    failure returns (results, False) untouched so the caller keeps the lexical
+    survivors rather than emptying the list over a transient outage.
+    """
+    if not results:
+        return results, False
+    texts = [query] + [
+        f"{r.get('title') or ''} :: {r.get('snippet') or ''}"[:280] for r in results
+    ]
+    vecs = page_cache.embed_texts(texts)
+    if not vecs or len(vecs) != len(texts):
+        return results, False
+    qv = vecs[0]
+    scored = []
+    for r, rv in zip(results, vecs[1:]):
+        r["relevance"] = round(_cosine(qv, rv), 3)
+        if r["relevance"] >= REL_MIN_SEMANTIC:
+            scored.append(r)
+    scored.sort(key=lambda r: r.get("relevance", 0.0), reverse=True)
+    low_conf = len(scored) < REL_MIN_CREDIBLE_RESULTS
+    return scored[:WEB_SEARCH_RESULT_LIMIT], low_conf
+
+
+def _filter_relevant_results(results, query):
+    """Apply lexical + semantic relevance gating; return (results, low_confidence)."""
+    if not results:
+        return results, False
+    qtoks = _query_tokens(query)
+    # Location gate is authoritative for explicit place queries. Generic
+    # topical similarity must not turn a Kolkata query into a London/TfL hit.
+    location_kept = [r for r in results if _location_matches(query, r)]
+    if _requested_places(query):
+        if not location_kept:
+            return [], True
+        results = location_kept
+    # Lexical gate is AUTHORITATIVE: a result sharing no meaningful token with
+    # the query (Real-Madrid-for-"real-time traffic", dictionary-for-"overview")
+    # is junk and is hard-dropped — never handed back just to avoid an empty
+    # list, because the model will then fixate on the irrelevant page.
+    if qtoks:
+        kept = [r for r in results if _strong_overlap(qtoks, _result_tokens(r))]
+        if kept:
+            results = kept
+        else:
+            return [], True
+    # Semantic gate: drop low-similarity survivors; degrade gracefully to the
+    # lexical survivors if the embed server is briefly unavailable.
+    try:
+        results, low_conf = _semantic_relevance(results, query)
+    except Exception as e:
+        print(f"[web_search] relevance screening failed: {e}")
+        results, low_conf = results, False
+    return results[:WEB_SEARCH_RESULT_LIMIT], low_conf
+
+
+def _screen_cached_payload(payload, query):
+    """Revalidate cached results because cache keys may predate relevance gates."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return payload
+    screened = dict(payload)
+    results, low_confidence = _filter_relevant_results(payload["results"], query)
+    screened["results"] = results
+    if low_confidence:
+        screened["low_confidence"] = True
+        screened["low_confidence_note"] = (
+            "Cached search results did not contain enough credible sources for "
+            "this query. Do not fetch or cite the listed URLs; issue a fresh, "
+            "better-scoped web_search instead."
+        )
+    return screened
+
+
+# ---------------------------------------------------------------------------
+# Query re-scoping for the search backend and the diagnostics fallback fetch.
+# ---------------------------------------------------------------------------
+_COUNTRY_LANG = [
+    (("united states", "usa", "america"), "en-US"),
+    (("us",), "en-US"),
+    (("india", "bengaluru", "bangalore", "mumbai", "delhi", "kolkata", "chennai", "hyderabad", "pune"), "en-IN"),
+    (("united kingdom", "uk", "britain", "london"), "en-GB"),
+    (("australia", "sydney", "melbourne"), "en-AU"),
+    (("canada", "toronto"), "en-CA"),
+]
+
+
+def _region_language(query, location=""):
+    """Best-guess SearXNG ``language`` code from a query's geo tokens + location."""
+    q = " ".join(_query_tokens(query))
+    q = q.replace("-", " ")
+    if q:
+        for keys, lang in _COUNTRY_LANG:
+            for k in keys:
+                if re.search(rf"(^| ){re.escape(k)}( |$)", q):
+                    return lang
+    loc = (location or "").lower()
+    if "india" in loc or "bengaluru" in loc or "bangalore" in loc:
+        return "en-IN"
+    return ""
+
+
+def _rescoped_query(query):
+    """Drop role-filler words so the backend/fallback searches real content.
+
+    E.g. "overview of quantum computing fundamentals and applications" →
+    "quantum computing", which the local SearXNG can actually answer instead
+    of returning dictionary pages for the word "overview".
+    """
+    toks = _query_tokens(query)
+    return " ".join(sorted(toks, key=str.lower)) if toks else (query or "")
+
+
+def _apply_location_scoping(clean_query, current_location, params):
+    """Fold location/geo into SearXNG params (language hint, place qualifier)."""
+    lang = _region_language(clean_query, current_location)
+    if lang:
+        params["language"] = lang
+    # If the user gave no explicit place and we know where they are AND the
+    # query is location-sensitive, qualify the search with their area so the
+    # engine returns local results instead of global keyword-only junk.
+    place = (current_location or "").strip()
+    if place and not _has_explicit_place(clean_query):
+        if re.search(r"weather|traffic|news|nearby|restaurants?|caf[eé]s?|"
+                     r"events?|local|today|forecast|store|shop|market", clean_query, re.I):
+            params["q"] = f"{clean_query} {place}"
+
+
+def _has_explicit_place(query):
+    """True when the query already names a city/country/place."""
+    return any(re.search(rf"(^| ){re.escape(place)}( |$)",
+                         query.lower())
+               for place in _PLACE_HINTS)
+
+
+_PLACE_HINTS = [
+    "bengaluru", "bangalore", "mumbai", "delhi", "kolkata", "chennai",
+    "hyderabad", "pune", "india", "london", "paris", "new york", "tokyo",
+    "boston", "seattle", "sydney", "melbourne", "toronto", "us", "usa",
+    "united states", "america", "uk", "singapore", "bangkok", "dubai",
+]
+
+
 def web_search(query, current_time=None, current_location=None):
     ts = datetime.now()
     clean_query = (query or "").strip()
     norm_query = " ".join(re.findall(r"[a-z0-9]+", clean_query.lower()))
+    # Live and location-sensitive searches must not reuse an older result set,
+    # including one that may have been contaminated by semantic recall.
+    allow_cached_results = not _SEMANTIC_RECALL_UNSAFE_RE.search(clean_query)
     params = {"q": clean_query, "format": "json"}
+    _apply_location_scoping(clean_query, current_location, params)
     cats = _pick_categories(clean_query)
     if cats:
         params["categories"] = cats
     print(f"[web_search] categories={cats!r} for {clean_query!r}")
-    # Keep the backend URL private; only expose the public search URL in tool
-    # output that may be shown to the user or passed through to the model.
-    search_url = f"{M.SEARXNG_PUBLIC_URL}?{urlencode(params)}"
+    # The diagnostics fallback never repeats a query the engine already failed:
+    # it re-runs the ROLE-FILLER-STRIPPED content words (plus geo scope) so a
+    # "quantum computing overview" dead-end becomes a real "quantum computing"
+    # search instead of dictionary pages for the word "overview". It is still
+    # explicitly non-citable.
+    fallback_params = dict(params)
+    fallback_params["q"] = _rescoped_query(clean_query)
+    _apply_location_scoping(fallback_params["q"], current_location, fallback_params)
+    fallback_url = f"{M.SEARXNG_PUBLIC_URL}?{urlencode(fallback_params)}"
 
-    def _respond(results, error=None):
+    def _respond(results, error=None, low_confidence=False):
         payload = {
             "results": results,
             "search_date": ts.strftime("%Y-%m-%d %A"),
+            "retrieved_at": ts.astimezone().isoformat(timespec="seconds"),
             "query": query,
-            "fallback_fetch_url": search_url,
+            "fallback_fetch_url": fallback_url,
             "fallback_fetch_note": (
-                "Internal pointer to the raw JSON results. Never cite "
-                "this URL as a source; cite result URLs only. Fetch it "
-                "via fetch_page only if the results are insufficient."
+                "Diagnostics-only re-run of the query with role-filler words "
+                "stripped (e.g. 'overview'/'fundamentals' removed) plus the "
+                "geo/language scope, returned as raw JSON. NEVER cite this URL "
+                "as a source; cite result URLs only. Prefer issuing a fresh, "
+                "well-scoped web_search instead of fetching this, and only use "
+                "it to confirm whether the engine has better results."
             ),
         }
+        if low_confidence:
+            payload["low_confidence"] = True
+            payload["low_confidence_note"] = (
+                "This search FAILED to find any result credibly matching the "
+                "query (fewer than two results survived relevance screening; "
+                "the set may even be empty). Treat every listed URL as "
+                "UNRELIABLE and off-topic: do NOT fetch any of them, do NOT "
+                "summarize them, and do NOT build an answer around them (e.g. "
+                "do not pivot to Real Madrid for a traffic question just "
+                "because it is the only returned link). State the sub-answer "
+                "as UNSUPPORTED and issue a fresh web_search with a clearer, "
+                "better-scoped query instead of improvising or latching onto "
+                "an irrelevant source."
+            )
         if error:
             payload["error"] = error
         return payload
 
     owns_slot = False
     with _CACHE_LOCK:
-        hit = _search_cache_get(norm_query, clean_query, time.monotonic())
-        if hit is None:
+        hit = (
+            _search_cache_get(norm_query, clean_query, time.monotonic())
+            if allow_cached_results
+            else None
+        )
+        if hit is None and allow_cached_results:
             inflight = _IN_FLIGHT.get(norm_query)
             if inflight is None:
                 inflight = _IN_FLIGHT[norm_query] = threading.Event()
                 owns_slot = True
     if hit is not None:
         print("Web-search cache hit")
-        return json.dumps(hit)
-    if hit is None:
+        return json.dumps(_screen_cached_payload(hit, clean_query))
+    if hit is None and allow_cached_results:
         # Persistent (cross-restart) cache: a query answered before this
         # process started should never cost another SearXNG request.
         hit = page_cache.search_get(norm_query)
         if hit is not None:
             _search_cache_store(norm_query, hit, ttl=hit.get("_ttl"))
             print("Web-search cache hit (persistent)")
-            return json.dumps(hit)
-    if hit is None:
+            return json.dumps(_screen_cached_payload(hit, clean_query))
+    if hit is None and allow_cached_results:
         # Semantic recall: this query shares no exact key with a cached search,
         # but we may have already fetched pages (via fetch_page or enrichment)
         # whose meaning matches the query. Reuse those instead of another
@@ -570,8 +897,8 @@ def web_search(query, current_time=None, current_location=None):
                 _finish_inflight(norm_query, inflight)
             _search_cache_store(norm_query, hit)
             print("Web-search cache hit (semantic)")
-            return json.dumps(hit)
-    if not owns_slot:
+            return json.dumps(_screen_cached_payload(hit, clean_query))
+    if not owns_slot and allow_cached_results:
         # An identical fetch is already running: wait for its result
         # instead of duplicating the request.
         if inflight.wait(SEARCH_INFLIGHT_WAIT):
@@ -581,7 +908,7 @@ def web_search(query, current_time=None, current_location=None):
                 )
             if hit is not None:
                 print("Web-search cache hit (in-flight wait)")
-                return json.dumps(hit)
+                return json.dumps(_screen_cached_payload(hit, clean_query))
         # Timed out or the fetch failed without caching: fall through and
         # fetch this query ourselves (paced like any other).
 
@@ -611,7 +938,12 @@ def web_search(query, current_time=None, current_location=None):
     # re-read by the story pipeline). The model should never see a shopping,
     # download, quote, or company-profile URL as a possible source.
     formatted = scrub_search_results(formatted, query=query)
-    payload = _respond(formatted)
+    # Relevance gate (A): drop keyword-only junk (Real-Madrid-for-traffic,
+    # dictionary-for-"overview") before the LLM ever sees it, and flag the
+    # set as low-confidence when few credible results survive so the model
+    # reports UNSUPPORTED instead of improvising.
+    formatted, low_confidence = _filter_relevant_results(formatted, query)
+    payload = _respond(formatted, low_confidence=low_confidence)
     # Ask the LLM how long this answer stays fresh so the next identical query
     # re-fetches at the right time ("breaking news" -> seconds, "how to" -> days),
     # rather than a fixed regex heuristic. Falls back to the regex default if
@@ -999,6 +1331,7 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                             "title": res.get("title", ""),
                             "content": res.get("content", ""),
                             "error": res.get("error", ""),
+                            "retrieved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                         }
                     )
                 except Exception:

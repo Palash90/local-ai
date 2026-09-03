@@ -14,6 +14,7 @@ may bind a shared name at import time.
 """
 
 import queue as _queue
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -92,6 +93,34 @@ _model_transition_lock = threading.Lock()
 _data_lock = threading.Lock()
 
 MAX_QUEUE_SIZE = 15
+
+# Short, low-stakes chat turns skip the expensive LLM judge passes (sampling
+# router + quality/L3 judges) to keep perceived latency close to the raw
+# generation time. A task is "simple" when its original user message is short
+# and it carries no research flag and no image/audio input.
+SIMPLE_TASK_MAX_CHARS = 40
+
+
+def is_simple_round_task(task):
+    """True when ``task`` (a dict) is a short, low-stakes chat turn.
+
+    Used to skip the sampling router and the quality/L3 LLM judge passes for
+    quick answers ("what is 2+2?"), restoring near raw-generation latency. The
+    deterministic pattern blockers in input_guard still always run.
+    """
+    if not task:
+        return False
+    if task.get("research"):
+        return False
+    if task.get("_mcp") or task.get("_peer_review"):
+        return False
+    if task.get("_original_image") or task.get("_audio"):
+        return False
+    msg = (task.get("_original_message") or "").strip()
+    if not msg:
+        return False
+    return len(msg) <= SIMPLE_TASK_MAX_CHARS
+
 
 # Tool-loop budget per task. Normal chats stay light (10 LLM rounds ≈ small
 # number of tool calls); tasks sent with the UI's "research" toggle get the
@@ -203,14 +232,18 @@ _users_cache_time = 0
 # The interactive UI chat runs on the GPU llama-server, which is launched with
 # --ctx-size 24576 (24K). Keep this in sync with server/config.py so the UI's
 # context meter and the /api/model-status payload reflect the real budget.
-MAX_INPUT_TOKENS = 24576
+MAX_INPUT_TOKENS = int(os.environ.get("MAX_INPUT_TOKENS", "16384"))
 AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 
 # Hard llama-server context PER SLOT (keep in sync with the "--ctx-size" /
 # "--parallel" values in LLAMA_*_ARGS, server/config.py — llama-server splits
 # the total ctx across parallel slots; the CPU server reports
 # n_slots=4 / n_ctx_slot=32768, the guardrail lane runs --parallel 2).
-LANE_CTX_SIZES = {"gpu": 24576, "cpu": 32768, "guardrail": 8192}
+LANE_CTX_SIZES = {
+    "gpu": MAX_INPUT_TOKENS,
+    "cpu": int(os.environ.get("CPU_CTX_SIZE", "32768")),
+    "guardrail": 8192,
+}
 PROMPT_BUDGET_MARGIN = 1024
 
 

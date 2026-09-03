@@ -246,10 +246,10 @@ def save_slot_checkpoint(mode="gpu", sid=None):
 
     Called on unload. With a ``sid`` the snapshot is written to (and recorded
     for) that session; without one it resolves to the session currently
-    resident in the slot (falling back to the shared per-lane file), so on
-    unload/reload the conversation the lane was actually serving is the one
-    that keeps its KV. Skipped when the model is not loaded or no completion
-    has run since the last save/restore. Failures never block the caller.
+    resident in the slot. Anonymous slots are not checkpointed, so auxiliary
+    stateless requests cannot recreate the legacy shared per-lane file. Skipped
+    when the model is not loaded or no completion has run since the last
+    save/restore. Failures never block the caller.
     """
     with M._data_lock:
         ms = _lane_model_status(mode)
@@ -259,6 +259,11 @@ def save_slot_checkpoint(mode="gpu", sid=None):
         return False
     if not sid:
         sid = _lane_resident_sid(mode)
+    # Never persist an anonymous slot. Auxiliary requests (critic/compaction)
+    # can use slot 0 without belonging to a chat session; saving those requests
+    # to the shared lane filename would recreate the legacy gpu_slot0.kv file.
+    if not sid:
+        return False
     if not dirty and cp:
         return True  # snapshot on disk already reflects the current KV
     filename = slot_checkpoint_file(mode, sid)
@@ -868,6 +873,31 @@ def _last_user_text(messages):
     return ""
 
 
+SIMPLE_ROUND_MAX_CHARS = 40
+
+
+def _is_simple_round(messages, task=None):
+    """True for a short, low-stakes chat turn that needs no sampling router.
+
+    Heuristic: the latest user message is short (≤ SIMPLE_ROUND_MAX_CHARS)
+    and, when a task dict is supplied, the task is NOT a research request and
+    has no attached image/audio. Such turns are answered with server-default
+    sampling, skipping the sampling-router inference call entirely (and, in
+    the finalize path, the expensive quality/l3 judge passes).
+    """
+    text = _last_user_text(messages)
+    if not text or not text.strip():
+        return False
+    if len(text) > SIMPLE_ROUND_MAX_CHARS:
+        return False
+    if task:
+        if task.get("research"):
+            return False
+        if task.get("_original_image") or task.get("_audio"):
+            return False
+    return True
+
+
 def _route_sampling(mode, messages):
     """Classify the latest user message and return sampling overrides.
 
@@ -910,10 +940,15 @@ def _route_sampling(mode, messages):
 
 def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
     print("Entered LLM ")
+    phase_start = time.monotonic()
     try:
         if M.estimate_tokens(msgs) > M.AUTO_COMPACT_THRESHOLD:
             M.set_status(task_id, "Context is full — compressing older messages...")
         messages = M.prepare_context_for_llm(sid, msgs, mode)
+        context_ms = int((time.monotonic() - phase_start) * 1000)
+        with M._data_lock:
+            if task_id in M.tasks:
+                M.tasks[task_id].setdefault("_timings", {})["context_ms"] = context_ms
         print("line 616")
         messages = _inject_read_image(messages)
         tool_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "tool"]
@@ -954,9 +989,15 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         # this task (stored under an underscore key so it stays private).
         with M._data_lock:
             sampling = M.tasks.get(task_id, {}).get("_sampling")
+            task_scheduling = dict(M.tasks.get(task_id, {}) or {})
         if sampling is None:
             if M.tasks.get(task_id, {}).get("openai_lane"):
                 sampling = M.SAMPLING_BUCKETS.get("code", {})
+            elif round_num == 0 and _is_simple_round(messages, task_scheduling):
+                # Short, low-stakes turn: skip the sampling-router inference
+                # call and answer with server-default sampling.
+                sampling = {}
+                print(f"[sampling-router] {mode}: simple round — skipping classifier")
             else:
                 sampling = _route_sampling(mode, messages) if round_num == 0 else {}
             with M._data_lock:
@@ -975,12 +1016,31 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         # Re-point slot 0 at this session's KV (save the previous resident
         # session, restore this one) before the prompt is evaluated, so each
         # chat session keeps its own KV cache. Best-effort and fail-open.
+        generation_start = time.monotonic()
         try:
             sync_session_slot(mode, sid)
         except Exception as e:
             print(f"[llama] sync_session_slot failed ({e}) — continuing without KV swap")
         M.mark_slot_kv_dirty(mode)
         _mark_chat_generating(mode, True)
+        if mode == "gpu":
+            try:
+                _dbg = []
+                for _i, _m in enumerate(messages):
+                    _c = _m.get("content")
+                    _clen = len(_c) if isinstance(_c, str) else len(json.dumps(_c))
+                    _dbg.append(f"{_i}:{_m.get('role','?')}:{_clen}")
+                _payload_json = json.dumps(payload)
+                print(
+                    f"[llm_payload] {mode} sid={sid} round={round_num} "
+                    f"n_msgs={len(messages)} est_tokens={M.estimate_tokens(messages, include_tools=True)} "
+                    f"n_sys={sum(1 for m in messages if m.get('role')=='system')} "
+                    f"msgs=[{', '.join(_dbg)}] "
+                    f"payload_chars={len(_payload_json)} system0_chars={len(messages[0]['content']) if messages and isinstance(messages[0].get('content'),str) else 'n/a'}",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"[llm_payload] debug error: {_e}", flush=True)
         try:
             r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
             if r.status_code != 200:
@@ -1042,6 +1102,17 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                                     existing["function"]["arguments"] += fn["arguments"]
         finally:
             _mark_chat_generating(mode, False)
+        generation_ms = int((time.monotonic() - generation_start) * 1000)
+        with M._data_lock:
+            if task_id in M.tasks:
+                timings = M.tasks[task_id].setdefault("_timings", {})
+                timings["generation_ms"] = generation_ms
+                timings["round_ms"] = int((time.monotonic() - phase_start) * 1000)
+        print(
+            f"[latency] task={task_id} round={round_num} mode={mode} "
+            f"context_ms={context_ms} generation_ms={generation_ms}",
+            flush=True,
+        )
         print(f"[llm_round] Round {round_num} done: reasoning_buf={len(reasoning_buf)} chars, content_buf={len(content_buf)} chars, tool_calls={len(tool_calls_map)}")  # DEBUG
         msg = {
             "role": "assistant",

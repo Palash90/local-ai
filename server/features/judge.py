@@ -283,6 +283,21 @@ def _judge_max_tokens():
         return 2048
 
 
+def _judge_reasoning_budget():
+    """Reasoning-token cap for a judge POST, separate from max_tokens.
+
+    On the GPU-fallback path a judge is answered by the chat model on the GPU
+    server, which has NO server-side ``--reasoning-budget`` (that flag is only
+    on the CPU/guardrail processes). Without an explicit per-request budget a
+    thinking chat model can silently burn thousands of reasoning tokens before
+    emitting its verdict — a major latency source. Bound it explicitly and keep
+    it small (a judgment doesn't need a long chain of thought)."""
+    try:
+        return int(os.environ.get("GUARD_LLM_REASONING_BUDGET", "256"))
+    except ValueError:
+        return 256
+
+
 def ensure_judge_ready(base_url, model_id=None):
     """Bring the guardrail LLM judge server up with the requested model loaded.
 
@@ -668,11 +683,16 @@ def _judge_post_loop(label, system_prompt, user_content, base_url, timeout,
                 ],
                 "temperature": 0,
                 "max_tokens": max_tokens,
+                # Explicit, small reasoning budget so a thinking model on a
+                # server without its own --reasoning-budget (the GPU fallback)
+                # cannot burn thousands of tokens before the verdict word.
+                "reasoning_budget_tokens": _judge_reasoning_budget(),
                 "cache_prompt": False,
                 "stream": False,
             }
             try:
                 if gpu_base:
+                    from server.features.llm import _mark_chat_generating
                     _mark_chat_generating("gpu", True)
                 try:
                     r = requests.post(
@@ -682,6 +702,7 @@ def _judge_post_loop(label, system_prompt, user_content, base_url, timeout,
                     )
                 finally:
                     if gpu_base:
+                        from server.features.llm import _mark_chat_generating
                         _mark_chat_generating("gpu", False)
             except Exception as e:
                 # Endpoint itself down — other model ids won't help.

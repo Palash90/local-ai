@@ -894,6 +894,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "status": "queued",
                     "message": "Waiting in line...",
                     "session_id": sid,
+                    "_queued_at": time.time(),
                     "mode": mode,
                     "research": bool(body.get("research")),
                     "cpu": cpu_flagged,

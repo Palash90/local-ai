@@ -54,7 +54,7 @@ SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL", "").strip().rstrip("/")
 # environment variable (e.g. in .env).  Leave empty to disable the endpoints.
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
-REASONING_BUDGET = 2048
+REASONING_BUDGET = int(os.environ.get("REASONING_BUDGET", "1024"))
 # The judge lane emits one short verdict per call, but judges are thinking
 # models: a 2048-token reasoning budget means a worst case of ~3 minutes of
 # CPU decode per verdict — far past the judge timeout, so research-verify
@@ -62,7 +62,7 @@ REASONING_BUDGET = 2048
 # still generous headroom for a verdict while keeping worst-case latency
 # inside it.
 GUARDRAIL_REASONING_BUDGET = 512
-MAX_OUTPUT_TOKENS = 8192
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "2048"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sampling router (two-call split).
@@ -271,7 +271,7 @@ LLAMA_SERVER_ARGS = [
     # GPU / VRAM & Performance
     "-ngl", LLAMA_GEMMA_NGL,
     "-fa", "on",
-    "--ctx-size", "24576",       # 24K context for interactive UI chat
+    "--ctx-size", os.environ.get("GPU_CTX_SIZE", "16384"),  # bounded for 4 GB VRAM
     "-ctk", "q8_0",
     "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q8_0
     "--no-mmproj-offload",

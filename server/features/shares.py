@@ -108,7 +108,6 @@ _SNAPSHOT_KEYS = (
     "_image_url",
     "_image_model",
     "_gen_prompt",
-    "_reasoning",
     "_tools_used",
     "_search_details",
     "_artifacts",
@@ -121,8 +120,12 @@ _SNAPSHOT_KEYS = (
 def _snapshot_message(msg):
     if msg.get("_steering"):
         return None
+    # Reasoning is available in the private session only; never publish it in
+    # a share, even if the snapshot whitelist changes later.
     snap = {}
     for key in _SNAPSHOT_KEYS:
+        if key == "_reasoning":
+            continue
         if key in msg:
             snap[key] = copy.deepcopy(msg[key])
     return snap
@@ -184,7 +187,15 @@ def get_share(token):
     if not token:
         return None
     with M._data_lock:
-        return M.shares.get(token)
+        record = M.shares.get(token)
+        if not record:
+            return None
+        # Also sanitize legacy shares created before reasoning was removed from
+        # the public snapshot whitelist.
+        public_record = copy.deepcopy(record)
+        if isinstance(public_record.get("message"), dict):
+            public_record["message"].pop("_reasoning", None)
+        return public_record
 
 
 def revoke_share(token, user, purge=False):

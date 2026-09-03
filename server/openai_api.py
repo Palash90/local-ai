@@ -375,6 +375,7 @@ def handle_chat_completions(handler):
             "status": "queued",
             "message": "Waiting in line...",
             "session_id": session_id,
+            "_queued_at": time.time(),
             "mode": mode,
             "_user": _API_USER,
         }

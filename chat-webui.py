@@ -162,6 +162,7 @@ from server.features.state import (  # noqa: E402
     sessions_meta,
     shares,
     tasks,
+    is_simple_round_task,
 )
 
 from server.features.tasks_db import (  # noqa: E402
@@ -355,11 +356,12 @@ if __name__ == "__main__":
     # startup; ensure_embed_ready degrades to keyed-only cache if it can't come up.
     threading.Thread(target=ensure_embed_ready, daemon=True).start()
     threading.Thread(target=_event_loop, daemon=True).start()
-    # One queue worker per lane: GPU (interactive UI users) and CPU (self-chat
-    # agents) now run fully independently, so an agent task can never make a
-    # UI user wait behind it.
+    # One queue worker per lane: GPU (interactive UI users), CPU (self-chat
+    # agents), and guardrail judges run independently. The guardrail worker is
+    # required because self-chat's theme judge explicitly targets that lane.
     threading.Thread(target=_queue_worker, args=("gpu",), daemon=True).start()
     threading.Thread(target=_queue_worker, args=("cpu",), daemon=True).start()
+    threading.Thread(target=_queue_worker, args=("guardrail",), daemon=True).start()
     threading.Thread(target=_mcp_db_worker, daemon=True).start()
     threading.Thread(target=_image_worker, daemon=True).start()
     threading.Thread(target=_idle_unload_loop, daemon=True).start()

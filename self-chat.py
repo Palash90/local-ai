@@ -1949,23 +1949,53 @@ def _decode_exp(token):
         return 0
 
 
+LOGIN_RETRY_ATTEMPTS = 3
+LOGIN_RETRY_BACKOFF_START = 1.0
+LOGIN_RETRY_BACKOFF_MAX = 10.0
+# After a failed token-refresh we must NOT immediately re-attempt on the next
+# poll (POLL_INTERVAL_SECONDS away) — a transient Authentik reject would
+# otherwise hammer the provider with a failed grant every few seconds and
+# flood the logs with "auth failures". Back off this long before retrying a
+# refresh for the same user.
+LOGIN_FAILED_BACKOFF = 30.0
+
+_LAST_LOGIN_FAIL = {}  # username -> monotonic time of the last failed grant
+
+
 def login(username, password):
     from server.auth import oidc_password_grant
 
-    try:
-        token = oidc_password_grant(username, password)
-    except Exception as e:
-        print(f"[login] Authentik password grant failed for {username}: {e}")
-        raise
+    last_error = None
+    for attempt in range(1, LOGIN_RETRY_ATTEMPTS + 1):
+        try:
+            token = oidc_password_grant(username, password)
+        except Exception as e:
+            last_error = e
+            print(
+                f"[login] Authentik password grant failed for {username} "
+                f"(attempt {attempt}/{LOGIN_RETRY_ATTEMPTS}): {e}"
+            )
+            if attempt < LOGIN_RETRY_ATTEMPTS:
+                time.sleep(
+                    min(
+                        LOGIN_RETRY_BACKOFF_START * (2 ** (attempt - 1)),
+                        LOGIN_RETRY_BACKOFF_MAX,
+                    )
+                )
+            continue
+        with _TOKEN_LOCK:
+            _TOKEN_META[username] = {
+                "password": password,
+                "token": token,
+                "exp": _decode_exp(token),
+                "granted_at": time.time(),
+            }
+            _TOKEN_OWNER[token] = username
+            _LAST_LOGIN_FAIL.pop(username, None)
+        return token
     with _TOKEN_LOCK:
-        _TOKEN_META[username] = {
-            "password": password,
-            "token": token,
-            "exp": _decode_exp(token),
-            "granted_at": time.time(),
-        }
-        _TOKEN_OWNER[token] = username
-    return token
+        _LAST_LOGIN_FAIL[username] = time.monotonic()
+    raise last_error
 
 
 def _fresh_token(token):
@@ -1974,6 +2004,11 @@ def _fresh_token(token):
     Re-grants only when that token is at ``TOKEN_REFRESH_MARGIN`` seconds from
     expiry (or when its expiry is unknown and it is older than the margin).
     Unknown tokens pass through untouched.
+
+    A failed refresh never raises: after a failed grant we back off and, if we
+    still hold a last-known-good token, return it (the request will simply be
+    rejected by the server and the caller can recover) rather than dropping
+    the whole round on a transient Authentik issue.
     """
     with _TOKEN_LOCK:
         username = _TOKEN_OWNER.get(token)
@@ -1991,8 +2026,26 @@ def _fresh_token(token):
             # Resolve stale aliases to the agent's current token without
             # re-authenticating — this is what breaks the reauth loop.
             return entry["token"]
-        print(f"[auth] {username}'s access token expired — re-authenticating")
-        return login(username, entry["password"])
+        last_fail = _LAST_LOGIN_FAIL.get(username, 0.0)
+        password = entry["password"]
+        if now - last_fail >= LOGIN_FAILED_BACKOFF:
+            # Leave the lock before the (possibly slow, retrying) grant so a
+            # transient Authentik outage never blocks other callers.
+            print(f"[auth] {username}'s access token is near expiry — re-authenticating")
+            try:
+                return login(username, password)
+            except Exception as e:
+                # Fail-open on refresh: keep the last-known-good token so the
+                # round is not torn down by a transient grant failure. The
+                # server will reject an actually-expired token; the caller
+                # then re-enters refresh after the backoff.
+                print(
+                    f"[auth] {username} re-authenticate failed ({e}) "
+                    "— using last token"
+                )
+    # The refresh was skipped (backoff window) or failed — hold the last token.
+    with _TOKEN_LOCK:
+        return _TOKEN_META[username]["token"]
 
 
 def auth_headers(token):
@@ -2000,6 +2053,23 @@ def auth_headers(token):
     with _TOKEN_LOCK:
         token = _fresh_token(token)
     return {"Authorization": f"Bearer {token}"}
+
+
+def force_refresh(token):
+    """Invalidate a token so the very next auth_headers() re-grants it.
+
+    Called when the server actually returns 401 (the token really expired,
+    beyond what the TTL-margin heal can predict). Any backoff set by a recent
+    failed grant is cleared so the refresh is attempted immediately instead of
+    waiting out LOGIN_FAILED_BACKOFF.
+    """
+    with _TOKEN_LOCK:
+        username = _TOKEN_OWNER.get(token)
+        if username is not None:
+            _LAST_LOGIN_FAIL.pop(username, None)
+            entry = _TOKEN_META[username]
+            entry["exp"] = 0
+            entry["granted_at"] = 0
 
 
 class _TaskLostError(RuntimeError):
@@ -2183,6 +2253,19 @@ def _call_llm_raw(
         what=f"submit chat for session {session_id[:8]}",
         extra_retry_status=(404,),
     )
+    if submit_respo.status_code == 401:
+        # Expired token at submit time. Force a fresh grant and submit once
+        # more before giving up, so a stale bearer never aborts a turn.
+        force_refresh(token)
+        submit_respo = _http_retry(
+            "POST",
+            f"{BASE_URL}/api/chat",
+            json=payload,
+            headers=auth_headers(token),
+            timeout=30,
+            what=f"submit chat for session {session_id[:8]}",
+            extra_retry_status=(404,),
+        )
     submit_respo.raise_for_status()
     task_id = submit_respo.json()["task_id"]
 
@@ -2206,6 +2289,18 @@ def _call_llm_raw(
                 f"Lost connection to chat server while waiting for task "
                 f"{task_id}: {e}"
             ) from e
+        if status_resp.status_code == 401:
+            # The token really expired mid-flight. Force a fresh grant and
+            # keep polling — never tear down a running task over a transient
+            # auth rejection. Eventually the server either starts accepting
+            # once more or the task itself reports a terminal status.
+            force_refresh(token)
+            print(
+                f"[auth] status poll for {task_id[:8]} rejected (401) — "
+                "refreshing token and continuing"
+            )
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
         data = status_resp.json()
 
         status = data.get("status")

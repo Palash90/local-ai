@@ -496,7 +496,7 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
       locationNotifiedRef.current = false
       if (selectingRef && selectingRef.current) return
       setMessage(st.message || 'Working...')
-      if (st.reasoning) setReasoning(prev => (prev === st.reasoning ? prev : st.reasoning))
+      if (st.reasoning) setReasoning(prev => prev === st.reasoning ? prev : st.reasoning)
     }, 3000)
     return () => clearInterval(iv)
   }, [pending, onResolved, onLocationNeeded, selectingRef])
@@ -526,8 +526,8 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
   const elRef = useRef(null)
   const chatEl = useRef(null)
   const [popupVisible, setPopupVisible] = useState(null)
-  const hideTimer = useRef(null)
   const [reasoningOpen, setReasoningOpen] = useState(!!pending)
+  const hideTimer = useRef(null)
   const [pageModal, setPageModal] = useState(null)
   const codeRef = useRef([])
 
