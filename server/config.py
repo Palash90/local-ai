@@ -6,6 +6,8 @@ from server.dotenv import load_dotenv
 
 load_dotenv()
 
+BASE_MODELS_DIR = os.environ.get("BASE_MODELS_DIR")
+
 LLAMA_BASE = "http://localhost:8081"
 LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
 
@@ -187,7 +189,7 @@ VERIFY_MAX_RETRIES = 2       # max judge/quality re-runs before decline/deliver
 # requests are sent with an empty tool list and tool_choice "none".
 TOOL_FREE_AGENTS = {"editor", "moderator"}
 
-# model.json holds the LLM model filenames (relative to ~/local-ai-files/my-models/)
+# model.json holds the LLM model filenames (relative to BASE_MODELS_DIR)
 # per runtime mode: "gpu" for interactive chat UI users, "cpu" for automated
 # self-chat agents (editor/moderator/registered agents). Falls back to the legacy
 # single-model model.txt when model.json is missing or has no usable entries.
@@ -265,7 +267,7 @@ VERIFY_IDLE_TIMEOUT = int(os.environ.get("VERIFY_IDLE_TIMEOUT", "300"))
 LLAMA_SERVER_ARGS = [
     "--host", "127.0.0.1",
     "--port", "8081",
-    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
     "--jinja",
 
     # GPU / VRAM & Performance
@@ -307,7 +309,7 @@ LLAMA_SERVER_ARGS = [
 LLAMA_SERVER_ARGS_CPU = [
     "--host", "127.0.0.1",
     "--port", "8079",
-    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
     "--jinja",
 
     # CPU-only execution — no layers offloaded to the GPU.
@@ -371,7 +373,7 @@ KNOWN_AGENT_USERS = set(
 LLAMA_SERVER_ARGS_GUARDRAIL = [
     "--host", "127.0.0.1",
     "--port", "8083",
-    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
     "--jinja",
     "--n-gpu-layers", "0",
     "-fa", "off",
@@ -411,7 +413,7 @@ MODEL_ID_EMBED = "nomic-embed-text-v1.5.Q8_0"
 LLAMA_SERVER_ARGS_EMBED = [
     "--host", "127.0.0.1",
     "--port", "8084",
-    "--models-dir", os.path.expanduser("~/local-ai-files/my-models/"),
+    "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
     # Restrict this process to embedding only (no chat/completion) and use
     # mean pooling + L2 normalisation, which is how nomic embeddings modelcard
     # expects retrieval vectors to be produced.
