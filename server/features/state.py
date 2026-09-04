@@ -250,7 +250,7 @@ AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 # n_slots=4 / n_ctx_slot=32768, the guardrail lane runs --parallel 2).
 LANE_CTX_SIZES = {
     "gpu": MAX_INPUT_TOKENS,
-    "cpu": int(os.environ.get("CPU_CTX_SIZE", "32768")),
+    "cpu": int(os.environ.get("CPU_CTX_SIZE", "24576")),
     "guardrail": 8192,
 }
 
