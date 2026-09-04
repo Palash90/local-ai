@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { extractFile, uploadImage } from '../api'
 
 const CODE_EXTS = new Set([
@@ -25,7 +25,7 @@ function readFileAsBase64(file) {
   })
 }
 
-export default function InputBar({ onSend, onCancel, hasPending }) {
+export default function InputBar({ onSend, onCancel, hasPending, sessionId }) {
   const [text, setText] = useState('')
   const [research, setResearch] = useState(false)
   const [cpu, setCpu] = useState(false)
@@ -33,6 +33,11 @@ export default function InputBar({ onSend, onCancel, hasPending }) {
   const [attachedFile, setAttachedFile] = useState(null)
   const [attachedFileUrl, setAttachedFileUrl] = useState(null)
   const fileInputRef = useRef(null)
+
+  useEffect(() => {
+    setResearch(false)
+    setCpu(false)
+  }, [sessionId])
   const textareaRef = useRef(null)
   const imagePreviewRef = useRef(null)
   const sendingRef = useRef(false)

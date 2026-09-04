@@ -470,6 +470,7 @@ export default function App() {
               onSend={handleSend}
               onCancel={handleCancelTask}
               hasPending={hasPendingForCurrent}
+              sessionId={currentSessionId}
             />
         </div>
         <ImageLightbox src={lightboxSrc} onClose={closeLightbox} />
