@@ -111,7 +111,6 @@ from server.features.state import (  # noqa: E402
     MAX_TOOL_ROUNDS,
     RAM_EVAC_THRESHOLD,
     RAM_RESUME_THRESHOLD,
-    TASK_STUCK_TIMEOUT,
     TEMP_THRESHOLD_OFF,
     TEMP_THRESHOLD_ON,
     _active_tokens,

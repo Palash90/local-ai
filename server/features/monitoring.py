@@ -517,8 +517,8 @@ def _free_ram_mb():
         return None
 
 
-def _verify_cpu_unload(avail_before):
-    """After an idle CPU unload, confirm the model actually left RAM.
+def _verify_cpu_unload(avail_before, context="idle"):
+    """After a CPU model unload, confirm the model actually left RAM.
 
     The unload POST can return 200 while the async/dropped child model-server
     process still holds the ~9 GB of RAM — in router mode the root process on
@@ -536,11 +536,11 @@ def _verify_cpu_unload(avail_before):
         if freed is not None and freed >= RAM_UNLOAD_MIN_FREED_MB:
             with M._data_lock:
                 M._cpu_last_idle_freed_mb = freed
-            print(f"[idle] cpu unload verified — freed ~{freed} MB RAM", flush=True)
+            print(f"[{context}] cpu unload verified — freed ~{freed} MB RAM", flush=True)
             return
         time.sleep(5)
     print(
-        f"[idle] cpu model still resident after 30s (freed ~{freed or 0} MB) — killing cpu llama-server",
+        f"[{context}] cpu model still resident after 30s (freed ~{freed or 0} MB) — killing cpu llama-server",
         flush=True,
     )
     M.kill_llama_server("cpu")
@@ -551,41 +551,35 @@ def _verify_cpu_unload(avail_before):
     with M._data_lock:
         M._cpu_model_status = "unloaded"
         M._cpu_last_idle_freed_mb = freed
-    print(f"[idle] cpu llama-server killed — freed ~{freed or 0} MB total", flush=True)
+    print(f"[{context}] cpu llama-server killed — freed ~{freed or 0} MB total", flush=True)
 
 
-def _stuck_task_check():
-    """Force-error any lane task that has run past ``TASK_STUCK_TIMEOUT``.
+def evict_cpu_model_for_image():
+    """Release the CPU lane model's RAM before ComfyUI renders.
 
-    A task whose LLM call hangs (or whose worker died mid-run) leaves
-    ``_current_task_ids[mode]`` set forever, which makes the not-``queue_active``
-    idle-unload gate False permanently — the lane's model then never gets
-    released. Erring the task lets the lane worker recycle (releasing
-    ``_current_task_ids``) and idle-unload fire.
+    An interactive image render and a self-chat agent compete for the same
+    ~15 GB of RAM: the ~9 GB gemma4-12b resident on the cpu lane leaves almost
+    nothing for ComfyUI, so RAM evacuation used to kill every long render. The
+    caller must have already waited for in-flight cpu rounds (image gen's
+    _wait_chat_generating_clear now includes the cpu lane). Unload the cpu
+    model (KV checkpointed first) and verify the RAM actually came back,
+    escalating to killing the cpu llama-server if the router keeps the child.
     """
-    from server.features.orchestration import _set_task_error
-
-    for mode in ("gpu", "cpu", "guardrail"):
-        with M._queue_locks[mode]:
-            tid = M._current_task_ids[mode]
-        if not tid:
-            continue
-        with M._data_lock:
-            t = M.tasks.get(tid)
-        if not t or t.get("status") in ("done", "error", "cancelled", "requeued"):
-            continue
-        started = t.get("_started_at")
-        if started is None:
-            started = t.get("_queued_at")
-        if not started:
-            continue
-        elapsed = time.time() - started
-        if elapsed > M.TASK_STUCK_TIMEOUT:
-            print(
-                f"[stuck] {mode} task {tid} running {elapsed:.0f}s > {M.TASK_STUCK_TIMEOUT}s — forcing error",
-                flush=True,
-            )
-            _set_task_error(tid, f"Stuck: no progress for {M.TASK_STUCK_TIMEOUT}s — bot recycled its lane.")
+    print("[image] Evicting CPU lane model to free RAM for ComfyUI", flush=True)
+    # Close the race with generate_image's up-front wait: a cpu round can start
+    # streaming AFTER that early check (during the GPU/guardrail unload churn)
+    # and must not be force-killed here. _image_active is already True, so no
+    # new round can start meanwhile — drain the tail round first (600s valve).
+    M._wait_chat_generating_clear()
+    avail_before = _free_ram_mb()
+    ok = M.unload_llama_model("cpu")
+    if ok and avail_before is not None:
+        _verify_cpu_unload(avail_before, context="image")
+    else:
+        print(
+            f"[image] cpu unload returned {ok} (avail_before={avail_before} MB) — continuing with render",
+            flush=True,
+        )
 
 
 def _idle_unload_loop():
@@ -594,7 +588,14 @@ def _idle_unload_loop():
     _diag_next = {}
     while True:
         time.sleep(10)
-        _stuck_task_check()
+        with M._data_lock:
+            image_active = M._image_active
+        # A round that is still streaming must never be surprised by an unload —
+        # the lane is busy even if _current_task_ids was already released (e.g.
+        # the surrounding task just finalized). Counting every lane here keeps
+        # the unload/stream race structurally impossible.
+        with M._chat_generating_lock:
+            any_streaming = M._chat_generating > 0
 
         # Each llama-server unloads independently once its own LANE has been
         # idle for > its timeout. This is checked per-lane (not combined) so a
@@ -609,7 +610,8 @@ def _idle_unload_loop():
             ms = M.server_status(mode)
             lu = M.server_last_use(mode)
             idle = time.time() - lu
-            if ms == "chat_loaded" and idle > timeout and not queue_active:
+            busy = queue_active or any_streaming
+            if ms == "chat_loaded" and idle > timeout and not busy:
                 print(
                     f"[idle] No {mode} LLM activity for {idle:.0f}s (>{timeout}s), releasing model weights...",
                     flush=True,
@@ -624,7 +626,9 @@ def _idle_unload_loop():
                 continue
             # Loaded lane that still won't unload past its idle timeout — say
             # exactly why (throttled), so a stuck lane is diagnosable in logs.
-            if idle > timeout and _diag_next.get(mode, 0.0) <= time.time():
+            # During a render the cpu lane sits deliberately unloaded (evicted
+            # to free RAM for ComfyUI), so the diagnostic would be pure noise.
+            if not image_active and idle > timeout and _diag_next.get(mode, 0.0) <= time.time():
                 if queue_active:
                     reason = f"blocked: task still running ({tid_running!r})"
                 elif ms != "chat_loaded":

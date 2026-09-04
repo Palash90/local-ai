@@ -128,6 +128,17 @@ def _set_task_error(task_id, error, sid=None):
                 "_mcp": is_mcp,
                 "_user": d.get("_user"),
             }
+    # Abort any in-flight LLM stream so an errored task's round ends cleanly
+    # instead of lingering (or later hitting an unloaded server). Mirrors the
+    # user-cancel path in api.py.
+    with M._data_lock:
+        stream = M._active_streams.pop(task_id, None)
+    if stream is not None:
+        try:
+            stream.close()
+            stream.raw.close()
+        except Exception:
+            pass
     if mode == "guardrail" or is_mcp:
         try:
             from server.mcp_tasks_db import mcp_task_update
@@ -588,6 +599,44 @@ def _event_loop():
         elif ev_type == "llm_err":
             if t.get("_state") != "llm_waiting":
                 continue
+            # A cpu round killed by an image render's eviction (server killed
+            # mid-flight) must resume, not die permanently. Requeue it like the
+            # RAM-evacuation path so the lane picks it back up once the render
+            # clears and the model reloads.
+            if M.task_mode(task_id) == "cpu":
+                with M._data_lock:
+                    img_active = M._image_active
+                if img_active:
+                    print(f"[llm_err] task {task_id} interrupted by image render — requeueing to resume after it", flush=True)
+                    with M._data_lock:
+                        tsk = M.tasks.get(task_id, {})
+                    entry = {
+                        "task_id": task_id,
+                        "session_id": tsk.get("session_id", ""),
+                        "message": tsk.get("_original_message", ""),
+                        "image": tsk.get("_original_image"),
+                        "audio": tsk.get("_audio"),
+                        "user": tsk.get("_user", ""),
+                        "client_timestamp": tsk.get("_client_timestamp"),
+                        "research": bool(tsk.get("research")),
+                        "cpu": True,
+                        "no_tools": bool(tsk.get("no_tools")),
+                        "openai_lane": bool(tsk.get("openai_lane")),
+                        "skip_ensure_llama": bool(tsk.get("skip_ensure_llama")),
+                        "mode": "cpu",
+                        "_mcp": bool(tsk.get("_mcp")),
+                        "_peer_review": bool(tsk.get("_peer_review")),
+                        "_resumed": True,
+                    }
+                    with M._queue_locks["cpu"]:
+                        M._task_queues["cpu"].insert(0, entry)
+                        M._queue_conds["cpu"].notify_all()
+                    with M._data_lock:
+                        tt = M.tasks.get(task_id)
+                        if tt:
+                            tt["status"] = "requeued"
+                            tt["message"] = "Interrupted by image render — requeued, will resume shortly"
+                    continue
             M._set_task_error(task_id, data["error"], data.get("sid"))
 
         elif ev_type == "tool_ok":
@@ -706,9 +755,11 @@ def _queue_worker(mode):
                 oh = M._overheated
             # GPU overheating only pauses the GPU lane — the CPU lane runs on
             # the CPU server and is unaffected. RAM pressure affects the whole
-            # box, so it pauses both lanes.
-            if (oh and mode == "gpu") or M._ram_evacuating:
-                label = "GPU overheating" if oh else "RAM pressure — restarting servers"
+            # box, so it pauses both lanes. An active image render pauses every
+            # lane: ComfyUI needs the GPU (VRAM) AND the ~9 GB of RAM the cpu
+            # lane's model was evicted from, so no new model may load mid-render.
+            if (oh and mode == "gpu") or M._ram_evacuating or M._image_active:
+                label = "GPU overheating" if oh else ("RAM pressure — restarting servers" if M._ram_evacuating else "image rendering")
                 for qitem in task_queue:
                     tid = qitem["task_id"]
                     if tid in M.tasks:

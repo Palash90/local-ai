@@ -12,6 +12,7 @@ import requests
 
 from server.features.state import M
 from server.features.users import _safe_username
+from server.features.monitoring import evict_cpu_model_for_image
 
 # LLM-selectable framing presets for generate_image. All values are divisible
 # by 8 (latent-safe for EmptySD3LatentImage) and stay near the ~2 MP budget of
@@ -87,7 +88,8 @@ def generate_image(
     with M._data_lock:
         M._image_active = True
     # ComfyUI renders on the GPU, so unload both GPU and guardrail llama-servers.
-    # The CPU server (self-chat agents) keeps running untouched.
+    # The CPU server (self-chat agents) is held until the render finishes and
+    # its model is evicted below (RAM, not VRAM — both can't fit at once).
     try:
         _vram = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
@@ -111,6 +113,10 @@ def generate_image(
         print(f"[image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms})...")
         time.sleep(2)
     print(f"[image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}")
+    # ComfyUI also needs RAM, and the cpu lane's ~9 GB gemma4-12b is the
+    # biggest other consumer. Evict it (KV checkpointed, RAM verified) so the
+    # render never trips the whole-box RAM evacuation.
+    evict_cpu_model_for_image()
 
     width, height = _aspect_dims(aspect_ratio)
 
@@ -403,7 +409,8 @@ def edit_image(
     with M._data_lock:
         M._image_active = True
     # ComfyUI renders on the GPU, so unload both GPU and guardrail llama-servers.
-    # The CPU server (self-chat agents) keeps running untouched.
+    # The CPU server (self-chat agents) is held until the render finishes and
+    # its model is evicted below (RAM, not VRAM — both can't fit at once).
     print(f"[edit_image] Calling unload_llama_model(gpu), current status: {M.server_status('gpu')}")
     gpu_ok = M.unload_llama_model("gpu")
     print(f"[edit_image] gpu unload returned: {gpu_ok}, status now: {M.server_status('gpu')}")
@@ -419,6 +426,8 @@ def edit_image(
         print(f"[edit_image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms})...")
         time.sleep(2)
     print(f"[edit_image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}")
+    # Same eviction as generate_image: free the cpu lane's RAM for ComfyUI.
+    evict_cpu_model_for_image()
 
     gen_tag = str(uuid.uuid4())[:8]
     prefix = f"{_safe_username(user)}/edit_{gen_tag}_"

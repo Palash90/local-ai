@@ -274,7 +274,3 @@ RAM_RESUME_THRESHOLD = 70
 # its model weights are released from RAM. The GPU lane keeps the historical
 # fixed 300s in monitoring._idle_unload_loop. Test-mode override via .env.
 CPU_IDLE_UNLOAD_SECONDS = int(os.environ.get("CPU_IDLE_UNLOAD_SECONDS", "300"))
-# Max time a task may stay "working" on its lane before it is force-errored as
-# stuck. A stuck task keeps _current_task_ids[mode] set, which blocks the
-# idle-unload gate forever; erroring it lets the lane recycle and unload fire.
-TASK_STUCK_TIMEOUT = int(os.environ.get("TASK_STUCK_TIMEOUT", "900"))

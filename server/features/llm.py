@@ -642,15 +642,17 @@ def _wait_image_active_clear(timeout=600):
 
 
 def _mark_chat_generating(mode, active):
-    """Track live GPU/guardrail LLM inference so image gen can avoid the GPU.
+    """Track live LLM inference on any lane so image gen can take over safely.
 
-    Only ``gpu``/``guardrail`` touch the single physical GPU; the CPU lane runs
-    on a separate server and never contends with ComfyUI. Every concurrent
-    inference increments with ``active=True`` (before the streaming POST) and
-    decrements with ``active=False`` in its ``finally``.
+    ``gpu``/``guardrail`` touch the single physical GPU and contend with
+    ComfyUI; the ``cpu`` lane runs on a separate server and never contends with
+    it, BUT an interactive image render also needs the cpu lane's ~9 GB of RAM
+    (evicted before ComfyUI starts). Counting the cpu lane here lets image gen
+    wait for an in-flight agent reply to finish before evicting the cpu model
+    instead of killing a live bot response. Every concurrent inference
+    increments with ``active=True`` (before the streaming POST) and decrements
+    with ``active=False`` in its ``finally``.
     """
-    if mode not in ("gpu", "guardrail"):
-        return
     with M._chat_generating_lock:
         if active:
             M._chat_generating += 1
@@ -693,7 +695,7 @@ def load_llama_model(mode="gpu", model_id=None):
     # starving it of VRAM and causing "VRAM grow failed". We busy-wait here
     # (not under _model_transition_lock) so the image path can still complete
     # and clear the flag without deadlocking.
-    if mode in ("gpu", "guardrail"):
+    if mode in ("gpu", "cpu", "guardrail"):
         _wait_image_active_clear()
     with M._model_transition_lock:
         with M._data_lock:
