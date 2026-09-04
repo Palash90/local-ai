@@ -205,11 +205,14 @@ stateDiagram-v2
     }
 ```
 
-Image generation unloads **only** the GPU server; CPU agents keep serving.
-Per-lane idle timestamps (`_last_llm_use`, `_cpu_last_llm_use`,
-`_guardrail_last_llm_use`) drive independent unloads. Before any unload the KV
-cache is checkpointed to `kv-slots/` (`--slot-save-path`, per-session `_session_kv`)
-and restored after reload, so long conversations don't re-prefill.
+Image generation unloads the **GPU** and **guardrail** models for VRAM (ComfyUI)
+*and* evicts the **CPU** model for RAM — in-flight CPU rounds are drained first,
+and a round the eviction cannot save is requeued to resume after the render (see
+[HARDENING.md](HARDENING.md) §3-4). Per-lane idle timestamps (`_last_llm_use`,
+`_cpu_last_llm_use`, `_guardrail_last_llm_use`; CPU governed by
+`CPU_IDLE_UNLOAD_SECONDS`) drive independent unloads. Before any unload the KV
+cache is checkpointed to `kv-slots/` (`--slot-save-path`, per-session
+`_session_kv`) and restored after reload, so long conversations don't re-prefill.
 
 ### 6. REST API Endpoints (`chat-webui` :3001)
 
@@ -300,7 +303,7 @@ flag.
 ```mermaid
 graph TD
     E2["_queue_worker(mode)\ngpu / cpu"] --> QueueLoop["queue_cond[mode].wait on empty"]
-    QueueLoop --> PauseCheck{"overheated and mode=gpu\nor ram_evacuating?"}
+    QueueLoop --> PauseCheck{"overheated (gpu only),\nram_evacuating, or image_active?"}
     PauseCheck -- Yes --> MarkWaiting["queued tasks → status waiting"]
     MarkWaiting --> PauseWait["cond.wait 5s"] --> QueueLoop
     PauseCheck -- No --> PopTask["pop head → _current_task_ids[mode]"]
@@ -326,6 +329,10 @@ entry back up once the servers are back, and the `start` event then skips
 from the interrupted attempt) is already in the session, so a resume never
 duplicates the user turn in the chat.
 
+The same `requeued`-with-`_resumed` path survives an image render: a CPU round
+killed by the render's eviction is requeued to the front of its lane and
+regenerated once ComfyUI finishes (see HARDENING.md §4).
+
 ### 9. Event Loop Pipeline (features/orchestration.py)
 
 ```mermaid
@@ -343,7 +350,9 @@ graph TD
     VGate -- No --> Final["_finalize_task:\n1. L3 output judge (features/judge.py):\nstrict pattern block + per-user judge;\nMCP lane (_mcp / guardrail) fail-closed,\nUI lane fail-open\n2. append msg, save sessions,\nstatus done, refresh idle stamp"]
     LLMOK -- Yes --> SubmitTools["append assistant msg,\npending_tools = N,\nsubmit to lane's _tool_pools"]
 
-    EvDispatch -- "llm_err" --> LLMErr["_set_task_error → status error"]
+    EvDispatch -- "llm_err" --> LLMErr{"cpu lane & image_active?\n(round killed by render eviction)"}
+    LLMErr -- Yes --> Requeue["requeue to lane front with _resumed\n(status requeued) -> resumes after render"]
+    LLMErr -- No --> SetErr["_set_task_error -> status error"]
     EvDispatch -- "tool_ok / tool_err" --> ToolOK["append tool result,\npending -= 1"]
     ToolOK --> AllDone{"pending ≤ 0?"}
     AllDone -- No --> E1
@@ -418,12 +427,17 @@ graph TD
     Cool -- Yes --> Clear["_overheated = False"]
     TM --> RAM{"RAM ≥ 95%?"}
     RAM -- Yes --> Evac["_evacuate_ram:\nrequeue in-flight to lane fronts\n(status requeued — non-terminal, UI keeps polling —\nentry flagged _resumed so the restart skips\nprepare_session and never re-appends the user msg),\nkill llama-servers + ComfyUI,\nwait ≤ 70%, restart_servers()"]
-    IDLE["_idle_unload_loop (10s)"] --> ICheck{"per lane: loaded,\nidle > 300s, queue empty,\nnot _chat_generating?"}
+    IDLE["_idle_unload_loop (10s)"] --> ICheck{"per lane: loaded, idle > timeout\n(cpu: CPU_IDLE_UNLOAD_SECONDS),\nqueue/current task empty,\nnot streaming? (global counter)"}
     ICheck -- Yes --> ISave["save KV slot → unload lane"]
-    IMG["images.py post-render"] --> REC["recycle_comfyui (background thread):\nkill + reboot ComfyUI — --lowvram\nweights never return RAM otherwise\n(~8 GB held idle → evacuation trigger);\nCOMFYUI_RECYCLE_AFTER_RENDER=0 disables"]
+    IMG["images.py: unload gpu+guardrail (VRAM),\nevict cpu model (RAM, drains in-flight\nrounds first), reload + KV restore"] --> REC["recycle_comfyui (background thread):\nkill + reboot ComfyUI — --lowvram\nweights never return RAM otherwise\n(~8 GB held idle → evacuation trigger);\nCOMFYUI_RECYCLE_AFTER_RENDER=0 disables"]
     CM["_connection_manager"] --> DNS["GoDaddy DDNS AAAA update\n(when public IPv6 changes)"]
     CM --> HB["heartbeat POST to GCP VM\nover WireGuard (10s)"]
 ```
+
+The idle check deliberately has **no runtime-based stuck-task watchdog** — the
+earlier `TASK_STUCK_TIMEOUT` force-error was removed. A wedged lane is reclaimed
+by RAM evacuation, thermal pressure, image-render takeover, or the idle gate;
+long research rounds run to completion by design (HARDENING.md §5).
 
 ### 13. Moderation & Verification Pipeline
 

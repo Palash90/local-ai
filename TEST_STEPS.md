@@ -305,7 +305,7 @@ With a browser (or headed test) authenticated via SSO:
 
 ## J. Resource management (thermal / RAM / idle / KV)
 
-**J1. Idle unload (300s, per lane)**
+**J1. Idle unload (per lane — GPU/guardrail 300s; CPU `CPU_IDLE_UNLOAD_SECONDS`)**
 - Load GPU model, stop chatting → after ~300s `GET /api/model-status` shows unloaded + `[llama]` idle log; **before** unloading, a KV snapshot is written to `~/local-ai-files/kv-slots/` (check file mtime)
 - Reload + resume the same session → prompt tokens for that round ≪ total context (KV restored, only new tokens prefilled — compare `tokens`/`prompt_eval_count` in logs)
 - CPU lane idles independently: keep CPU agents busy while GPU idles → only GPU model unloads (needs `FORCE_GPU_LANE=False`)
@@ -322,6 +322,25 @@ With a browser (or headed test) authenticated via SSO:
 - Judge calls during the render hold (`[judge] image render active`) and fire after ComfyUI finishes — a judge model load must never overlap a render (RAM-evacuation guard, see §I2)
 - **Post-render ComfyUI recycle**: after each render logs show `[comfyui] Recycling process to return render RAM` → old process killed → fresh boot (`[comfyui] Recycle complete`); ComfyUI RSS drops from multi-GB to base (~300 MB) — assert `free -m` no longer drifts upward across renders and no `[ram]` evacuation follows a render. Next render re-loads the model from disk (slower start, expected). `COMFYUI_RECYCLE_AFTER_RENDER=0` disables
 - After render: ComfyUI VRAM freed, GPU model reloaded, KV restored, ~5s cooldown observed
+
+**J5. CPU idle-unload, verified (Phase 0)**
+- With `CPU_IDLE_UNLOAD_SECONDS=15` in `.env` (test value — raise to 300 before live), run a CPU task (research/self-chat), then go quiet → inside ~15s the CPU lane unloads; `GET /api/model-status` shows `cpu_model_state: unloaded` and `cpu_last_idle_freed_mb ≈ 8000`
+- Assert the unload is verified, not assumed: log line `[idle] cpu llama-server killed — freed ~NNNN MB total`
+- **No stuck watchdog**: grep the codebase for `TASK_STUCK_TIMEOUT` / `_stuck_task_check` and assert both are absent — a long CPU round must NOT be force-errored on runtime (see §5)
+
+**J6. Render-interrupt schedule (Kaya-Kolpo dog test)**
+- Start a research task on the CPU lane (`SELF_CHAT_MODE=cpu`); while a round is mid-generation, open a second chat session and request a dog (`generate_image`)
+- During the render: GPU + guardrail models unloaded, GPU lane chat requests hold (not error), queue shows `waiting — image rendering`
+- If the router force-kills a mid-prefill CPU round, assert the log shows `[llm_err] task ... interrupted by image render — requeueing` and the task status ring is `requeued`, not `error`
+- Render delivers the dog → after ComfyUI finishes, poll `/api/status/:task_id` and assert the research task ends `done` (NEVER `error`)
+- Assert the resumed conversation shows no duplicated user turn in the UI
+
+**J7. Eviction drain + CPU KV restore**
+- With a CPU research round actively prefilling, trigger a render; assert the eviction waits for the round: `[image] Evicting CPU lane model ...` prints only after that round's request completes — no `force-killing model instance` for a round that finishes within the drain window
+- After the render and CPU reload, assert KV restore on the next CPU round: `prompt_eval_count` ≪ full context — only new tokens are re-prefilled (compare `total time` in the CPU server log against an equivalent cold prefill)
+
+**J8. Lane independence during long CPU research**
+- Keep a CPU research task busy while a UI (GPU) user chats: UI first token latency must look like a GPU-lane hot/cold load (no CPU-lane queuing); UI model still unloads at its own 300s idle even if the CPU round is mid-stream (KNOWN global-stream-gate caveat — see HARDENING.md §6)
 
 ---
 

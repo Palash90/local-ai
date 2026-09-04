@@ -257,6 +257,11 @@ machinery, model state machines, REST surface, event loop, tool dispatch,
 resource management and the moderation/verification pipeline — is documented
 with diagrams in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
+Resource hardening — how lanes stay isolated, when models auto-unload (and how
+that is verified), and how tasks survive an image render or RAM evacuation — is
+in **[HARDENING.md](HARDENING.md)**; its manual regression steps live in
+TEST_STEPS.md `## J`.
+
 ## Companion Services
 
 ### MCP Gateway (`server/mcp_gateway.py`, :8000)
