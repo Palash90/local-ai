@@ -302,6 +302,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "overheated": oh,
                     "gpu_temp": gtemp,
                     "ram_evacuating": ram_evac,
+                    "cpu_model_state": snap.get("cpu_model_state"),
+                    "cpu_last_idle_freed_mb": snap.get("cpu_last_idle_freed_mb"),
                     "max_context": MAX_INPUT_TOKENS,
                     "reminder_count": reminder_count,
                 }

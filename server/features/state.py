@@ -184,6 +184,9 @@ _cpu_model_status = "unloaded"
 _last_tps = None
 _last_llm_use = time.time()
 _cpu_last_llm_use = time.time()
+# MB of RAM reclaimed by the last CPU-lane idle unload (None until one ran).
+# Surfaced to the UI via /api/model-status so under-release is visible.
+_cpu_last_idle_freed_mb = None
 
 _guardrail_model_status = "unloaded"
 _guardrail_last_llm_use = time.time()
@@ -267,3 +270,11 @@ TEMP_THRESHOLD_ON = 90
 TEMP_THRESHOLD_OFF = 75
 RAM_EVAC_THRESHOLD = 95
 RAM_RESUME_THRESHOLD = 70
+# How long the CPU llama-server must be idle (since its last LLM call) before
+# its model weights are released from RAM. The GPU lane keeps the historical
+# fixed 300s in monitoring._idle_unload_loop. Test-mode override via .env.
+CPU_IDLE_UNLOAD_SECONDS = int(os.environ.get("CPU_IDLE_UNLOAD_SECONDS", "300"))
+# Max time a task may stay "working" on its lane before it is force-errored as
+# stuck. A stuck task keeps _current_task_ids[mode] set, which blocks the
+# idle-unload gate forever; erroring it lets the lane recycle and unload fire.
+TASK_STUCK_TIMEOUT = int(os.environ.get("TASK_STUCK_TIMEOUT", "900"))

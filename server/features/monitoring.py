@@ -22,6 +22,12 @@ from server.features.state import M
 
 _LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8083", "embed": "8084"}
 
+# Minimum RAM that must actually be freed after a CPU idle-unload before we
+# stop waiting. An async/dropped unload can return 200 without the ~9 GB model
+# child process leaving; below this the unload is treated as failed and
+# escalated to killing the whole cpu lane server.
+RAM_UNLOAD_MIN_FREED_MB = 512
+
 
 def model_status_snapshot():
     # The UI reports the interactive (GPU) server's state.
@@ -32,6 +38,8 @@ def model_status_snapshot():
             "overheated": M._overheated,
             "gpu_temp": M._gpu_temp,
             "ram_evacuating": M._ram_evacuating,
+            "cpu_model_state": M._cpu_model_status,
+            "cpu_last_idle_freed_mb": M._cpu_last_idle_freed_mb,
         }
 
 
@@ -499,22 +507,135 @@ def recycle_comfyui(wait=False):
         thread.join()
 
 
+def _free_ram_mb():
+    """Current available RAM in MB (``free -m``'s 'available' column)."""
+    try:
+        r = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
+        parts = r.stdout.strip().split("\n")[1].split()
+        return int(parts[6])
+    except Exception:
+        return None
+
+
+def _verify_cpu_unload(avail_before):
+    """After an idle CPU unload, confirm the model actually left RAM.
+
+    The unload POST can return 200 while the async/dropped child model-server
+    process still holds the ~9 GB of RAM — in router mode the root process on
+    8079 is tiny and the big model lives in a spawned child, so a 200 from
+    /models/unload proves nothing. Poll available RAM for a short grace window;
+    if the expected chunk never appears, kill the whole cpu lane server for
+    real and settle the bookkeeping so the next task restarts it fresh.
+    """
+    freed = None
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        avail = _free_ram_mb()
+        if avail is not None and avail_before is not None:
+            freed = avail - avail_before
+        if freed is not None and freed >= RAM_UNLOAD_MIN_FREED_MB:
+            with M._data_lock:
+                M._cpu_last_idle_freed_mb = freed
+            print(f"[idle] cpu unload verified — freed ~{freed} MB RAM", flush=True)
+            return
+        time.sleep(5)
+    print(
+        f"[idle] cpu model still resident after 30s (freed ~{freed or 0} MB) — killing cpu llama-server",
+        flush=True,
+    )
+    M.kill_llama_server("cpu")
+    time.sleep(2)
+    avail = _free_ram_mb()
+    if avail is not None and avail_before is not None:
+        freed = avail - avail_before
+    with M._data_lock:
+        M._cpu_model_status = "unloaded"
+        M._cpu_last_idle_freed_mb = freed
+    print(f"[idle] cpu llama-server killed — freed ~{freed or 0} MB total", flush=True)
+
+
+def _stuck_task_check():
+    """Force-error any lane task that has run past ``TASK_STUCK_TIMEOUT``.
+
+    A task whose LLM call hangs (or whose worker died mid-run) leaves
+    ``_current_task_ids[mode]`` set forever, which makes the not-``queue_active``
+    idle-unload gate False permanently — the lane's model then never gets
+    released. Erring the task lets the lane worker recycle (releasing
+    ``_current_task_ids``) and idle-unload fire.
+    """
+    from server.features.orchestration import _set_task_error
+
+    for mode in ("gpu", "cpu", "guardrail"):
+        with M._queue_locks[mode]:
+            tid = M._current_task_ids[mode]
+        if not tid:
+            continue
+        with M._data_lock:
+            t = M.tasks.get(tid)
+        if not t or t.get("status") in ("done", "error", "cancelled", "requeued"):
+            continue
+        started = t.get("_started_at")
+        if started is None:
+            started = t.get("_queued_at")
+        if not started:
+            continue
+        elapsed = time.time() - started
+        if elapsed > M.TASK_STUCK_TIMEOUT:
+            print(
+                f"[stuck] {mode} task {tid} running {elapsed:.0f}s > {M.TASK_STUCK_TIMEOUT}s — forcing error",
+                flush=True,
+            )
+            _set_task_error(tid, f"Stuck: no progress for {M.TASK_STUCK_TIMEOUT}s — bot recycled its lane.")
+
+
 def _idle_unload_loop():
+    # Diagnostic throttle: log the reason a would-be idle unload is blocked at
+    # most once per minute (a lane that never frees must not spam the log).
+    _diag_next = {}
     while True:
         time.sleep(10)
+        _stuck_task_check()
 
         # Each llama-server unloads independently once its own LANE has been
-        # idle for > 300s. This is checked per-lane (not combined) so a busy
-        # CPU self-chat agent can't keep the idle GPU model pinned in VRAM,
-        # and vice versa.
+        # idle for > its timeout. This is checked per-lane (not combined) so a
+        # busy CPU self-chat agent can't keep the idle GPU model pinned in VRAM,
+        # and vice versa. The CPU timeout is configurable (CPU_IDLE_UNLOAD_
+        # SECONDS, default 300s); gpu/guardrail keep the historical 300s.
         for mode in ("gpu", "cpu", "guardrail"):
+            timeout = M.CPU_IDLE_UNLOAD_SECONDS if mode == "cpu" else 300
             with M._queue_locks[mode]:
-                queue_active = len(M._task_queues[mode]) > 0 or M._current_task_ids[mode] is not None
+                tid_running = M._current_task_ids[mode]
+                queue_active = len(M._task_queues[mode]) > 0 or tid_running is not None
             ms = M.server_status(mode)
             lu = M.server_last_use(mode)
-            if ms == "chat_loaded" and (time.time() - lu > 300) and not queue_active:
-                print(f"[idle] No {mode} LLM activity for 300s, releasing model weights...")
-                M.unload_llama_model(mode)
+            idle = time.time() - lu
+            if ms == "chat_loaded" and idle > timeout and not queue_active:
+                print(
+                    f"[idle] No {mode} LLM activity for {idle:.0f}s (>{timeout}s), releasing model weights...",
+                    flush=True,
+                )
+                if mode == "cpu":
+                    avail_before = _free_ram_mb()
+                    ok = M.unload_llama_model(mode)
+                    if ok and avail_before is not None:
+                        _verify_cpu_unload(avail_before)
+                else:
+                    M.unload_llama_model(mode)
+                continue
+            # Loaded lane that still won't unload past its idle timeout — say
+            # exactly why (throttled), so a stuck lane is diagnosable in logs.
+            if idle > timeout and _diag_next.get(mode, 0.0) <= time.time():
+                if queue_active:
+                    reason = f"blocked: task still running ({tid_running!r})"
+                elif ms != "chat_loaded":
+                    reason = f"blocked: status={ms!r} (not chat_loaded)"
+                else:
+                    reason = f"unknown: idle={idle:.0f}s status={ms!r}"
+                print(
+                    f"[idle] {mode} idle {idle:.0f}s > {timeout}s but not unloaded — {reason}",
+                    flush=True,
+                )
+                _diag_next[mode] = time.time() + 60
 
 
 def _reminder_loop():
@@ -584,7 +705,7 @@ def _evacuate_ram():
         ram = M.get_ram_usage()
         if ram is not None and ram <= M.RAM_RESUME_THRESHOLD:
             print(
-                f"[ram] RAM {ram:.0f}% ≤ {M.RAM_RESUME_THRESHOLD}%, restarting servers"
+                f"[ram] RAM used {ram:.0f}% ≤ {M.RAM_RESUME_THRESHOLD}%, restarting servers"
             )
             break
     M.restart_servers()
@@ -627,7 +748,7 @@ def _thermal_monitor():
         if not M._ram_evacuating:
             ram = M.get_ram_usage()
             if ram is not None and ram >= M.RAM_EVAC_THRESHOLD:
-                print(f"[ram] RAM usage {ram:.0f}% >= {M.RAM_EVAC_THRESHOLD}%")
+                print(f"[ram] RAM used {ram:.0f}% >= {M.RAM_EVAC_THRESHOLD}%")
                 M._evacuate_ram()
 
 
