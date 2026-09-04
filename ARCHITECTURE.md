@@ -114,7 +114,7 @@ graph TD
         RL1["MAX_QUEUE_SIZE = 15 (per lane)"]
         RL2["MAX_INPUT_TOKENS = 24576\nAUTO_COMPACT_THRESHOLD = 70%"]
         RL3["MAX_TOOL_ROUNDS = default 10 /\nresearch 50 (UI research toggle)"]
-        RL4["_llm_pools: gpu 1 / cpu 4 / guardrail 1\n(CPU_PARALLEL_SLOTS = 4)"]
+        RL4["_llm_pools: gpu 1 / cpu 4 / guardrail 1\n(CPU_PARALLEL_SLOTS = 1)"]
         RL5["_tool_pools: gpu 2 / cpu 2 / guardrail 2"]
         RL6["Idle unload = 300s per lane\nVERIFY_IDLE_TIMEOUT = 300s"]
         RL7["LLM timeout = 600s · ComfyUI poll = 120s"]

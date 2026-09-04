@@ -93,7 +93,7 @@ SAMPLING_BUCKETS = {
     "factual": {"temperature": 0.5, "top_k": 40, "top_p": 0.9},
     "chat": {"temperature": 1.0, "top_k": 64, "top_p": 0.95},
 }
-CPU_PARALLEL_SLOTS = 4  # Set to desired number of concurrent CPU agent slots
+CPU_PARALLEL_SLOTS = 1  # Set to desired number of concurrent CPU agent slots
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Unified RBAC / SSO — Authentik is the SINGLE identity provider.
@@ -343,6 +343,7 @@ LLAMA_SERVER_ARGS_CPU = [
     # KV-cache checkpointing (see LLAMA_SERVER_ARGS): the CPU lane also
     # idle-unloads, and re-prefilling an agent story context on CPU is slow.
     "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
+    "--parallel", "1"
 ]
 
 
