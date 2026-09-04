@@ -127,6 +127,7 @@ from server.features.state import (  # noqa: E402
     _guardrail_loaded_model,
     _image_active,
     _chat_generating,
+    _chat_generating_by_lane,
     _chat_generating_lock,
     _current_task_ids,
     _data_lock,

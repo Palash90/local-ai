@@ -335,8 +335,8 @@ With a browser (or headed test) authenticated via SSO:
 - Render delivers the dog → after ComfyUI finishes, poll `/api/status/:task_id` and assert the research task ends `done` (NEVER `error`)
 - Assert the resumed conversation shows no duplicated user turn in the UI
 
-**J7. Eviction drain + CPU KV restore**
-- With a CPU research round actively prefilling, trigger a render; assert the eviction waits for the round: `[image] Evicting CPU lane model ...` prints only after that round's request completes — no `force-killing model instance` for a round that finishes within the drain window
+**J7. Immediate CPU eviction + requeue resume + KV restore**
+- With a CPU research round actively prefilling, trigger a render; assert the eviction does **not** wait for the round: `[image] Evicting CPU lane model ...` prints immediately (image stays ~2 min), the killed round logs `[llm_err] ... requeueing`, and the research task's final status is `done` (no `error`)
 - After the render and CPU reload, assert KV restore on the next CPU round: `prompt_eval_count` ≪ full context — only new tokens are re-prefilled (compare `total time` in the CPU server log against an equivalent cold prefill)
 
 **J8. Lane independence during long CPU research**

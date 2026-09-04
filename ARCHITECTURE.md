@@ -206,9 +206,10 @@ stateDiagram-v2
 ```
 
 Image generation unloads the **GPU** and **guardrail** models for VRAM (ComfyUI)
-*and* evicts the **CPU** model for RAM — in-flight CPU rounds are drained first,
-and a round the eviction cannot save is requeued to resume after the render (see
-[HARDENING.md](HARDENING.md) §3-4). Per-lane idle timestamps (`_last_llm_use`,
+*and* evicts the **CPU** model for RAM — the eviction is immediate (images don't
+wait on the slow CPU lane: the render's up-front wait is scoped to the
+gpu/guardrail VRAM lanes), and a round the unload force-kills is requeued to
+resume after the render (see [HARDENING.md](HARDENING.md) §3-4). Per-lane idle timestamps (`_last_llm_use`,
 `_cpu_last_llm_use`, `_guardrail_last_llm_use`; CPU governed by
 `CPU_IDLE_UNLOAD_SECONDS`) drive independent unloads. Before any unload the KV
 cache is checkpointed to `kv-slots/` (`--slot-save-path`, per-session
@@ -429,7 +430,7 @@ graph TD
     RAM -- Yes --> Evac["_evacuate_ram:\nrequeue in-flight to lane fronts\n(status requeued — non-terminal, UI keeps polling —\nentry flagged _resumed so the restart skips\nprepare_session and never re-appends the user msg),\nkill llama-servers + ComfyUI,\nwait ≤ 70%, restart_servers()"]
     IDLE["_idle_unload_loop (10s)"] --> ICheck{"per lane: loaded, idle > timeout\n(cpu: CPU_IDLE_UNLOAD_SECONDS),\nqueue/current task empty,\nnot streaming? (global counter)"}
     ICheck -- Yes --> ISave["save KV slot → unload lane"]
-    IMG["images.py: unload gpu+guardrail (VRAM),\nevict cpu model (RAM, drains in-flight\nrounds first), reload + KV restore"] --> REC["recycle_comfyui (background thread):\nkill + reboot ComfyUI — --lowvram\nweights never return RAM otherwise\n(~8 GB held idle → evacuation trigger);\nCOMFYUI_RECYCLE_AFTER_RENDER=0 disables"]
+    IMG["images.py: unload gpu+guardrail (VRAM),\nevict cpu model (RAM, immediate — a killed round\nrequeues), reload + KV restore"] --> REC["recycle_comfyui (background thread):\nkill + reboot ComfyUI — --lowvram\nweights never return RAM otherwise\n(~8 GB held idle → evacuation trigger);\nCOMFYUI_RECYCLE_AFTER_RENDER=0 disables"]
     CM["_connection_manager"] --> DNS["GoDaddy DDNS AAAA update\n(when public IPv6 changes)"]
     CM --> HB["heartbeat POST to GCP VM\nover WireGuard (10s)"]
 ```

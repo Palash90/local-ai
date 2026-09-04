@@ -195,11 +195,14 @@ _guardrail_last_llm_use = time.time()
 # loaded id lets a repeated request for the same judge skip the reload churn.
 _guardrail_loaded_model = ""
 
-# Number of LLM inference calls currently generating on the GPU/guardrail
-# servers. Mirrors ``image_active``: while a chat/judge is actively streaming
-# tokens into VRAM we must NOT unload the model or load ComfyUI's models (the
-# reverse of the image_active rule). Guarded by ``_chat_generating_lock``.
+# Number of LLM inference calls currently generating on any lane. Mirrors
+# ``image_active``: while a chat/judge is actively streaming tokens into VRAM
+# we must NOT unload the model or load ComfyUI's models (the reverse of the
+# image_active rule). Guarded by ``_chat_generating_lock``.
 _chat_generating = 0
+# Per-lane version of the above (mode → count) so callers can wait on a
+# specific lane instead of the whole box. Kept in sync under the same lock.
+_chat_generating_by_lane = {}
 _chat_generating_lock = threading.Lock()
 
 # KV-cache slot checkpoints per llama-server lane (see llm.py). Maps mode →

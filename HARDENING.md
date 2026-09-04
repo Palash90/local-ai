@@ -16,7 +16,7 @@ Three kinds of scarce resource, protected by three mechanisms:
 
 | Resource | Consumers | Guard |
 |---|---|---|
-| **GPU VRAM** | GPU lane (UI users), guardrail lane (judge/L2-L3), ComfyUI renders | `_wait_chat_generating_clear()` + `_image_active` gate |
+| **GPU VRAM** | GPU lane (UI users), guardrail lane (judge/L2-L3), ComfyUI renders | `_wait_chat_generating_clear(lanes=("gpu","guardrail"))` + `_image_active` gate |
 | **System RAM** | CPU lane's gemma4-12b (~9 GB), ComfyUI models, KV slots | `_evacuate_ram` (95 %) + render-time CPU eviction |
 | **Rest of the box** | thermal state, whole-box RAM % | `_thermal_monitor`, `_evacuate_ram` |
 
@@ -79,34 +79,34 @@ sequenceDiagram
     participant Q as lane workers
     participant C as CPU gemma
     participant U as ComfyUI
-    GH->>LC: wait for ALL lanes to stop streaming (600s cap)
+    GH->>LC: wait for GPU/guardrail lanes to stop streaming (600s cap)
     GH->>GH: _image_active = True
     GH->>Q: lanes pause (queued tasks -> status "waiting",<br/>new loads blocked by _image_active gate)
     GH->>GH: unload gpu + guardrail llama-servers (VRAM)
-    GH->>C: evict CPU model for RAM<br/>(drains in-flight CPU rounds first, 600s cap)
+    GH->>C: evict CPU model for RAM<br/>(immediate; interrupted rounds requeued)
     GH->>U: ComfyUI workflow (poll 120s)
     U-->>GH: render complete (VRAM freed)
     GH->>GH: _image_active = False
     GH->>Q: lanes resume; gpu/guardrail reload + KV restore<br/>(~5s cooldown); ComfyUI recycled in background
 ```
 
-Every layer of this is about **not killing a live round**:
+Every layer of this is about **not silently losing a live round**:
 
 - The GPU/guardrail side waits for in-flight inference before touching VRAM
-  (`generate_image` starts with `_wait_chat_generating_clear`).
-- The CPU side **drains** before evicting: `evict_cpu_model_for_image` re-checks
-  `_wait_chat_generating_clear` immediately before `unload_llama_model("cpu")`,
-  so a round that started during the GPU/guardrail unload churn is waited out.
-- A render that still lands on a round mid-stream (the router's 10 s grace can
-  never finish a minutes-long prefill) does **not** error the task — it requeues
-  it (next section).
+  (`generate_image` starts with `_wait_chat_generating_clear(lanes=("gpu","guardrail"))`).
+- The CPU side does **not** drain: it evicts immediately so the render starts
+  fast, and any round the unload force-kills is **requeued** (Fix 2) to resume
+  after the render. Images stay ~2 min even while research is mid-round.
+- A render that lands on a round mid-stream (the router's 10 s grace can never
+  finish a minutes-long prefill) does **not** error the task — it requeues it
+  (next section).
 
 ## 4. What happens to a running task when a server goes away
 
 | Stop cause | Where it's triggered | Running task outcome |
 |---|---|---|
 | **Idle-unload** | `_idle_unload_loop` | Never fires mid-task — busy gate holds. Nothing to resume. |
-| **Render eviction** | `images.generate_image` → `evict_cpu_model_for_image` | In-flight round is drained (Fix 1) and completes. If the 600 s valve expires and the round is killed anyway, the task is **requeued** (Fix 2) and resumes after the render. |
+| **Render eviction** | `images.generate_image` → `evict_cpu_model_for_image` | CPU eviction is immediate (images never drain-wait on the CPU lane). A round that happens to be mid-stream is force-killed by the unload and **requeued** (Fix 2) to resume after the render. |
 | **RAM evacuation (≥95 %)** | `_evacuate_ram` | Task requeued to the front of its lane with `_resumed=true` *before* the servers are killed; resumes on restart. |
 | **Thermal (≥90 °C)** | `_thermal_monitor` | GPU lane pauses (never kills its server). CPU lane unaffected. |
 | **Server dies between rounds** | crash/kill/OOM | Self-heals — the next round's `load_llama_model` re-spawns the server and continues. |
@@ -153,9 +153,11 @@ completion rather than being recycled mid-answer.
   while an MCP task's round is streaming, the dying round's `_set_task_error`
   latches `status=error` into the MCP tasks DB even though the task was already
   requeued. In-memory flow still resumes. Not a priority.
-- **Residual eviction TOCTOU.** A CPU round can start in the sub-second gap
-  between the eviction's drain check and the kill. Always safe: the round may be
-  killed, but Fix 2 requeues the task so nothing is lost.
+- **CPU render eviction (by design).** The render never waits on the CPU lane:
+  a round mid-stream when the eviction fires is force-killed and requeued (Fix 2),
+  so the render resumes it after ComfyUI finishes. A round that starts in the
+  sub-second gap between the eviction kill and the unload's `finally` is equally
+  safe — the same requeue path catches it. Nothing is lost.
 - **CPU throughput.** gemma4-12b on the CPU lane runs ~10-16 tok/s prefill /
   ~4-5 tok/s generation. Research is expected to be slow-but-steady there; keep
   interactive users on the GPU lane.

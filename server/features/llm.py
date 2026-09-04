@@ -642,35 +642,47 @@ def _wait_image_active_clear(timeout=600):
 
 
 def _mark_chat_generating(mode, active):
-    """Track live LLM inference on any lane so image gen can take over safely.
+    """Track live LLM inference per lane so image gen can take over safely.
 
     ``gpu``/``guardrail`` touch the single physical GPU and contend with
     ComfyUI; the ``cpu`` lane runs on a separate server and never contends with
-    it, BUT an interactive image render also needs the cpu lane's ~9 GB of RAM
-    (evicted before ComfyUI starts). Counting the cpu lane here lets image gen
-    wait for an in-flight agent reply to finish before evicting the cpu model
-    instead of killing a live bot response. Every concurrent inference
+    the GPU, but an interactive image render needs the cpu lane's ~9 GB of RAM
+    (evicted before ComfyUI starts). The CPU lane is still counted for the
+    idle-unload stream gate (a busy self-chat round must never be surprised by
+    a background unload), but image gen deliberately does NOT wait on it — a
+    mid-round cpu task killed by the render eviction is requeued by the llm_err
+    handler and resumes after ComfyUI finishes. Every concurrent inference
     increments with ``active=True`` (before the streaming POST) and decrements
     with ``active=False`` in its ``finally``.
     """
     with M._chat_generating_lock:
         if active:
             M._chat_generating += 1
+            M._chat_generating_by_lane[mode] = M._chat_generating_by_lane.get(mode, 0) + 1
         else:
             M._chat_generating = max(0, M._chat_generating - 1)
+            cur = M._chat_generating_by_lane.get(mode, 0)
+            if cur > 0:
+                M._chat_generating_by_lane[mode] = cur - 1
 
 
-def _wait_chat_generating_clear(timeout=600):
-    """Block while any GPU/guardrail LLM inference is streaming into VRAM.
+def _wait_chat_generating_clear(timeout=600, lanes=None):
+    """Block while any LLM inference in ``lanes`` is streaming.
 
     Image generation must not unload the chat model (or let ComfyUI load its
-    own models) while a chat/judge round is mid-inference on the GPU — the
-    reverse of ``_wait_image_active_clear``.
+    own models) while a GPU/guardrail round is mid-inference — only those lanes
+    contend for the physical GPU/VRAM, so a render does not wait on the CPU
+    lane (its model is evicted instead, and an interrupted round requeues).
+    ``lanes=None`` waits on the whole box (the reverse of
+    ``_wait_image_active_clear``); a tuple of lane names narrows the poll.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
         with M._chat_generating_lock:
-            active = M._chat_generating > 0
+            if lanes is None:
+                active = M._chat_generating > 0
+            else:
+                active = any(M._chat_generating_by_lane.get(l, 0) > 0 for l in lanes)
         if not active:
             return True
         time.sleep(0.5)

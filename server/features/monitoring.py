@@ -560,17 +560,14 @@ def evict_cpu_model_for_image():
     An interactive image render and a self-chat agent compete for the same
     ~15 GB of RAM: the ~9 GB gemma4-12b resident on the cpu lane leaves almost
     nothing for ComfyUI, so RAM evacuation used to kill every long render. The
-    caller must have already waited for in-flight cpu rounds (image gen's
-    _wait_chat_generating_clear now includes the cpu lane). Unload the cpu
+    image gen up-front wait only covers gpu/guardrail (VRAM lanes) so a cpu
+    round may STILL be mid-inference here — that is fine: the unload force-kills
+    it and the llm_err handler requeues the interrupted task, which resumes
+    after ComfyUI finishes (no drain wait, images stay ~2 min). Unload the cpu
     model (KV checkpointed first) and verify the RAM actually came back,
     escalating to killing the cpu llama-server if the router keeps the child.
     """
     print("[image] Evicting CPU lane model to free RAM for ComfyUI", flush=True)
-    # Close the race with generate_image's up-front wait: a cpu round can start
-    # streaming AFTER that early check (during the GPU/guardrail unload churn)
-    # and must not be force-killed here. _image_active is already True, so no
-    # new round can start meanwhile — drain the tail round first (600s valve).
-    M._wait_chat_generating_clear()
     avail_before = _free_ram_mb()
     ok = M.unload_llama_model("cpu")
     if ok and avail_before is not None:

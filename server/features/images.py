@@ -79,7 +79,9 @@ def generate_image(
     # Wait for any active GPU/guardrail LLM inference to finish before we take
     # over the GPU. The reverse of the image_active gate: we must NOT unload the
     # chat model (or let ComfyUI load its own) while a chat round mid-inference.
-    M._wait_chat_generating_clear()
+    # Only the gpu/guardrail lanes contend for VRAM; the cpu lane is evicted
+    # instead (immediately, mid-round tasks requeue and resume after the render).
+    M._wait_chat_generating_clear(lanes=("gpu", "guardrail"))
     # Flag image generation NOW (before the unload below) so the chat pipeline's
     # load_llama_model — which may run concurrently when the same task's next LLM
     # round fires — blocks until ComfyUI is done. _image_active is a dedicated
@@ -400,8 +402,8 @@ def edit_image(
     print(f"\n[image_edit] Editing image for task {task_id} with prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image editing...")
     # Wait for any active GPU/guardrail LLM inference to finish before taking
-    # over the GPU (mirror of generate_image).
-    M._wait_chat_generating_clear()
+    # over the GPU (mirror of generate_image — cpu lane is evicted, not waited).
+    M._wait_chat_generating_clear(lanes=("gpu", "guardrail"))
     # Flag image editing NOW (before the unload) so a concurrent chat round that
     # calls load_llama_model blocks until ComfyUI is done (same reasoning as
     # generate_image). Without it the GPU model can be reloaded into VRAM right
