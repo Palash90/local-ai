@@ -149,6 +149,9 @@ _current_task_ids = {"gpu": None, "cpu": None, "guardrail": None}
 # a (permanently empty) entry here too.
 
 _event_queue = _queue.Queue()
+# Live HTTP responses are kept out of M.tasks because task dictionaries are
+# exposed directly through /api/status and must remain JSON serializable.
+_active_streams = {}
 # Serializes image generation/editing so VRAM management (llama unload/free/load)
 # and the ``image_active`` model status never race between concurrent chats.
 _image_queue = _queue.Queue()
@@ -232,7 +235,7 @@ _users_cache_time = 0
 # The interactive UI chat runs on the GPU llama-server, which is launched with
 # --ctx-size 24576 (24K). Keep this in sync with server/config.py so the UI's
 # context meter and the /api/model-status payload reflect the real budget.
-MAX_INPUT_TOKENS = int(os.environ.get("MAX_INPUT_TOKENS", "16384"))
+MAX_INPUT_TOKENS = int(os.environ.get("MAX_INPUT_TOKENS", "24576"))
 AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 
 # Hard llama-server context PER SLOT (keep in sync with the "--ctx-size" /
@@ -244,6 +247,7 @@ LANE_CTX_SIZES = {
     "cpu": int(os.environ.get("CPU_CTX_SIZE", "32768")),
     "guardrail": 8192,
 }
+
 PROMPT_BUDGET_MARGIN = 1024
 
 

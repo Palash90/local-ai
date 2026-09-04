@@ -47,11 +47,6 @@ cat << 'EOF' | sudo tee /var/www/dashboard/index.html > /dev/null
             <div class="title">Nextcloud</div>
             <div class="desc">/cloud/</div>
         </a>
-        <a href="/cloud/apps/files/files/136?dir=/Media/Public/E-books/" class="card">
-            <div class="icon">📚</div>
-            <div class="title">Books</div>
-            <div class="desc">E-books</div>
-        </a>
         <a href="/code/" class="card">
             <div class="icon">💻</div>
             <div class="title">Code Hoster</div>
@@ -575,6 +570,15 @@ server {
 
     # 3. SearXNG
     location /search/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+        error_page 401 = @ak-sso-ai;
+        error_page 502 503 504 = @service_unavailable;
+
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -582,6 +586,11 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Script-Name /search;
         proxy_set_header Accept-Encoding "";
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+        proxy_set_header X-Authentik-Email $authentik_email;
+        proxy_set_header X-Authentik-Name $authentik_name;
+        proxy_set_header X-Authentik-UID $authentik_uid;
     }
 
     # 4. Nextcloud

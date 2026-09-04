@@ -157,6 +157,15 @@ export async function deleteTask(taskId) {
   await authFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
 }
 
+export async function cancelTask(taskId) {
+  const r = await authFetch(`/api/cancel/${taskId}`, { method: 'POST' });
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({}));
+    throw new Error(data.error || `Could not cancel task (${r.status})`);
+  }
+  return r.json();
+}
+
 export async function shareMessage(sessionId, msgIndex) {
   const r = await authFetch('/api/shares', {
     method: 'POST',

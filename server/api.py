@@ -125,6 +125,7 @@ MAX_INPUT_TOKENS = None
 MAX_QUEUE_SIZE = None
 SHARES_FILE = None
 _active_tokens = None
+_active_streams = None
 _agent_tokens = None
 _agent_users = None
 _agent_token_by_user = None
@@ -171,6 +172,7 @@ APP_STATE_NAMES = [
     "MAX_QUEUE_SIZE",
     "SHARES_FILE",
     "_active_tokens",
+    "_active_streams",
     "_agent_tokens",
     "_agent_users",
     "_agent_token_by_user",
@@ -918,6 +920,56 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # message and poll /api/status/{task_id} for live progress ("Waiting
             # in line...", "Processing task...", "Generating image...", etc.).
             self.send_json({"task_id": task_id})
+        elif self.path.startswith("/api/cancel/"):
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            tid = self.path.split("/")[-1]
+            try:
+                import uuid as _u
+                _u.UUID(tid)  # validate UUID format
+            except ValueError:
+                self.send_json({"error": "Invalid task ID"}, status=400)
+                return
+            with _data_lock:
+                t = tasks.get(tid)
+                if not t:
+                    self.send_json({"error": "Task not found"}, status=404)
+                    return
+                sid = t.get("session_id")
+                meta = sessions_meta.get(sid, {})
+                if meta.get("user_id", "") != user:
+                    self.send_json({"error": "Task not yours"}, status=403)
+                    return
+                if t.get("status") in ("done", "error", "cancelled"):
+                    self.send_json({"status": t["status"]})
+                    return
+                t["status"] = "cancelled"
+                t["message"] = "Cancelled by user"
+            # Purge from lane queues
+            for mode in ("gpu", "cpu", "guardrail"):
+                with _queue_locks[mode]:
+                    q = _task_queues[mode]
+                    q[:] = [item for item in q if item.get("task_id") != tid]
+            # Close active LLM stream if present (aborts in-flight inference).
+            # The response lives in a private registry, not the public task dict.
+            with _data_lock:
+                stream = _active_streams.pop(tid, None)
+            if stream:
+                try:
+                    stream.close()
+                    stream.raw.close()
+                except Exception:
+                    pass
+            # Persist in MCP task DB if needed
+            if bool(t.get("_mcp")) or t.get("mode") == "guardrail":
+                try:
+                    from server.mcp_tasks_db import mcp_task_update
+                    mcp_task_update(tid, status="cancelled", reply="Cancelled by user")
+                except Exception:
+                    pass
+            self.send_json({"status": "cancelled"})
         elif self.path == "/api/extract-file":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))

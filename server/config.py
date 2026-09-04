@@ -271,7 +271,7 @@ LLAMA_SERVER_ARGS = [
     # GPU / VRAM & Performance
     "-ngl", LLAMA_GEMMA_NGL,
     "-fa", "on",
-    "--ctx-size", os.environ.get("GPU_CTX_SIZE", "16384"),  # bounded for 4 GB VRAM
+    "--ctx-size", os.environ.get("GPU_CTX_SIZE", "24576"),  # bounded for 4 GB VRAM
     "-ctk", "q8_0",
     "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q8_0
     "--no-mmproj-offload",

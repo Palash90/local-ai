@@ -1041,20 +1041,34 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                 )
             except Exception as _e:
                 print(f"[llm_payload] debug error: {_e}", flush=True)
+        r = None
         try:
             r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
             if r.status_code != 200:
                 err_body = r.text[:500] if r.text else f"HTTP {r.status_code}"
                 raise RuntimeError(f"LLM server returned {r.status_code}: {err_body}")
             r.encoding = "utf-8"
+            # Register the streaming response so a cancel handler can close it
+            # from another thread and force-abort the round even during silence.
+            with M._data_lock:
+                if task_id in M.tasks:
+                    M._active_streams[task_id] = r
             reasoning_buf = ""
             content_buf = ""
             tool_calls_map = {}
+            aborted = False
             with M._data_lock:
                 prev_reasoning = M.tasks.get(task_id, {}).get("reasoning", "")
             for line in r.iter_lines(decode_unicode=True):
                 if not line or not line.startswith("data: "):
                     continue
+                # Check for cancellation requested from another thread.
+                # This runs on every stream chunk, so it catches cancel even
+                # when the model is silent (prefill pause, etc.).
+                with M._data_lock:
+                    if M.tasks.get(task_id, {}).get("status") == "cancelled":
+                        aborted = True
+                        break
                 data_str = line[6:]
                 if data_str.strip() == "[DONE]":
                     break
@@ -1102,6 +1116,11 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                                     existing["function"]["arguments"] += fn["arguments"]
         finally:
             _mark_chat_generating(mode, False)
+        # Clear the active-stream reference so the task dict no longer
+        # holds a dangling response object.
+        with M._data_lock:
+            if M._active_streams.get(task_id) is r:
+                M._active_streams.pop(task_id, None)
         generation_ms = int((time.monotonic() - generation_start) * 1000)
         with M._data_lock:
             if task_id in M.tasks:
@@ -1114,24 +1133,25 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             flush=True,
         )
         print(f"[llm_round] Round {round_num} done: reasoning_buf={len(reasoning_buf)} chars, content_buf={len(content_buf)} chars, tool_calls={len(tool_calls_map)}")  # DEBUG
-        msg = {
-            "role": "assistant",
-            "content": content_buf,
-            "reasoning_content": prev_reasoning + reasoning_buf,
-        }
-        if tool_calls_map:
-            msg["tool_calls"] = list(tool_calls_map.values())
-        body = {"choices": [{"message": msg}]}
-        if "choices" in body:
-            M._event_post("llm_ok", task_id, body=body, round=round_num, sid=sid)
-        else:
-            M._event_post(
-                "llm_err",
-                task_id,
-                error="Unexpected response",
-                round=round_num,
-                sid=sid,
-            )
+        if not aborted:
+            msg = {
+                "role": "assistant",
+                "content": content_buf,
+                "reasoning_content": prev_reasoning + reasoning_buf,
+            }
+            if tool_calls_map:
+                msg["tool_calls"] = list(tool_calls_map.values())
+            body = {"choices": [{"message": msg}]}
+            if "choices" in body:
+                M._event_post("llm_ok", task_id, body=body, round=round_num, sid=sid)
+            else:
+                M._event_post(
+                    "llm_err",
+                    task_id,
+                    error="Unexpected response",
+                    round=round_num,
+                    sid=sid,
+                )
     except Exception as e:
         err_text = str(e)
         print(f"[llm_round] task {task_id} error: {err_text}")

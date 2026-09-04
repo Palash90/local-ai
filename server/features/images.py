@@ -243,6 +243,20 @@ def generate_image(
             found_file = None
             for _ in range(300):
                 time.sleep(1)
+                # Check for cancellation on every poll iteration — if the
+                # task was cancelled, interrupt ComfyUI immediately so the
+                # render stops without waiting for the full generation cycle.
+                with M._data_lock:
+                    cancelled = M.tasks.get(task_id, {}).get("status") == "cancelled"
+                if cancelled:
+                    try:
+                        requests.post(f"{M.COMFYUI_URL}/interrupt", timeout=10)
+                        print(
+                            f"[image] Interrupting ComfyUI render for cancelled task {task_id}"
+                        )
+                    except Exception:
+                        pass
+                    break
                 try:
                     hr = requests.get(
                         f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10
@@ -506,6 +520,19 @@ def edit_image(
             found_file = None
             for _ in range(300):
                 time.sleep(1)
+                # Check for cancellation on every poll iteration — if the
+                # task was cancelled, interrupt ComfyUI immediately.
+                with M._data_lock:
+                    cancelled = M.tasks.get(task_id, {}).get("status") == "cancelled"
+                if cancelled:
+                    try:
+                        requests.post(f"{M.COMFYUI_URL}/interrupt", timeout=10)
+                        print(
+                            f"[image] Interrupting ComfyUI edit for cancelled task {task_id}"
+                        )
+                    except Exception:
+                        pass
+                    break
                 try:
                     hr = requests.get(
                         f"{M.COMFYUI_URL}/history/{prompt_id}", timeout=10

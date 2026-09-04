@@ -113,6 +113,7 @@ from server.features.state import (  # noqa: E402
     TEMP_THRESHOLD_OFF,
     TEMP_THRESHOLD_ON,
     _active_tokens,
+    _active_streams,
     _agent_tokens,
     _agent_users,
     _agent_token_by_user,

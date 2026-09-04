@@ -25,7 +25,7 @@ function readFileAsBase64(file) {
   })
 }
 
-export default function InputBar({ onSend, hasPending }) {
+export default function InputBar({ onSend, onCancel, hasPending }) {
   const [text, setText] = useState('')
   const [research, setResearch] = useState(false)
   const [cpu, setCpu] = useState(false)
@@ -154,6 +154,16 @@ export default function InputBar({ onSend, hasPending }) {
     }
   }
 
+  async function handleCancel() {
+    if (sendingRef.current) return
+    sendingRef.current = true
+    try {
+      await onCancel()
+    } finally {
+      sendingRef.current = false
+    }
+  }
+
   const isMobile = window.matchMedia('(pointer: coarse)').matches;
 
   function handleKeyDown(e) {
@@ -213,6 +223,9 @@ export default function InputBar({ onSend, hasPending }) {
           CPU
         </label>
       </div>
+      {hasPending && (
+        <button id="stop-btn" onClick={handleCancel}><span className="stop-icon">&#10005;</span><span className="stop-text">Stop</span></button>
+      )}
       <button id="send-btn" onClick={handleSend}><span className="send-icon">&#10148;</span><span className="send-text">{hasPending ? 'Queue' : 'Send'}</span></button>
     </div>
   )

@@ -1232,6 +1232,29 @@ a.page-modal-url:hover {
   box-shadow: none;
 }
 
+#stop-btn {
+  background: linear-gradient(135deg, #f64f59, #ee4b2d);
+  color: #fff;
+  margin-left: 8px;
+}
+
+#stop-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(246, 79, 89, 0.35);
+}
+
+#stop-btn:active {
+  transform: translateY(0);
+}
+
+#stop-btn .stop-icon {
+  display: none;
+}
+
+#stop-btn .stop-text {
+  display: inline;
+}
+
 #send-btn .send-icon {
   display: none;
 }

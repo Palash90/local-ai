@@ -375,6 +375,26 @@ export default function App() {
     api.denyLocation(tid)
   }
 
+  async function handleCancelTask() {
+    // Cancel all pending tasks for the current session
+    const taskIds = Object.keys(pendingMessages).filter(
+      tid => pendingMessages[tid].sessionId === currentSessionId
+    )
+    for (const taskId of taskIds) {
+      await api.cancelTask(taskId)
+      // Optimistically remove the pending message so the Thinking bubble clears
+      setPendingMessages(prev => {
+        const next = { ...prev }
+        delete next[taskId]
+        return next
+      })
+    }
+    // Also clear any stored pending entries
+    setStoredPending(getStoredPending().filter(p => {
+      return !taskIds.includes(p.task_id)
+    }))
+  }
+
   if (publicShareToken) {
     return (
       <PublicShareView
@@ -447,9 +467,10 @@ export default function App() {
             onLocationNeeded={handleLocationNeeded}
           />
           <InputBar
-            onSend={handleSend}
-            hasPending={hasPendingForCurrent}
-          />
+              onSend={handleSend}
+              onCancel={handleCancelTask}
+              hasPending={hasPendingForCurrent}
+            />
         </div>
         <ImageLightbox src={lightboxSrc} onClose={closeLightbox} />
         {showTasks && <TaskPanel onClose={() => setShowTasks(false)} />}

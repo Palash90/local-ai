@@ -87,7 +87,7 @@ python comfy_main.py --lowvram --input-directory ~/local-ai-files/ComfyUI/input 
 Build step was there - read seup.sh
 
 ```shell
- ~/local-ai/llama.cpp/build/bin/llama-server --host 0.0.0.0 --port 8081 --models-dir ~/local-ai-files/my-models/ --n-gpu-layers 99 --no-kv-offload --ctx-size 16384 --reasoning-budget 2048
+ ~/local-ai/llama.cpp/build/bin/llama-server --host 0.0.0.0 --port 8081 --models-dir ~/local-ai-files/my-models/ --n-gpu-layers 99 --no-kv-offload --ctx-size 24576 --reasoning-budget 2048
 
 ```
 
