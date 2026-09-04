@@ -79,7 +79,7 @@ def kill_llama_server(mode=None):
 
 
 def kill_comfyui():
-    subprocess.run(["pkill", "-f", "main.py.*lowvram"], capture_output=True)
+    subprocess.run(["pkill", "-f", "comfy_main.py.*lowvram"], capture_output=True)
 
 
 def _start_llama_process(args, mode="gpu"):
@@ -344,7 +344,7 @@ def restart_servers():
     subprocess.Popen(
         [
             os.path.join(M.VENV_PYTHON),
-            "main.py",
+            "comfy_main.py",
             "--output-directory",
             M.COMFYUI_OUTPUT,
             "--input-directory",
@@ -398,7 +398,7 @@ def _launch_comfyui_and_wait():
     subprocess.Popen(
         [
             os.path.join(M.VENV_PYTHON),
-            "main.py",
+            "comfy_main.py",
             "--output-directory",
             M.COMFYUI_OUTPUT,
             "--input-directory",

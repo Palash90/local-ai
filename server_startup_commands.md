@@ -79,7 +79,7 @@ Build step was there - read setup.sh
 mkdir ~/local-ai
 cd ~/local-ai
 source venv/bin/activate
-python main.py --lowvram --input-directory ~/local-ai-files/ComfyUI/input --output-directory ~/local-ai-files/ComfyUI/output
+python comfy_main.py --lowvram --input-directory ~/local-ai-files/ComfyUI/input --output-directory ~/local-ai-files/ComfyUI/output
 ```
 
 ### Llama Server

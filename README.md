@@ -103,7 +103,11 @@ prefer to run the services manually:
     --slot-save-path ~/local-ai-files/kv-slots \
     --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0.0 --repeat-penalty 1.0
 
-cd ~/local-ai/ComfyUI && source venv/bin/activate && python main.py \
+ComfyUI is launched as `comfy_main.py` (a rename of ComfyUI's stock `main.py`),
+so its process can be targeted by name without colliding with other `main.py`
+processes in the `restart_services.sh` / `stop_services.sh` / kill logic:
+
+cd ~/local-ai/ComfyUI && source venv/bin/activate && python comfy_main.py \
     --lowvram \
     --input-directory ~/local-ai-files/ComfyUI/input \
     --output-directory ~/local-ai-files/ComfyUI/output
