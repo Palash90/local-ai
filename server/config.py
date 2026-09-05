@@ -323,8 +323,12 @@ LLAMA_SERVER_ARGS_CPU = [
     # which cudaMalloc-OOMs on the 4 GiB card while the GPU server is loaded.
     "--no-mmproj-offload",
 
-    "-t", "6",
-    "-tb", "6",
+    "-t", "4",
+    "-tb", "4",
+
+    # Explicit batching bounds for OpenBLAS
+    "-b", "2048",
+    "-ub", "512",
 
     # Prompt-cache reuse (see LLAMA_SERVER_ARGS): agent turns share long
     # prefixes (system prompt + tools), so shifted reuse saves CPU prefill.
@@ -450,6 +454,14 @@ APP_DB = os.path.expanduser("~/local-ai-files/local_ai.db")
 # Persistent page/search cache (see server/features/page_cache.py). Lives with
 # the app DB, outside the repo; override at runtime with LOCAL_AI_PAGE_CACHE.
 PAGE_CACHE_DB = os.path.expanduser("~/local-ai-files/page_cache.db")
+# ComfyUI render RAM headroom: when this much free RAM is available, an image
+# render does NOT evict the CPU lane model — background agent rounds and peer
+# reviews stay resident instead of being force-killed/requeued. Eviction only
+# happens below this threshold. Override at runtime with
+# IMAGE_RENDER_RAM_HEADROOM_MB.
+IMAGE_RENDER_RAM_HEADROOM_MB = int(
+    os.environ.get("IMAGE_RENDER_RAM_HEADROOM_MB", "4000")
+)
 IMAGE_TOKEN_COST = 1200
 AUDIO_TOKEN_COST = 800
 PER_MESSAGE_OVERHEAD = 4
@@ -614,6 +626,32 @@ TOOLS_DETAILED = [
                     }
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memory_read",
+            "description": "Recall previously archived conversation blocks that were compressed out of context. Archived blocks appear inline as markers like '[#12: topic (2 messages)]'. Pass memory_ids to fetch those exact blocks verbatim (ids come ONLY from '[#id]' markers — never invent them), OR pass query to search this session's archive for blocks on a topic. Pass one or the other, never both. Scoped to the current session's own history only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Exact archived block ids to fetch, e.g. [12] from a '[#12: ...]' marker. Do NOT invent ids; if unknown, use query instead."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "A short topic/keywords to search the archived history for, e.g. 'melting point of gallium'. Returns matching archived blocks."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max blocks to return for query searches (default 5)."
+                    }
+                },
+                "required": [],
             },
         },
     },

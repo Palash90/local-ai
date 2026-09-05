@@ -8,6 +8,7 @@ import re
 import requests
 
 from server.features.state import M
+from server.features.pensieve import distill_and_store_messages
 
 
 def strip_html(text):
@@ -343,6 +344,18 @@ def prepare_context_for_llm(sid, messages, mode="gpu"):
     being re-sent as base64 on every round."""
     messages = sanitize_content_for_llm(messages)
     messages = _reference_historical_images(messages)
+    # Pensieve: when the conversation crosses the distillation watermark,
+    # oldest blocks are archived to SQLite and replaced by [#id] markers so
+    # the model can recall them on demand via `memory_read`. Works on copies —
+    # the stored session is left untouched.
+    distilled = distill_and_store_messages(sid, messages, mode)
+    if distilled is not messages:
+        messages = distilled
+        try:
+            from server.features.llm import invalidate_session_kv
+            invalidate_session_kv(mode, sid)
+        except Exception:
+            pass
     total = estimate_tokens(messages)
     if total <= M.AUTO_COMPACT_THRESHOLD:
         context = trim_messages_for_context(messages, mode)

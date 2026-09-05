@@ -18,6 +18,7 @@ from datetime import datetime
 
 import requests
 
+from server.config import IMAGE_RENDER_RAM_HEADROOM_MB
 from server.features.state import M
 
 _LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8083", "embed": "8084"}
@@ -566,9 +567,21 @@ def evict_cpu_model_for_image():
     after ComfyUI finishes (no drain wait, images stay ~2 min). Unload the cpu
     model (KV checkpointed first) and verify the RAM actually came back,
     escalating to killing the cpu llama-server if the router keeps the child.
+
+    When enough free RAM is available (``IMAGE_RENDER_RAM_HEADROOM_MB``), the
+    cpu lane is left resident instead: ComfyUI gets its headroom without
+    force-killing in-flight agent rounds or peer reviews (which would otherwise
+    500/fail-open mid-eviction). Eviction only happens below the threshold.
     """
-    print("[image] Evicting CPU lane model to free RAM for ComfyUI", flush=True)
     avail_before = _free_ram_mb()
+    if avail_before is not None and avail_before >= IMAGE_RENDER_RAM_HEADROOM_MB:
+        print(
+            f"[image] CPU lane left resident for render — "
+            f"{avail_before} MB free (>= {IMAGE_RENDER_RAM_HEADROOM_MB} MB headroom)",
+            flush=True,
+        )
+        return
+    print("[image] Evicting CPU lane model to free RAM for ComfyUI", flush=True)
     ok = M.unload_llama_model("cpu")
     if ok and avail_before is not None:
         _verify_cpu_unload(avail_before, context="image")

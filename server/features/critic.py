@@ -1076,6 +1076,17 @@ def run_peer_review_worker(task_id, sid, answer, body, mode="cpu"):
         prompt = _PEER_REVIEW_PROMPT.format(
             peer=peer, author=author, answer=(answer or "")[:6000]
         )
+        # Wait out an active image render before touching the CPU lane: the
+        # render choreography force-unloads the cpu model to free RAM (see
+        # evict_cpu_model_for_image), so a peer-review fired mid-window would
+        # get a guaranteed 500 and fall back to the (much slower) quality
+        # judge. Ride out the render, then retry brief eviction races below.
+        try:
+            from server.features.llm import _wait_image_active_clear
+
+            _wait_image_active_clear(timeout=120)
+        except Exception:
+            pass
         try:
             base = M.server_base("cpu")
             payload = {
@@ -1085,20 +1096,36 @@ def run_peer_review_worker(task_id, sid, answer, body, mode="cpu"):
                 "max_tokens": 1024,
                 "stream": False,
             }
-            r = requests.post(
-                f"{base}/v1/chat/completions",
-                json=payload,
-                timeout=_PEER_REVIEW_TIMEOUT,
-            )
-            r.raise_for_status()
-            reply = (
-                (r.json().get("choices") or [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                or ""
-            )
+            reply = ""
+            last_err = None
+            for attempt in range(3):
+                try:
+                    r = requests.post(
+                        f"{base}/v1/chat/completions",
+                        json=payload,
+                        timeout=_PEER_REVIEW_TIMEOUT,
+                    )
+                    r.raise_for_status()
+                    reply = (
+                        (r.json().get("choices") or [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        or ""
+                    )
+                    if reply:
+                        break
+                    last_err = RuntimeError("peer round returned an empty reply")
+                except Exception as e:
+                    last_err = e
+                    if attempt < 2:
+                        print(
+                            f"[peer-review] cpu lane post failed "
+                            f"(attempt {attempt + 1}/3): {e} — retrying",
+                            flush=True,
+                        )
+                        time.sleep(3)
             if not reply:
-                raise RuntimeError("peer round returned an empty reply")
+                raise last_err
             verdict, confidence, notes = _parse_peer_verdict(reply)
             print(
                 f"[peer-review] {peer} verdict={verdict} "

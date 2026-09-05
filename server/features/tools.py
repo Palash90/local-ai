@@ -10,6 +10,7 @@ from server.mcp_client import mcp_manager, dispatch_mcp_tool
 from server.features.state import M
 from server.features.websearch import fetch_page, web_search
 from server.features.websearch import relevance as _relevance
+from server.features.pensieve import memory_read as _pensieve_read
 
 # Private names remain available to older focused checks and integrations.
 _screen_cached_payload = _relevance._screen_cached_payload
@@ -322,6 +323,30 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                     "available": sorted(known),
                 }
             )
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
+
+    elif tool_name == "memory_read":
+        try:
+            result = _pensieve_read(
+                sid=sid,
+                memory_ids=args.get("memory_ids"),
+                query=args.get("query", ""),
+                limit=args.get("limit", 5),
+            )
+        except Exception as e:
+            print(f"[memory_read] Unhandled exception for task {task_id}: {e}")
+            result = json.dumps(
+                {"error": f"memory_read failed: {e}", "memory_ids": args.get("memory_ids")}
+            )
+        print(f"[memory_read] Result for task {task_id}: {result[:300]}...")  # DEBUG
         M._event_post(
             "tool_ok",
             task_id,
