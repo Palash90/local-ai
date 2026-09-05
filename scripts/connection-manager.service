@@ -1,0 +1,26 @@
+[Unit]
+Description=Local AI connection manager heartbeat and dynamic DNS updater
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=palash
+Group=palash
+WorkingDirectory=/home/palash/git/local-ai
+EnvironmentFile=/home/palash/git/local-ai/.env
+ExecStart=/usr/bin/python3 /home/palash/git/local-ai/scripts/connection_manager.py
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

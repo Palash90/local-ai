@@ -282,7 +282,6 @@ from server.features.monitoring import (  # noqa: E402
     _guardrail_lane_needed,
     _reminder_loop,
     _thermal_monitor,
-    _connection_manager,
     ensure_comfyui_running,
     recycle_comfyui,
     ensure_llama_server,
@@ -373,7 +372,6 @@ if __name__ == "__main__":
     threading.Thread(target=_periodic_cpu_kv_save_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()
     threading.Thread(target=_reminder_loop, daemon=True).start()
-    threading.Thread(target=_connection_manager, daemon=True).start()
     threading.Thread(target=run_mcp, daemon=True).start()
     threading.Thread(target=start_mcp_client, daemon=True).start()
     # ThreadingHTTPServer: plain HTTPServer handles one connection at a time on

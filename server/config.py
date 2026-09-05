@@ -28,20 +28,19 @@ COMFYUI_URL = "http://localhost:8188"
 HOST = os.environ.get("CHAT_HOST", "127.0.0.1")
 PORT = 3001
 
-# GoDaddy Dynamic DNS — updates the AAAA record for DDNS_DOMAIN/DDNS_SUBDOMAIN
-# with this machine's stable global IPv6 on a timer (see the ConnectionManager
-# thread in server/features/monitoring.py). Secret credentials come from the
-# environment (e.g. an EnvironmentFile / /etc/environment); leave the keys
-# empty to disable the updater entirely.
+# GoDaddy Dynamic DNS — the standalone connection-manager service updates the
+# AAAA record for DDNS_DOMAIN/DDNS_SUBDOMAIN with this machine's stable global
+# IPv6. Secret credentials come from the environment (e.g. an EnvironmentFile
+# / /etc/environment); leave the keys empty to disable the updater entirely.
 GODADDY_API_KEY = os.environ.get("GODADDY_API_KEY", "")
 GODADDY_API_SECRET = os.environ.get("GODADDY_API_SECRET", "")
 DDNS_DOMAIN = os.environ.get("DDNS_DOMAIN", "palashkantikundu.in")
 DDNS_SUBDOMAIN = os.environ.get("DDNS_SUBDOMAIN", "home")
 DDNS_CHECK_INTERVAL = int(os.environ.get("DDNS_CHECK_INTERVAL", "300"))
 
-# GCP heartbeat — the ConnectionManager thread POSTs this machine's addresses
-# to the receiver running on the GCP VM (scripts/gcp_heartbeat_server.py)
-# over the WireGuard tunnel every 10s.
+# GCP heartbeat — the standalone connection-manager service POSTs this
+# machine's addresses to the receiver running on the GCP VM
+# (scripts/gcp_heartbeat_server.py) over the WireGuard tunnel every 10s.
 HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "http://10.66.66.1:9863/heartbeat")
 
 # External origin used to build public share links. Set this to a portless URL

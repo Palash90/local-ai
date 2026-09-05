@@ -3216,6 +3216,37 @@ def _conversation_attempt(
             )
             reply = result["text"]
 
+        if (
+            "image" in medium
+            and _has_placeholder_image_block(reply)
+            and not result.get("image")
+        ):
+            # The agent wrote a textual <image>...</image> placeholder block
+            # (mirroring the generate_image argument schema) instead of
+            # actually triggering the tool — the portrait would never render.
+            # Re-prompt once so a real image is produced.
+            print(
+                f"[image] {AGENT_NAMES[current_speaker]} turn {message_number}: "
+                "wrote an <image> placeholder block without calling "
+                "generate_image — re-prompting to trigger the tool"
+            )
+            prompt += (
+                "\n[SYSTEM ERROR: Your reply contained a textual "
+                "<image>...</image> placeholder block but you did NOT call "
+                "the generate_image tool. Placeholder tags render as nothing. "
+                "Call generate_image for real so the portrait is produced, "
+                "and keep only clean narrative/visual text inside [CONTENT].]"
+            )
+            result = call_llm(
+                token,
+                session,
+                prompt,
+                image_b64=shared_image_b64,
+                research=in_research_phase,
+                character_sheet=character_sheet,
+            )
+            reply = result["text"]
+
         if in_research_phase:
             # A research turn that ends without a single article-level URL
             # degenerates into homepage citations for every claim in the
@@ -3292,7 +3323,7 @@ def _conversation_attempt(
             )
             break
 
-        incoming = reply
+        incoming = strip_placeholder_image_blocks(reply)
         shared_image = result.get("image")
         if shared_image:
             shared_image_b64 = image_url_to_b64(shared_image)
@@ -3567,6 +3598,40 @@ def strip_image_markers(text):
         r"\s*:[^\]\)]*[\]\)]\s*\*{0,2}\s*$"
     )
     stripped = pattern.sub("", text or "")
+    return re.sub(r"\n{3,}", "\n\n", stripped).strip()
+
+
+_IMAGE_BLOCK_RE = re.compile(
+    r"<image(?:\s+[^>]*)?>.*?</image\s*>"
+    r"|<image(?:\s+[^>]*)?/>"
+    r"|<image(?=\s|>)[^>]*>(?!.*</image\s*>).*$",
+    flags=re.DOTALL | re.IGNORECASE,
+)
+
+
+def _has_placeholder_image_block(text):
+    """True if the text contains a `<image...>...</image>` placeholder block.
+
+    Detects the malformed pseudo-tool-call the agents occasionally spill
+    (``<image>`` plus a JSON blob that mirrors the ``generate_image``
+    argument schema) instead of actually invoking the tool. Looks for the
+    bare ``<image`` tag so unclosed/truncated variants are caught too.
+    """
+    return bool(re.search(r"<image\b", text or "", flags=re.IGNORECASE))
+
+
+def strip_placeholder_image_blocks(text):
+    """Remove model-authored ``<image>...</image>`` placeholder blocks.
+
+    An agent that writes a textual ``<image>`` block instead of calling
+    generate_image produces dead text — nothing ever renders it — and feeding
+    it back into the next turn's prompt teaches the partner to reproduce the
+    same malformed structure (self-amplifying context poisoning). The blocks
+    are stripped everywhere (turn feedback and the published story); a real
+    embed is inserted separately by the pipeline when an image was actually
+    generated that turn.
+    """
+    stripped = _IMAGE_BLOCK_RE.sub("", text or "")
     return re.sub(r"\n{3,}", "\n\n", stripped).strip()
 
 
@@ -3943,6 +4008,7 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
     cleaned = beautify_inline_citations(cleaned)
     cleaned = strip_ad_links(cleaned)
     cleaned = strip_image_markers(cleaned)
+    cleaned = strip_placeholder_image_blocks(cleaned)
     lines = [
         f'<small style="color:#888">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n',
         f"{cleaned}\n\n",
