@@ -19,6 +19,7 @@ from datetime import datetime
 import requests
 
 from server.config import IMAGE_RENDER_RAM_HEADROOM_MB
+from server.config import CPU_KV_SAVE_INTERVAL_SECONDS
 from server.features.state import M
 
 _LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8083", "embed": "8084"}
@@ -931,3 +932,37 @@ def _connection_manager():
         maybe_update_dns()
 
         time.sleep(10)
+
+
+def _periodic_cpu_kv_save_loop():
+    """Periodically snapshot the CPU slot's KV cache so an image-interrupted
+    round resumes from a recent prefix instead of a full re-prefill.
+
+    The CPU lane is unloaded (and its KV checkpointed) on image renders, but
+    a busy slot can make that save time out, leaving nothing to restore and
+    forcing a full re-prefill on resume.  A background save here keeps a
+    fresh snapshot available.  Failures are swallowed: this thread must never
+    take down the process, and a skipped save degrades to a full re-prefill.
+    """
+    while True:
+        try:
+            interval = CPU_KV_SAVE_INTERVAL_SECONDS
+            if interval <= 0:
+                time.sleep(60)
+                continue
+            time.sleep(interval)
+            if (
+                M.server_status("cpu") == "chat_loaded"
+                and M._slot_kv_dirty.get("cpu")
+                and M._slot_resident_sid.get("cpu")
+                and not getattr(M, "_image_active", False)
+                and not getattr(M, "_ram_evacuating", False)
+            ):
+                try:
+                    ok = M.save_slot_checkpoint("cpu", timeout=20)
+                    if ok:
+                        print("[periodic-kv] CPU KV snapshot saved")
+                except Exception as exc:
+                    print(f"[periodic-kv] CPU KV save failed (non-fatal): {exc}")
+        except Exception:
+            pass

@@ -338,6 +338,7 @@ With a browser (or headed test) authenticated via SSO:
 **J7. Immediate CPU eviction + requeue resume + KV restore**
 - With a CPU research round actively prefilling, trigger a render; assert the eviction does **not** wait for the round: `[image] Evicting CPU lane model ...` prints immediately (image stays ~2 min), the killed round logs `[llm_err] ... requeueing`, and the research task's final status is `done` (no `error`)
 - After the render and CPU reload, assert KV restore on the next CPU round: `prompt_eval_count` ≪ full context — only new tokens are re-prefilled (compare `total time` in the CPU server log against an equivalent cold prefill)
+- **Periodic snapshot regression**: while a CPU round is active, assert `[periodic-kv] CPU KV snapshot saved` appears in `logs/chat-webui.log` roughly every `CPU_KV_SAVE_INTERVAL_SECONDS` (set low, e.g. `CPU_KV_SAVE_INTERVAL_SECONDS=30` in `.env` for the test); after the render-interrupt requeue + reload, confirm the resumed round's `prompt_eval_count` reflects only tokens added since the last periodic save (i.e. far below a full cold prefill), proving the busy-slot unload-save timeout gap is covered by the periodic snapshot
 
 **J8. Lane independence during long CPU research**
 - Keep a CPU research task busy while a UI (GPU) user chats: UI first token latency must look like a GPU-lane hot/cold load (no CPU-lane queuing); UI model still unloads at its own 300s idle even if the CPU round is mid-stream (KNOWN global-stream-gate caveat — see HARDENING.md §6)

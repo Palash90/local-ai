@@ -99,7 +99,10 @@ Every layer of this is about **not silently losing a live round**:
   after the render. Images stay ~2 min even while research is mid-round.
 - A render that lands on a round mid-stream (the router's 10 s grace can never
   finish a minutes-long prefill) does **not** error the task — it requeues it
-  (next section).
+  (next section). The unload's own save usually times out on a busy slot, so a
+  **periodic KV snapshot** (`CPU_KV_SAVE_INTERVAL_SECONDS`, default 120 s) keeps
+  a recent checkpoint: the resumed round restores that and re-prefills only the
+  tokens added since the last snapshot, not the whole context.
 
 ## 4. What happens to a running task when a server goes away
 
@@ -157,7 +160,10 @@ completion rather than being recycled mid-answer.
   a round mid-stream when the eviction fires is force-killed and requeued (Fix 2),
   so the render resumes it after ComfyUI finishes. A round that starts in the
   sub-second gap between the eviction kill and the unload's `finally` is equally
-  safe — the same requeue path catches it. Nothing is lost.
+  safe — the same requeue path catches it. Nothing is lost; the periodic
+  snapshot (default 120 s) limits the resume's re-prefill cost to what changed
+  since the last save, avoiding a full-context re-prefill when the eviction's own
+  save times out on a busy slot.
 - **CPU throughput.** gemma4-12b on the CPU lane runs ~10-16 tok/s prefill /
   ~4-5 tok/s generation. Research is expected to be slow-but-steady there; keep
   interactive users on the GPU lane.
@@ -167,6 +173,8 @@ completion rather than being recycled mid-answer.
 | Knob | Where | Default / current | Meaning |
 |---|---|---|---|
 | `CPU_IDLE_UNLOAD_SECONDS` | `.env` | **15 (test) — set 300 before live** | CPU-lane idle unload timeout |
+| `CPU_KV_SAVE_INTERVAL_SECONDS` | `.env` | `120` (`0` disables) | CPU-lane periodic KV snapshot; keeps an image-evicted round resumable from a recent prefix instead of a full re-prefill |
+| `IMAGE_RENDER_RAM_HEADROOM_MB` | config | `4000` | Free-RAM headroom (MB) that skips CPU-lane eviction on an image render when already satisfied |
 | `SELF_CHAT_MODE` | `.env` | `cpu` | Lane for self-chat agents (research defaults here) |
 | `RAM_EVAC_THRESHOLD` / `RAM_RESUME_THRESHOLD` | config | 95 % / 70 % | Whole-box evacuation hysteresis |
 | `TEMP_THRESHOLD_ON` / `TEMP_THRESHOLD_OFF` | config | 90 °C / 75 °C | Thermal hysteresis (GPU lane pause) |

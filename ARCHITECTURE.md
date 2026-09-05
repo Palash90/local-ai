@@ -211,9 +211,14 @@ wait on the slow CPU lane: the render's up-front wait is scoped to the
 gpu/guardrail VRAM lanes), and a round the unload force-kills is requeued to
 resume after the render (see [HARDENING.md](HARDENING.md) §3-4). Per-lane idle timestamps (`_last_llm_use`,
 `_cpu_last_llm_use`, `_guardrail_last_llm_use`; CPU governed by
-`CPU_IDLE_UNLOAD_SECONDS`) drive independent unloads. Before any unload the KV
+`CPU_IDLE_UNLOAD_SECONDS`) drive independent unloads. On unload the KV
 cache is checkpointed to `kv-slots/` (`--slot-save-path`, per-session
 `_session_kv`) and restored after reload, so long conversations don't re-prefill.
+A render eviction that kills a CPU round mid-stream can make that unload save
+time out on the busy slot; a background **periodic saver**
+(`_periodic_cpu_kv_save_loop`, `CPU_KV_SAVE_INTERVAL_SECONDS`, default 120 s)
+keeps a recent prefix cached so the requeued round resumes from it rather than a
+full re-prefill.
 
 ### 6. REST API Endpoints (`chat-webui` :3001)
 
@@ -373,7 +378,7 @@ graph TD
     Parse --> Post["event llm_ok / llm_err"]
     Req -. exception .-> Err["llm_err (friendly msg on vision/OOM)"]
     subgraph KV ["KV slot checkpoints"]
-        K1["before unload: POST /slots/{id}?action=save\n→ kv-slots/<session>.dat"]
+        K1["on unload: POST /slots/{id}?action=save\n→ kv-slots/<session>.dat;\ncpu lane also saves periodically\n(CPU_KV_SAVE_INTERVAL_SECONDS,\ndefault 120s) so a render-killed\nround resumes from a recent prefix"]
         K2["after load: action=restore —\nonly new tokens re-prefilled"]
     end
 ```

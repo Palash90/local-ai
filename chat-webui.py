@@ -278,6 +278,7 @@ from server.features.monitoring import (  # noqa: E402
     _ensure_llama_server_for_task,
     _evacuate_ram,
     _idle_unload_loop,
+    _periodic_cpu_kv_save_loop,
     _guardrail_lane_needed,
     _reminder_loop,
     _thermal_monitor,
@@ -369,6 +370,7 @@ if __name__ == "__main__":
     threading.Thread(target=_mcp_db_worker, daemon=True).start()
     threading.Thread(target=_image_worker, daemon=True).start()
     threading.Thread(target=_idle_unload_loop, daemon=True).start()
+    threading.Thread(target=_periodic_cpu_kv_save_loop, daemon=True).start()
     threading.Thread(target=_thermal_monitor, daemon=True).start()
     threading.Thread(target=_reminder_loop, daemon=True).start()
     threading.Thread(target=_connection_manager, daemon=True).start()

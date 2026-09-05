@@ -95,6 +95,12 @@ SAMPLING_BUCKETS = {
 }
 CPU_PARALLEL_SLOTS = 1  # Set to desired number of concurrent CPU agent slots
 
+# Periodic CPU KV-cache snapshot interval (seconds).  Saves a background
+# checkpoint while the CPU lane is loaded, so an image-interrupted round can
+# resume from a recent prefix instead of a full re-prefill.  0 disables;
+# overridden by the CPU_KV_SAVE_INTERVAL_SECONDS env var.
+CPU_KV_SAVE_INTERVAL_SECONDS = int(os.environ.get("CPU_KV_SAVE_INTERVAL_SECONDS", "120"))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Unified RBAC / SSO — Authentik is the SINGLE identity provider.
 #
