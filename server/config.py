@@ -297,7 +297,8 @@ LLAMA_SERVER_ARGS = [
     "--temp", "1.0",
     "--top-p", "0.95",
     "--top-k", "64",
-    "--min-p", "0.05"
+    "--min-p", "0.05",
+    "--parallel", "1"
 ]
 
 # Second set of llama-server arguments used when processing automated
