@@ -316,7 +316,7 @@ LLAMA_SERVER_ARGS_CPU = [
     # CPU-only execution — no layers offloaded to the GPU.
     "--n-gpu-layers", "0",
     "-fa", "off",
-    "--ctx-size", "24576",
+    "--ctx-size", os.environ.get("CPU_CTX_SIZE", "32768"),
     "-ctk", "q8_0",            # Quantized KV cache keeps RAM usage low
     # Keep the multimodal projector (mmproj) in RAM too. llama-server
     # offloads the mmproj to the GPU by DEFAULT even with --n-gpu-layers 0,
