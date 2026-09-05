@@ -110,8 +110,13 @@ def _record_checkpoint(mode, filename, n_tokens, sid=None):
     return rec
 
 
-def _save_slot_to_disk(mode, sid, filename, record=True):
+def _save_slot_to_disk(mode, sid, filename, record=True, timeout=180):
     """POST /slots/0?action=save to snapshot the lane's live KV to ``filename``.
+
+    ``timeout`` bounds how long we wait on a slot that is busy mid-batch:
+    llama-server serializes the slot-action behind the running generation
+    (``--parallel 1``), and the image-eviction path overrides this with a short
+    value so an image never stalls behind a long agent prefill on the CPU lane.
 
     Returns ``(ok, n_tokens)``. Failures are logged and never raise."""
     try:
@@ -120,7 +125,7 @@ def _save_slot_to_disk(mode, sid, filename, record=True):
             # "model" is required in router mode: the parent picks the child
             # instance to proxy to from this field (the child itself ignores it).
             json={"filename": filename, "model": M.server_model_id(mode)},
-            timeout=180,
+            timeout=timeout,
         )
         if r.status_code == 200:
             n_tokens = r.json().get("n_tokens", 0)
@@ -241,7 +246,7 @@ def sync_session_slot(mode, sid):
         _set_lane_resident_sid(mode, sid)
 
 
-def save_slot_checkpoint(mode="gpu", sid=None):
+def save_slot_checkpoint(mode="gpu", sid=None, timeout=180):
     """Snapshot the llama-server's current KV cache to disk.
 
     Called on unload. With a ``sid`` the snapshot is written to (and recorded
@@ -267,7 +272,7 @@ def save_slot_checkpoint(mode="gpu", sid=None):
     if not dirty and cp:
         return True  # snapshot on disk already reflects the current KV
     filename = slot_checkpoint_file(mode, sid)
-    ok, _n = _save_slot_to_disk(mode, sid, filename, record=True)
+    ok, _n = _save_slot_to_disk(mode, sid, filename, record=True, timeout=timeout)
     return ok
 
 
@@ -526,13 +531,18 @@ def _is_vram_occupied(threshold_mb=500):
         return False
 
 
-def unload_llama_model(mode="gpu", model_id=None):
+def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None):
     """Unload the model from the llama-server for ``mode``.
 
     For the guardrail lane ``model_id`` defaults to whichever judge is
     currently resident (``_guardrail_loaded_model``), so idle-unload always
     releases the right per-user judge. KV slot checkpointing is skipped for
     the guardrail lane: judge calls are stateless single-shots.
+
+    ``kv_save_timeout`` bounds the KV-checkpoint save that runs before the
+    unload. The image-eviction path passes a short value (e.g. 15s) so an image
+    never stalls behind a busy CPU slot for the full default 180s. When None,
+    the default 180s timeout is used.
     """
     current_status = M.server_status(mode)
     print(f"[llama] unload_llama_model called: mode={mode}, current_status={current_status}")
@@ -554,7 +564,7 @@ def unload_llama_model(mode="gpu", model_id=None):
         # model still reads "chat_loaded" — save_slot_checkpoint skips
         # anything else — hence before the "unloading" transition below.
         if mode != "guardrail":
-            save_slot_checkpoint(mode)
+            save_slot_checkpoint(mode, timeout=kv_save_timeout if kv_save_timeout is not None else 180)
         
         with M._data_lock:
             if mode == "cpu":

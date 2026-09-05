@@ -582,7 +582,13 @@ def evict_cpu_model_for_image():
         )
         return
     print("[image] Evicting CPU lane model to free RAM for ComfyUI", flush=True)
-    ok = M.unload_llama_model("cpu")
+    # Short KV-save timeout: a busy CPU slot (long agent prefill under
+    # --parallel 1) would otherwise make the slot checkpoint park for the full
+    # 180s default and stall the image behind it. 15s bounds the wait, then we
+    # proceed straight to the unload POST (which is handled without waiting on
+    # the busy slot). A skipped snapshot only means the interrupted round
+    # re-prefills on requeue — the acceptable cost of keeping images fast.
+    ok = M.unload_llama_model("cpu", kv_save_timeout=15)
     if ok and avail_before is not None:
         _verify_cpu_unload(avail_before, context="image")
     else:
