@@ -3,9 +3,18 @@
 
 import os
 import subprocess
+import sys
 import time
 
 import requests
+
+# When systemd (or any caller) launches this script by path, the script's own
+# directory — not the repo root — is prepended to sys.path. Add the repo root
+# so the ``server`` package (e.g. server.dotenv) resolves regardless of how
+# the script is invoked.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from server.dotenv import load_dotenv
 
