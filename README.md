@@ -405,8 +405,13 @@ markers), then synthesizes:
 | kn | kn-IN-SapnaNeural (female) | edge-tts, online |
 
 Piper voices are cached process-wide and synthesis is lock-serialized;
-edge-tts results are cached in memory (repeats return in ms). Piper `.onnx`
-files live in `~/.piper_voices/` (downloaded, not in the repo).
+audio is stored in a two-tier content-addressed disk cache (`~/local-ai-files/tts_cache/`,
+plus optional read-only secondary archive via `TTS_CACHE_SECONDARY_DIR` in `.env`),
+pruned to 1 GB by default. Long messages are synthesized in sentence-bounded
+chunks (up to 8,000 chars authenticated, 2,000 chars on public shares).
+Deleting a chat session or revoking a share with purge removes its orphaned
+audio files from both primary and secondary cache directories.
+Piper `.onnx` files live in `~/.piper_voices/` (downloaded, not in the repo).
 Known limit: Bengali SSML `<phoneme>` overrides were tried and reverted —
 the `edge-tts` library escapes markup into literal speech and the service
 rejects `<phoneme>` for Bengali voices, so Bengali অ-nuances (দেখলো/যেন-type
