@@ -139,8 +139,11 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 - `POST /api/tts` `{text}` → audio bytes (Piper voice); with Piper missing → edge-tts fallback or clean 5xx (no hang)
 - SPA fallback: `GET /some/unknown/route` (no dot) → `index.html` 200; `GET /api/nonexistent` → 404 JSON, not HTML
 
-**B9. File serving auth-gate**
+**B9. File serving auth + ownership gate**
 - `GET /output/<file>.png` / `GET /uploads/<file>` **without** identity → 401; with SSO headers or agent JWT → 200
+- **Cross-user ownership**: user A requests user B's `/output/B/gen_*.png` with A's own valid token → 404 (ownership check in `resolve_image_file` rejects path whose first component doesn't match the caller)
+- `GET /api/image/output/B/gen_*.png` as user A → same 404
+- Public shares are **not affected**: `/api/public/share/<token>/image/<path>` omits the user param, so the ownership check is skipped (snapshot scoping applies instead)
 - Path traversal: `/output/../../etc/passwd`, encoded `%2e%2e/` variants → rejected
 
 ---

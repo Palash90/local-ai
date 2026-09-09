@@ -427,9 +427,10 @@ proxies to the backend for development.
   polling — no error flash) plus a `_resumed` flag. After the servers restart,
   the queue's `start` event skips `_prepare_session`, so the user message is
   **not** appended twice and the answer still arrives exactly once.
-- **Image/file endpoints require identity.** `/output/…`, `/uploads/…` and
-  `/api/image/…` answer only with valid SSO headers or a verified agent JWT. Public
-  share pages load images exclusively through `/api/public/share/<token>/image/…`,
+- **Image/file endpoints require identity + ownership.** `/output/…`, `/uploads/…` and
+  `/api/image/…` answer only with valid SSO headers or a verified agent JWT, and
+  `/output/…` paths must match the caller's username (generated images are user-scoped).
+  Public share pages load images exclusively through `/api/public/share/<token>/image/…`,
   which serves only files referenced by that share's snapshot.
 - **CORS is wide open.** Responses carry `Access-Control-Allow-Origin: *`. SSO cookies
   are HttpOnly + SameSite, so cross-origin pages cannot ride the session, but same-origin

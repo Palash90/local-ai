@@ -39,6 +39,7 @@ from server.config import (
     UPLOADS_DIR,
 )
 from server.features.tasks_db import _MISSING
+from server.features.users import _safe_username
 
 IMAGE_MIME = {
     ".png": "image/png",
@@ -90,12 +91,17 @@ def _snapshot_image_refs(msg):
     return refs
 
 
-def resolve_image_file(image_id):
+def resolve_image_file(image_id, user=None):
     """Resolve an ``/api/image/<id>`` identifier to a local image file path.
 
     Accepts ids shaped like the stored image URLs — ``uploads/<name>`` (user
     uploads) or ``output/<rel>`` (ComfyUI generated images) — plus bare
     filenames, which are looked up in the uploads dir first.
+
+    When *user* is supplied, ``output/`` paths are restricted so that the
+    first path component must match the user's safe username — preventing
+    one authenticated user from reading another's generated images.
+    Public-share callers should omit *user* to skip this check.
     """
     if not image_id:
         return None
@@ -106,6 +112,8 @@ def resolve_image_file(image_id):
         base, rel = UPLOADS_DIR, raw[len("uploads/"):]
     elif raw.startswith("output/"):
         base, rel = COMFYUI_OUTPUT, raw[len("output/"):]
+        if user and not rel.startswith(_safe_username(user) + "/"):
+            return None
     else:
         base, rel = UPLOADS_DIR, os.path.basename(raw)
     root = os.path.realpath(base)
@@ -379,15 +387,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 }
             )
         elif self.path.startswith("/output/"):
-            if not _get_identity_safe(self.headers):
+            user = get_current_user(self.headers)
+            if not user:
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
-            rel = urlparse(self.path).path
-            rel = rel[len("/output/"):] if rel.startswith("/output/") else rel
-            fpath = os.path.abspath(os.path.join(COMFYUI_OUTPUT, rel))
-            if fpath.startswith(os.path.abspath(COMFYUI_OUTPUT)) and os.path.exists(
-                fpath
-            ):
+            fpath = resolve_image_file(self.path, user=user)
+            if fpath:
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
                 self.end_headers()
@@ -396,12 +401,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self.send_error(404)
         elif self.path.startswith("/uploads/"):
-            if not _get_identity_safe(self.headers):
+            user = get_current_user(self.headers)
+            if not user:
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
-            filename = os.path.basename(urlparse(self.path).path)
-            fpath = os.path.abspath(os.path.join(UPLOADS_DIR, filename))
-            if fpath.startswith(os.path.abspath(UPLOADS_DIR)) and os.path.exists(fpath):
+            fpath = resolve_image_file(self.path, user=user)
+            if fpath:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Disposition", "inline")
@@ -411,11 +416,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             self.send_error(404)
         elif self.path.startswith("/api/image/"):
-            if not _get_identity_safe(self.headers):
+            user = get_current_user(self.headers)
+            if not user:
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
             image_id = self.path[len("/api/image/"):]
-            fpath = resolve_image_file(image_id)
+            fpath = resolve_image_file(image_id, user=user)
             if fpath:
                 ext = os.path.splitext(fpath)[1].lower()
                 ctype = IMAGE_MIME.get(ext, "image/jpeg")

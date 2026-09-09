@@ -357,20 +357,18 @@ function SpeakButton({ text }) {
   const idRef = useRef(null)
 
   async function handleClick() {
-    const myId = (idRef.current = {})
-    if (_activeAudio && _activeAudio._speakId === myId) {
+    if (_activeAudio && _activeAudio._speakId === idRef.current) {
       _activeAudio.pause()
-      _activeAudio.currentTime = 0
       _activeAudio = null
       setSpeaking(false)
       return
     }
     if (_activeAudio) {
       _activeAudio.pause()
-      _activeAudio.currentTime = 0
       _activeAudio = null
       setSpeaking(false)
     }
+    const myId = (idRef.current = {})
     setSpeaking(true)
     try {
       const data = await apiSpeak(text)
@@ -397,8 +395,8 @@ function SpeakButton({ text }) {
     <button
       className={'speak-btn' + (speaking ? ' speaking' : '')}
       onClick={handleClick}
-      title={speaking ? 'Stop' : 'Read aloud'}
-      aria-label={speaking ? 'Stop' : 'Read aloud'}
+      title={speaking ? 'Pause' : 'Read aloud'}
+      aria-label={speaking ? 'Pause' : 'Read aloud'}
     >
       {speaking ? (
         <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">

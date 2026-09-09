@@ -267,7 +267,7 @@ graph TD
         Client -->|"GET/POST /api/user-context"| UserCtx["read/append; overwrite = admin only"]
         Client -->|"POST /api/tts"| TTS["Piper local, edge-tts fallback"]
         Client -->|"GET /api/active-users · POST /api/leaving"| Presence["Active window tracking"]
-        Client -->|"GET /output/… · GET /uploads/…"| ServeFiles["Identity-gated file serving"]
+        Client -->|"GET /output/… · GET /uploads/…"| ServeFiles["Identity + ownership-gated\nfile serving (resolve_image_file)"]
     end
 
     subgraph OpenAIEndpoints ["OpenAI-compatible /v1/* (Bearer OPENAI_API_KEY)"]
