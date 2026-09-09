@@ -668,6 +668,13 @@ async def story_audio_segment(
         raise HTTPException(status_code=404, detail=f"Segment {segment_idx} not found (total {len(segments)})")
 
     # Proxy to chat-webui's internal TTS on localhost
+    import asyncio
+
+    def _fetch_json(req):
+        """Synchronous HTTP request helper for use in asyncio.to_thread."""
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return _json.loads(resp.read())
+
     try:
         body = _json.dumps({
             "text": segments[segment_idx],
@@ -681,8 +688,9 @@ async def story_audio_segment(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            resp_data = _json.loads(resp.read())
+        # Run synchronous HTTP call in a thread so it doesn't block the
+        # uvicorn event loop (otherwise the page's poll/resources stall).
+        resp_data = await asyncio.to_thread(_fetch_json, req)
 
         audio_b64 = resp_data.get("audio", "")
         mime = resp_data.get("type", "audio/mpeg")
