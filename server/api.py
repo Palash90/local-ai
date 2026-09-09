@@ -238,10 +238,10 @@ def set_app_state(state):
 # ---------------------------------------------------------------------------
 
 PIPER_VOICES = {
-    # Bengali deliberately routes to edge-tts (bn-IN-TanishaaNeural):
-    # bn_BD-google-medium is Piper's only Bengali voice and sounds robotic.
-    "hi": "/home/palash/.piper_voices/hi_IN-priyamvada-medium.onnx",
-    "te": "/home/palash/.piper_voices/te_IN-padmavathi-medium.onnx",
+    # Only en/es stay on Piper (high-quality local voices). Bengali,
+    # Hindi, Telugu and Kannada route to edge-tts neural female voices —
+    # Piper's Indic voices sound robotic in comparison. The .onnx files
+    # remain on disk as an offline fallback option.
     "es": "/home/palash/.piper_voices/es_MX-claude-high.onnx",
     "en": "/home/palash/.piper_voices/en_US-lessac-high.onnx",
 }
@@ -249,7 +249,7 @@ EDGE_VOICES = {
     "bn": "bn-BD-NabanitaNeural",
     "hi": "hi-IN-SwaraNeural",
     "te": "te-IN-ShrutiNeural",
-    "kn": "kn-IN-GaganNeural",
+    "kn": "kn-IN-SapnaNeural",
     "es": "es-MX-DaliaNeural",
     "en": "en-US-AriaNeural",
 }
