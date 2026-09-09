@@ -104,7 +104,17 @@ export async function denyLocation(taskId) {
   });
 }
 
-export async function speak(text, voice) {
+export async function speak(text, voice, shareToken) {
+  if (shareToken) {
+    // Public share page: scoped endpoint, no auth, text comes from the
+    // stored snapshot server-side.
+    const r = await fetch(`/api/public/share/${encodeURIComponent(shareToken)}/tts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    return r.json();
+  }
   const r = await authFetch('/api/tts', {
     method: 'POST',
     body: JSON.stringify({ text, voice: voice || undefined }),

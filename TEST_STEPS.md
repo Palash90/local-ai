@@ -136,7 +136,8 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 - `POST /api/leaving` → user drops from `GET /api/active-users` immediately (else the 120s active-window expiry removes them)
 - `POST /api/logout` → 200; next `/api/check-auth` with same headers behaves per design (header-auth is stateless — assert response shape, not session invalidation)
 - `POST /api/upload-image` (base64 png) → `{url:"/uploads/…"}`; `GET /api/image/<id>` serves the working image; bogus id → 404
-- `POST /api/tts` `{text}` → audio bytes (Piper voice); with Piper missing → edge-tts fallback or clean 5xx (no hang)
+- `POST /api/tts` `{text}` → audio bytes. Routing: `[xx]` tag or script detect → `en` (lessac-high), `es` (claude-high) via Piper (process-cached, lock-serialized); `hi`/`te`/`bn`/`kn` → edge-tts neural female MP3, online (Swara/Shruti/Nabanita/Sapna). Markdown is cleaned first (`**`, links/URLs, code blocks, `|` separators never spoken; `Word:` → `Word,`). Repeat identical request → `cache hit`, ~ms. Missing Piper voice file → clean 5xx (no hang). Voices live in `~/.piper_voices/` (es/en-high are downloads, not in repo).
+- Speak button (browser): play → pause freezes position → resume continues from the paused word → stop resets to the beginning; rapid double-clicks across messages never leave a stuck icon; with no network, hi/te/bn/kn surface an error while en/es still play.
 - SPA fallback: `GET /some/unknown/route` (no dot) → `index.html` 200; `GET /api/nonexistent` → 404 JSON, not HTML
 
 **B9. File serving auth + ownership gate**

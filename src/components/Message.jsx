@@ -352,53 +352,112 @@ function ArtifactLinks({ artifacts, shareToken }) {
 
 let _activeAudio = null
 
-function SpeakButton({ text }) {
+function _stopActiveAudio() {
+  if (_activeAudio) {
+    try { _activeAudio.pause() } catch {}
+    const owner = _activeAudio._owner
+    _activeAudio = null
+    if (owner) {
+      owner.setSpeaking(false)
+      owner.setPaused(false)
+    }
+  }
+}
+
+function SpeakButton({ text, shareToken }) {
   const [speaking, setSpeaking] = useState(false)
+  const [paused, setPaused] = useState(false)
+  const [loading, setLoading] = useState(false)
   const idRef = useRef(null)
+  const reqRef = useRef(0)
+  if (!idRef.current) idRef.current = {}
 
   async function handleClick() {
+    // Resume our own paused audio from the paused position.
     if (_activeAudio && _activeAudio._speakId === idRef.current) {
-      _activeAudio.pause()
-      _activeAudio = null
-      setSpeaking(false)
+      if (paused) {
+        setPaused(false)
+        setSpeaking(true)
+        try {
+          await _activeAudio.play()
+        } catch (e) {
+          console.warn('TTS resume blocked:', e)
+          if (_activeAudio && _activeAudio._speakId === idRef.current) {
+            setSpeaking(false)
+            setPaused(true)
+          }
+        }
+      } else {
+        // True pause: keep the element (and its position) for resume.
+        _activeAudio.pause()
+        setSpeaking(false)
+        setPaused(true)
+      }
       return
     }
-    if (_activeAudio) {
-      _activeAudio.pause()
-      _activeAudio = null
-      setSpeaking(false)
-    }
-    const myId = (idRef.current = {})
-    setSpeaking(true)
+    // A different message's audio is active (or paused): stop it first.
+    _stopActiveAudio()
+    const reqId = ++reqRef.current
+    setPaused(false)
+    setLoading(true)
     try {
-      const data = await apiSpeak(text)
-      if (idRef.current !== myId) return
+      const data = await apiSpeak(text, undefined, shareToken)
+      if (reqRef.current !== reqId) return
+      if (!data || !data.audio) throw new Error(data && data.error ? data.error : 'Empty TTS response')
       const mime = data.type || 'audio/mpeg'
       const audio = new Audio('data:' + mime + ';base64,' + data.audio)
-      audio._speakId = myId
+      audio._speakId = idRef.current
+      audio._owner = { setSpeaking, setPaused }
       audio.onended = () => {
         if (_activeAudio === audio) {
           _activeAudio = null
           setSpeaking(false)
+          setPaused(false)
         }
       }
-      audio.onerror = () => { setSpeaking(false); _activeAudio = null }
+      audio.onerror = () => {
+        if (_activeAudio === audio) _activeAudio = null
+        setSpeaking(false)
+        setPaused(false)
+        setLoading(false)
+      }
       _activeAudio = audio
-      audio.play()
+      setLoading(false)
+      setSpeaking(true)
+      try {
+        await audio.play()
+      } catch (e) {
+        // Autoplay/policy block or decode failure: never leave the UI stuck.
+        console.warn('TTS playback blocked:', e)
+        if (_activeAudio === audio) _activeAudio = null
+        setSpeaking(false)
+      }
     } catch (e) {
       console.warn('TTS error:', e)
       setSpeaking(false)
+      setPaused(false)
+      setLoading(false)
     }
   }
 
+  // Stop: discard playback entirely. Next play starts from the beginning.
+  function handleStop(e) {
+    e.stopPropagation()
+    _stopActiveAudio()
+  }
+
+  const showPauseIcon = speaking && !paused
+  const showStop = (speaking || paused) && !loading
   return (
+    <>
     <button
-      className={'speak-btn' + (speaking ? ' speaking' : '')}
+      className={'speak-btn' + (speaking ? ' speaking' : '') + (paused ? ' paused' : '') + (loading ? ' loading' : '')}
       onClick={handleClick}
-      title={speaking ? 'Pause' : 'Read aloud'}
-      aria-label={speaking ? 'Pause' : 'Read aloud'}
+      title={loading ? 'Loading audio…' : paused ? 'Resume' : speaking ? 'Pause' : 'Read aloud'}
+      aria-label={loading ? 'Loading audio' : paused ? 'Resume' : speaking ? 'Pause' : 'Read aloud'}
+      disabled={loading && !speaking && !paused}
     >
-      {speaking ? (
+      {showPauseIcon ? (
         <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
           <rect x="6" y="5" width="4" height="14" rx="1" />
           <rect x="14" y="5" width="4" height="14" rx="1" />
@@ -409,6 +468,19 @@ function SpeakButton({ text }) {
         </svg>
       )}
     </button>
+    {showStop && (
+      <button
+        className="speak-btn stop-btn"
+        onClick={handleStop}
+        title="Stop (next play starts from the beginning)"
+        aria-label="Stop"
+      >
+        <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" aria-hidden="true">
+          <rect x="6" y="6" width="12" height="12" rx="1.5" />
+        </svg>
+      </button>
+    )}
+    </>
   )
 }
 
@@ -520,7 +592,7 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
   )
 }
 
-function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, selectingRef, onResolved, onLocationNeeded, shareToken }) {
+function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onImageOpen, selectingRef, onResolved, onLocationNeeded, shareToken }) {
   const elRef = useRef(null)
   const chatEl = useRef(null)
   const [popupVisible, setPopupVisible] = useState(null)
@@ -638,7 +710,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
   }
 
   const ttsText = text
-  if (role === 'bot') text = text.replace(/^\s*\[(bn|hi|en)\]\s*/, '')
+  if (role === 'bot') text = text.replace(/^\s*\[(bn|hi|te|kn|es|en)\]\s*/, '')
 
   async function handleContentClick(e) {
     const btn = e.target.closest('.copy-code-btn')
@@ -661,13 +733,13 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
         {role === 'user' && msg._research && (
         <span className="tool-badge research" title="This message was sent with the Research toggle on">Research</span>
       )}
-      {role === 'bot' && msg._elapsed_ms != null && (
+      {role === 'bot' && !hideMeta && msg._elapsed_ms != null && (
           <span className="msg-elapsed" title="Time from task start to completion">&#9202; {formatElapsed(msg._elapsed_ms)}</span>
         )}
-        {role === 'bot' && msg._confidence != null && (
+        {role === 'bot' && !hideMeta && msg._confidence != null && (
           <span className="conf-badge" title="Confidence from the verification judge">&#9878; {msg._confidence}%</span>
         )}
-        {role === 'bot' && toolsUsed.length > 0 && (() => {
+        {role === 'bot' && !hideMeta && toolsUsed.length > 0 && (() => {
           let fetchIdx = 0
           return toolsUsed.map((t, i) => {
             const isFetch = t === 'fetch_page'
@@ -703,7 +775,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
             )
           })
         })()}
-        {role === 'bot' && text && !hideSpeak && <SpeakButton text={ttsText} />}
+        {role === 'bot' && text && (!hideSpeak || shareToken) && <SpeakButton text={ttsText} shareToken={shareToken} />}
         <CopyButton text={text} genPrompt={genPrompt} imageUrl={imageUrl} />
         {role === 'bot' && sessionId && msgIndex != null && (
           <ShareButton sessionId={sessionId} msgIndex={msgIndex} />

@@ -385,6 +385,33 @@ extension whitelist), `ModelBar` (live temp/tps), `StatusBox`, `TaskPanel`,
 Build with `npm install && npm run build` (Vite → `dist/`); `npm run dev`
 proxies to the backend for development.
 
+## Voice / read-aloud (TTS)
+
+Each assistant message has a speak button: play → pause → resume from the
+paused word, plus a stop button that resets to the beginning (`Message.jsx`
+`SpeakButton`; playback failures never leave the button stuck).
+`POST /api/tts` first cleans chat markdown into speakable text (formatting,
+links/URLs, code blocks and table separators are never spoken; `Word:`
+becomes `Word,`), detects the language (`[xx]` tag, Indic scripts, Spanish
+markers), then synthesizes:
+
+| Lang | Voice | Backend |
+| ---- | ----- | ------- |
+| en | en_US-lessac-high | Piper, local/offline |
+| es | es_MX-claude-high | Piper, local/offline |
+| hi | hi-IN-SwaraNeural (female) | edge-tts, online |
+| te | te-IN-ShrutiNeural (female) | edge-tts, online |
+| bn | bn-BD-NabanitaNeural (female) | edge-tts, online |
+| kn | kn-IN-SapnaNeural (female) | edge-tts, online |
+
+Piper voices are cached process-wide and synthesis is lock-serialized;
+edge-tts results are cached in memory (repeats return in ms). Piper `.onnx`
+files live in `~/.piper_voices/` (downloaded, not in the repo).
+Known limit: Bengali SSML `<phoneme>` overrides were tried and reverted —
+the `edge-tts` library escapes markup into literal speech and the service
+rejects `<phoneme>` for Bengali voices, so Bengali অ-nuances (দেখলো/যেন-type
+words) follow whatever the neural voice produces.
+
 ## Security & Deployment Notes
 
 > **Intended scope: a private, trusted home deployment** — e.g. a household of a few

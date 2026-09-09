@@ -6,6 +6,7 @@ import ImageLightbox from './ImageLightbox'
 export default function PublicShareView({ token, onExit }) {
   const [state, setState] = useState({ loading: true, error: '', message: null, sharedBy: '' })
   const [lightboxSrc, setLightboxSrc] = useState(null)
+  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -30,12 +31,33 @@ export default function PublicShareView({ token, onExit }) {
   }, [token])
 
   const openImage = useCallback(src => setLightboxSrc(src), [])
-  const closeLightbox = useCallback(() => setLightboxSrc(null), [])
+  const closeLightbox = useCallback(src => setLightboxSrc(null), [])
+
+  const copyLink = useCallback(async () => {
+    const url = window.location.href
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(url)
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = url
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      }
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch { }
+  }, [])
 
   return (
     <div id="public-share-view">
       <div className="public-share-topbar">
         <span className="public-share-label">Shared message</span>
+        <button type="button" className="public-share-copylink" onClick={copyLink} title="Copy link to this shared message">
+          {copied ? 'Copied!' : 'Copy link'}
+        </button>
       </div>
       {state.loading ? (
         <div className="public-share-status">Loading…</div>
@@ -44,7 +66,7 @@ export default function PublicShareView({ token, onExit }) {
       ) : (
         <div className="public-share-body">
           <div className="public-share-meta">Shared by <strong>{state.sharedBy || 'someone'}</strong></div>
-          <Message msg={state.message} onImageOpen={openImage} hideSpeak shareToken={token} />
+          <Message msg={state.message} onImageOpen={openImage} hideMeta shareToken={token} />
         </div>
       )}
       <ImageLightbox src={lightboxSrc} onClose={closeLightbox} />
