@@ -1049,7 +1049,7 @@ async def read_story(
                 let paused = false;
                 let abortChain = false;
                 let segReqId = 0;
-                let wordMap = [];  // [{w, s, e}] — absolute timestamps for current segment
+                let wordMap = [];  // absolute timestamps for current segment
                 let wordSpans = []; // DOM spans matching wordMap
                 let highlightTimer = null;
                 let currentHighlight = null;
