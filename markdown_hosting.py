@@ -714,6 +714,94 @@ async def story_audio_segment(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/story/{collection}/{story_id:path}/words")
+async def story_words_segment(
+    collection: str,
+    story_id: str,
+    segment_idx: int = 0,
+    request: Request = None,
+):
+    """Return word-level timestamps for a story segment.
+
+    Uses query param ``?segment_idx=0`` instead of path segment to avoid
+    the greedy ``story_id:path`` swallowing ``/words/0`` before the route
+    can match.
+    """
+    """Return word-level timestamps for a story segment.
+
+    RBAC enforced. Proxies to chat-webui's internal /api/tts-words endpoint.
+    """
+    import base64
+    import json as _json
+    import urllib.request
+
+    from fastapi.responses import JSONResponse
+
+    from server.features.tts import (
+        story_markdown_to_speech_text as _clean_story,
+        detect_tts_lang,
+        _split_speech_chunks,
+        TTS_CHUNK_CHARS,
+    )
+    from server.config import TTS_INTERNAL_TOKEN
+
+    enforce_rbac(collection, request=request)
+
+    if not TTS_INTERNAL_TOKEN:
+        raise HTTPException(status_code=503, detail="Internal TTS not configured")
+
+    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    if not os.path.exists(folder_path):
+        raise HTTPException(status_code=404, detail="Story folder not found")
+
+    md_file = pick_story_md(folder_path)
+    if not md_file:
+        raise HTTPException(status_code=404, detail="No markdown file found in story directory")
+
+    with open(md_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    text = _clean_story(content)
+    lang, text = detect_tts_lang(text)
+    segments = _split_speech_chunks(text, max_chunk=min(7500, TTS_CHUNK_CHARS * 4))
+
+    if segment_idx < 0 or segment_idx >= len(segments):
+        raise HTTPException(status_code=404, detail=f"Segment {segment_idx} not found")
+
+    # Proxy to chat-webui's internal TTS words endpoint
+    import asyncio
+
+    def _fetch_words(req):
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return _json.loads(resp.read())
+
+    try:
+        body = _json.dumps({
+            "text": segments[segment_idx],
+            "token": TTS_INTERNAL_TOKEN,
+            "max_chars": 8000,
+            "cleaner": "story",
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "http://127.0.0.1:3001/api/tts-words",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Authentik-Username": request.headers.get("X-Authentik-Username", ""),
+                "X-Authentik-Groups": request.headers.get("X-Authentik-Groups", ""),
+            },
+            method="POST",
+        )
+        resp_data = await asyncio.to_thread(_fetch_words, req)
+        return JSONResponse(content={"words": resp_data.get("words", [])})
+    except Exception as e:
+        print(f"[story-words] error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/story/{collection}/{story_id:path}")
 async def delete_story(
     collection: str, 
@@ -830,6 +918,8 @@ async def read_story(
             #speak-btn.playing {{ background: rgba(96,165,250,0.12); color: #3b82f6; border-color: #3b82f6; }}
             #speak-btn.loading {{ opacity: 0.55; cursor: wait; animation: sp 1s ease-in-out infinite; }}
             @keyframes sp {{ 0%,100% {{ opacity: 0.55; }} 50% {{ opacity: 0.9; }} }}
+            .word-highlight {{ background: rgba(96,165,250,0.25); border-radius: 3px; padding: 0 2px; transition: background 0.15s; cursor: pointer; }}
+            .word-highlight:hover {{ background: rgba(96,165,250,0.4); }}
             blockquote {{ border-left: 4px solid #ddd; margin: 0 0 1em; padding: 0 0 0 16px; color: #555; }}
             code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.85em; }}
             pre {{ background: #f0f0f0; padding: 12px; border-radius: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
@@ -959,26 +1049,108 @@ async def read_story(
                 let paused = false;
                 let abortChain = false;
                 let segReqId = 0;
+                let wordMap = [];  // [{w, s, e}] — absolute timestamps for current segment
+                let wordSpans = []; // DOM spans matching wordMap
+                let highlightTimer = null;
+                let currentHighlight = null;
+
+                function extractWords(article) {{
+                    // Walk all text nodes, split by spaces, collect word spans
+                    const words = [];
+                    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, null, false);
+                    let node;
+                    while ((node = walker.nextNode())) {{
+                        const text = node.textContent;
+                        if (!text.trim()) continue;
+                        const parts = text.split(/(\\s+)/);
+                        const frag = document.createDocumentFragment();
+                        for (const part of parts) {{
+                            if (part.match(/^\\s+$/)) {{
+                                frag.appendChild(document.createTextNode(part));
+                            }} else {{
+                                const span = document.createElement('span');
+                                span.className = 'word-hit';
+                                span.textContent = part;
+                                span.style.cursor = 'pointer';
+                                frag.appendChild(span);
+                                words.push(span);
+                            }}
+                        }}
+                        node.parentNode.replaceChild(frag, node);
+                    }}
+                    return words;
+                }}
+
+                function highlightWord(idx) {{
+                    if (currentHighlight) {{
+                        currentHighlight.classList.remove('word-highlight');
+                        currentHighlight = null;
+                    }}
+                    if (idx >= 0 && idx < wordSpans.length) {{
+                        currentHighlight = wordSpans[idx];
+                        currentHighlight.classList.add('word-highlight');
+                        // Scroll into view if needed
+                        const rect = currentHighlight.getBoundingClientRect();
+                        if (rect.top < 0 || rect.bottom > window.innerHeight) {{
+                            currentHighlight.scrollIntoView({{ block: 'center', behavior: 'smooth' }});
+                        }}
+                    }}
+                }}
+
+                function startHighlightLoop() {{
+                    function tick() {{
+                        if (!playing || paused || !currentAudio) return;
+                        const t = currentAudio.currentTime;
+                        // Binary search for current word
+                        let lo = 0, hi = wordMap.length - 1, best = -1;
+                        while (lo <= hi) {{
+                            const mid = (lo + hi) >> 1;
+                            if (wordMap[mid].s <= t) {{ best = mid; lo = mid + 1; }}
+                            else hi = mid - 1;
+                        }}
+                        if (best >= 0 && t <= wordMap[best].e) {{
+                            highlightWord(best);
+                        }}
+                        highlightTimer = requestAnimationFrame(tick);
+                    }}
+                    highlightTimer = requestAnimationFrame(tick);
+                }}
+
+                function stopHighlightLoop() {{
+                    if (highlightTimer) {{ cancelAnimationFrame(highlightTimer); highlightTimer = null; }}
+                    if (currentHighlight) {{ currentHighlight.classList.remove('word-highlight'); currentHighlight = null; }}
+                }}
+
+                async function loadWords(segIdx) {{
+                    try {{
+                        const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/words?segment_idx=' + segIdx);
+                        if (!r.ok) return;
+                        const data = await r.json();
+                        wordMap = data.words || [];
+                    }} catch(e) {{
+                        wordMap = [];
+                    }}
+                }}
 
                 speakBtn.addEventListener('click', async () => {{
                     if (playing && !paused) {{
-                        // Pause
                         if (currentAudio) currentAudio.pause();
                         paused = true;
+                        stopHighlightLoop();
                         speakBtn.textContent = '▶ Resume';
                         speakBtn.classList.add('playing');
                         return;
                     }}
                     if (paused) {{
-                        // Resume
                         if (currentAudio) {{
                             try {{ await currentAudio.play(); }} catch(e) {{}}
                             paused = false;
+                            startHighlightLoop();
                             speakBtn.textContent = '⏸ Pause';
                         }}
                         return;
                     }}
-                    // Fresh play: fetch segments, then play from start
+                    // Fresh play
                     abortChain = false;
                     segIdx = 0;
                     segReqId++;
@@ -1001,6 +1173,8 @@ async def read_story(
                         speakBtn.textContent = '⏸ Pause';
                         speakBtn.classList.remove('loading');
                         speakBtn.classList.add('playing');
+                        // Extract words from article for highlight clicking
+                        wordSpans = extractWords(article);
                         await playSegment(myReq);
                     }} catch(e) {{
                         console.warn('Story TTS error:', e);
@@ -1016,6 +1190,7 @@ async def read_story(
                         speakBtn.classList.remove('loading', 'playing');
                         playing = false;
                         currentAudio = null;
+                        stopHighlightLoop();
                         return;
                     }}
                     speakBtn.textContent = 'Loading…';
@@ -1024,19 +1199,24 @@ async def read_story(
                         const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/audio/' + segIdx);
                         if (!r.ok) throw new Error('Audio fetch failed');
                         const blob = await r.blob();
+                        // Words are saved by the audio synthesis; fetch them now
+                        await loadWords(segIdx);
                         const url = URL.createObjectURL(blob);
                         const audio = new Audio(url);
                         currentAudio = audio;
                         speakBtn.textContent = '⏸ Pause';
                         speakBtn.classList.remove('loading');
                         speakBtn.classList.add('playing');
+                        startHighlightLoop();
                         audio.onended = () => {{
+                            stopHighlightLoop();
                             URL.revokeObjectURL(url);
                             segIdx++;
                             playSegment(myReq);
                         }};
                         audio.onerror = (e) => {{
                             console.warn('Segment audio error:', e);
+                            stopHighlightLoop();
                             URL.revokeObjectURL(url);
                             speakBtn.textContent = '🔊 Play';
                             speakBtn.classList.remove('loading', 'playing');

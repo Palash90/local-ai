@@ -406,8 +406,53 @@ _detect_tts_lang = detect_tts_lang
 # ---------------------------------------------------------------------------
 
 
+def _build_words_from_alignments(alignments, text, sample_rate):
+    """Convert phoneme alignments into word-level boundaries.
+
+    Given a list of ``(start_sample, end_sample, phoneme)`` tuples and the
+    original text (space-separated words), returns a list of
+    ``{w: str, s: float, e: float}`` dicts with start/end times in seconds.
+    """
+    if not alignments or not text:
+        return []
+
+    raw_words = text.split()
+    if not raw_words:
+        return []
+
+    words = []
+    phoneme_idx = 0
+
+    for word in raw_words:
+        if phoneme_idx >= len(alignments):
+            words.append({"w": word, "s": 0, "e": 0})
+            continue
+
+        # Consume phonemes for this word until we hit a space phoneme
+        word_start_sample = alignments[phoneme_idx][0]
+        last_sample = alignments[phoneme_idx][1]
+        phoneme_idx += 1
+
+        while phoneme_idx < len(alignments):
+            phoneme = alignments[phoneme_idx][2]
+            if phoneme in (" ", "sil", "spn", ""):
+                break
+            last_sample = alignments[phoneme_idx][1]
+            phoneme_idx += 1
+
+        s = word_start_sample / sample_rate
+        e = last_sample / sample_rate
+        words.append({"w": word, "s": round(s, 3), "e": round(e, 3)})
+
+    return words
+
+
 def synthesize_piper_wav(tag, text):
-    """Synthesize WAV bytes with the cached Piper voice (thread-safe)."""
+    """Synthesize WAV bytes with the cached Piper voice (thread-safe).
+
+    Returns ``(wav_bytes, word_boundaries)`` where word_boundaries is a
+    list of ``{w, s, e}`` dicts (word, start_seconds, end_seconds).
+    """
     import piper as _piper
 
     with _PIPER_LOCK:
@@ -417,25 +462,37 @@ def synthesize_piper_wav(tag, text):
             if not os.path.isfile(onnx_path):
                 raise FileNotFoundError(f"Piper voice missing: {onnx_path}")
             print(f"[tts] Loading Piper voice '{tag}' ...")
-            pv = _piper.PiperVoice.load(onnx_path, config_path=onnx_path + ".json")
+            pv = _piper.PiperVoice.load(onnx_path, config_path=onnx_path + ".json", include_alignments=True)
             _PIPER_VOICES[tag] = pv
         print(f"[tts] Piper {tag}: synthesizing {len(text)} chars")
         rate = 22050
         frames = []
-        for chunk in pv.synthesize(text):
+        all_alignments = []
+        sample_offset = 0
+        for chunk in pv.synthesize(text, include_alignments=True):
             try:
                 rate = int(chunk.sample_rate)
             except Exception:
                 pass
             int16 = (chunk.audio_float_array * 32767).clip(-32768, 32767).astype("<i2")
             frames.append(int16.tobytes())
+            if chunk.phoneme_alignments:
+                pos = sample_offset
+                for a in chunk.phoneme_alignments:
+                    all_alignments.append((pos, pos + a.num_samples, a.phoneme))
+                    pos += a.num_samples
+            sample_offset += len(chunk.audio_float_array)
+
+        # Build word boundaries from phoneme alignments + original text
+        words = _build_words_from_alignments(all_alignments, text, rate)
+
         wav_io = _io.BytesIO()
         with _wave.open(wav_io, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(rate)
             wf.writeframes(b"".join(frames))
-        return wav_io.getvalue()
+        return wav_io.getvalue(), words
 
 
 # Legacy alias used by api.py callers.
@@ -475,25 +532,55 @@ def tts_synthesize(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown
 
     if tag in PIPER_VOICES:
         wav_parts = []
+        all_words = []
+        cumulative_s = 0.0
         for idx, chunk in enumerate(chunks):
             key = hashlib.sha256(f"piper:{tag}:{chunk}".encode("utf-8")).hexdigest()
             part = _tts_cache_get(key)
             if part is None:
-                part = synthesize_piper_wav(tag, chunk)
+                wav_bytes, words = synthesize_piper_wav(tag, chunk)
+                part = wav_bytes
                 _tts_cache_put(key, part)
+                # Words saved per-chunk; adjust to absolute offsets
+                chunk_duration_s = words[-1]["e"] if words else 0
+                for w in words:
+                    all_words.append({
+                        "w": w["w"],
+                        "s": round(cumulative_s + w["s"], 3),
+                        "e": round(cumulative_s + w["e"], 3),
+                    })
+                cumulative_s += chunk_duration_s
+                _tts_words_cache_put(key, words)
             else:
                 if total_chunks > 1:
                     print(f"[tts] Piper {tag} chunk {idx+1}/{total_chunks}: cache hit ({len(chunk)} chars)")
                 else:
                     print(f"[tts] Piper {tag}: cache hit ({len(chunk)} chars)")
+                # Load words from cache
+                cached_words = _tts_words_cache_get(key)
+                if cached_words:
+                    chunk_duration_s = cached_words[-1]["e"] if cached_words else 0
+                    for w in cached_words:
+                        all_words.append({
+                            "w": w["w"],
+                            "s": round(cumulative_s + w["s"], 3),
+                            "e": round(cumulative_s + w["e"], 3),
+                        })
+                    cumulative_s += chunk_duration_s
             wav_parts.append(part)
         combined_wav = _concat_wav_blobs(wav_parts)
-        return base64.b64encode(combined_wav).decode(), "audio/wav"
+        # Save full word list
+        combined_key = hashlib.sha256(f"piper:{tag}:{text}".encode("utf-8")).hexdigest()
+        _tts_words_cache_put(combined_key, all_words)
+        return base64.b64encode(combined_wav).decode(), "audio/wav", all_words
 
     import asyncio, edge_tts
 
     edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
     mp3_parts = []
+    all_words = []
+    cumulative_ms = 0.0
+
     for idx, chunk in enumerate(chunks):
         key = hashlib.sha256(f"edge:{edge_voice}:{chunk}".encode("utf-8")).hexdigest()
         part = _tts_cache_get(key)
@@ -502,29 +589,158 @@ def tts_synthesize(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown
                 print(f"[tts] edge-tts {tag} ({edge_voice}) chunk {idx+1}/{total_chunks}: {len(chunk)} chars")
             else:
                 print(f"[tts] edge-tts {tag} ({edge_voice}): {len(chunk)} chars")
-            communicate = edge_tts.Communicate(chunk, edge_voice)
+            communicate = edge_tts.Communicate(chunk, edge_voice, boundary="WordBoundary")
             mp3_data = bytearray()
+            chunk_words = []
 
             async def _gen():
                 async for chunk_piece in communicate.stream():
                     if chunk_piece["type"] == "audio":
                         mp3_data.extend(chunk_piece["data"])
+                    elif chunk_piece["type"] == "WordBoundary":
+                        # offset is in 100ns ticks, duration same
+                        off_ticks = chunk_piece.get("offset", 0)
+                        dur_ticks = chunk_piece.get("duration", 0)
+                        word_text = chunk_piece.get("text", "")
+                        s_ms = off_ticks / 10000.0
+                        e_ms = (off_ticks + dur_ticks) / 10000.0
+                        chunk_words.append({
+                            "w": word_text,
+                            "s_ms": round(s_ms, 1),
+                            "e_ms": round(e_ms, 1),
+                        })
 
             asyncio.run(_gen())
             part = bytes(mp3_data)
             _tts_cache_put(key, part)
+
+            # Adjust word timings to absolute offsets and accumulate
+            chunk_duration_ms = chunk_words[-1]["e_ms"] if chunk_words else 0
+            for w in chunk_words:
+                all_words.append({
+                    "w": w["w"],
+                    "s": round((cumulative_ms + w["s_ms"]) / 1000.0, 3),
+                    "e": round((cumulative_ms + w["e_ms"]) / 1000.0, 3),
+                })
+            cumulative_ms += chunk_duration_ms
         else:
             if total_chunks > 1:
                 print(f"[tts] edge-tts {tag} chunk {idx+1}/{total_chunks}: cache hit ({len(chunk)} chars)")
             else:
                 print(f"[tts] edge-tts {tag}: cache hit ({len(chunk)} chars)")
+            # Load per-chunk words from cache and accumulate
+            cached_words = _tts_words_cache_get(key)
+            if cached_words:
+                chunk_duration_ms = cached_words[-1]["e"] * 1000 if cached_words else 0
+                for w in cached_words:
+                    all_words.append({
+                        "w": w["w"],
+                        "s": round(cumulative_ms / 1000.0 + w["s"], 3),
+                        "e": round(cumulative_ms / 1000.0 + w["e"], 3),
+                    })
+                cumulative_ms += chunk_duration_ms
         mp3_parts.append(part)
     combined_mp3 = b"".join(mp3_parts)
-    return base64.b64encode(combined_mp3).decode(), "audio/mpeg"
+
+    # Always save full word list under the combined cache key
+    if all_words:
+        combined_key = hashlib.sha256(f"edge:{edge_voice}:{text}".encode("utf-8")).hexdigest()
+        _tts_words_cache_put(combined_key, all_words)
+
+    return base64.b64encode(combined_mp3).decode(), "audio/mpeg", all_words
+
+
+# ---------------------------------------------------------------------------
+# Public API for word boundaries (called by api.py endpoints)
+# ---------------------------------------------------------------------------
+
+def get_tts_words(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown_to_speech_text):
+    """Return word boundaries for the last synthesis of *raw_text*.
+
+    Re-runs the same cleanup/detect/truncate logic to compute the exact
+    cache key, then looks up the cached words JSON.
+    """
+    text = cleaner(raw_text)
+    tag, text = detect_tts_lang(text, voice)
+    if not text:
+        return []
+    if len(text) > max_chars:
+        cut = text[:max_chars].rsplit(" ", 1)[0]
+        text = cut or text[:max_chars]
+
+    chunks = _split_speech_chunks(text, max_chunk=TTS_CHUNK_CHARS)
+    if not chunks:
+        return []
+
+    # The combined cache key is the full (cleaned) text
+    combined_key = hashlib.sha256(
+        (f"piper:{tag}:{text}" if tag in PIPER_VOICES else
+         f"edge:{EDGE_VOICES.get(tag, 'en-US-AriaNeural')}:{text}")
+        .encode("utf-8")
+    ).hexdigest()
+    words = _tts_words_cache_get(combined_key)
+    if words:
+        return words
+
+    # Fallback: combine per-chunk words (may be slightly less accurate)
+    cumulative_s = 0.0
+    all_words = []
+    for chunk in chunks:
+        chunk_key = hashlib.sha256(
+            (f"piper:{tag}:{chunk}" if tag in PIPER_VOICES else
+             f"edge:{EDGE_VOICES.get(tag, 'en-US-AriaNeural')}:{chunk}")
+            .encode("utf-8")
+        ).hexdigest()
+        chunk_words = _tts_words_cache_get(chunk_key)
+        if chunk_words:
+            for w in chunk_words:
+                all_words.append({
+                    "w": w["w"],
+                    "s": round(cumulative_s + w["s"], 3),
+                    "e": round(cumulative_s + w["e"], 3),
+                })
+            cumulative_s += chunk_words[-1]["e"] if chunk_words else 0
+    return all_words
 
 
 # Legacy alias used by api.py callers.
 _tts_synthesize = tts_synthesize
+
+
+# ---------------------------------------------------------------------------
+# Word boundary cache (JSON alongside audio files)
+# ---------------------------------------------------------------------------
+
+def _tts_words_cache_put(key, words):
+    """Save word boundaries JSON to the primary cache dir."""
+    import json as _json
+
+    if not words:
+        return
+    try:
+        os.makedirs(TTS_CACHE_DIR, exist_ok=True)
+        path = os.path.join(TTS_CACHE_DIR, f"{key}.words.json")
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(words, f, ensure_ascii=False)
+    except OSError as e:
+        print(f"[tts] words cache write skipped: {e}")
+
+
+def _tts_words_cache_get(key):
+    """Load word boundaries from cache (primary, then secondary)."""
+    import json as _json
+
+    for base in (TTS_CACHE_DIR, TTS_CACHE_SECONDARY_DIR or None):
+        if not base:
+            continue
+        try:
+            path = os.path.join(base, f"{key}.words.json")
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return _json.load(f)
+        except Exception:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
