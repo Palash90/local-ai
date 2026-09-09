@@ -246,7 +246,7 @@ PIPER_VOICES = {
     "en": "/home/palash/.piper_voices/en_US-lessac-high.onnx",
 }
 EDGE_VOICES = {
-    "bn": "bn-IN-TanishaaNeural",
+    "bn": "bn-BD-NabanitaNeural",
     "hi": "hi-IN-SwaraNeural",
     "te": "te-IN-ShrutiNeural",
     "kn": "kn-IN-GaganNeural",
