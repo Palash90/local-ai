@@ -440,8 +440,16 @@ function SpeakButton({ text }) {
     }
   }
 
+  // Stop: discard playback entirely. Next play starts from the beginning.
+  function handleStop(e) {
+    e.stopPropagation()
+    _stopActiveAudio()
+  }
+
   const showPauseIcon = speaking && !paused
+  const showStop = (speaking || paused) && !loading
   return (
+    <>
     <button
       className={'speak-btn' + (speaking ? ' speaking' : '') + (paused ? ' paused' : '') + (loading ? ' loading' : '')}
       onClick={handleClick}
@@ -460,6 +468,19 @@ function SpeakButton({ text }) {
         </svg>
       )}
     </button>
+    {showStop && (
+      <button
+        className="speak-btn stop-btn"
+        onClick={handleStop}
+        title="Stop (next play starts from the beginning)"
+        aria-label="Stop"
+      >
+        <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor" aria-hidden="true">
+          <rect x="6" y="6" width="12" height="12" rx="1.5" />
+        </svg>
+      </button>
+    )}
+    </>
   )
 }
 
