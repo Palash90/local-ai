@@ -354,6 +354,7 @@ let _activeAudio = null
 
 function SpeakButton({ text }) {
   const [speaking, setSpeaking] = useState(false)
+  const [loading, setLoading] = useState(false)
   const idRef = useRef(null)
 
   async function handleClick() {
@@ -369,10 +370,11 @@ function SpeakButton({ text }) {
       setSpeaking(false)
     }
     const myId = (idRef.current = {})
-    setSpeaking(true)
+    setLoading(true)
     try {
       const data = await apiSpeak(text)
       if (idRef.current !== myId) return
+      if (!data || !data.audio) throw new Error(data && data.error ? data.error : 'Empty TTS response')
       const mime = data.type || 'audio/mpeg'
       const audio = new Audio('data:' + mime + ';base64,' + data.audio)
       audio._speakId = myId
@@ -382,21 +384,32 @@ function SpeakButton({ text }) {
           setSpeaking(false)
         }
       }
-      audio.onerror = () => { setSpeaking(false); _activeAudio = null }
+      audio.onerror = () => { setSpeaking(false); setLoading(false); _activeAudio = null }
       _activeAudio = audio
-      audio.play()
+      setLoading(false)
+      setSpeaking(true)
+      try {
+        await audio.play()
+      } catch (e) {
+        // Autoplay/policy block or decode failure: never leave the UI stuck.
+        console.warn('TTS playback blocked:', e)
+        if (_activeAudio === audio) _activeAudio = null
+        setSpeaking(false)
+      }
     } catch (e) {
       console.warn('TTS error:', e)
       setSpeaking(false)
+      setLoading(false)
     }
   }
 
   return (
     <button
-      className={'speak-btn' + (speaking ? ' speaking' : '')}
+      className={'speak-btn' + (speaking ? ' speaking' : '') + (loading ? ' loading' : '')}
       onClick={handleClick}
-      title={speaking ? 'Pause' : 'Read aloud'}
-      aria-label={speaking ? 'Pause' : 'Read aloud'}
+      title={loading ? 'Loading audio…' : speaking ? 'Pause' : 'Read aloud'}
+      aria-label={loading ? 'Loading audio' : speaking ? 'Pause' : 'Read aloud'}
+      disabled={loading && !speaking}
     >
       {speaking ? (
         <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
@@ -638,7 +651,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
   }
 
   const ttsText = text
-  if (role === 'bot') text = text.replace(/^\s*\[(bn|hi|en)\]\s*/, '')
+  if (role === 'bot') text = text.replace(/^\s*\[(bn|hi|te|kn|es|en)\]\s*/, '')
 
   async function handleContentClick(e) {
     const btn = e.target.closest('.copy-code-btn')
