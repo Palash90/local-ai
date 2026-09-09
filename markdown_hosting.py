@@ -733,6 +733,20 @@ async def delete_story(
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Story folder not found")
 
+    # Clean up TTS audio cache for this story before deleting files
+    try:
+        from server.features.tts import tts_keys_for_story_text, delete_tts_cache_key
+        from server.config import TTS_MAX_CHARS
+        md_file = pick_story_md(folder_path)
+        if md_file:
+            with open(md_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            keys = tts_keys_for_story_text(raw_text=content, max_chars=TTS_MAX_CHARS)
+            for k in keys:
+                delete_tts_cache_key(k)
+    except Exception as e:
+        print(f"[story-delete] TTS cache cleanup failed (non-fatal): {e}")
+
     shutil.rmtree(folder_path, ignore_errors=True)
     if os.path.exists(folder_path):
         raise HTTPException(status_code=500, detail="Failed to delete story folder")
