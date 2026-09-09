@@ -265,7 +265,7 @@ graph TD
         Client -->|"GET /api/image/:id"| ImgEdit["Serve working image"]
         Client -->|"POST /api/location"| SetLocation["Nominatim reverse geocode"]
         Client -->|"GET/POST /api/user-context"| UserCtx["read/append; overwrite = admin only"]
-        Client -->|"POST /api/tts"| TTS["md→speech cleanup → lang detect\n(en/es/hi/bn/te Piper cached+locked,\nkn edge-tts) → wav/mp3 + LRU cache"]
+        Client -->|"POST /api/tts"| TTS["md→speech cleanup → lang detect\n(en/es/hi/te Piper cached+locked,\nbn/kn edge-tts neural) → wav/mp3 + LRU cache"]
         Client -->|"GET /api/active-users · POST /api/leaving"| Presence["Active window tracking"]
         Client -->|"GET /output/… · GET /uploads/…"| ServeFiles["Identity + ownership-gated\nfile serving (resolve_image_file)"]
     end

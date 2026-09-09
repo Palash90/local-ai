@@ -238,7 +238,8 @@ def set_app_state(state):
 # ---------------------------------------------------------------------------
 
 PIPER_VOICES = {
-    "bn": "/home/palash/.piper_voices/bn_BD-google-medium.onnx",
+    # Bengali deliberately routes to edge-tts (bn-IN-TanishaaNeural):
+    # bn_BD-google-medium is Piper's only Bengali voice and sounds robotic.
     "hi": "/home/palash/.piper_voices/hi_IN-priyamvada-medium.onnx",
     "te": "/home/palash/.piper_voices/te_IN-padmavathi-medium.onnx",
     "es": "/home/palash/.piper_voices/es_MX-claude-high.onnx",
