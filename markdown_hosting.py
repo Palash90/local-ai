@@ -570,6 +570,142 @@ async def story_content(
     return {"html": render_story_html(collection, story_id, content)}
 
 
+@app.get("/story/{collection}/{story_id:path}/prose-segments")
+async def story_prose_segments(
+    collection: str,
+    story_id: str,
+    request: Request,
+):
+    """Return the story's speakable prose split into sentence-bounded segments.
+
+    RBAC is enforced (guests get free stories only). Each segment is
+    cleaned of metadata headers, round markers, code blocks, and URLs.
+    The result is a JSON object with ``segments`` (list of strings),
+    ``language`` (detected tag), and ``total_segments`` (count).
+    """
+    from server.features.tts import (
+        story_markdown_to_speech_text as _clean_story,
+        detect_tts_lang,
+        _split_speech_chunks,
+        TTS_CHUNK_CHARS,
+    )
+
+    enforce_rbac(collection, request=request)
+
+    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    if not os.path.exists(folder_path):
+        raise HTTPException(status_code=404, detail="Story folder not found")
+
+    md_file = pick_story_md(folder_path)
+    if not md_file:
+        raise HTTPException(status_code=404, detail="No markdown file found in story directory")
+
+    with open(md_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    text = _clean_story(content)
+    lang, text = detect_tts_lang(text)
+    if not text:
+        return {"segments": [], "language": lang, "total_segments": 0}
+
+    segments = _split_speech_chunks(text, max_chunk=min(7500, TTS_CHUNK_CHARS * 4))
+    return {
+        "segments": segments,
+        "language": lang,
+        "total_segments": len(segments),
+    }
+
+
+@app.get("/story/{collection}/{story_id:path}/audio/{segment_idx:int}")
+async def story_audio_segment(
+    collection: str,
+    story_id: str,
+    segment_idx: int,
+    request: Request,
+):
+    """Return audio for a single story segment.
+
+    RBAC enforced. Proxies to chat-webui's internal TTS endpoint.
+    Returns raw audio bytes (mp3 or wav).
+    """
+    import base64
+    import hashlib
+    import json as _json
+    import os as _os
+    import urllib.request
+
+    from fastapi.responses import Response
+
+    from server.features.tts import (
+        story_markdown_to_speech_text as _clean_story,
+        detect_tts_lang,
+        _split_speech_chunks,
+        TTS_CHUNK_CHARS,
+    )
+    from server.config import TTS_INTERNAL_TOKEN
+
+    enforce_rbac(collection, request=request)
+
+    if not TTS_INTERNAL_TOKEN:
+        raise HTTPException(status_code=503, detail="Internal TTS not configured")
+
+    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    if not os.path.exists(folder_path):
+        raise HTTPException(status_code=404, detail="Story folder not found")
+
+    md_file = pick_story_md(folder_path)
+    if not md_file:
+        raise HTTPException(status_code=404, detail="No markdown file found in story directory")
+
+    with open(md_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    text = _clean_story(content)
+    lang, text = detect_tts_lang(text)
+    segments = _split_speech_chunks(text, max_chunk=min(7500, TTS_CHUNK_CHARS * 4))
+
+    if segment_idx < 0 or segment_idx >= len(segments):
+        raise HTTPException(status_code=404, detail=f"Segment {segment_idx} not found (total {len(segments)})")
+
+    # Proxy to chat-webui's internal TTS on localhost
+    try:
+        body = _json.dumps({
+            "text": segments[segment_idx],
+            "token": TTS_INTERNAL_TOKEN,
+            "max_chars": 8000,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "http://127.0.0.1:3001/api/internal/tts",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            resp_data = _json.loads(resp.read())
+
+        audio_b64 = resp_data.get("audio", "")
+        mime = resp_data.get("type", "audio/mpeg")
+        if not audio_b64:
+            raise HTTPException(status_code=500, detail="TTS returned no audio")
+
+        audio_bytes = base64.b64decode(audio_b64)
+        ext = ".mp3" if "mpeg" in mime else ".wav"
+        return Response(
+            content=audio_bytes,
+            media_type=mime,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+    except urllib.error.URLError as e:
+        print(f"[story-tts] proxy error: {e}")
+        raise HTTPException(status_code=502, detail=f"TTS service unavailable: {e}")
+    except Exception as e:
+        print(f"[story-tts] error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/story/{collection}/{story_id:path}")
 async def delete_story(
     collection: str, 
@@ -638,6 +774,7 @@ async def read_story(
             )
 
     delete_button_html = '<button id="delete-btn">Delete story</button>' if is_admin else ""
+    speak_button_html = '<button id="speak-btn" title="Read aloud">🔊 Play</button>'
 
     # Escaped parameters for safe JavaScript injection and HTTP URL generation
     story_id_js = json.dumps(story_id)
@@ -662,9 +799,15 @@ async def read_story(
             article p, article li {{ font-size: 1em; }}
             img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 20px 0; display: block; }}
             .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
+            .topbar-actions {{ display: flex; gap: 8px; align-items: center; }}
             a.back {{ color: #666; text-decoration: none; }}
             .topbar button {{ background: none; border: 1px solid #c44; color: #c44; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-family: sans-serif; font-size: 14px; }}
             .topbar button:hover {{ background: #fceaea; }}
+            #speak-btn {{ border-color: #60a5fa; color: #60a5fa; }}
+            #speak-btn:hover {{ background: rgba(96,165,250,0.12); }}
+            #speak-btn.playing {{ background: rgba(96,165,250,0.12); color: #3b82f6; border-color: #3b82f6; }}
+            #speak-btn.loading {{ opacity: 0.55; cursor: wait; animation: sp 1s ease-in-out infinite; }}
+            @keyframes sp {{ 0%,100% {{ opacity: 0.55; }} 50% {{ opacity: 0.9; }} }}
             blockquote {{ border-left: 4px solid #ddd; margin: 0 0 1em; padding: 0 0 0 16px; color: #555; }}
             code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.85em; }}
             pre {{ background: #f0f0f0; padding: 12px; border-radius: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }}
@@ -683,13 +826,16 @@ async def read_story(
             @media (max-width: 600px) {{
                 body {{ padding: 12px; font-size: 19px; }}
                 .topbar {{ flex-direction: column; align-items: stretch; }}
-                .topbar button {{ width: 100%; }}
+                .topbar-actions {{ flex-direction: row; }}
+                .topbar button {{ width: auto; }}
             }}
             @media (prefers-color-scheme: dark) {{
                 body {{ background: #16181d; color: #e6e6e6; }}
                 a.back {{ color: #999; }}
                 .topbar button {{ border-color: #e05a5a; color: #ff7a7a; }}
                 .topbar button:hover {{ background: #2a1c1c; }}
+                #speak-btn {{ border-color: #3b82f6; color: #60a5fa; }}
+                #speak-btn:hover {{ background: rgba(59,130,246,0.12); }}
                 blockquote {{ border-left-color: #444; color: #aaa; }}
                 code {{ background: #2a2e37; }}
                 pre {{ background: #2a2e37; }}
@@ -700,7 +846,10 @@ async def read_story(
     <body>
         <nav class="topbar">
             <a href="/stories/" class="back">← Back to Collections</a>
-            {delete_button_html}
+            <div class="topbar-actions">
+                {speak_button_html}
+                {delete_button_html}
+            </div>
         </nav>
         {verdict_html}
         <article id="story-article">{html_content}</article>
@@ -776,6 +925,112 @@ async def read_story(
             document.addEventListener('click', () => {{
                 document.querySelectorAll('.mod-badge.show-tip').forEach(o => o.classList.remove('show-tip'));
             }});
+
+            // --- Story read-aloud (segmented, chained playback) ---
+            (function() {{
+                const speakBtn = document.getElementById('speak-btn');
+                if (!speakBtn) return;
+                let segments = [];
+                let segIdx = 0;
+                let currentAudio = null;
+                let playing = false;
+                let paused = false;
+                let abortChain = false;
+                let segReqId = 0;
+
+                speakBtn.addEventListener('click', async () => {{
+                    if (playing && !paused) {{
+                        // Pause
+                        if (currentAudio) currentAudio.pause();
+                        paused = true;
+                        speakBtn.textContent = '▶ Resume';
+                        speakBtn.classList.add('playing');
+                        return;
+                    }}
+                    if (paused) {{
+                        // Resume
+                        if (currentAudio) {{
+                            try {{ await currentAudio.play(); }} catch(e) {{}}
+                            paused = false;
+                            speakBtn.textContent = '⏸ Pause';
+                        }}
+                        return;
+                    }}
+                    // Fresh play: fetch segments, then play from start
+                    abortChain = false;
+                    segIdx = 0;
+                    segReqId++;
+                    const myReq = segReqId;
+                    speakBtn.textContent = 'Loading…';
+                    speakBtn.classList.add('loading');
+                    try {{
+                        const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/prose-segments');
+                        if (!r.ok) throw new Error('Failed to load segments');
+                        const data = await r.json();
+                        segments = data.segments || [];
+                        if (!segments.length) {{
+                            speakBtn.textContent = 'No text';
+                            speakBtn.classList.remove('loading');
+                            setTimeout(() => speakBtn.textContent = '🔊 Play', 1500);
+                            return;
+                        }}
+                        playing = true;
+                        paused = false;
+                        speakBtn.textContent = '⏸ Pause';
+                        speakBtn.classList.remove('loading');
+                        speakBtn.classList.add('playing');
+                        await playSegment(myReq);
+                    }} catch(e) {{
+                        console.warn('Story TTS error:', e);
+                        speakBtn.textContent = '🔊 Play';
+                        speakBtn.classList.remove('loading', 'playing');
+                        playing = false;
+                    }}
+                }});
+
+                async function playSegment(myReq) {{
+                    if (abortChain || segReqId !== myReq || segIdx >= segments.length) {{
+                        speakBtn.textContent = '🔊 Play';
+                        speakBtn.classList.remove('loading', 'playing');
+                        playing = false;
+                        currentAudio = null;
+                        return;
+                    }}
+                    speakBtn.textContent = 'Loading…';
+                    speakBtn.classList.add('loading');
+                    try {{
+                        const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/audio/' + segIdx);
+                        if (!r.ok) throw new Error('Audio fetch failed');
+                        const blob = await r.blob();
+                        const url = URL.createObjectURL(blob);
+                        const audio = new Audio(url);
+                        currentAudio = audio;
+                        speakBtn.textContent = '⏸ Pause';
+                        speakBtn.classList.remove('loading');
+                        speakBtn.classList.add('playing');
+                        audio.onended = () => {{
+                            URL.revokeObjectURL(url);
+                            segIdx++;
+                            playSegment(myReq);
+                        }};
+                        audio.onerror = (e) => {{
+                            console.warn('Segment audio error:', e);
+                            URL.revokeObjectURL(url);
+                            speakBtn.textContent = '🔊 Play';
+                            speakBtn.classList.remove('loading', 'playing');
+                            playing = false;
+                            currentAudio = null;
+                        }};
+                        await audio.play();
+                    }} catch(e) {{
+                        console.warn('Segment fetch error:', e);
+                        speakBtn.textContent = '🔊 Play';
+                        speakBtn.classList.remove('loading', 'playing');
+                        playing = false;
+                        currentAudio = null;
+                    }}
+                }}
+            }})();
         </script>
     </body>
     </html>

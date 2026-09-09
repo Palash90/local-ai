@@ -235,529 +235,31 @@ def set_app_state(state):
 
 
 # ---------------------------------------------------------------------------
-# Text-to-speech (read-aloud button).
-#
-# Piper voices are cached process-wide: a new Handler instance is created
-# per HTTP request, so per-instance caching would reload the 60-110MB ONNX
-# model on every click. Piper's espeak-ng bridge is not thread-safe, so
-# voice load + synthesis are serialized behind _PIPER_LOCK.
+# Text-to-speech — all logic lives in server/features/tts.py (shared by
+# chat-webui and markdown_hosting).  Names below are re-exported so the
+# rest of api.py keeps working without changes.
 # ---------------------------------------------------------------------------
 
-PIPER_VOICES = {
-    # Only en/es stay on Piper (high-quality local voices). Bengali,
-    # Hindi, Telugu and Kannada route to edge-tts neural female voices —
-    # Piper's Indic voices sound robotic in comparison. The .onnx files
-    # remain on disk as an offline fallback option.
-    "es": "/home/palash/.piper_voices/es_MX-claude-high.onnx",
-    "en": "/home/palash/.piper_voices/en_US-lessac-high.onnx",
-}
-EDGE_VOICES = {
-    "bn": "bn-BD-NabanitaNeural",
-    "hi": "hi-IN-SwaraNeural",
-    "te": "te-IN-ShrutiNeural",
-    "kn": "kn-IN-SapnaNeural",
-    "es": "es-MX-DaliaNeural",
-    "en": "en-US-AriaNeural",
-}
-_PIPER_LOCK = threading.Lock()
-_PIPER_VOICES = {}
-_TTS_AUDIO_CACHE = {}
-_TTS_AUDIO_CACHE_ORDER = []
-_TTS_AUDIO_CACHE_MAX = 64
-
-
-def _tts_ext_for(data):
-    """Sniff audio container from magic bytes (avoids threading ext through callers)."""
-    if data[:4] == b"RIFF":
-        return ".wav"
-    if data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
-        return ".mp3"
-    return ""
-
-
-def _tts_cache_get(key):
-    with _PIPER_LOCK:
-        hit = _TTS_AUDIO_CACHE.get(key)
-    if hit is not None:
-        return hit
-    # Disk tiers: primary first, then the (optional) secondary archive.
-    # Filenames are content hashes, so a file moved between tiers by hand
-    # is found with no mapping updates; a miss simply re-synthesizes.
-    for ext in (".wav", ".mp3"):
-        for base in (TTS_CACHE_DIR, TTS_CACHE_SECONDARY_DIR or None):
-            if not base:
-                continue
-            try:
-                path = os.path.join(base, key + ext)
-                if not os.path.isfile(path):
-                    continue
-                with open(path, "rb") as f:
-                    data = f.read()
-                if not data or _tts_ext_for(data) != ext:
-                    # Corrupt/truncated entry: drop primary copies so the
-                    # next lookup re-synthesizes; never serve bad bytes.
-                    if base == TTS_CACHE_DIR:
-                        try:
-                            os.remove(path)
-                        except OSError:
-                            pass
-                    continue
-                print(f"[tts] disk cache hit ({base}, {len(data)} bytes)")
-                with _PIPER_LOCK:
-                    _TTS_AUDIO_CACHE[key] = data
-                return data
-            except OSError:
-                continue
-    return None
-
-
-def _tts_prune_disk_cache():
-    """Enforce TTS_CACHE_MAX_BYTES on the primary dir (oldest-mtime-first)."""
-    try:
-        files = []
-        total = 0
-        for name in os.listdir(TTS_CACHE_DIR):
-            if not (name.endswith(".wav") or name.endswith(".mp3")):
-                continue
-            path = os.path.join(TTS_CACHE_DIR, name)
-            try:
-                st = os.stat(path)
-            except OSError:
-                continue
-            files.append((st.st_mtime, st.st_size, path))
-            total += st.st_size
-        files.sort()
-        for _, size, path in files:
-            if total <= TTS_CACHE_MAX_BYTES:
-                break
-            try:
-                os.remove(path)
-                total -= size
-            except OSError:
-                continue
-    except OSError:
-        pass
-
-
-def _tts_cache_put(key, value):
-    with _PIPER_LOCK:
-        _TTS_AUDIO_CACHE[key] = value
-        _TTS_AUDIO_CACHE_ORDER.append(key)
-        while len(_TTS_AUDIO_CACHE_ORDER) > _TTS_AUDIO_CACHE_MAX:
-            old = _TTS_AUDIO_CACHE_ORDER.pop(0)
-            _TTS_AUDIO_CACHE.pop(old, None)
-    # Primary disk tier only; the secondary archive is the operator's
-    # manual domain (server never writes there). Atomic rename so a file
-    # moved by hand mid-write is always complete under its final name.
-    ext = _tts_ext_for(value)
-    if not ext:
-        return
-    try:
-        os.makedirs(TTS_CACHE_DIR, exist_ok=True)
-        tmp = os.path.join(TTS_CACHE_DIR, f".{key}{ext}.tmp")
-        final = os.path.join(TTS_CACHE_DIR, key + ext)
-        if not os.path.isfile(final):
-            with open(tmp, "wb") as f:
-                f.write(value)
-            os.replace(tmp, final)
-        _tts_prune_disk_cache()
-    except OSError as e:
-        print(f"[tts] disk cache write skipped: {e}")
-
-
-def _split_speech_chunks(text, max_chunk=TTS_CHUNK_CHARS):
-    """Split clean speech text into sentence-bounded chunks for synthesis.
-
-    Splits on sentence terminators (danda ।, period, question mark,
-    exclamation, newline). A single sentence longer than max_chunk is
-    split on whitespace words so no chunk exceeds max_chunk.
-    """
-    import re as _re
-
-    if not text:
-        return []
-    if len(text) <= max_chunk:
-        return [text]
-
-    # Split while retaining the punctuation attached to the preceding sentence.
-    raw_sentences = _re.split(r"([।\.!\?\n]+)", text)
-    sentences = []
-    i = 0
-    while i < len(raw_sentences):
-        s = raw_sentences[i]
-        punct = raw_sentences[i + 1] if i + 1 < len(raw_sentences) else ""
-        combined = (s + punct).strip()
-        if combined:
-            sentences.append(combined)
-        i += 2
-
-    chunks = []
-    current = []
-    curr_len = 0
-    for s in sentences:
-        if len(s) > max_chunk:
-            if current:
-                chunks.append(" ".join(current))
-                current = []
-                curr_len = 0
-            words = s.split()
-            w_curr = []
-            w_len = 0
-            for w in words:
-                if w_len + len(w) + (1 if w_curr else 0) > max_chunk:
-                    if w_curr:
-                        chunks.append(" ".join(w_curr))
-                    w_curr = [w]
-                    w_len = len(w)
-                else:
-                    w_curr.append(w)
-                    w_len += len(w) + (1 if len(w_curr) > 1 else 0)
-            if w_curr:
-                chunks.append(" ".join(w_curr))
-            continue
-
-        add_len = len(s) + (1 if current else 0)
-        if curr_len + add_len > max_chunk:
-            chunks.append(" ".join(current))
-            current = [s]
-            curr_len = len(s)
-        else:
-            current.append(s)
-            curr_len += add_len
-    if current:
-        chunks.append(" ".join(current))
-    return chunks or [text]
-
-
-def _concat_wav_blobs(wav_blobs):
-    """Concatenate multiple single-channel WAV byte strings into one.
-
-    Extracts raw PCM frames from each WAV file and repackages them with
-    the first chunk's sample rate, channel count, and sample width.
-    """
-    import io as _io
-    import wave as _wave
-
-    if not wav_blobs:
-        return b""
-    if len(wav_blobs) == 1:
-        return wav_blobs[0]
-
-    frames = []
-    rate = 22050
-    nchannels = 1
-    sampwidth = 2
-    for i, blob in enumerate(wav_blobs):
-        try:
-            with _wave.open(_io.BytesIO(blob), "rb") as r:
-                if i == 0:
-                    rate = r.getframerate()
-                    nchannels = r.getnchannels()
-                    sampwidth = r.getsampwidth()
-                frames.append(r.readframes(r.getnframes()))
-        except Exception as e:
-            print(f"[tts] concat_wav error on chunk {i}: {e}")
-    out = _io.BytesIO()
-    with _wave.open(out, "wb") as w:
-        w.setnchannels(nchannels)
-        w.setsampwidth(sampwidth)
-        w.setframerate(rate)
-        w.writeframes(b"".join(frames))
-    return out.getvalue()
-
-
-def _tts_synthesize(raw_text, voice="", max_chars=TTS_MAX_CHARS):
-    """Clean, detect language and synthesize speech (chunked).
-
-    Shared by the authenticated ``/api/tts`` endpoint (max_chars=8000)
-    and the public share endpoint (max_chars=2000). Long stories are split
-    into sentence-bounded chunks of <= TTS_CHUNK_CHARS each, synthesized
-    or loaded from cache per chunk, and concatenated into a single audio
-    blob. Returns ``(audio_b64, mime_type)``. Raises ``ValueError`` when
-    there is nothing speakable.
-    """
-    import hashlib
-
-    text = markdown_to_speech_text(raw_text)
-    tag, text = _detect_tts_lang(text, voice)
-    if not text:
-        raise ValueError("No speakable text found")
-    if len(text) > max_chars:
-        cut = text[:max_chars].rsplit(" ", 1)[0]
-        text = cut or text[:max_chars]
-
-    chunks = _split_speech_chunks(text, max_chunk=TTS_CHUNK_CHARS)
-    total_chunks = len(chunks)
-
-    if tag in PIPER_VOICES:
-        wav_parts = []
-        for idx, chunk in enumerate(chunks):
-            key = hashlib.sha256(f"piper:{tag}:{chunk}".encode("utf-8")).hexdigest()
-            part = _tts_cache_get(key)
-            if part is None:
-                part = _synthesize_piper_wav(tag, chunk)
-                _tts_cache_put(key, part)
-            else:
-                if total_chunks > 1:
-                    print(f"[tts] Piper {tag} chunk {idx+1}/{total_chunks}: cache hit ({len(chunk)} chars)")
-                else:
-                    print(f"[tts] Piper {tag}: cache hit ({len(chunk)} chars)")
-            wav_parts.append(part)
-        combined_wav = _concat_wav_blobs(wav_parts)
-        return base64.b64encode(combined_wav).decode(), "audio/wav"
-
-    import asyncio, edge_tts
-
-    edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
-    mp3_parts = []
-    for idx, chunk in enumerate(chunks):
-        key = hashlib.sha256(f"edge:{edge_voice}:{chunk}".encode("utf-8")).hexdigest()
-        part = _tts_cache_get(key)
-        if part is None:
-            if total_chunks > 1:
-                print(f"[tts] edge-tts {tag} ({edge_voice}) chunk {idx+1}/{total_chunks}: {len(chunk)} chars")
-            else:
-                print(f"[tts] edge-tts {tag} ({edge_voice}): {len(chunk)} chars")
-            communicate = edge_tts.Communicate(chunk, edge_voice)
-            mp3_data = bytearray()
-
-            async def _gen():
-                async for chunk_piece in communicate.stream():
-                    if chunk_piece["type"] == "audio":
-                        mp3_data.extend(chunk_piece["data"])
-
-            asyncio.run(_gen())
-            part = bytes(mp3_data)
-            _tts_cache_put(key, part)
-        else:
-            if total_chunks > 1:
-                print(f"[tts] edge-tts {tag} chunk {idx+1}/{total_chunks}: cache hit ({len(chunk)} chars)")
-            else:
-                print(f"[tts] edge-tts {tag}: cache hit ({len(chunk)} chars)")
-        mp3_parts.append(part)
-    combined_mp3 = b"".join(mp3_parts)
-    return base64.b64encode(combined_mp3).decode(), "audio/mpeg"
-
-
-def _tts_keys_for_raw_text(raw_text, voice="", max_chars=TTS_MAX_CHARS):
-    """Compute all possible TTS cache keys for a given raw message text.
-
-    Replicates the normalization, language detection, truncation and chunking
-    from ``_tts_synthesize`` so the exact cache keys can be determined
-    without executing any synthesis. Returns a set of hex key strings.
-    """
-    import hashlib
-
-    text = markdown_to_speech_text(raw_text)
-    tag, text = _detect_tts_lang(text, voice)
-    if not text:
-        return set()
-    if len(text) > max_chars:
-        cut = text[:max_chars].rsplit(" ", 1)[0]
-        text = cut or text[:max_chars]
-
-    chunks = _split_speech_chunks(text, max_chunk=TTS_CHUNK_CHARS)
-    keys = set()
-    if tag in PIPER_VOICES:
-        for chunk in chunks:
-            keys.add(hashlib.sha256(f"piper:{tag}:{chunk}".encode("utf-8")).hexdigest())
-    else:
-        edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
-        for chunk in chunks:
-            keys.add(hashlib.sha256(f"edge:{edge_voice}:{chunk}".encode("utf-8")).hexdigest())
-    return keys
-
-
-def _delete_tts_cache_key(key):
-    """Two-tier deletion of a cached TTS audio key.
-
-    Checks primary directory first; if file exists, deletes it. If not in
-    primary, checks secondary directory and deletes if present. Also removes
-    from in-memory cache.
-    """
-    with _PIPER_LOCK:
-        _TTS_AUDIO_CACHE.pop(key, None)
-        if key in _TTS_AUDIO_CACHE_ORDER:
-            try:
-                _TTS_AUDIO_CACHE_ORDER.remove(key)
-            except ValueError:
-                pass
-
-    for ext in (".wav", ".mp3"):
-        # Check primary first
-        primary_file = os.path.join(TTS_CACHE_DIR, key + ext)
-        if os.path.isfile(primary_file):
-            try:
-                os.remove(primary_file)
-                print(f"[tts] Deleted primary cache file: {primary_file}")
-                continue
-            except OSError as e:
-                print(f"[tts] Error removing primary file {primary_file}: {e}")
-
-        # If not in primary (or after primary check), check secondary
-        if TTS_CACHE_SECONDARY_DIR:
-            secondary_file = os.path.join(TTS_CACHE_SECONDARY_DIR, key + ext)
-            if os.path.isfile(secondary_file):
-                try:
-                    os.remove(secondary_file)
-                    print(f"[tts] Deleted secondary cache file: {secondary_file}")
-                except OSError as e:
-                    print(f"[tts] Error removing secondary file {secondary_file}: {e}")
-
-
-def purge_share_tts_audio(snapshot_message, keep_protected_keys):
-    """Purge TTS cache keys for a revoked share if not referenced elsewhere.
-
-    Two-tiered: checks primary dir and deletes, then checks secondary.
-    """
-    raw_c = _share_message_text({"message": snapshot_message})
-    if not raw_c:
-        return
-    keys = _tts_keys_for_raw_text(raw_c, max_chars=TTS_MAX_CHARS) | _tts_keys_for_raw_text(raw_c, max_chars=TTS_MAX_CHARS_PUBLIC)
-    for k in keys:
-        if k not in keep_protected_keys:
-            _delete_tts_cache_key(k)
-
-
-def _share_message_text(rec):
-    msg = (rec or {}).get("message", {})
-    content = msg.get("content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return " ".join(
-            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
-        )
-    return ""
-
-
-def markdown_to_speech_text(text):
-    """Convert chat markdown into speakable plain text.
-
-    Strips formatting symbols (so Piper doesn't read "asterisk asterisk"
-    or "colon"), drops code blocks/images/URLs, and joins blocks with
-    sentence pauses. Only touches ASCII markdown syntax, so Bengali,
-    Hindi, Telugu, Kannada and Spanish text passes through untouched.
-    """
-    import re as _re
-    from html import unescape as _unescape
-
-    if not text:
-        return ""
-    t = str(text)
-    # Markdown table separator rows (|---|---|) and setext/hr lines:
-    # drop before conversion so they are never spoken as "dash dash".
-    t = _re.sub(r"(?m)^\s*\|?[\s:\-|]+\|?\s*$", " ", t)
-    # Fenced code blocks: drop entirely (code must not be read aloud).
-    t = _re.sub(r"```.*?```", " ", t, flags=_re.DOTALL)
-    # Inline code: keep the content, drop the backticks.
-    t = _re.sub(r"`([^`]*)`", r"\1", t)
-    try:
-        import markdown as _md
-        from bs4 import BeautifulSoup as _Soup
-
-        soup = _Soup(_md.markdown(t), "html.parser")
-        for node in soup(["pre", "code", "script", "style", "img", "hr", "table"]):
-            if node.name == "table":
-                # Read table cells as flowing text instead of dropping.
-                cells = [
-                    c.get_text(" ", strip=True)
-                    for c in node.find_all(["th", "td"])
-                    if c.get_text(" ", strip=True)
-                ]
-                node.replace_with(". ".join(cells) + ". " if cells else " ")
-            else:
-                node.decompose()
-        for a in soup.find_all("a"):
-            a.replace_with(a.get_text(" ", strip=True))
-        parts = []
-        for el in soup.find_all(
-            ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "div"]
-        ):
-            s = el.get_text(" ", strip=True)
-            if s:
-                parts.append(s)
-        t = ". ".join(parts) if parts else soup.get_text(" ", strip=True)
-    except Exception:
-        # Fallback when markdown/bs4 are unavailable: regex strip.
-        t = _re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", t)
-        t = _re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
-        t = _re.sub(r"(?m)^#{1,6}\s*", "", t)
-        t = _re.sub(r"[*_~]{1,3}", "", t)
-    t = _re.sub(r"https?://\S+|www\.\S+", " ", t)  # bare URLs
-    t = _re.sub(r"<[^>]+>", " ", t)  # stray HTML tags
-    t = _re.sub(r"\[NEXT TURN:[^\]]*\]", " ", t, flags=_re.IGNORECASE)
-    t = _re.sub(r"\s*:\s*", ", ", t)  # avoid a spoken "colon"
-    t = _re.sub(r"[|*_~#>`]+", " ", t)  # leftover markers
-    t = _re.sub(r"([.!?]){2,}", r"\1", t)
-    t = _re.sub(r"\s+", " ", t).strip()
-    return _unescape(t)
-
-
-def _detect_tts_lang(text, voice=""):
-    """Detect the TTS language tag for cleaned speech text."""
-    import re as _re
-
-    m = _re.match(r"^\s*\[(bn|hi|te|kn|es|en)\]\s*", text)
-    if m:
-        return m.group(1), text[m.end():].lstrip()
-    if voice:
-        return "en", text
-    bn = len(_re.findall(r"[\u0980-\u09FF]", text))
-    hi = len(_re.findall(r"[\u0900-\u097F]", text))
-    te = len(_re.findall(r"[\u0C00-\u0C7F]", text))
-    kn = len(_re.findall(r"[\u0C80-\u0CFF]", text))
-    scores = {"bn": bn, "hi": hi, "te": te, "kn": kn}
-    tag = max(scores, key=scores.get)
-    if scores[tag] > 0:
-        return tag, text
-    # Latin-only text: Spanish markers (ñ, ¿, ¡, accented vowels,
-    # common Spanish words) route to the Spanish voice.
-    if _re.search(r"[ñÑ¡¿áéíóúü]", text):
-        return "es", text
-    if _re.search(
-        r"\b(el|la|los|las|una|uno|unos|unas|qué|está|estás|están|para|porque|"
-        r"hola|gracias|por favor|buenos|buenas|días|tardes|noches)\b",
-        text,
-        _re.IGNORECASE,
-    ):
-        return "es", text
-    return "en", text
-
-
-def _synthesize_piper_wav(tag, text):
-    """Synthesize WAV bytes with the cached Piper voice (thread-safe)."""
-    import io as _io
-    import wave as _wave
-
-    import piper as _piper
-
-    with _PIPER_LOCK:
-        pv = _PIPER_VOICES.get(tag)
-        if pv is None:
-            onnx_path = PIPER_VOICES[tag]
-            if not os.path.isfile(onnx_path):
-                raise FileNotFoundError(f"Piper voice missing: {onnx_path}")
-            print(f"[tts] Loading Piper voice '{tag}' ...")
-            pv = _piper.PiperVoice.load(onnx_path, config_path=onnx_path + ".json")
-            _PIPER_VOICES[tag] = pv
-        print(f"[tts] Piper {tag}: synthesizing {len(text)} chars")
-        rate = 22050
-        frames = []
-        for chunk in pv.synthesize(text):
-            try:
-                rate = int(chunk.sample_rate)
-            except Exception:
-                pass
-            int16 = (chunk.audio_float_array * 32767).clip(-32768, 32767).astype("<i2")
-            frames.append(int16.tobytes())
-        wav_io = _io.BytesIO()
-        with _wave.open(wav_io, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(rate)
-            wf.writeframes(b"".join(frames))
-        return wav_io.getvalue()
+from server.features.tts import (
+    PIPER_VOICES,
+    EDGE_VOICES,
+    tts_synthesize as _tts_synthesize,
+    detect_tts_lang as _detect_tts_lang,
+    markdown_to_speech_text,
+    story_markdown_to_speech_text,
+    _split_speech_chunks,
+    _concat_wav_blobs,
+    synthesize_piper_wav as _synthesize_piper_wav,
+    tts_keys_for_raw_text as _tts_keys_for_raw_text,
+    tts_keys_for_story_text as tts_keys_for_story_text,
+    delete_tts_cache_key as _delete_tts_cache_key,
+    purge_share_tts_audio as purge_share_tts_audio,
+    share_message_text as _share_message_text,
+    _TTS_AUDIO_CACHE,
+    _PIPER_LOCK,
+    _PIPER_VOICES,
+    _TTS_AUDIO_CACHE_ORDER,
+)
 
 
 def read_index_html():
@@ -1644,6 +1146,46 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with open(filepath, "wb") as f:
                 f.write(raw)
             self.send_json({"url": f"/uploads/{safe_name}"})
+        elif self.path == "/api/internal/tts":
+            # Internal-only TTS: loopback + shared token, used by
+            # markdown_hosting for story-page audio (guest access).
+            from server.config import TTS_INTERNAL_TOKEN
+            import hashlib as _hashlib
+
+            if not TTS_INTERNAL_TOKEN:
+                self.send_json({"error": "Internal TTS not configured"}, status=503)
+                return
+            # Must come from loopback
+            try:
+                client_ip = self.client_address[0]
+            except Exception:
+                client_ip = ""
+            if client_ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                self.send_json({"error": "Forbidden"}, status=403)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            token = body.get("token", "")
+            if not token or _hashlib.sha256(token.encode()).hexdigest() != _hashlib.sha256(TTS_INTERNAL_TOKEN.encode()).hexdigest():
+                self.send_json({"error": "Invalid token"}, status=403)
+                return
+            raw_text = body.get("text", "")
+            cleaner_name = body.get("cleaner", "chat")
+            max_chars = body.get("max_chars", TTS_MAX_CHARS)
+            if not raw_text:
+                self.send_json({"error": "No text provided"}, status=400)
+                return
+            try:
+                from server.features.tts import story_markdown_to_speech_text as _story_clean
+                cleaner = _story_clean if cleaner_name == "story" else markdown_to_speech_text
+                audio_b64, mime = _tts_synthesize(raw_text, max_chars=max_chars, cleaner=cleaner)
+                self.send_json({"audio": audio_b64, "type": mime})
+            except ValueError as e:
+                self.send_json({"error": str(e)}, status=400)
+            except Exception as e:
+                print(f"[tts] Internal error: {e}")
+                traceback.print_exc()
+                self.send_json({"error": str(e)}, status=500)
         elif self.path == "/api/tts":
             user = get_current_user(self.headers)
             if not user:
