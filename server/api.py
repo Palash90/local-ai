@@ -36,6 +36,9 @@ from server.config import (
     KNOWN_AGENT_USERS,
     MCP_USER,
     SELF_CHAT_MODE,
+    TTS_CACHE_DIR,
+    TTS_CACHE_MAX_BYTES,
+    TTS_CACHE_SECONDARY_DIR,
     UPLOADS_DIR,
 )
 from server.features.tasks_db import _MISSING
@@ -262,9 +265,77 @@ _TTS_AUDIO_CACHE = {}
 _TTS_AUDIO_CACHE_ORDER = []
 
 
+def _tts_ext_for(data):
+    """Sniff audio container from magic bytes (avoids threading ext through callers)."""
+    if data[:4] == b"RIFF":
+        return ".wav"
+    if data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
+        return ".mp3"
+    return ""
+
+
 def _tts_cache_get(key):
     with _PIPER_LOCK:
-        return _TTS_AUDIO_CACHE.get(key)
+        hit = _TTS_AUDIO_CACHE.get(key)
+    if hit is not None:
+        return hit
+    # Disk tiers: primary first, then the (optional) secondary archive.
+    # Filenames are content hashes, so a file moved between tiers by hand
+    # is found with no mapping updates; a miss simply re-synthesizes.
+    for ext in (".wav", ".mp3"):
+        for base in (TTS_CACHE_DIR, TTS_CACHE_SECONDARY_DIR or None):
+            if not base:
+                continue
+            try:
+                path = os.path.join(base, key + ext)
+                if not os.path.isfile(path):
+                    continue
+                with open(path, "rb") as f:
+                    data = f.read()
+                if not data or _tts_ext_for(data) != ext:
+                    # Corrupt/truncated entry: drop primary copies so the
+                    # next lookup re-synthesizes; never serve bad bytes.
+                    if base == TTS_CACHE_DIR:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                    continue
+                print(f"[tts] disk cache hit ({base}, {len(data)} bytes)")
+                with _PIPER_LOCK:
+                    _TTS_AUDIO_CACHE[key] = data
+                return data
+            except OSError:
+                continue
+    return None
+
+
+def _tts_prune_disk_cache():
+    """Enforce TTS_CACHE_MAX_BYTES on the primary dir (oldest-mtime-first)."""
+    try:
+        files = []
+        total = 0
+        for name in os.listdir(TTS_CACHE_DIR):
+            if not (name.endswith(".wav") or name.endswith(".mp3")):
+                continue
+            path = os.path.join(TTS_CACHE_DIR, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, path))
+            total += st.st_size
+        files.sort()
+        for _, size, path in files:
+            if total <= TTS_CACHE_MAX_BYTES:
+                break
+            try:
+                os.remove(path)
+                total -= size
+            except OSError:
+                continue
+    except OSError:
+        pass
 
 
 def _tts_cache_put(key, value):
@@ -274,6 +345,23 @@ def _tts_cache_put(key, value):
         while len(_TTS_AUDIO_CACHE_ORDER) > _TTS_AUDIO_CACHE_MAX:
             old = _TTS_AUDIO_CACHE_ORDER.pop(0)
             _TTS_AUDIO_CACHE.pop(old, None)
+    # Primary disk tier only; the secondary archive is the operator's
+    # manual domain (server never writes there). Atomic rename so a file
+    # moved by hand mid-write is always complete under its final name.
+    ext = _tts_ext_for(value)
+    if not ext:
+        return
+    try:
+        os.makedirs(TTS_CACHE_DIR, exist_ok=True)
+        tmp = os.path.join(TTS_CACHE_DIR, f".{key}{ext}.tmp")
+        final = os.path.join(TTS_CACHE_DIR, key + ext)
+        if not os.path.isfile(final):
+            with open(tmp, "wb") as f:
+                f.write(value)
+            os.replace(tmp, final)
+        _tts_prune_disk_cache()
+    except OSError as e:
+        print(f"[tts] disk cache write skipped: {e}")
 
 
 def _tts_synthesize(raw_text, voice=""):
