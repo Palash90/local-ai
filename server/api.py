@@ -256,62 +256,6 @@ EDGE_VOICES = {
 TTS_MAX_CHARS = 2000
 _TTS_AUDIO_CACHE_MAX = 64
 
-# Bengali inherent-vowel (অ) fixes: word → IPA. The অ in these words is
-# systematically misread by statistical voices (final -o swallowed:
-# যেন→"jen"; ô↔o swapped: দেখলো→"dekhol"; phantom vowel: হর্ন→"horno"),
-# so they are pinned deterministically via SSML <phoneme> instead.
-# Add entries as mispronounced words are reported; verify by ear.
-BN_PHONEME_FIXES = {
-    "যাচ্ছিল": "dʒatʃtʃʰilo",
-    "দেখলো": "dekʰlo",
-    "হর্ন": "ɦɔrn",
-    "ভাবলো": "bʱablo",
-    "যেন": "dʒeno",
-    "পেলো": "pelo",
-    "গাঢ়": "ɡaɽʰo",
-    "বুঝলো": "budʒʱlo",
-    "দিলো": "dilo",
-    "লাগলো": "laɡlo",
-}
-
-
-def _apply_bn_phoneme_fixes(text, edge_voice):
-    """Wrap known tricky Bengali words in SSML <phoneme> tags.
-
-    Returns plain text unchanged when nothing matches, otherwise a full
-    <speak> SSML envelope (edge-tts auto-detects SSML by the prefix).
-    """
-    import re as _re
-
-    if not BN_PHONEME_FIXES:
-        return text
-    # Escape XML metachars first (tags are inserted after).
-    esc = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    pat = (
-        "(?<![\u0980-\u09FF\u200c\u200d])(?:"
-        + "|".join(map(_re.escape, BN_PHONEME_FIXES))
-        + ")(?![\u0980-\u09FF\u200c\u200d])"
-    )
-    found = []
-
-    def _wrap(m):
-        w = m.group(0)
-        ipa = BN_PHONEME_FIXES.get(w)
-        if not ipa:
-            return w
-        found.append(w)
-        return f'<phoneme alphabet="ipa" ph="{ipa}">{w}</phoneme>'
-
-    out = _re.sub(pat, _wrap, esc)
-    if not found:
-        return text
-    print(f"[tts] bn phoneme fixes applied: {sorted(set(found))}")
-    lang = "bn-BD" if edge_voice.startswith("bn-BD") else "bn-IN"
-    return (
-        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' "
-        f"xml:lang='{lang}'><voice name='{edge_voice}'>{out}</voice></speak>"
-    )
-
 _PIPER_LOCK = threading.Lock()
 _PIPER_VOICES = {}
 _TTS_AUDIO_CACHE = {}
@@ -1288,18 +1232,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 else:
                     import asyncio, edge_tts
                     edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
-                    speak_text = (
-                        _apply_bn_phoneme_fixes(text, edge_voice)
-                        if tag == "bn"
-                        else text
-                    )
                     key = hashlib.sha256(
-                        f"edge:{edge_voice}:{speak_text}".encode("utf-8")
+                        f"edge:{edge_voice}:{text}".encode("utf-8")
                     ).hexdigest()
                     mp3_bytes = _tts_cache_get(key)
                     if mp3_bytes is None:
                         print(f"[tts] edge-tts {tag} ({edge_voice}): {len(text)} chars")
-                        communicate = edge_tts.Communicate(speak_text, edge_voice)
+                        communicate = edge_tts.Communicate(text, edge_voice)
                         mp3_data = bytearray()
                         async def _gen():
                             async for chunk in communicate.stream():
