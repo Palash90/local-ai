@@ -36,6 +36,12 @@ from server.config import (
     KNOWN_AGENT_USERS,
     MCP_USER,
     SELF_CHAT_MODE,
+    TTS_CACHE_DIR,
+    TTS_CACHE_MAX_BYTES,
+    TTS_CACHE_SECONDARY_DIR,
+    TTS_CHUNK_CHARS,
+    TTS_MAX_CHARS,
+    TTS_MAX_CHARS_PUBLIC,
     UPLOADS_DIR,
 )
 from server.features.tasks_db import _MISSING
@@ -229,242 +235,31 @@ def set_app_state(state):
 
 
 # ---------------------------------------------------------------------------
-# Text-to-speech (read-aloud button).
-#
-# Piper voices are cached process-wide: a new Handler instance is created
-# per HTTP request, so per-instance caching would reload the 60-110MB ONNX
-# model on every click. Piper's espeak-ng bridge is not thread-safe, so
-# voice load + synthesis are serialized behind _PIPER_LOCK.
+# Text-to-speech — all logic lives in server/features/tts.py (shared by
+# chat-webui and markdown_hosting).  Names below are re-exported so the
+# rest of api.py keeps working without changes.
 # ---------------------------------------------------------------------------
 
-PIPER_VOICES = {
-    # Only en/es stay on Piper (high-quality local voices). Bengali,
-    # Hindi, Telugu and Kannada route to edge-tts neural female voices —
-    # Piper's Indic voices sound robotic in comparison. The .onnx files
-    # remain on disk as an offline fallback option.
-    "es": "/home/palash/.piper_voices/es_MX-claude-high.onnx",
-    "en": "/home/palash/.piper_voices/en_US-lessac-high.onnx",
-}
-EDGE_VOICES = {
-    "bn": "bn-BD-NabanitaNeural",
-    "hi": "hi-IN-SwaraNeural",
-    "te": "te-IN-ShrutiNeural",
-    "kn": "kn-IN-SapnaNeural",
-    "es": "es-MX-DaliaNeural",
-    "en": "en-US-AriaNeural",
-}
-TTS_MAX_CHARS = 2000
-_TTS_AUDIO_CACHE_MAX = 64
-
-_PIPER_LOCK = threading.Lock()
-_PIPER_VOICES = {}
-_TTS_AUDIO_CACHE = {}
-_TTS_AUDIO_CACHE_ORDER = []
-
-
-def _tts_cache_get(key):
-    with _PIPER_LOCK:
-        return _TTS_AUDIO_CACHE.get(key)
-
-
-def _tts_cache_put(key, value):
-    with _PIPER_LOCK:
-        _TTS_AUDIO_CACHE[key] = value
-        _TTS_AUDIO_CACHE_ORDER.append(key)
-        while len(_TTS_AUDIO_CACHE_ORDER) > _TTS_AUDIO_CACHE_MAX:
-            old = _TTS_AUDIO_CACHE_ORDER.pop(0)
-            _TTS_AUDIO_CACHE.pop(old, None)
-
-
-def _tts_synthesize(raw_text, voice=""):
-    """Clean, detect language and synthesize speech.
-
-    Shared by the authenticated ``/api/tts`` endpoint and the public
-    share endpoint. Returns ``(audio_b64, mime_type)``. Raises
-    ``ValueError`` when there is nothing speakable.
-    """
-    import hashlib
-
-    text = markdown_to_speech_text(raw_text)
-    tag, text = _detect_tts_lang(text, voice)
-    if not text:
-        raise ValueError("No speakable text found")
-    if len(text) > TTS_MAX_CHARS:
-        cut = text[:TTS_MAX_CHARS].rsplit(" ", 1)[0]
-        text = cut or text[:TTS_MAX_CHARS]
-
-    if tag in PIPER_VOICES:
-        key = hashlib.sha256(f"piper:{tag}:{text}".encode("utf-8")).hexdigest()
-        wav_bytes = _tts_cache_get(key)
-        if wav_bytes is None:
-            wav_bytes = _synthesize_piper_wav(tag, text)
-            _tts_cache_put(key, wav_bytes)
-        else:
-            print(f"[tts] Piper {tag}: cache hit ({len(text)} chars)")
-        return base64.b64encode(wav_bytes).decode(), "audio/wav"
-    import asyncio, edge_tts
-
-    edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
-    key = hashlib.sha256(f"edge:{edge_voice}:{text}".encode("utf-8")).hexdigest()
-    mp3_bytes = _tts_cache_get(key)
-    if mp3_bytes is None:
-        print(f"[tts] edge-tts {tag} ({edge_voice}): {len(text)} chars")
-        communicate = edge_tts.Communicate(text, edge_voice)
-        mp3_data = bytearray()
-
-        async def _gen():
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    mp3_data.extend(chunk["data"])
-
-        asyncio.run(_gen())
-        mp3_bytes = bytes(mp3_data)
-        _tts_cache_put(key, mp3_bytes)
-    else:
-        print(f"[tts] edge-tts {tag}: cache hit ({len(text)} chars)")
-    return base64.b64encode(mp3_bytes).decode(), "audio/mpeg"
-
-
-def _share_message_text(rec):
-    """Extract speakable text from a share snapshot record."""
-    msg = (rec or {}).get("message", {})
-    content = msg.get("content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return " ".join(
-            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
-        )
-    return ""
-
-
-def markdown_to_speech_text(text):
-    """Convert chat markdown into speakable plain text.
-
-    Strips formatting symbols (so Piper doesn't read "asterisk asterisk"
-    or "colon"), drops code blocks/images/URLs, and joins blocks with
-    sentence pauses. Only touches ASCII markdown syntax, so Bengali,
-    Hindi, Telugu, Kannada and Spanish text passes through untouched.
-    """
-    import re as _re
-    from html import unescape as _unescape
-
-    if not text:
-        return ""
-    t = str(text)
-    # Markdown table separator rows (|---|---|) and setext/hr lines:
-    # drop before conversion so they are never spoken as "dash dash".
-    t = _re.sub(r"(?m)^\s*\|?[\s:\-|]+\|?\s*$", " ", t)
-    # Fenced code blocks: drop entirely (code must not be read aloud).
-    t = _re.sub(r"```.*?```", " ", t, flags=_re.DOTALL)
-    # Inline code: keep the content, drop the backticks.
-    t = _re.sub(r"`([^`]*)`", r"\1", t)
-    try:
-        import markdown as _md
-        from bs4 import BeautifulSoup as _Soup
-
-        soup = _Soup(_md.markdown(t), "html.parser")
-        for node in soup(["pre", "code", "script", "style", "img", "hr", "table"]):
-            if node.name == "table":
-                # Read table cells as flowing text instead of dropping.
-                cells = [
-                    c.get_text(" ", strip=True)
-                    for c in node.find_all(["th", "td"])
-                    if c.get_text(" ", strip=True)
-                ]
-                node.replace_with(". ".join(cells) + ". " if cells else " ")
-            else:
-                node.decompose()
-        for a in soup.find_all("a"):
-            a.replace_with(a.get_text(" ", strip=True))
-        parts = []
-        for el in soup.find_all(
-            ["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "div"]
-        ):
-            s = el.get_text(" ", strip=True)
-            if s:
-                parts.append(s)
-        t = ". ".join(parts) if parts else soup.get_text(" ", strip=True)
-    except Exception:
-        # Fallback when markdown/bs4 are unavailable: regex strip.
-        t = _re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", t)
-        t = _re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
-        t = _re.sub(r"(?m)^#{1,6}\s*", "", t)
-        t = _re.sub(r"[*_~]{1,3}", "", t)
-    t = _re.sub(r"https?://\S+|www\.\S+", " ", t)  # bare URLs
-    t = _re.sub(r"<[^>]+>", " ", t)  # stray HTML tags
-    t = _re.sub(r"\[NEXT TURN:[^\]]*\]", " ", t, flags=_re.IGNORECASE)
-    t = _re.sub(r"\s*:\s*", ", ", t)  # avoid a spoken "colon"
-    t = _re.sub(r"[|*_~#>`]+", " ", t)  # leftover markers
-    t = _re.sub(r"([.!?]){2,}", r"\1", t)
-    t = _re.sub(r"\s+", " ", t).strip()
-    return _unescape(t)
-
-
-def _detect_tts_lang(text, voice=""):
-    """Detect the TTS language tag for cleaned speech text."""
-    import re as _re
-
-    m = _re.match(r"^\s*\[(bn|hi|te|kn|es|en)\]\s*", text)
-    if m:
-        return m.group(1), text[m.end():].lstrip()
-    if voice:
-        return "en", text
-    bn = len(_re.findall(r"[\u0980-\u09FF]", text))
-    hi = len(_re.findall(r"[\u0900-\u097F]", text))
-    te = len(_re.findall(r"[\u0C00-\u0C7F]", text))
-    kn = len(_re.findall(r"[\u0C80-\u0CFF]", text))
-    scores = {"bn": bn, "hi": hi, "te": te, "kn": kn}
-    tag = max(scores, key=scores.get)
-    if scores[tag] > 0:
-        return tag, text
-    # Latin-only text: Spanish markers (ñ, ¿, ¡, accented vowels,
-    # common Spanish words) route to the Spanish voice.
-    if _re.search(r"[ñÑ¡¿áéíóúü]", text):
-        return "es", text
-    if _re.search(
-        r"\b(el|la|los|las|una|uno|unos|unas|qué|está|estás|están|para|porque|"
-        r"hola|gracias|por favor|buenos|buenas|días|tardes|noches)\b",
-        text,
-        _re.IGNORECASE,
-    ):
-        return "es", text
-    return "en", text
-
-
-def _synthesize_piper_wav(tag, text):
-    """Synthesize WAV bytes with the cached Piper voice (thread-safe)."""
-    import io as _io
-    import wave as _wave
-
-    import piper as _piper
-
-    with _PIPER_LOCK:
-        pv = _PIPER_VOICES.get(tag)
-        if pv is None:
-            onnx_path = PIPER_VOICES[tag]
-            if not os.path.isfile(onnx_path):
-                raise FileNotFoundError(f"Piper voice missing: {onnx_path}")
-            print(f"[tts] Loading Piper voice '{tag}' ...")
-            pv = _piper.PiperVoice.load(onnx_path, config_path=onnx_path + ".json")
-            _PIPER_VOICES[tag] = pv
-        print(f"[tts] Piper {tag}: synthesizing {len(text)} chars")
-        rate = 22050
-        frames = []
-        for chunk in pv.synthesize(text):
-            try:
-                rate = int(chunk.sample_rate)
-            except Exception:
-                pass
-            int16 = (chunk.audio_float_array * 32767).clip(-32768, 32767).astype("<i2")
-            frames.append(int16.tobytes())
-        wav_io = _io.BytesIO()
-        with _wave.open(wav_io, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(rate)
-            wf.writeframes(b"".join(frames))
-        return wav_io.getvalue()
+from server.features.tts import (
+    PIPER_VOICES,
+    EDGE_VOICES,
+    tts_synthesize as _tts_synthesize,
+    detect_tts_lang as _detect_tts_lang,
+    markdown_to_speech_text,
+    story_markdown_to_speech_text,
+    _split_speech_chunks,
+    _concat_wav_blobs,
+    synthesize_piper_wav as _synthesize_piper_wav,
+    tts_keys_for_raw_text as _tts_keys_for_raw_text,
+    tts_keys_for_story_text as tts_keys_for_story_text,
+    delete_tts_cache_key as _delete_tts_cache_key,
+    purge_share_tts_audio as purge_share_tts_audio,
+    share_message_text as _share_message_text,
+    _TTS_AUDIO_CACHE,
+    _PIPER_LOCK,
+    _PIPER_VOICES,
+    _TTS_AUDIO_CACHE_ORDER,
+)
 
 
 def read_index_html():
@@ -808,8 +603,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             token = self.path.split("/")[3].split("?")[0]
             purge = parse_qs(urlparse(self.path).query).get("purge", [""])[0] == "1"
+            # If purging, grab the snapshot message content and compute protected keys before revoking
+            snapshot_msg = None
+            if purge:
+                with _data_lock:
+                    rec = shares.get(token)
+                    if rec and rec.get("owner") == user:
+                        snapshot_msg = rec.get("message", {})
+
             ok, info = revoke_share(token, user, purge=purge)
             if ok:
+                if purge and snapshot_msg:
+                    protected_tts_keys = set()
+                    with _data_lock:
+                        for other_t, other_rec in shares.items():
+                            ot_text = _share_message_text(other_rec)
+                            if ot_text:
+                                protected_tts_keys |= _tts_keys_for_raw_text(ot_text, max_chars=TTS_MAX_CHARS)
+                                protected_tts_keys |= _tts_keys_for_raw_text(ot_text, max_chars=TTS_MAX_CHARS_PUBLIC)
+                        for s_msgs in sessions.values():
+                            for m in s_msgs:
+                                if m.get("role") == "assistant":
+                                    c = m.get("content", "")
+                                    if isinstance(c, str) and c:
+                                        protected_tts_keys |= _tts_keys_for_raw_text(c, max_chars=TTS_MAX_CHARS)
+                                    elif isinstance(c, list):
+                                        joined = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+                                        if joined:
+                                            protected_tts_keys |= _tts_keys_for_raw_text(joined, max_chars=TTS_MAX_CHARS)
+                    purge_share_tts_audio(snapshot_msg, protected_tts_keys)
+
                 self.send_json({"status": "revoked", **info})
             else:
                 self.send_json({"error": "Share not found or not yours"}, status=404)
@@ -902,6 +725,44 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     elif os.path.exists(fpath):
                         print(f"[delete] Removed uploaded image: {fpath}")
                         os.remove(fpath)
+
+            # Compute protected TTS keys from active shares and other remaining sessions
+            # so audio files still referenced elsewhere are preserved.
+            protected_tts_keys = set()
+            for rec in share_recs:
+                s_text = _share_message_text(rec)
+                if s_text:
+                    protected_tts_keys |= _tts_keys_for_raw_text(s_text, max_chars=TTS_MAX_CHARS)
+                    protected_tts_keys |= _tts_keys_for_raw_text(s_text, max_chars=TTS_MAX_CHARS_PUBLIC)
+
+            with _data_lock:
+                for other_sid, other_msgs in sessions.items():
+                    if other_sid == sid:
+                        continue
+                    for other_msg in other_msgs:
+                        if other_msg.get("role") == "assistant":
+                            c = other_msg.get("content", "")
+                            if isinstance(c, str) and c:
+                                protected_tts_keys |= _tts_keys_for_raw_text(c, max_chars=TTS_MAX_CHARS)
+                            elif isinstance(c, list):
+                                joined = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+                                if joined:
+                                    protected_tts_keys |= _tts_keys_for_raw_text(joined, max_chars=TTS_MAX_CHARS)
+
+            # Clean up TTS audio cache files for deleted messages (two-tier deletion: primary, then secondary)
+            for msg in msgs:
+                if msg.get("role") == "assistant":
+                    c = msg.get("content", "")
+                    raw_c = ""
+                    if isinstance(c, str):
+                        raw_c = c
+                    elif isinstance(c, list):
+                        raw_c = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+                    if raw_c:
+                        msg_tts_keys = _tts_keys_for_raw_text(raw_c, max_chars=TTS_MAX_CHARS) | _tts_keys_for_raw_text(raw_c, max_chars=TTS_MAX_CHARS_PUBLIC)
+                        for k in msg_tts_keys:
+                            if k not in protected_tts_keys:
+                                _delete_tts_cache_key(k)
 
             with _data_lock:
                 exists = sid in sessions
@@ -1002,7 +863,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "No text provided"}, status=400)
                 return
             try:
-                audio_b64, mime = _tts_synthesize(raw_text)
+                audio_b64, mime = _tts_synthesize(raw_text, max_chars=TTS_MAX_CHARS_PUBLIC)
                 self.send_json({"audio": audio_b64, "type": mime})
             except ValueError as e:
                 self.send_json({"error": str(e)}, status=400)
@@ -1285,6 +1146,46 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with open(filepath, "wb") as f:
                 f.write(raw)
             self.send_json({"url": f"/uploads/{safe_name}"})
+        elif self.path == "/api/internal/tts":
+            # Internal-only TTS: loopback + shared token, used by
+            # markdown_hosting for story-page audio (guest access).
+            from server.config import TTS_INTERNAL_TOKEN
+            import hashlib as _hashlib
+
+            if not TTS_INTERNAL_TOKEN:
+                self.send_json({"error": "Internal TTS not configured"}, status=503)
+                return
+            # Must come from loopback
+            try:
+                client_ip = self.client_address[0]
+            except Exception:
+                client_ip = ""
+            if client_ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                self.send_json({"error": "Forbidden"}, status=403)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            token = body.get("token", "")
+            if not token or _hashlib.sha256(token.encode()).hexdigest() != _hashlib.sha256(TTS_INTERNAL_TOKEN.encode()).hexdigest():
+                self.send_json({"error": "Invalid token"}, status=403)
+                return
+            raw_text = body.get("text", "")
+            cleaner_name = body.get("cleaner", "chat")
+            max_chars = body.get("max_chars", TTS_MAX_CHARS)
+            if not raw_text:
+                self.send_json({"error": "No text provided"}, status=400)
+                return
+            try:
+                from server.features.tts import story_markdown_to_speech_text as _story_clean
+                cleaner = _story_clean if cleaner_name == "story" else markdown_to_speech_text
+                audio_b64, mime = _tts_synthesize(raw_text, max_chars=max_chars, cleaner=cleaner)
+                self.send_json({"audio": audio_b64, "type": mime})
+            except ValueError as e:
+                self.send_json({"error": str(e)}, status=400)
+            except Exception as e:
+                print(f"[tts] Internal error: {e}")
+                traceback.print_exc()
+                self.send_json({"error": str(e)}, status=500)
         elif self.path == "/api/tts":
             user = get_current_user(self.headers)
             if not user:
@@ -1297,7 +1198,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "No text provided"}, status=400)
                 return
             try:
-                audio_b64, mime = _tts_synthesize(raw_text, body.get("voice", ""))
+                audio_b64, mime = _tts_synthesize(raw_text, body.get("voice", ""), max_chars=TTS_MAX_CHARS)
                 self.send_json({"audio": audio_b64, "type": mime})
             except ValueError as e:
                 self.send_json({"error": str(e)}, status=400)
