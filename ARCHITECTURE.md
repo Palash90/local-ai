@@ -43,12 +43,13 @@ graph TD
         HTTPServer -->|"localhost:8081"| LLamaGPU["llama-server (GPU)\ninteractive UI users"]
         HTTPServer -->|"localhost:8079"| LLamaCPU["llama-server (CPU)\nself-chat agents"]
         HTTPServer -->|"localhost:8083"| LLamaGuard["llama-server (guardrail)\njudge / L2-L3 verify"]
+        HTTPServer -->|"localhost:8084"| LLamaEmbed["llama-server (embed)\nnomic embeddings"]
         HTTPServer -->|"localhost:8188"| ComfyUIRuntime["ComfyUI"]
         HTTPServer -->|"localhost:8080"| SearXNG
         HTTPServer -->|"nominatim.openstreetmap.org"| Nominatim["Reverse Geocoding"]
         SelfChat["self-chat.py"] -->|"Bearer JWT /api/chat"| HTTPServer
         MCPClient["MCP clients (Claude, …)"] -->|"https …/mcp"| Nginx --> HTTPServer
-        HTTPServer -->|"heartbeat POST"| GCP
+        HTTPServer -.->|"heartbeat POST (via\nconnection_manager systemd)"| GCP
     end
 ```
 
@@ -104,7 +105,7 @@ graph TD
 graph TD
     subgraph RCNetwork ["Service URLs (server/config.py)"]
         RC1["LLAMA_BASE = localhost:8081 (GPU)"]
-        RC2["LLAMA_BASE_CPU = localhost:8079 (CPU)\nctx 65536, reasoning-budget 2048"]
+        RC2["LLAMA_BASE_CPU = localhost:8079 (CPU)\nctx 32768, reasoning-budget 1024"]
         RC3["LLAMA_BASE_GUARDRAIL = localhost:8083\n(VERIFY_PORT, gemma E2B, ctx 16K)"]
         RC4["COMFYUI_URL = localhost:8188\nSEARXNG_URL = 127.0.0.1:8080"]
         RC5["HOST = 127.0.0.1 (CHAT_HOST)\nPORT = 3001 · MCP gateway :8000"]
@@ -114,7 +115,7 @@ graph TD
         RL1["MAX_QUEUE_SIZE = 15 (per lane)"]
         RL2["MAX_INPUT_TOKENS = 24576\nAUTO_COMPACT_THRESHOLD = 70%"]
         RL3["MAX_TOOL_ROUNDS = default 10 /\nresearch 50 (UI research toggle)"]
-        RL4["_llm_pools: gpu 1 / cpu 4 / guardrail 1\n(CPU_PARALLEL_SLOTS = 1)"]
+        RL4["_llm_pools: gpu 1 / cpu 1 / guardrail 1\n(CPU_PARALLEL_SLOTS = 1)"]
         RL5["_tool_pools: gpu 2 / cpu 2 / guardrail 2"]
         RL6["Idle unload = 300s per lane\nVERIFY_IDLE_TIMEOUT = 300s"]
         RL7["LLM timeout = 600s · ComfyUI poll = 120s"]
@@ -126,14 +127,14 @@ graph TD
         RT2["TEMP_THRESHOLD_OFF = 75 C"]
         RT3["RAM_EVAC_THRESHOLD = 95%"]
         RT4["RAM_RESUME_THRESHOLD = 70%"]
-        RT5["FORCE_GPU_LANE = True (test flag:\npins all traffic to GPU lane)"]
+        RT5["FORCE_GPU_LANE = False by default (test flag:\npins all traffic to GPU lane; enable via\nFORCE_GPU_LANE=true in .env)"]
     end
 
     subgraph RCVerify ["Verification Budgets (critic/judge)"]
         RV1["VERIFY_RETRIES = 2 per citation"]
         RV2["VERIFY_FETCH_CHARS = 6000"]
         RV3["VERIFY_MAX_CITES_PER_URL = 3"]
-        RV4["VERIFY_QUALITY_GATE = 70/100\nVERIFY_MAX_RETRIES = 2"]
+        RV4["VERIFY_QUALITY_GATE = 80/100\nVERIFY_MAX_RETRIES = 2"]
         RV5["SAMPLING_BUCKETS: creative / code /\nfactual / chat (router picks per task)"]
         RV6["Judge render gate:\nwait_until_render_safe — 600s cap\n+ 30s cooldown while _image_active"]
     end
@@ -157,17 +158,21 @@ graph TD
     A2 --> B["__main__: makedirs uploads,\nload_sessions, load_shares"]
     B --> C{"GPU llama-server /health\nlocalhost:8081?"}
     C -- "200 OK" --> D{"SearXNG reachable\n:8080?"}
-    C -- "Dead" --> Restart["restart_servers:\nkill both llama-servers + ComfyUI,\nspawn ComfyUI + GPU + CPU llama-servers,\npoll /health up to 120s, kill on timeout"]
+    C -- "Dead" --> Restart["restart_servers:\nkill llama-servers + ComfyUI,\nspawn ComfyUI + GPU (+ CPU/guardrail/embed\nonly if their lane is needed),\npoll /health up to 120s, kill on timeout"]
     Restart --> D
     D -- "No" --> Exit["print ERROR & sys.exit(1)\n(web search is mandatory)"]
-    D -- "Yes" --> E["Start 11 Daemon Threads"]
-    E --> E1["_event_loop"] & E2["_queue_worker gpu"] & E3["_queue_worker cpu"] & E13["_mcp_db_worker\n(SQLite MCP task queue)"] & E4["_image_worker"] & E5["_idle_unload_loop 10s"] & E6["_thermal_monitor 10s"] & E7["_reminder_loop 30s"] & E8["_connection_manager\n(DDNS + GCP heartbeat)"] & E9["run_mcp\n(MCP gateway :8000)"] & E10["start_mcp_client\n(outbound MCP servers)"]
+    D -- "Yes" --> E["Start 12 Daemon Threads"]
+    E --> E1["ensure_embed_ready\n(embed llama-server :8084)"] & E2["_event_loop"] & E3["_queue_worker gpu"] & E4["_queue_worker cpu"] & E5["_queue_worker guardrail"] & E6["_mcp_db_worker\n(SQLite MCP task queue)"] & E7["_image_worker"] & E8["_idle_unload_loop 10s"] & E9["_periodic_cpu_kv_save_loop"] & E10["_thermal_monitor 10s"] & E11["_reminder_loop 12h"] & E12["run_mcp\n(MCP gateway :8000)"] & E13["start_mcp_client\n(outbound MCP servers)"]
     E --> F["ThreadingHTTPServer.serve_forever\n127.0.0.1:3001"]
 ```
 
-CPU (8079) and guardrail (8083) llama-servers are **lazy**: `ensure_llama_server`
-/ the MCP gateway start them on first use; `_idle_unload_loop` unloads their
-models after 300s idle.
+CPU (8079), guardrail (8083) and embed (8084) llama-servers are **lazy**:
+`ensure_llama_server` / the MCP gateway / `ensure_embed_ready` start them on first
+use; `_idle_unload_loop` unloads the CPU/guardrail models after 300s idle.
+
+The DDNS + GCP heartbeat component (`connection_manager.py`) is **not** a
+chat-webui thread — it runs as its own systemd service
+(`scripts/connection-manager.service`, `Wants=wg-quick@wg0.service`).
 
 ### 5. Model State Machines
 
@@ -288,7 +293,7 @@ graph TD
     Route -->|"human"| GPULane["gpu lane"]
     Route -->|"UI research+CPU toggle"| CPUMark["cpu_flagged → cpu lane"]
     Route -->|"explicit body mode"| Pin["pin gpu/cpu/guardrail\n(MCP gateway verify)"]
-    Route -.->|"FORCE_GPU_LANE=True\n(test flag)"| ForceAll["everything → gpu unless\nexplicit mode / cpu_flagged"]
+    Route -.->|"FORCE_GPU_LANE=true\n(opt-in test flag)"| ForceAll["everything → gpu unless\nexplicit mode / cpu_flagged"]
     AgentLane & GPULane & CPUMark & Pin --> QueueCheck{"len(lane queue) < 15?"}
     ForceAll --> QueueCheck
     QueueCheck -- No --> Busy503[503 Server Busy]
@@ -304,11 +309,11 @@ pause paths rewrite queued task dicts down to a minimal placeholder, so the
 queue entry — not the pre-created task dict — is the source of truth for the
 flag.
 
-### 8. Queue Workers (one per lane)
+### 8. Queue Workers (one per lane — gpu / cpu / guardrail)
 
 ```mermaid
 graph TD
-    E2["_queue_worker(mode)\ngpu / cpu"] --> QueueLoop["queue_cond[mode].wait on empty"]
+    E2["_queue_worker(mode)\ngpu / cpu / guardrail"] --> QueueLoop["queue_cond[mode].wait on empty"]
     QueueLoop --> PauseCheck{"overheated (gpu only),\nram_evacuating, or image_active?"}
     PauseCheck -- Yes --> MarkWaiting["queued tasks → status waiting"]
     MarkWaiting --> PauseWait["cond.wait 5s"] --> QueueLoop
@@ -320,11 +325,13 @@ graph TD
     MCP["MCP gateway batches"] --> DBQ[("mcp_tasks SQLite table")] --> MW["_mcp_db_worker\n(polls → admits to the gpu/cpu lane\nwith the _mcp flag)"]
 ```
 
-The human/agent lanes never wait behind each other. MCP chat tasks arrive
-through the SQLite queue via `_mcp_db_worker` (routed onto the gpu lane by
-default, cpu when flagged) carrying `_mcp: true`; the **guardrail server**
-(:8083) is only where their L2/L3 judge calls execute — generation stays on
-the gpu/cpu lane.
+The human/agent lanes never wait behind each other. A third `_queue_worker`
+runs for the **guardrail lane** — it carries judge-eligible work (MCP-admitted
+tasks, self-chat theme-judge rounds) that executes on the guardrail server
+(:8083). MCP chat tasks arrive through the SQLite queue via `_mcp_db_worker`
+(routed onto the gpu lane by default, cpu when flagged) carrying `_mcp: true`;
+the **guardrail server** (:8083) is where their L2/L3 judge calls execute —
+generation stays on the gpu/cpu lane.
 
 Tasks requeued by an emergency RAM evacuation (`_evacuate_ram`) ride the same
 loop with two extra pieces of state: the task status becomes the **non-terminal
@@ -383,6 +390,40 @@ graph TD
     end
 ```
 
+### 10.5 Archival Compaction (Pensieve — `features/pensieve/`)
+
+Before the payload reaches any lane, `prepare_context_for_llm`
+(`features/context.py`) runs Pensieve, a **deterministic, embed-free context
+archival layer**. It is not the classic LLM summarization — it moves the
+oldest conversation blocks out of the active context and into SQLite, leaving
+a compact `[#id: topic (n messages)]` marker the model can recall on demand.
+
+- **Block model.** A *block* is an unbreakable fused chain: a `user` message,
+  or an `assistant` message plus every immediately-following `role="tool"`
+  result (one per tool call, in order), up to the next user/assistant/system
+  message. The `system` message is never archived. Blocks are the atomic unit
+  of archival.
+- **Trigger.** When the token estimate crosses `RELEVANCE_WATERMARK_FRAC`
+  (default 0.55) of the lane's prompt budget, Pensieve archives the **oldest**
+  blocks beyond the keep-recent window (`RELEVANCE_KEEP_RECENT`, default 6) to
+  SQLite (`~/local-ai-files/pensieve.db`) and swaps them for `[#id: …]`
+  markers in the working copy. The **stored session is never mutated** — all
+  work happens on copies — and the session's KV cache is invalidated when the
+  effective prefix changes.
+- **Recall.** The `memory_read` tool (`features/tools.py`) → `pensieve.retrieval.memory_read`,
+  which takes either `memory_ids` (exact archived block ids, taken only from
+  `[#id]` markers) or a `query` (keyword search), scoped to the current
+  session's own archive.
+- **Knobs** (`features/pensieve/distill.py`): `RELEVANCE_DISTILL` (on by
+  default), `RELEVANCE_WATERMARK_FRAC`, `RELEVANCE_KEEP_RECENT`,
+  `PENSIEVE_MAX_UNITS` (200), `PENSIEVE_BLOCK_MAX_CHARS` (12000),
+  `PENSIEVE_TOPIC_MAX_CHARS` (120).
+- **Relation to classic compaction.** Pensieve runs first; whatever remains
+  below the budget is passed on. If a session still exceeds
+  `AUTO_COMPACT_THRESHOLD`, the older LLM-summarization path
+  (`compact_messages_copy` + `trim_messages_for_context`) still applies to the
+  remainder (`features/context.py`).
+
 ### 11. Tool Worker (features/tools.py)
 
 ```mermaid
@@ -436,7 +477,7 @@ graph TD
     IDLE["_idle_unload_loop (10s)"] --> ICheck{"per lane: loaded, idle > timeout\n(cpu: CPU_IDLE_UNLOAD_SECONDS),\nqueue/current task empty,\nnot streaming? (global counter)"}
     ICheck -- Yes --> ISave["save KV slot → unload lane"]
     IMG["images.py: unload gpu+guardrail (VRAM),\nevict cpu model (RAM, immediate — a killed round\nrequeues), reload + KV restore"] --> REC["recycle_comfyui (background thread):\nkill + reboot ComfyUI — --lowvram\nweights never return RAM otherwise\n(~8 GB held idle → evacuation trigger);\nCOMFYUI_RECYCLE_AFTER_RENDER=0 disables"]
-    CM["_connection_manager"] --> DNS["GoDaddy DDNS AAAA update\n(when public IPv6 changes)"]
+    CM["connection_manager\n(systemd service,\nscripts/connection-manager.service)"] --> DNS["GoDaddy DDNS AAAA update\n(when public IPv6 changes)"]
     CM --> HB["heartbeat POST to GCP VM\nover WireGuard (10s)"]
 ```
 
@@ -444,6 +485,10 @@ The idle check deliberately has **no runtime-based stuck-task watchdog** — the
 earlier `TASK_STUCK_TIMEOUT` force-error was removed. A wedged lane is reclaimed
 by RAM evacuation, thermal pressure, image-render takeover, or the idle gate;
 long research rounds run to completion by design (HARDENING.md §5).
+
+`connection_manager` (DDNS + GCP heartbeat) runs as its **own systemd service**
+(`scripts/connection-manager.service`, `Wants=wg-quick@wg0.service`), reading
+`.env`; it is **not** one of the chat-webui daemon threads listed in §4.
 
 ### 13. Moderation & Verification Pipeline
 

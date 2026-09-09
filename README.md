@@ -29,9 +29,10 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 | 3001 | chat-webui (core API + SPA) | `python chat-webui.py` | binds `127.0.0.1` (`CHAT_HOST`) — expose only via nginx |
 | 3002 | markdown hosting (stories) | `restart_services.sh` (uvicorn) | FastAPI app, role-gated collections |
 | 8000 | MCP gateway | in-process thread of chat-webui | FastMCP + OAuth; `MCP_USER` token auth |
-| 8079 | llama-server (CPU) | lazy / `restart_servers` | self-chat agents, 64K ctx, RAM-backed |
+| 8079 | llama-server (CPU) | lazy / `restart_servers` | self-chat agents, 32K ctx, RAM-backed |
 | 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI, 24K ctx, VRAM-backed |
 | 8083 | llama-server (guardrail) | lazy by MCP gateway / judge | small verify model, idle-unloads after 300s |
+| 8084 | llama-server (embed) | lazy by chat-webui / `restart_servers` | serves `/embedding` (nomic); vector layer of `page_cache` |
 | 8080 | SearXNG | docker / systemd | web search backend |
 | 8188 | ComfyUI | lazy on image request | image generation; recycled after every render to return its RAM (`COMFYUI_RECYCLE_AFTER_RENDER=0` to disable) |
 | 9000 | code host | `restart_services.sh` | `code_host.py` (lives outside this repo) |
@@ -50,6 +51,8 @@ bash setup.sh
 #                  model.json holds "gpu" (chat UI) and "cpu" (self-chat
 #                  agents) model ids — edit if you use other models
 #                  (the guardrail/verify model is VERIFY_MODEL in .env/config)
+#    Embeddings:   nomic-embed-text-v1.5.Q8_0 into ~/local-ai-files/my-models/
+#                  (served on :8084 for the page_cache vector layer)
 #    Image (z_image): copy these into ~/local-ai/ComfyUI/models/:
 #      diffusion_models/z_image_turbo_bf16.safetensors
 #      text_encoders/qwen_3_4b.safetensors
@@ -71,10 +74,11 @@ VRAM. Switch lanes with `SELF_CHAT_MODE` (env var or `server/config.py`):
 SELF_CHAT_MODE=gpu python chat-webui.py
 ```
 
-> **Note:** `server/config.py` currently ships with `FORCE_GPU_LANE = True`, a
-> test-time flag that pins *everything* (including agents) to the GPU lane
-> unless a request explicitly sets `mode` or the UI's research+CPU toggle. Set
-> it to `False` for the intended CPU-agent behaviour.
+> **Note:** `server/config.py` ships with `FORCE_GPU_LANE = False` (the
+> intended behaviour: agents go to the CPU lane, UI users to the GPU lane). It
+> is a test-time flag that, when set to `FORCE_GPU_LANE=true` in `.env`, pins
+> *everything* (including agents) to the GPU lane unless a request explicitly
+> sets `mode` or the UI's research+CPU toggle. Leave it off for production.
 
 `chat-webui.py` auto-starts the GPU llama-server on boot if it's down (CPU and
 guardrail servers lazy-start on first use) and starts ComfyUI on demand. If you
@@ -95,13 +99,20 @@ prefer to run the services manually:
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 127.0.0.1 --port 8079 \
     --models-dir ~/local-ai-files/my-models/ \
-    --jinja --n-gpu-layers 0 -fa off --ctx-size 65536 \
+    --jinja --n-gpu-layers 0 -fa off --ctx-size 32768 \
     -ctk q8_0 --no-mmproj-offload --device none \
-    -t 6 -tb 6 --cache-reuse 256 \
-    --reasoning-budget 2048 \
+    -t 4 -tb 4 --cache-reuse 256 \
+    --reasoning-budget 1024 \
     --reasoning-budget-message "Reasoning limit reached, summarize final answer." \
     --slot-save-path ~/local-ai-files/kv-slots \
     --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0.0 --repeat-penalty 1.0
+
+# Embedding llama-server — nomic vectors for page_cache (CPU, 2048 ctx)
+~/local-ai/llama.cpp/build/bin/llama-server \
+    --host 127.0.0.1 --port 8084 \
+    --models-dir ~/local-ai-files/my-models/ \
+    --jinja --embedding --pooling mean --embd-normalize 2 \
+    --n-gpu-layers 0 -fa off --ctx-size 2048 -b 2048 -ub 2048 -t 6
 
 ComfyUI is launched as `comfy_main.py` (a rename of ComfyUI's stock `main.py`),
 so its process can be targeted by name without colliding with other `main.py`
@@ -152,7 +163,7 @@ Access at `http://localhost:3001` (published from the container). Notes:
 ```
 local-ai/
 ├── chat-webui.py            Entrypoint: owns ALL shared state, re-exports config +
-│                            features, registers the M proxy, starts 11 daemon threads,
+│                            features, registers the M proxy, starts 12 daemon threads,
 │                            serves server/api.Handler on :3001
 ├── server/                  Core backend
 │   ├── api.py               HTTP layer (routes, Handler, app-state injection)
@@ -169,14 +180,17 @@ local-ai/
 │   ├── dotenv.py            Tiny .env parser
 │   └── features/            Chat engine, one concern per module (see ARCHITECTURE.md)
 │       ├── state.py         Shared containers/locks + the M entrypoint proxy; lane constants
-│       ├── llm.py           llama-server load/unload FSM, task_mode routing, sampling router,
-│       │                    KV slot checkpoints, _llm_worker (SSE parse), tool-call reassembly
+│       ├── llm.py           llama-server load/unload FSM (incl. embed lane), task_mode routing,
+│       │                    sampling router, KV slot checkpoints, _llm_worker (SSE parse),
+│       │                    tool-call reassembly
 │       ├── orchestration.py Queues, event loop, finalize (critic pass + L3 judge), reminders glue
 │       ├── tools.py         Tool dispatch: web_search, fetch_page (SSRF-guarded), read_file/image,
-│       │                    update_user_context, manage_tasks, track_theme, tool_details
+│       │                    update_user_context, manage_tasks, track_theme, tool_details,
+│       │                    memory_read (Pensieve recall)
 │       ├── images.py        ComfyUI generate/edit workflows, VRAM choreography, image worker
 │       ├── sessions.py      Per-user session files, prompt injection, auto-rename, compaction glue
-│       ├── context.py       Token estimation, trim/compact, sanitize, effective-context reports
+│       ├── context.py       Token estimation, trim/compact, sanitize, effective-context reports,
+│       │                    Pensieve archival-compaction hook
 │       ├── shares.py        Public share snapshots + scoped image serving
 │       ├── tasks_db.py      To-do tasks (SQLite) + manage_tasks tool handler
 │       ├── themes_db.py     Creative-combination tracker (dedup) + track_theme tool handler
@@ -186,13 +200,20 @@ local-ai/
 │       ├── critic.py        Citation extraction + existence probe (direct fetch →
 │       │                    bot-block → search) + per-citation LLM verification
 │       │                    (reasoning-aware judge calls, 2048/4096 token budget)
-│       ├── monitoring.py    Thermal/RAM/idle loops, server lifecycle, DDNS + GCP heartbeat
+│       ├── monitoring.py    Thermal/RAM/idle loops, server lifecycle, embed/cpu/guardrail
+│       │                    ensure-* lazy starts + idle unload
+│       ├── page_cache.py    SQLite page cache + nomic vector layer (posts to :8084)
+│       ├── pensieve/        Archival context compaction (deterministic; see ARCHITECTURE.md §10.5)
+│       ├── websearch/       search.py, fetch.py, relevance.py, vector_store.py (embed-scored hits)
+│       ├── toolstrip.py / urlclassify.py   tool shaping + URL classification helpers
 │       ├── surface_loader.py Fernet-decryptable attack-surface pattern files
 │       └── openai_adapter.py Tool-call ↔ OpenAI SSE format adapters (incremental chunks)
 ├── src/                     React 19 + Vite SPA (built to dist/, served by chat-webui)
 ├── prompts/                 System prompts, persona/genre/task pools, judge prompts
 │   └── surface_attacks/     Guardrail pattern/judge files (optionally .enc via SURFACE_ATTACKS_KEY)
-├── scripts/                 authentik_bootstrap.py, encrypt_surface.py, gcp_heartbeat_server.py
+├── scripts/                 authentik_bootstrap.py, encrypt_surface.py,
+│                            gcp_heartbeat_server.py, connection_manager.py
+│                            (+ gcp-heartbeat.service, connection-manager.service)
 ├── searxng/                 SearXNG settings volume
 ├── markdown_hosting.py      Story hosting service on :3002 (FastAPI, free/premium/admin RBAC)
 ├── self-chat.py             Offline multi-agent story pipeline (CLI; editor gate
@@ -211,8 +232,8 @@ local-ai/
 The data dir (`~/local-ai-files/`, shared into the container) holds: `model.json`,
 `models.json`, `sys_prompt.txt`, `sessions/`, `shares.json`, `contexts/<user>.txt`,
 `my-models/` (GGUFs), `ComfyUI/{input,output}`, `uploads/`, `kv-slots/`,
-`stories/`, `local_ai.db` (tasks + theme log + MCP batches + per-user
-`user_judges` assignments).
+`stories/`, `pensieve.db` (archived conversation blocks), `local_ai.db` (tasks
++ theme log + MCP batches + per-user `user_judges` assignments).
 
 ## Authentication (SSO)
 
@@ -255,7 +276,10 @@ collection access (`markdown_hosting`) and the "overwrite user context" admin ac
 The full runtime design — network topology, module layout, lane/queue
 machinery, model state machines, REST surface, event loop, tool dispatch,
 resource management and the moderation/verification pipeline — is documented
-with diagrams in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+with diagrams in **[ARCHITECTURE.md](ARCHITECTURE.md)**. That also covers the
+newer subsystems: the embedding server (`:8084`) powering the `page_cache`
+vector layer, the `websearch/` relevance + vector-store pipeline, and the
+Pensieve archival-compaction layer (ARCHITECTURE.md §10.5).
 
 Resource hardening — how lanes stay isolated, when models auto-unload (and how
 that is verified), and how tasks survive an image render or RAM evacuation — is
@@ -341,7 +365,10 @@ resolve per-agent judge models from the `user_judges` table.
 - `scripts/encrypt_surface.py` — Fernet-encrypt `prompts/surface_attacks/*.txt` to
   `.enc` (set `SURFACE_ATTACKS_KEY` to enable decryption at load).
 - `scripts/gcp_heartbeat_server.py` — the GCP-side receiver (DNS + heartbeat) that
-  `_connection_manager` talks to over WireGuard; feeds nginx/DDNS.
+  `connection_manager.py` talks to over WireGuard; feeds nginx/DDNS.
+- `scripts/connection_manager.py` — the box-side DDNS (GoDaddy) + heartbeat sender;
+  runs as its own systemd service (`scripts/connection-manager.service`), not a
+  chat-webui thread.
 
 ## Frontend SPA (`src/` → `dist/`)
 

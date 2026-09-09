@@ -17,7 +17,7 @@ Three kinds of scarce resource, protected by three mechanisms:
 | Resource | Consumers | Guard |
 |---|---|---|
 | **GPU VRAM** | GPU lane (UI users), guardrail lane (judge/L2-L3), ComfyUI renders | `_wait_chat_generating_clear(lanes=("gpu","guardrail"))` + `_image_active` gate |
-| **System RAM** | CPU lane's gemma4-12b (~9 GB), ComfyUI models, KV slots | `_evacuate_ram` (95 %) + render-time CPU eviction |
+| **System RAM** | CPU lane's gemma4-e4b-q4 (QAT, RAM-backed), ComfyUI models, KV slots | `_evacuate_ram` (95 %) + render-time CPU eviction |
 | **Rest of the box** | thermal state, whole-box RAM % | `_thermal_monitor`, `_evacuate_ram` |
 
 Lanes are otherwise independent workers (`_queue_worker` per lane, own
@@ -69,7 +69,7 @@ Key properties:
 
 ## 3. The render ↔ LLM handshake (`_image_active`)
 
-ComfyUI needs the GPU (VRAM) *and* the ~9 GB of RAM the CPU gemma normally
+ComfyUI needs the GPU (VRAM) *and* the RAM the CPU gemma-e4b normally
 holds. Image generation therefore orchestrates every lane:
 
 ```mermaid
@@ -77,7 +77,7 @@ sequenceDiagram
     participant GH as generate_image
     participant LC as _wait_chat_generating_clear
     participant Q as lane workers
-    participant C as CPU gemma
+    participant C as CPU gemma-e4b
     participant U as ComfyUI
     GH->>LC: wait for GPU/guardrail lanes to stop streaming (600s cap)
     GH->>GH: _image_active = True
@@ -164,9 +164,9 @@ completion rather than being recycled mid-answer.
   snapshot (default 120 s) limits the resume's re-prefill cost to what changed
   since the last save, avoiding a full-context re-prefill when the eviction's own
   save times out on a busy slot.
-- **CPU throughput.** gemma4-12b on the CPU lane runs ~10-16 tok/s prefill /
-  ~4-5 tok/s generation. Research is expected to be slow-but-steady there; keep
-  interactive users on the GPU lane.
+- **CPU throughput.** gemma4-e4b-q4 (a small QAT model on the CPU lane) is
+  materially faster than the older gemma4-12b it replaced. Research is still
+  expected to be slow-but-steady there; keep interactive users on the GPU lane.
 
 ## 7. Configuration knobs
 

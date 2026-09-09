@@ -1,0 +1,1701 @@
+commit a39b6d2feddc74bf60cd934296b7b35cf6a862f0
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Sep 9 03:11:32 2026 +0530
+
+    Added sudo wg0 ufw
+
+commit 37460923fdf2dfb99f6137b550304ff273300899
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Sep 6 07:39:01 2026 +0530
+
+    path issue fixed
+
+commit c09290f87b6614f5a727cb42a5b5c35f6429373a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 23:15:23 2026 +0530
+
+    separated connection manager
+
+commit a1b2affef0e840dc105fee21752c67defb21246e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 22:13:48 2026 +0530
+
+    Periodic KV Cache saving
+
+commit c81d03804c26691db879d879ba025a42bd30adf9
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 17:16:59 2026 +0530
+
+    Done on multi-lane discipline
+
+commit a072c6f229d5df93780fee13c07321067db98171
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 16:40:34 2026 +0530
+
+    Done, working as of now
+
+commit 06418286cb6003ceca2304edd924d8e84576cb82
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 12:45:08 2026 +0530
+
+    Upgraded context for CPU Lane
+
+commit 41e0a6734b366be87a6bce39c87d08800558ad03
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 05:45:08 2026 +0530
+
+    Fixing with parallel GPU Execution
+
+commit 5a8017c25448215bb1dbd9b97ca969b7e1c56080
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 05:23:35 2026 +0530
+
+    Performing better than before
+
+commit ff979e2eaa9f664de0a1ca9b0b9771146bf4e829
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 05:09:22 2026 +0530
+
+    change arch
+
+commit a8329b190d9ea47575112719c5642dca10993ef1
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 04:40:45 2026 +0530
+
+    Machine tried its best
+
+commit 8f34c7794ca6684eea584841c78f53a00c2e0d57
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 04:15:27 2026 +0530
+
+    arch change documentation
+
+commit 300e1b30d47b56343eaa4a85e8ce2dfef59bbe4a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 03:54:23 2026 +0530
+
+    auto load/unload of cpu tasks
+
+commit f392ac526f217b9493fca194c884bf473516932c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Sep 5 02:42:03 2026 +0530
+
+    Release CPU lane model when idle; verify RAM freed
+
+commit 0a5cc262467c3e2c6abd4b4052775ed5af59eb2c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Sep 4 21:58:25 2026 +0530
+
+    model dir read from env
+
+commit 68de6bb08092dadf08092f5d946a47c99059a980
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Sep 4 13:56:59 2026 +0530
+
+    Session wise research enablement
+
+commit d062eaac4fabaf922c3b6a049d7625dc364db84f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Sep 4 13:29:06 2026 +0530
+
+    Stop Implementation applied
+
+commit 310c4a43e6c4b93f9a142771f5c2e8931f07412b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Sep 4 11:17:38 2026 +0530
+
+    comfy main.py renamed
+
+commit 427b880b00900545f63efb1b91219f2d04646214
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Sep 4 01:56:43 2026 +0530
+
+    Better research prompt
+
+commit 27385fc984a22599dd861e7b12c8bd4c58bfe897
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Sep 4 01:27:22 2026 +0530
+
+    Fixed searched cache in-mem, blocking good results
+
+commit 5e56972cc8cba40bf25c49329b8c9a68cfe558c2
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Sep 4 00:46:29 2026 +0530
+
+    Search engine fixes
+
+commit 07875f75fa316a9f601f488f277ef1baa4f5301d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Sep 3 23:58:40 2026 +0530
+
+    Fix on search issues
+
+commit db1ca6ff5c938e5a25903d880fc9dfca5bb369b3
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Sep 3 22:51:20 2026 +0530
+
+    Added Google Search (but not used)
+
+commit 0f957fdf7841e425c47c633cf6b2135d70aade75
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Sep 3 20:51:43 2026 +0530
+
+    fix the caching result issue
+
+commit d85e6aae263470555cdcce4a6824f3bb5b3ec9af
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Sep 3 19:59:23 2026 +0530
+
+    Fixing search
+
+commit 704c32f0b7399a4bc2c08bd9abe7392bb04d8bd4
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Sep 3 18:43:31 2026 +0530
+
+    Fixing web search
+
+commit 74f9147aedbfc44f1f08f067784094a4daa2de1b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Sep 3 18:18:18 2026 +0530
+
+    Web Search is fixing
+
+commit fd6422bca0a98d07ef7de78b236dffa37b61bd08
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Sep 3 16:49:11 2026 +0530
+
+    Web Search extraction
+
+commit d9aa045b786f0ba5f0422d93cfea9347f030d5f1
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Sep 3 14:46:49 2026 +0530
+
+    change tasks
+
+commit 91a6b349dc6c26701f32b7e17b0bcb4401d51090
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Sep 3 14:28:52 2026 +0530
+
+    Kaya Kolpo unstuck
+
+commit 08c17b4d5357c257f1071a7f733df2aa0a16bc4c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Sep 2 20:18:40 2026 +0530
+
+    self-chat is not working
+
+commit dcb24f98b8663477c455f5069b76d730670926d8
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Sep 2 03:57:46 2026 +0530
+
+    Working research improved
+
+commit 5b7e4ba7bba7904e13652b75d9f9dd534f1b0e3e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Sep 2 01:20:50 2026 +0530
+
+    Done
+
+commit c3dde89630013ffd8f3fc481764cc0fe3654329f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Sep 1 16:41:19 2026 +0530
+
+    Improved Kaya Kolpo pipeline and user message judging
+
+commit 41537b3a660309cf9b2de37177344e12b1b3d00e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Sep 1 04:56:07 2026 +0530
+
+    Fixi
+
+commit 03cea116d4570eab8c41131e784930c6000b7559
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Sep 1 04:27:51 2026 +0530
+
+    Working
+
+commit aa2893846b9d3bdbeb5bbbb21b1b20c0693dfe2c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Sep 1 03:54:09 2026 +0530
+
+    Kaya Kolpo Patching
+
+commit 8e2d49cf9a2694ae76a82444a7eabb8e9aa29130
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Sep 1 01:43:46 2026 +0530
+
+    Fix errors
+
+commit 2ad313b3c6e1a07ef6cd648e89fe35ba0c9712ac
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Sep 1 01:30:39 2026 +0530
+
+    research judge strengthening
+
+commit 97a58a78d2d4baef31f5431465b4ec1978ca8f43
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Sep 1 01:07:40 2026 +0530
+
+    OCR
+
+commit 783cf5df32778979efba4b82e42c25e255d94dbb
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Sep 1 00:52:38 2026 +0530
+
+    OCR Read is working. Formatting is needed to be completed.
+
+commit 067df7cd19982f7b5df35e7bd1ea35d717136b1c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 21:35:02 2026 +0530
+
+    some more fixes
+
+commit f9955dbbd0bf57c8713437a904d5628b9cba3130
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 21:14:21 2026 +0530
+
+    Fixing a few bugs
+
+commit 95822c9df80632f559b214668c82c32f432bbf48
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 20:17:42 2026 +0530
+
+    Multi judge (#8)
+    
+    * Multi-Judge with error
+    
+    * Added judging of ui
+    
+    * Fix on multi-side
+    
+    * Fix with sync/async messaging system
+    
+    * Done to some
+    
+    * Context reduced to 24k tokens
+    
+    * working now
+    
+    * Judgin fixes
+    
+    * Working on all lanes
+    
+    * Fixed a lot of things
+    
+    * Done
+
+commit bf3ebc5d1d8c343a9353bc0c4a84f2120cbdadcb
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 19:47:18 2026 +0530
+
+    Done
+
+commit 66ef1dcd95784ef7e5461836c40e61a7fd9c092e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 19:46:43 2026 +0530
+
+    Fixed a lot of things
+
+commit 5cd4cbd8a10805b54a1e9549c89bed4de59f1e20
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 18:05:47 2026 +0530
+
+    Working on all lanes
+
+commit b8fb3c98fc2d4e5991d966e8845b8523c6607fa5
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 16:12:55 2026 +0530
+
+    Judgin fixes
+
+commit e6221a6d93061986002a246b41dfc33444f5a1bd
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 15:12:18 2026 +0530
+
+    working now
+
+commit 6df92a6e685d33b7149ea4d9b09e33faee0288ee
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 11:27:28 2026 +0530
+
+    Context reduced to 24k tokens
+
+commit 9408246f3f8850790cf4bacc1b17a581318ccf1f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 11:04:22 2026 +0530
+
+    Done to some
+
+commit 0181c65bff7ca4506eeaf25b9e68d1b90c9b7300
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 10:46:15 2026 +0530
+
+    Fix with sync/async messaging system
+
+commit 234014a33eb0d65db224c9d39fa962fe2b79ae97
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 10:25:26 2026 +0530
+
+    Fix on multi-side
+
+commit 9d54e711e336f9e0e62a565e229fe82afab1b08e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 10:03:39 2026 +0530
+
+    Added judging of ui
+
+commit a2c515c32d8a0b26adbecd25c6d56b76d6e4b816
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 08:59:05 2026 +0530
+
+    Multi-Judge with error
+
+commit e1b1e96bf2a0dc3202c8bdca45bcf246e2466e1c
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 31 19:02:50 2026 +0530
+
+    Multi judge (#7)
+    
+    * Judge is now on it's own module
+    
+    * Research judge put in place
+    
+    * Multi-Judge with error
+    
+    * Added judging of ui
+    
+    * Fix on multi-side
+    
+    * Fix with sync/async messaging system
+    
+    * Done to some
+    
+    * Context reduced to 24k tokens
+    
+    * working now
+    
+    * Judgin fixes
+    
+    * Working on all lanes
+
+commit 62d84d25934b313a6049feeefb2bb5d0d1bba404
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 29 22:04:07 2026 +0530
+
+    Stick to 24K Context for day to day use cases
+
+commit 46107de58027b2602b16e845b8bca29c2346453c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 29 21:38:57 2026 +0530
+
+    Fixin log sentences
+
+commit 332d894465bb9882376e3139ebfb9b9d43fad0c4
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 29 06:49:36 2026 +0530
+
+    Coding lane fixed, Indexer added
+
+commit bcc5510198ea99a534401d3072616f9ab21269c6
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 29 06:10:47 2026 +0530
+
+    Add changes
+
+commit 2bb766c2a29931952cd9a590c616b60788a7561f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 29 05:28:23 2026 +0530
+
+    Added codebase index search
+
+commit d3bc921c75ce7de8f4c030a44761ef8e62de029a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 29 05:19:49 2026 +0530
+
+    MCP Client is working now
+
+commit edfa2224d59c2285d64af76d5c594df53383ff19
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 29 01:43:52 2026 +0530
+
+    Updated definitions of polling
+
+commit 23453452bc14953b694989178661026dc1d664e2
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 29 00:30:24 2026 +0530
+
+    Sleep between MCP Messages
+
+commit 8fa91edc0f4331ba5091030efefc93736b0f701c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 28 21:42:46 2026 +0530
+
+    Bug fix
+
+commit 70203a0fe0fef8e070967a8699690f9cbc02207a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 28 21:03:52 2026 +0530
+
+    Restart all
+
+commit 6c960ba88c3d29a74eff9ab8bbd70e30b0881c1c
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 28 20:52:41 2026 +0530
+
+    Prompter grader (#6)
+    
+    * Prompt Safety, Guardrail
+    
+    * some mumbo jumbo not working
+    
+    * Red-teaming
+    
+    * Encrypted attack files
+    
+    * DB Based MCP task management
+    
+    * 3rd lane added
+    
+    * Details added
+    
+    * Bug fix, oai impl
+    
+    * Broken model load
+    
+    * CPU GPU MCP Locha
+    
+    * Fixes
+    
+    * OAI lane and chat working simultaneously
+    
+    * OAI and Web Chat fixes
+    
+    * Fixed MCP Gateway
+    
+    * Extra logs
+    
+    * Significant changes
+    
+    * re-introduced missing slot checkpoint saving
+    
+    * Fixed the issue of model load/unload
+    
+    * All three now open
+    
+    * done
+    
+    * Fix multi-model load issue
+    
+    * Update tool calls
+    
+    * Fix MCP Lane
+    
+    * LLM Judge Fix
+
+commit c1d981397b84016454d3ae9ccb3bccea94c36a5b
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 27 06:15:55 2026 +0530
+
+    Prompter grader (#5)
+    
+    * Prompt Safety, Guardrail
+    
+    * some mumbo jumbo not working
+    
+    * Red-teaming
+    
+    * Encrypted attack files
+    
+    * DB Based MCP task management
+    
+    * 3rd lane added
+    
+    * Details added
+    
+    * Bug fix, oai impl
+    
+    * Broken model load
+    
+    * CPU GPU MCP Locha
+    
+    * Fixes
+    
+    * OAI lane and chat working simultaneously
+    
+    * OAI and Web Chat fixes
+    
+    * Fixed MCP Gateway
+    
+    * Extra logs
+    
+    * Significant changes
+    
+    * re-introduced missing slot checkpoint saving
+    
+    * Fixed the issue of model load/unload
+
+commit b43ad440e863afd8ab5a530e15dbbc3c821ddcaf
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 26 02:13:08 2026 +0530
+
+    small changes
+
+commit 229be6035bcbae667abe197a38a15e8d4e9fd47c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 24 14:51:00 2026 +0530
+
+    End to end batching confirmed
+
+commit 6d5c2cbc009188689f5ce095cb77f4a165456712
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 24 05:44:42 2026 +0530
+
+    Close endpoints
+
+commit 0fa9cd0dd5b6f23baaacbf147572fdbb1e8df0db
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 24 04:47:20 2026 +0530
+
+    batch completed
+
+commit 34a41dac5ae12f9fbeb003891054562139b64f79
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 24 04:02:37 2026 +0530
+
+    Batch message processing
+
+commit 78b608d331c2d843cf3dd68352af4aa7cdbe7581
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 24 02:38:55 2026 +0530
+
+    Two step reasoning Split
+
+commit 06a2ba26c6b718c009dd9a8ba986df21cf32e34f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 24 01:43:37 2026 +0530
+
+    Perf changes
+
+commit fd8a834747b5e20da6d25b81e29595d7f2e86670
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 24 00:59:16 2026 +0530
+
+    Polling hint to claude
+
+commit 07162fb42bd639a25f13805acb112a75053f7668
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 24 00:44:10 2026 +0530
+
+    Added polling interface
+
+commit 1305c769b4313bb2bb1b9f1a9daff0b120d2b917
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 24 00:12:16 2026 +0530
+
+    Finally Claude can connect to my machine
+
+commit 97fe980bd116eb942823d5fb9ca2fb0cd6bed6b5
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 23:50:32 2026 +0530
+
+    MCP OAuth working now
+
+commit 6bf3e79c3a7a72890b7b7aec640270e919006151
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 23:34:08 2026 +0530
+
+    MCP Authorization works now
+
+commit e6887f26ba6497bcee09861719e908a396d8f917
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 23:21:12 2026 +0530
+
+    Fixed the share issues
+
+commit c0cdb2a3e267ce9a8f115547a1e28945710655f5
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 21:17:33 2026 +0530
+
+    Remove the login button
+
+commit e01bb0377f78c73a94362baab7be50473550c0d6
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 21:06:37 2026 +0530
+
+    Share button fixed
+
+commit e639046fc075f28388606f7656203386e9eda275
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 19:38:53 2026 +0530
+
+    Descriptive to MCP Tools
+
+commit 1cab120efa52cc379448569aad99da272e3171ba
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 19:20:07 2026 +0530
+
+    Rename properly
+
+commit 459e556a2890457f7d3db6c21c38c2397a91793a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 19:19:47 2026 +0530
+
+    OAuth system login
+
+commit b2931ca65930a048f8774df18919280f9da22c0b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 18:44:53 2026 +0530
+
+    Keep only required
+
+commit 418edb5c4c43a96a3995e3d32545e020416ee251
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 18:28:10 2026 +0530
+
+    Authorization of sender connect
+
+commit 63ceb5895c057a32507f2cc1c8f1ef2dc0788a56
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 18:03:20 2026 +0530
+
+    MCP Gateway exposure
+
+commit f88b3ff24d4c50ec9d7156d4c6f920c2bc585008
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 17:33:15 2026 +0530
+
+    MCP Configured for server
+
+commit b56739e9852832915d97bb5cf911401b4a4a2919
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 15:30:57 2026 +0530
+
+    fixed
+
+commit 61a20299c5d22ce0d62636ce9e96caa6d5956e5d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 14:40:30 2026 +0530
+
+    Authentiked stories
+
+commit 12d6a2c5b58007a0a5c14638d1b41f3f3352bafc
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 14:30:27 2026 +0530
+
+    Working nicely
+
+commit e1ee4f0a2e5b482aab994708ecaab53ae1504a6b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 14:18:57 2026 +0530
+
+    Working to some extent
+
+commit 645da14b7f92128c6849f6197bc22da87000f41d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 13:27:51 2026 +0530
+
+    fixed side overlay
+
+commit 82f3d5eb5b8817a5c4614d32781b594cb64e1ff4
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 23 12:46:54 2026 +0530
+
+    New small fixes
+
+commit 33576be957fbc6eca485113c35188f42e0be20f6
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 22 22:31:30 2026 +0530
+
+    Fix issues
+
+commit 3e5372fa23160f423804c494853a5599872675c0
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 22 22:13:28 2026 +0530
+
+    Fixed a few, removed tracker
+
+commit fc7cb7e2550abedb233c88a094d60d6be458df2e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 22 20:51:11 2026 +0530
+
+    Restart fixes
+
+commit c24c997868a0dd98c4e2f6b807fbfb7d7e1a7338
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 22 19:45:36 2026 +0530
+
+    add gcp connection
+
+commit ab129b67ddb7255157a14aac3a02546e569ddb9b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 22 03:17:05 2026 +0530
+
+    fix a few things
+
+commit 3bf31e43f769701485bb7382918cbef6d978fb55
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 22 03:14:20 2026 +0530
+
+    Content generation enhancements
+
+commit c6f4e2785d03c40615e3ef77bb26d9679cdd41ae
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 22:49:30 2026 +0530
+
+    added network saving
+
+commit ef9a6204e757de8a5add334591c5d8d811f143dd
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 22:04:05 2026 +0530
+
+    Much better shape
+
+commit 25b6167b2056faa1997cd48fa33f00dce8cb9cf9
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 20:12:23 2026 +0530
+
+    kv slot
+
+commit 1b6f8185ebd690e09f84ea0be387938391b5d9e9
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 18:42:32 2026 +0530
+
+    Token healing for self chat agents
+
+commit e8d2b813c41d6b17f43402d761e2b3be61d69981
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 18:12:15 2026 +0530
+
+    chore: ignore runtime artifacts, untrack repomix bundle
+
+commit 625ed3bf53e39c57275f42be62fdb00bc9d05252
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 18:09:24 2026 +0530
+
+    Final repomix before clean up
+
+commit 23c947794f85d8f00186a6d7e98673ff6d77535d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 17:48:20 2026 +0530
+
+    Done
+
+commit e12558719f2b46fe710683707652fed9e1e032a1
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 17:45:15 2026 +0530
+
+    All set now
+
+commit db54f5168d0a47d06e8e03ef245f6d8297629e8a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 16:50:09 2026 +0530
+
+    Mostly done, final wiring is pending
+
+commit d0545c0aa0aa93094cb517ec1c5794d168d6e3c4
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 16:49:44 2026 +0530
+
+    Changing DNS Strategy
+
+commit 83cd343aa30ba4e829b51397a5514ca798b2227e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 16:15:06 2026 +0530
+
+    Split DNS Server
+
+commit c53810f0b0f0c76e1e2d919a26f30217b8c87936
+Merge: ef819cf 193fbc7
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 07:21:25 2026 +0530
+
+    Merge pull request #4 from Palash90/sso
+    
+    Sso
+
+commit 193fbc715cd07eb52f91513a0cea1561fb51492d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 07:14:43 2026 +0530
+
+    Fresh copy of code
+
+commit a497aa6cb5fc9df238a4eaf5f07fffa2d154817a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 07:14:29 2026 +0530
+
+    Done adding a restart script
+
+commit d9f787e7cc0428baadfb412e05aeb2fee22f0f8a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 07:07:52 2026 +0530
+
+    Done
+
+commit 1c01e424a6199e863e0514aa056d5d3b46d7460b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 07:07:41 2026 +0530
+
+    All set
+
+commit 08eb4d55a18d1a8d7eca0efb146dbb95f3a126e3
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 06:13:08 2026 +0530
+
+    Done
+
+commit 4f9b74bf5b514ae201a83c085f744b60efbf8a18
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 06:12:52 2026 +0530
+
+    cloud setup completed
+
+commit d24a1a73dbb983afdc7c9428f87f2eb560937f40
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 03:52:12 2026 +0530
+
+    Fix tracker page
+
+commit 11f4f281df4477788a05f45dafa938c800cd188e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 03:16:12 2026 +0530
+
+    Done
+
+commit 686b3701321f4c6a566c03120153479b66630a82
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 03:15:23 2026 +0530
+
+    Done
+
+commit 868daab854891bace7c45e51d74d150a9ad43d3a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 21 03:11:49 2026 +0530
+
+    Sign in working, not sign out
+
+commit 823a79799641d11ee1abf707241bf0bed635a33a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 20 14:46:55 2026 +0530
+
+    SSO Changes
+
+commit ef819cf247c8954de70a94f9388c1ea0e7a83889
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 20 06:10:30 2026 +0530
+
+    Done
+
+commit f8c785432a19db47c614019e8cbb0a28a3ee8972
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 20 05:45:42 2026 +0530
+
+    Overlay on GCP Routed pages
+
+commit 1820393e76cf885ddf9ed5b5fb7447bf54f56de7
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 20 04:55:07 2026 +0530
+
+    Successful subdomain
+
+commit b75e9c70eceac6cd7c33356a98cc8b843ff0f092
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 20 01:23:04 2026 +0530
+
+    All fixed
+
+commit dcf83f3d066f09a7631daa7f65aaaae683cf052b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 20 00:59:49 2026 +0530
+
+    Quick fixes
+
+commit 479803dcfa5314a5d509dd9c6c8db80c5fab757e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 20 00:18:28 2026 +0530
+
+    local cloud setup
+
+commit 84a0619131dcf31a300a090291eba9f90569009f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 19 20:57:00 2026 +0530
+
+    remove tests
+
+commit 631ae20eb2b73f10e0b6c0ff4817a95218443a1b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 19 00:43:20 2026 +0530
+
+    remove erroneous
+
+commit a77b73bd78c5f7e602b78b1b0512df16015c8154
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 19 00:37:06 2026 +0530
+
+    optimize cpu args
+
+commit fb4c08f066c08eac4168f2f933c8686acc578d8b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 18 20:38:00 2026 +0530
+
+    Social Media exclusion
+
+commit 724cdca002230f3156feff8f9fe53f717e39d594
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 18 19:41:21 2026 +0530
+
+    Done
+
+commit b641a7715ecb73c24fcee1e10a74e9c6874fda4b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 18 16:29:11 2026 +0530
+
+    Done a lot of changes
+
+commit 9a471e118ea9cf23f563d5a3d0f6635860d7fd5a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 18 13:04:58 2026 +0530
+
+    Turn by turn research ===> CONTENT workflow
+
+commit edc084fb9aae9b7c374262bd1f8419e805485383
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 18 04:33:46 2026 +0530
+
+    Add more rest
+
+commit 61061921015cf1d5b95edabdaa20e3938ba23c61
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 18 04:26:58 2026 +0530
+
+    Research flag on
+
+commit 73032ef4e1a970374737550118513f176fee001c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 18 03:31:50 2026 +0530
+
+    Multi-step research, Kaya Kolpo Cross Validation
+
+commit 02df7516ec8f1378ef366ad5582f6a274f898f6f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 18 02:54:40 2026 +0530
+
+    Self-critique research
+
+commit e4f60586334e1a613abd720159002d8844066f97
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 18 02:12:01 2026 +0530
+
+    Chunked seaerch for ressearch
+
+commit d0c6e6f8b27a5379f2c58bf6aac46bffd71c4d20
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 17 21:26:36 2026 +0530
+
+    pdf reading for web search
+
+commit 80c29b1a8f0d74fec6f05dede42c6944fa9b1ae4
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 17 19:13:00 2026 +0530
+
+    Exception handling
+
+commit a4fe44f176b57b09f21ca9b0c4876454b62313ab
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 17 00:29:25 2026 +0530
+
+    remove unnecessary details
+
+commit d2ae76b55930e8c21c6332315a3d49ad7caa8777
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 16 23:43:05 2026 +0530
+
+    Stop the generation pipeline completely
+
+commit 96ecbdbaf7e7bc4705ae08f84c687aa2532ed614
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 16 16:13:34 2026 +0530
+
+    Few fixes for pipeline
+
+commit ae719d7054a588f6b4b3cdff80d1c9cb56901c19
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 16 14:04:15 2026 +0530
+
+    Removed fashion photography from generation
+
+commit 98f29074ea76893bfb1cd6010efa011045a4cae0
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 16 11:29:18 2026 +0530
+
+    Fashion magazine working
+
+commit 66a08aeb0ee42b9ccce575046e73a5e19cff4ea7
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 15 21:41:28 2026 +0530
+
+    Working
+
+commit 321b9889b7f4ea7616a0c0445a26838fe89e4e90
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 15 04:16:31 2026 +0530
+
+    Minor Fixes
+
+commit 5bbcae2bb459bf8f685c9dd66cc12ebb9a239cf4
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 15 03:58:58 2026 +0530
+
+    New fixes with dynamic and static models
+
+commit a57dcb04a0ead6ae03bd49355af2f0af15b3a62c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 14 17:55:41 2026 +0530
+
+    fixed
+
+commit c2fc8b371e4de9a9ee29b7c0781ac36fb6f05771
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 14 05:38:02 2026 +0530
+
+    Self-chat now functional
+
+commit 3f2f41fbca9ea63d25c45ba1a767d2af739dade3
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 14 02:51:27 2026 +0530
+
+    Enhanced with dynamic selectors
+
+commit 650e0573d3a17b974054453aee9c250d767e1252
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 13 21:52:58 2026 +0530
+
+    Turn now dynamic
+
+commit a5cb5198f8fb2dbcb3e3050b61d149e99242c509
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 13 21:33:28 2026 +0530
+
+    Fix fix fix
+
+commit 0464627b973d4bfdd63f739502f966e5dd505b53
+Merge: cff8466 1e7915b
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 13 19:51:17 2026 +0530
+
+    Merge pull request #3 from Palash90/cpu-mode
+    
+    Cpu mode
+
+commit 1e7915bfdd122396ef56f5879698cfd360e13c8d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 13 19:50:21 2026 +0530
+
+    working base with stories
+
+commit 02ee804df83f8fd4744d41f3f203fb36cf91a883
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 13 17:05:40 2026 +0530
+
+    enhance tests
+
+commit beef9430becf02f5b9869d581e9ea7631792ed85
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 13 16:40:20 2026 +0530
+
+    new changes
+
+commit 836b2c769ee2b859f5a799d74bb9acad4ad41bbe
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 13 03:31:59 2026 +0530
+
+    Working
+
+commit be857ed69d3127b0c24fd2e08cb50649d0c57cef
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Aug 13 01:24:46 2026 +0530
+
+    done
+
+commit 1838cb26d384c633676052cbdf6aaf3a3573aee7
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 21:50:50 2026 +0530
+
+    Working to some extent
+
+commit 01cbe8456e8f63efea21499409396fcfa0a603a0
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 18:15:07 2026 +0530
+
+    More logs and story path stream line
+
+commit c1e85bd1ea86e2fc4961770fbd02d7b7fc32846f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 13:28:40 2026 +0530
+
+    e2E playwright automation
+
+commit d069e827fb5fc540a91c3d600ea04825929d9919
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 06:08:27 2026 +0530
+
+    All working fine towards MVP
+
+commit 2ddec678e4c36c18ce35d1edde0542024be89239
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 05:16:26 2026 +0530
+
+    MD Changes
+
+commit f848009a59258adeb0e6d1722ddfa28c71a9e58d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 04:22:27 2026 +0530
+
+    Dictionary editorials
+
+commit 384d77eff4abb5a8cb2467fd37cbb8605fb099b3
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 04:06:41 2026 +0530
+
+    Prompt modification
+
+commit cff8466630da8ccc156a434a67c9647c8af4c359
+Merge: f9f3e7e 6039bbc
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 02:19:37 2026 +0530
+
+    Merge pull request #2 from Palash90/cpu-mode
+    
+    Cpu mode
+
+commit 6039bbc2fffd5832640ffe18f81b609d6e112fb8
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 02:18:37 2026 +0530
+
+    Kinda working  settings for my machine
+
+commit 5550520931df12db280c798e7aacac4ca1c8b039
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 02:17:16 2026 +0530
+
+    working fine
+
+commit 857639e577b730f177cc1a01a40f6e45e288157b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 01:48:43 2026 +0530
+
+    seems like working now
+
+commit 20d92a0cfcdb1fb1b9543b139d4b0b010c1ddb8d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 12 00:17:52 2026 +0530
+
+    Done
+
+commit 16b5bcd13e77ae7cdceaf6d361775128f12a665a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 11 23:08:40 2026 +0530
+
+    4b model on chat
+
+commit 82113097efa45f05b339bdf2e58c2723781e3050
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 11 22:09:40 2026 +0530
+
+    Well done.
+
+commit e2c1572bbec958d55805307d5fb2a9de0e647e0d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 11 18:29:33 2026 +0530
+
+    Fi UI issues
+
+commit cb37eec2fa53b2105471a77b650084052294fcd0
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 11 18:15:34 2026 +0530
+
+    workable state
+
+commit bd5046345a6eec9b4309def79703f69463f3649e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 11 16:44:18 2026 +0530
+
+    Working now
+
+commit 3368411a1e82c420fd878a8ec4bf612bf6a54d85
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 11 15:32:55 2026 +0530
+
+    fixed dual mode issue but memory on GPU is skyrocketing
+
+commit 8eb31752c7033a11f3d9af2017a2e1aed6d8b9f6
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 11 03:36:39 2026 +0530
+
+    Change it
+
+commit 93f0fe2d86c551a5dfe41f6653f8622ce1f1e2a1
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 11 02:37:31 2026 +0530
+
+    Fixed CPU GPU Mode
+
+commit e3eb87ad0fc78c71f7479bc6b3ed99dcdf99cc55
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 10 18:51:10 2026 +0530
+
+    working on dual mode
+
+commit f9f3e7e04432b81a9674d76ba118c741bbc080be
+Merge: f2c13da 584eacd
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 10 15:16:34 2026 +0530
+
+    Merge pull request #1 from Palash90/image_gen_q
+    
+    Image queueing is working
+
+commit 584eacdfc1e47bbb568fd4de1f9cee22c14c7b44
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 10 15:14:27 2026 +0530
+
+    Image queueing is working
+
+commit f2c13da9825f7e11c3597e3184bc8ac1fb2a9405
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 10 11:27:38 2026 +0530
+
+    Fix matching tests
+
+commit 9370602e5b6d1b580930696b9ee7e4c43ca4c8fc
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 10 02:06:03 2026 +0530
+
+    At least  chat is working
+
+commit 40e5221acecdd70dc6cac5ef8f63d8bbded3c10a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Aug 10 00:49:17 2026 +0530
+
+    Refactoring covered
+
+commit 4b1a35725b20e24da8724c82025992993f1691d1
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 9 16:07:23 2026 +0530
+
+    Coverage up
+
+commit 79b2177f71aaabe167ab1524ee31edbdb410370d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 9 15:07:52 2026 +0530
+
+    Tests
+
+commit b256c47dffbffbbf3e1e9a4c2b4b3a416a17dd50
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 8 23:39:37 2026 +0530
+
+    fix minor issue
+
+commit 529c0cd15a241f8f1eaa40e9cf412c84d52b16d9
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 8 22:32:41 2026 +0530
+
+    Revert "Few more refactoring"
+    
+    This reverts commit 828d9cc40d7aa63b28ad3a15b4805e33e193ee46.
+
+commit 828d9cc40d7aa63b28ad3a15b4805e33e193ee46
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 8 19:49:58 2026 +0530
+
+    Few more refactoring
+
+commit 1c7a3047c3393142a73439b675f8ec02cce2aafc
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 8 19:13:27 2026 +0530
+
+    Reduce to one function
+
+commit ec1577b0138cab38f1f764ece6a650f5281c343f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 8 12:58:27 2026 +0530
+
+    Done
+
+commit d268c6f917e2918d270535de852e18b29e172d2b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 8 07:34:37 2026 +0530
+
+    Done with a lot of changes
+
+commit d92e52b60192866bb3ddb89c6fc8dd0a76bac6b9
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 8 03:44:23 2026 +0530
+
+    Remove dead code
+
+commit 1443a2ec72c380287585d1928d62b90a3bb01e56
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 8 03:35:25 2026 +0530
+
+    Many fixes
+
+commit bb3e30fd0eaa574327d523a2522954ffff3becfd
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 7 19:02:18 2026 +0530
+
+    Fixed many issues
+
+commit 11d807890b7a09ecd5e0c96fef4c3311b246aaca
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 7 17:33:18 2026 +0530
+
+    Genre specific folder
+
+commit 6dc263105c8810c24c6ec37b1d2ad2b7864b2e44
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 7 07:19:29 2026 +0530
+
+    Much more done
+
+commit 474eba2c30070a3cc11c45a8e344f5f74335c398
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 7 07:01:04 2026 +0530
+
+    Much more streamlined experience now
+
+commit 04f9772e051dda59fff7f4ac9fb191ea064853a9
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 7 06:57:05 2026 +0530
+
+    Looks much better now
+
+commit 77586e15d5f71c4f119cd95f36c51c4ca38909ff
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 7 06:42:41 2026 +0530
+
+    Enough for the day
+
+commit 41298a9885684cf6c1331216303dd88b76a312cf
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 7 04:28:58 2026 +0530
+
+    Done, working
+
+commit d0f2666cf88fd7f596c05b47680e9234f4b7885f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Aug 7 03:46:10 2026 +0530
+
+    Self-chat functional
+
+commit fb66ae74110e5818a628a89e01e7bc422b526fb7
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 5 07:09:49 2026 +0530
+
+    Done
+
+commit 00902a43e1ed1d4a5bd4402759fb057a8cf449fc
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 5 00:22:50 2026 +0530
+
+    Don't save json
+
+commit 3abae3ef96bb36c8dbf2f2dbcca3ccf2d50b2943
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Wed Aug 5 00:22:19 2026 +0530
+
+    Self chat saved in a conversation mode and session deleted from server after it''s done
+
+commit 6528cbf142778193bc664083d51194db2d619e23
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 4 05:31:16 2026 +0530
+
+    Fixed self  chat loop
+
+commit f42a0064c3fcf59fa3da03eeefc69f1ab32b48e3
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 4 03:37:17 2026 +0530
+
+    Two user self chat system
+
+commit 3c6f2989b64c4a4386c2e5577f8b4e36e3442fdc
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 4 01:44:12 2026 +0530
+
+    formatting fix
+
+commit eab679bf430b5405be1dafb05bbb386de9ecc2c3
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Aug 4 01:38:37 2026 +0530
+
+    Done
+
+commit 060632a0e90ce6318a2d6d06f45d26651b00a141
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 2 20:41:49 2026 +0530
+
+    Done orphaned image deletion
+
+commit ddb04c2aa38c7fd22bae4073898e53aac1f9fdd9
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 2 17:40:40 2026 +0530
+
+    Fixed
+
+commit f5481ba08dc49046f525a800a9977030875e953b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 2 14:19:13 2026 +0530
+
+    Trim user name and password before validation
+
+commit 6041296c62282d540fb71f1495b0deaf03037312
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Aug 2 09:10:25 2026 +0530
+
+    Generation time added
+
+commit c5d4d64cfb0e96fee56e7b6fbfa2c3412f1b3da0
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 1 21:06:39 2026 +0530
+
+    Change in readme
+
+commit f574c6da4c327b59cff2b9c1124ae1298b919694
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 1 19:05:13 2026 +0530
+
+    Move to z_image
+
+commit 0b7e087f962da56747186064ae3bec3e78d1a466
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 1 16:53:57 2026 +0530
+
+    Updated diagrams
+
+commit 0511aceffeb486b8893828897cb37d8bfe02c7d5
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 1 16:48:13 2026 +0530
+
+    Added deployment steps
+
+commit 60b6828f6ea076fb88909c3167ca9f20b1de324f
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 1 04:00:23 2026 +0530
+
+    fix(setup): install nodejs, use docker wrapper, unify ctx-size & reasoning-budget
+
+commit cf27d0777bffe79dd0a9d6640819d7b9462e651f
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 1 03:40:32 2026 +0530
+
+    Move Quick Start to top and remove Requirements section
+
+commit 5dd343ddd09917a54d3f14f5c8cd09d919ea7d33
+Author: Palash Kanti Kundu <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 1 03:37:15 2026 +0530
+
+    Add MIT License
+
+commit a5a09a4bc0c1745e9a53546e14df2f393044c410
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sat Aug 1 00:59:41 2026 +0530
+
+    Fix vite issue
+
+commit 6b89af07e3dc99315de69c9ce4f14e37d445b0d6
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Jul 31 23:58:44 2026 +0530
+
+    Satisfied with First Draft
+
+commit c2735a9ccc304bc962964fd4f1b16faf2a747ff1
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Jul 31 23:16:59 2026 +0530
+
+    date time location fixed
+
+commit c210f2e8f3138116580dc04d45123702bd77d55e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Jul 31 21:30:28 2026 +0530
+
+    New fixes
+
+commit b95cd48604f1419a3f5b633717e4cacb30129649
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Jul 31 21:10:31 2026 +0530
+
+    Some more fixes
+
+commit 9ec49a602f0f6b91999f529652687434937898a4
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Jul 31 16:17:53 2026 +0530
+
+    Web page fetch
+
+commit a460a6b46cdb2f96218bbe87be719092fb997c2e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Jul 31 15:39:53 2026 +0530
+
+    Done
+
+commit 0d959e33ffab300418d02ba8474dc109213840e7
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Fri Jul 31 13:04:42 2026 +0530
+
+    First Performance Boost
+
+commit 3d8e518c8226cd2965ac2c56f1cb40640c11d7c3
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Jul 30 23:39:37 2026 +0530
+
+    Done with Audio speaking capacity
+
+commit 4c51d8f37df766574b295cb50816ad10216bb76f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Jul 30 22:26:29 2026 +0530
+
+    Fixed some more
+
+commit 937556c2b8e458e06bcb9d4a8cbc6d04106a028f
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Jul 30 21:40:57 2026 +0530
+
+    Mostly working
+
+commit a7b37e99fc54582743f38f53fd32dc375b5ee709
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Jul 30 20:52:58 2026 +0530
+
+    Fixed searxng and message thread issue
+
+commit f68a01c1a361fad8f4079da05dab9112fc3397b9
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Jul 30 15:37:46 2026 +0530
+
+    Location query
+
+commit 20df421908c46992e3d385632726bebd64c1a1d7
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Jul 30 06:00:40 2026 +0530
+
+    Done
+
+commit 762af1cd9c8040f53ca9e3d9ac1fc90469406f8a
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Jul 30 01:26:08 2026 +0530
+
+    Too many things
+
+commit 36a90a27fc80dd39cc95e0ddcf057468fe948604
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Thu Jul 30 00:06:32 2026 +0530
+
+    many ui and app fixes
+
+commit 92b7cc5af51a15c7b835a94428cb23c0c7bd6e37
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 06:04:26 2026 +0530
+
+    dom purify
+
+commit 4d10b47c5998e68f024b56533e3d94390572228b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 05:05:45 2026 +0530
+
+    Let's host
+
+commit 2fd2d17656ddc9a9cd13ed7b0ab6c13008275d75
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 04:11:52 2026 +0530
+
+    Completed
+
+commit 040da3a5841da4e3970a20982b09ca1d16eca31b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 03:43:44 2026 +0530
+
+    Add some breathing for GPU
+
+commit 3d85ecd63d17f2daed571684a0755ff924e3c5c7
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 03:28:47 2026 +0530
+
+    Fix markup and image generation summarize combo
+
+commit b233de8e03a5d63a584a793c755379781559cc4e
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 03:08:09 2026 +0530
+
+    Done a lot of changes
+
+commit 206a7685429b3258d5091fe64d2b7a5b640959a6
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 01:59:44 2026 +0530
+
+    UI Fixes
+
+commit caf9b6e63bb87a419298072b33ac847415ddebdd
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 00:56:34 2026 +0530
+
+    Image model shown now directly during chat
+
+commit 1fa2b4b6fceac97c833228dcbe633861479450b7
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 00:30:25 2026 +0530
+
+    Fixed web search tooling
+
+commit 6d49a9e07271a75eac9feef4998f29cb3ad7691b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 00:17:26 2026 +0530
+
+    timestamp added
+
+commit e1ff289ea450c4717dbfbdcaf8fd66cf173ad835
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Tue Jul 28 00:02:53 2026 +0530
+
+    Few fixes done
+
+commit 6feac32859c10c0c4677029d4e66dc35e182c1eb
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Jul 27 23:42:31 2026 +0530
+
+    Fix issue of eneter to send
+
+commit ec38bf8a902744f748e2862b7a8f4b43cf581ca1
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Jul 27 04:18:15 2026 +0530
+
+    MVP Ready
+
+commit 017712af5a08e80bab5925e4879033bb04dc4a38
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Jul 27 03:18:07 2026 +0530
+
+    Somewhat working
+
+commit 8d3e03df0daf16f1aceb9fe1515ca28d5a82a93c
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Jul 27 02:16:27 2026 +0530
+
+    Reasoning block added
+
+commit 99c734d4e634f76c87e095a84a07086b219a5e1b
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Jul 27 01:45:29 2026 +0530
+
+    Quite good first draft
+
+commit 9c0784c0f4ae12e10b8e67106a19b0586051c76d
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Mon Jul 27 00:34:51 2026 +0530
+
+    First cut served
+
+commit c0d9ba12d5b0c9e718b3db3fceb03e656cb2d5b1
+Author: palash90 <palash.kanti.kundu.90@gmail.com>
+Date:   Sun Jul 26 19:58:41 2026 +0530
+
+    Original files

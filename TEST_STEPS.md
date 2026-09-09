@@ -9,6 +9,7 @@
 | 3002 | markdown hosting | UP |
 | 8000 | MCP gateway | UP (401 w/o token) |
 | 8081 | GPU llama | UP |
+| 8084 | embedding llama | UP (lazy) |
 | 8188 | ComfyUI | UP |
 | 8080 | SearXNG | UP |
 | 9000 | code host | UP |
@@ -27,7 +28,7 @@ Then confirm `curl -s localhost:3001/api/model-status` returns JSON and GPU `/he
 
 **4. Identify test users.** `palash`(admin), `totan`(premium), `kolpo/kaya/editor/moderator`(free). Browser auth = Authentik SSO headers `X-Authentik-Username/Groups/...`; agents = `Authorization: Bearer <JWT>`.
 
-**5. Lane-routing flag.** `server/config.py` ships with `FORCE_GPU_LANE = True` (test-time flag: everything pins to the GPU lane unless the request carries an explicit `mode` or the UI research+CPU toggle). §B3/§F CPU-lane assertions below **require `FORCE_GPU_LANE = False`** in `server/config.py` (or an explicit `mode:"cpu"` request) — otherwise skip them and note the flag in the report.
+**5. Lane-routing flag.** `server/config.py` ships with `FORCE_GPU_LANE = False` (the intended test-time default: agents go to the CPU lane, UI users to the GPU lane; enable `FORCE_GPU_LANE=true` in `.env` to pin everything to the GPU lane). §B3/§F CPU-lane assertions below hold by default; if you have pinned the GPU lane for testing, either flip the flag back to `False` or add an explicit `mode:"cpu"` to those requests — otherwise skip them and note the flag in the report.
 
 ---
 
@@ -127,7 +128,7 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 
 **B7. Tasks & themes & context (direct API)**
 - `POST /api/tasks` `{title, priority, due_date, reminder_at}` → id; `GET /api/tasks` lists it; `PUT`/`DELETE /api/tasks/:id` work; cross-user id → 404
-- Reminder: create task with `reminder_at` ~1 min out → within ~90s `GET /api/model-status` shows `reminder_count` increment / reminder surfaces in UI (reminder loop = 30s)
+- Reminder: the reminder loop (`_reminder_loop`) scans every **12h** (sleeps 43200s), so a `reminder_at` in the future will not surface within a test. To test: create a task with `reminder_at` in the past → on the next scan `GET /api/model-status` shows `reminder_count` increment / reminder surfaces in UI.
 - `GET /api/themes` (admin) → theme log rows + stats after §F or an agent `track_theme` run
 - `POST /api/user-context` role matrix: `{action:"write"}` any user OK; `{action:"overwrite"}` **admin only** (free/premium → 403); `GET /api/user-context` → own file only
 
@@ -284,7 +285,7 @@ With a browser (or headed test) authenticated via SSO:
 
 **I3. Critic citation pass (research answers)**
 - Ask a research-mode question that yields `(Author, Venue, Year) [url]` citations → logs show per-citation re-search/re-fetch, `VERIFY_FETCH_CHARS`-bounded excerpts
-- Fabricated citation (prompt a specific fake source) → verdict flags it; quality < `VERIFY_QUALITY_GATE` (70) or missing cite → re-scheduled ≤ `VERIFY_MAX_RETRIES` (2), then declined/corrected — never silently delivered as verified
+- Fabricated citation (prompt a specific fake source) → verdict flags it; quality < `VERIFY_QUALITY_GATE` (80) or missing cite → re-scheduled ≤ `VERIFY_MAX_RETRIES` (2), then declined/corrected — never silently delivered as verified
 - One URL cited for > `VERIFY_MAX_CITES_PER_URL` (3) distinct claims → over-reliance flagged
 - **Critic token budget / reasoning fallback**: with a reasoning-capable chat model on the lane, logs must NOT show repeated `[critic] LLM call failed … empty content in response`; on an empty `content` the log shows `empty content but reasoning present — judging on reasoning text` and the citation verdict still lands
 - **Existence probe** (`_citation_exists`): cite a real deep link that research never fetched (e.g. a `pmc.ncbi.nlm.nih.gov/articles/PMC…/` page) → the verification block must NOT flag it "likely fabricated"; the log shows the direct fetch succeeding (or `bot-blocked … treating as existing` for 403 hosts like tuftsmedicine.org) instead of a search-only miss
