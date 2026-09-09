@@ -39,6 +39,9 @@ from server.config import (
     TTS_CACHE_DIR,
     TTS_CACHE_MAX_BYTES,
     TTS_CACHE_SECONDARY_DIR,
+    TTS_CHUNK_CHARS,
+    TTS_MAX_CHARS,
+    TTS_MAX_CHARS_PUBLIC,
     UPLOADS_DIR,
 )
 from server.features.tasks_db import _MISSING
@@ -256,13 +259,11 @@ EDGE_VOICES = {
     "es": "es-MX-DaliaNeural",
     "en": "en-US-AriaNeural",
 }
-TTS_MAX_CHARS = 2000
-_TTS_AUDIO_CACHE_MAX = 64
-
 _PIPER_LOCK = threading.Lock()
 _PIPER_VOICES = {}
 _TTS_AUDIO_CACHE = {}
 _TTS_AUDIO_CACHE_ORDER = []
+_TTS_AUDIO_CACHE_MAX = 64
 
 
 def _tts_ext_for(data):
@@ -364,12 +365,116 @@ def _tts_cache_put(key, value):
         print(f"[tts] disk cache write skipped: {e}")
 
 
-def _tts_synthesize(raw_text, voice=""):
-    """Clean, detect language and synthesize speech.
+def _split_speech_chunks(text, max_chunk=TTS_CHUNK_CHARS):
+    """Split clean speech text into sentence-bounded chunks for synthesis.
 
-    Shared by the authenticated ``/api/tts`` endpoint and the public
-    share endpoint. Returns ``(audio_b64, mime_type)``. Raises
-    ``ValueError`` when there is nothing speakable.
+    Splits on sentence terminators (danda ।, period, question mark,
+    exclamation, newline). A single sentence longer than max_chunk is
+    split on whitespace words so no chunk exceeds max_chunk.
+    """
+    import re as _re
+
+    if not text:
+        return []
+    if len(text) <= max_chunk:
+        return [text]
+
+    # Split while retaining the punctuation attached to the preceding sentence.
+    raw_sentences = _re.split(r"([।\.!\?\n]+)", text)
+    sentences = []
+    i = 0
+    while i < len(raw_sentences):
+        s = raw_sentences[i]
+        punct = raw_sentences[i + 1] if i + 1 < len(raw_sentences) else ""
+        combined = (s + punct).strip()
+        if combined:
+            sentences.append(combined)
+        i += 2
+
+    chunks = []
+    current = []
+    curr_len = 0
+    for s in sentences:
+        if len(s) > max_chunk:
+            if current:
+                chunks.append(" ".join(current))
+                current = []
+                curr_len = 0
+            words = s.split()
+            w_curr = []
+            w_len = 0
+            for w in words:
+                if w_len + len(w) + (1 if w_curr else 0) > max_chunk:
+                    if w_curr:
+                        chunks.append(" ".join(w_curr))
+                    w_curr = [w]
+                    w_len = len(w)
+                else:
+                    w_curr.append(w)
+                    w_len += len(w) + (1 if len(w_curr) > 1 else 0)
+            if w_curr:
+                chunks.append(" ".join(w_curr))
+            continue
+
+        add_len = len(s) + (1 if current else 0)
+        if curr_len + add_len > max_chunk:
+            chunks.append(" ".join(current))
+            current = [s]
+            curr_len = len(s)
+        else:
+            current.append(s)
+            curr_len += add_len
+    if current:
+        chunks.append(" ".join(current))
+    return chunks or [text]
+
+
+def _concat_wav_blobs(wav_blobs):
+    """Concatenate multiple single-channel WAV byte strings into one.
+
+    Extracts raw PCM frames from each WAV file and repackages them with
+    the first chunk's sample rate, channel count, and sample width.
+    """
+    import io as _io
+    import wave as _wave
+
+    if not wav_blobs:
+        return b""
+    if len(wav_blobs) == 1:
+        return wav_blobs[0]
+
+    frames = []
+    rate = 22050
+    nchannels = 1
+    sampwidth = 2
+    for i, blob in enumerate(wav_blobs):
+        try:
+            with _wave.open(_io.BytesIO(blob), "rb") as r:
+                if i == 0:
+                    rate = r.getframerate()
+                    nchannels = r.getnchannels()
+                    sampwidth = r.getsampwidth()
+                frames.append(r.readframes(r.getnframes()))
+        except Exception as e:
+            print(f"[tts] concat_wav error on chunk {i}: {e}")
+    out = _io.BytesIO()
+    with _wave.open(out, "wb") as w:
+        w.setnchannels(nchannels)
+        w.setsampwidth(sampwidth)
+        w.setframerate(rate)
+        w.writeframes(b"".join(frames))
+    return out.getvalue()
+
+
+def _tts_synthesize(raw_text, voice="", max_chars=TTS_MAX_CHARS):
+    """Clean, detect language and synthesize speech (chunked).
+
+    Shared by the authenticated ``/api/tts`` endpoint (max_chars=8000)
+    and the public share endpoint (max_chars=2000). Long stories are split
+    into sentence-bounded chunks of <= TTS_CHUNK_CHARS each, synthesized
+    or loaded from cache per chunk, and concatenated into a single audio
+    blob. Returns ``(audio_b64, mime_type)``. Raises ``ValueError`` when
+    there is nothing speakable.
     """
     import hashlib
 
@@ -377,44 +482,144 @@ def _tts_synthesize(raw_text, voice=""):
     tag, text = _detect_tts_lang(text, voice)
     if not text:
         raise ValueError("No speakable text found")
-    if len(text) > TTS_MAX_CHARS:
-        cut = text[:TTS_MAX_CHARS].rsplit(" ", 1)[0]
-        text = cut or text[:TTS_MAX_CHARS]
+    if len(text) > max_chars:
+        cut = text[:max_chars].rsplit(" ", 1)[0]
+        text = cut or text[:max_chars]
+
+    chunks = _split_speech_chunks(text, max_chunk=TTS_CHUNK_CHARS)
+    total_chunks = len(chunks)
 
     if tag in PIPER_VOICES:
-        key = hashlib.sha256(f"piper:{tag}:{text}".encode("utf-8")).hexdigest()
-        wav_bytes = _tts_cache_get(key)
-        if wav_bytes is None:
-            wav_bytes = _synthesize_piper_wav(tag, text)
-            _tts_cache_put(key, wav_bytes)
-        else:
-            print(f"[tts] Piper {tag}: cache hit ({len(text)} chars)")
-        return base64.b64encode(wav_bytes).decode(), "audio/wav"
+        wav_parts = []
+        for idx, chunk in enumerate(chunks):
+            key = hashlib.sha256(f"piper:{tag}:{chunk}".encode("utf-8")).hexdigest()
+            part = _tts_cache_get(key)
+            if part is None:
+                part = _synthesize_piper_wav(tag, chunk)
+                _tts_cache_put(key, part)
+            else:
+                if total_chunks > 1:
+                    print(f"[tts] Piper {tag} chunk {idx+1}/{total_chunks}: cache hit ({len(chunk)} chars)")
+                else:
+                    print(f"[tts] Piper {tag}: cache hit ({len(chunk)} chars)")
+            wav_parts.append(part)
+        combined_wav = _concat_wav_blobs(wav_parts)
+        return base64.b64encode(combined_wav).decode(), "audio/wav"
+
     import asyncio, edge_tts
 
     edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
-    key = hashlib.sha256(f"edge:{edge_voice}:{text}".encode("utf-8")).hexdigest()
-    mp3_bytes = _tts_cache_get(key)
-    if mp3_bytes is None:
-        print(f"[tts] edge-tts {tag} ({edge_voice}): {len(text)} chars")
-        communicate = edge_tts.Communicate(text, edge_voice)
-        mp3_data = bytearray()
+    mp3_parts = []
+    for idx, chunk in enumerate(chunks):
+        key = hashlib.sha256(f"edge:{edge_voice}:{chunk}".encode("utf-8")).hexdigest()
+        part = _tts_cache_get(key)
+        if part is None:
+            if total_chunks > 1:
+                print(f"[tts] edge-tts {tag} ({edge_voice}) chunk {idx+1}/{total_chunks}: {len(chunk)} chars")
+            else:
+                print(f"[tts] edge-tts {tag} ({edge_voice}): {len(chunk)} chars")
+            communicate = edge_tts.Communicate(chunk, edge_voice)
+            mp3_data = bytearray()
 
-        async def _gen():
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    mp3_data.extend(chunk["data"])
+            async def _gen():
+                async for chunk_piece in communicate.stream():
+                    if chunk_piece["type"] == "audio":
+                        mp3_data.extend(chunk_piece["data"])
 
-        asyncio.run(_gen())
-        mp3_bytes = bytes(mp3_data)
-        _tts_cache_put(key, mp3_bytes)
+            asyncio.run(_gen())
+            part = bytes(mp3_data)
+            _tts_cache_put(key, part)
+        else:
+            if total_chunks > 1:
+                print(f"[tts] edge-tts {tag} chunk {idx+1}/{total_chunks}: cache hit ({len(chunk)} chars)")
+            else:
+                print(f"[tts] edge-tts {tag}: cache hit ({len(chunk)} chars)")
+        mp3_parts.append(part)
+    combined_mp3 = b"".join(mp3_parts)
+    return base64.b64encode(combined_mp3).decode(), "audio/mpeg"
+
+
+def _tts_keys_for_raw_text(raw_text, voice="", max_chars=TTS_MAX_CHARS):
+    """Compute all possible TTS cache keys for a given raw message text.
+
+    Replicates the normalization, language detection, truncation and chunking
+    from ``_tts_synthesize`` so the exact cache keys can be determined
+    without executing any synthesis. Returns a set of hex key strings.
+    """
+    import hashlib
+
+    text = markdown_to_speech_text(raw_text)
+    tag, text = _detect_tts_lang(text, voice)
+    if not text:
+        return set()
+    if len(text) > max_chars:
+        cut = text[:max_chars].rsplit(" ", 1)[0]
+        text = cut or text[:max_chars]
+
+    chunks = _split_speech_chunks(text, max_chunk=TTS_CHUNK_CHARS)
+    keys = set()
+    if tag in PIPER_VOICES:
+        for chunk in chunks:
+            keys.add(hashlib.sha256(f"piper:{tag}:{chunk}".encode("utf-8")).hexdigest())
     else:
-        print(f"[tts] edge-tts {tag}: cache hit ({len(text)} chars)")
-    return base64.b64encode(mp3_bytes).decode(), "audio/mpeg"
+        edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
+        for chunk in chunks:
+            keys.add(hashlib.sha256(f"edge:{edge_voice}:{chunk}".encode("utf-8")).hexdigest())
+    return keys
+
+
+def _delete_tts_cache_key(key):
+    """Two-tier deletion of a cached TTS audio key.
+
+    Checks primary directory first; if file exists, deletes it. If not in
+    primary, checks secondary directory and deletes if present. Also removes
+    from in-memory cache.
+    """
+    with _PIPER_LOCK:
+        _TTS_AUDIO_CACHE.pop(key, None)
+        if key in _TTS_AUDIO_CACHE_ORDER:
+            try:
+                _TTS_AUDIO_CACHE_ORDER.remove(key)
+            except ValueError:
+                pass
+
+    for ext in (".wav", ".mp3"):
+        # Check primary first
+        primary_file = os.path.join(TTS_CACHE_DIR, key + ext)
+        if os.path.isfile(primary_file):
+            try:
+                os.remove(primary_file)
+                print(f"[tts] Deleted primary cache file: {primary_file}")
+                continue
+            except OSError as e:
+                print(f"[tts] Error removing primary file {primary_file}: {e}")
+
+        # If not in primary (or after primary check), check secondary
+        if TTS_CACHE_SECONDARY_DIR:
+            secondary_file = os.path.join(TTS_CACHE_SECONDARY_DIR, key + ext)
+            if os.path.isfile(secondary_file):
+                try:
+                    os.remove(secondary_file)
+                    print(f"[tts] Deleted secondary cache file: {secondary_file}")
+                except OSError as e:
+                    print(f"[tts] Error removing secondary file {secondary_file}: {e}")
+
+
+def purge_share_tts_audio(snapshot_message, keep_protected_keys):
+    """Purge TTS cache keys for a revoked share if not referenced elsewhere.
+
+    Two-tiered: checks primary dir and deletes, then checks secondary.
+    """
+    raw_c = _share_message_text({"message": snapshot_message})
+    if not raw_c:
+        return
+    keys = _tts_keys_for_raw_text(raw_c, max_chars=TTS_MAX_CHARS) | _tts_keys_for_raw_text(raw_c, max_chars=TTS_MAX_CHARS_PUBLIC)
+    for k in keys:
+        if k not in keep_protected_keys:
+            _delete_tts_cache_key(k)
 
 
 def _share_message_text(rec):
-    """Extract speakable text from a share snapshot record."""
     msg = (rec or {}).get("message", {})
     content = msg.get("content", "")
     if isinstance(content, str):
@@ -896,8 +1101,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             token = self.path.split("/")[3].split("?")[0]
             purge = parse_qs(urlparse(self.path).query).get("purge", [""])[0] == "1"
+            # If purging, grab the snapshot message content and compute protected keys before revoking
+            snapshot_msg = None
+            if purge:
+                with _data_lock:
+                    rec = shares.get(token)
+                    if rec and rec.get("owner") == user:
+                        snapshot_msg = rec.get("message", {})
+
             ok, info = revoke_share(token, user, purge=purge)
             if ok:
+                if purge and snapshot_msg:
+                    protected_tts_keys = set()
+                    with _data_lock:
+                        for other_t, other_rec in shares.items():
+                            ot_text = _share_message_text(other_rec)
+                            if ot_text:
+                                protected_tts_keys |= _tts_keys_for_raw_text(ot_text, max_chars=TTS_MAX_CHARS)
+                                protected_tts_keys |= _tts_keys_for_raw_text(ot_text, max_chars=TTS_MAX_CHARS_PUBLIC)
+                        for s_msgs in sessions.values():
+                            for m in s_msgs:
+                                if m.get("role") == "assistant":
+                                    c = m.get("content", "")
+                                    if isinstance(c, str) and c:
+                                        protected_tts_keys |= _tts_keys_for_raw_text(c, max_chars=TTS_MAX_CHARS)
+                                    elif isinstance(c, list):
+                                        joined = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+                                        if joined:
+                                            protected_tts_keys |= _tts_keys_for_raw_text(joined, max_chars=TTS_MAX_CHARS)
+                    purge_share_tts_audio(snapshot_msg, protected_tts_keys)
+
                 self.send_json({"status": "revoked", **info})
             else:
                 self.send_json({"error": "Share not found or not yours"}, status=404)
@@ -990,6 +1223,44 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     elif os.path.exists(fpath):
                         print(f"[delete] Removed uploaded image: {fpath}")
                         os.remove(fpath)
+
+            # Compute protected TTS keys from active shares and other remaining sessions
+            # so audio files still referenced elsewhere are preserved.
+            protected_tts_keys = set()
+            for rec in share_recs:
+                s_text = _share_message_text(rec)
+                if s_text:
+                    protected_tts_keys |= _tts_keys_for_raw_text(s_text, max_chars=TTS_MAX_CHARS)
+                    protected_tts_keys |= _tts_keys_for_raw_text(s_text, max_chars=TTS_MAX_CHARS_PUBLIC)
+
+            with _data_lock:
+                for other_sid, other_msgs in sessions.items():
+                    if other_sid == sid:
+                        continue
+                    for other_msg in other_msgs:
+                        if other_msg.get("role") == "assistant":
+                            c = other_msg.get("content", "")
+                            if isinstance(c, str) and c:
+                                protected_tts_keys |= _tts_keys_for_raw_text(c, max_chars=TTS_MAX_CHARS)
+                            elif isinstance(c, list):
+                                joined = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+                                if joined:
+                                    protected_tts_keys |= _tts_keys_for_raw_text(joined, max_chars=TTS_MAX_CHARS)
+
+            # Clean up TTS audio cache files for deleted messages (two-tier deletion: primary, then secondary)
+            for msg in msgs:
+                if msg.get("role") == "assistant":
+                    c = msg.get("content", "")
+                    raw_c = ""
+                    if isinstance(c, str):
+                        raw_c = c
+                    elif isinstance(c, list):
+                        raw_c = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+                    if raw_c:
+                        msg_tts_keys = _tts_keys_for_raw_text(raw_c, max_chars=TTS_MAX_CHARS) | _tts_keys_for_raw_text(raw_c, max_chars=TTS_MAX_CHARS_PUBLIC)
+                        for k in msg_tts_keys:
+                            if k not in protected_tts_keys:
+                                _delete_tts_cache_key(k)
 
             with _data_lock:
                 exists = sid in sessions
@@ -1090,7 +1361,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "No text provided"}, status=400)
                 return
             try:
-                audio_b64, mime = _tts_synthesize(raw_text)
+                audio_b64, mime = _tts_synthesize(raw_text, max_chars=TTS_MAX_CHARS_PUBLIC)
                 self.send_json({"audio": audio_b64, "type": mime})
             except ValueError as e:
                 self.send_json({"error": str(e)}, status=400)
@@ -1385,7 +1656,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "No text provided"}, status=400)
                 return
             try:
-                audio_b64, mime = _tts_synthesize(raw_text, body.get("voice", ""))
+                audio_b64, mime = _tts_synthesize(raw_text, body.get("voice", ""), max_chars=TTS_MAX_CHARS)
                 self.send_json({"audio": audio_b64, "type": mime})
             except ValueError as e:
                 self.send_json({"error": str(e)}, status=400)

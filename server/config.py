@@ -466,6 +466,12 @@ APP_DB = os.path.expanduser("~/local-ai-files/local_ai.db")
 TTS_CACHE_DIR = os.path.expanduser("~/local-ai-files/tts_cache")
 TTS_CACHE_SECONDARY_DIR = os.environ.get("TTS_CACHE_SECONDARY_DIR", "").strip()
 TTS_CACHE_MAX_BYTES = int(os.environ.get("TTS_CACHE_MAX_BYTES", str(1024**3)))
+# Speech-text caps: authenticated lane may synthesize long stories in
+# sentence-bounded chunks; the anonymous public share endpoint stays at a
+# single chunk (abuse bound).
+TTS_MAX_CHARS = int(os.environ.get("TTS_MAX_CHARS", "8000"))
+TTS_MAX_CHARS_PUBLIC = int(os.environ.get("TTS_MAX_CHARS_PUBLIC", "2000"))
+TTS_CHUNK_CHARS = int(os.environ.get("TTS_CHUNK_CHARS", "1800"))
 PAGE_CACHE_DB = os.path.expanduser("~/local-ai-files/page_cache.db")
 # ComfyUI render RAM headroom: when this much free RAM is available, an image
 # render does NOT evict the CPU lane model — background agent rounds and peer
