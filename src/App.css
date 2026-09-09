@@ -451,6 +451,12 @@ html, body {
   color: #f472b6;
 }
 
+.speak-btn.paused {
+  background: rgba(251, 191, 36, 0.15);
+  border-color: rgba(251, 191, 36, 0.4);
+  color: #fbbf24;
+}
+
 .speak-btn.loading {
   opacity: 0.55;
   cursor: wait;
