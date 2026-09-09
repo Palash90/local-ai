@@ -1038,7 +1038,7 @@ async def read_story(
                 document.querySelectorAll('.mod-badge.show-tip').forEach(o => o.classList.remove('show-tip'));
             }});
 
-            // --- Story read-aloud (segmented, chained playback) ---
+            // --- Story read-aloud (segmented, chained playback + word sync) ---
             (function() {{
                 const speakBtn = document.getElementById('speak-btn');
                 if (!speakBtn) return;
@@ -1049,14 +1049,16 @@ async def read_story(
                 let paused = false;
                 let abortChain = false;
                 let segReqId = 0;
-                let wordMap = [];  // absolute timestamps for current segment
-                let wordSpans = []; // DOM spans matching wordMap
+                let wordMap = [];   // absolute timestamps per word
+                let wordSpans = []; // DOM spans with data-idx
                 let highlightTimer = null;
                 let currentHighlight = null;
 
-                function extractWords(article) {{
-                    // Walk all text nodes, split by spaces, collect word spans
-                    const words = [];
+                // Map wordMap entries to DOM spans by fuzzy text matching
+                function tagWords(article, wmap) {{
+                    // Walk text nodes, split into tokens, find matching wordMap entry
+                    const spans = [];
+                    let mapIdx = 0;
                     const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, null, false);
                     let node;
                     while ((node = walker.nextNode())) {{
@@ -1068,17 +1070,44 @@ async def read_story(
                             if (part.match(/^\\s+$/)) {{
                                 frag.appendChild(document.createTextNode(part));
                             }} else {{
+                                // Find matching wordMap entry (advance past punctuation mismatches)
+                                const clean = part.replace(/[^\\w\\u0980-\\u09FF\\u0900-\\u097F\\u0C00-\\u0C7F\\u0C80-\\u0CFF]/g, '').toLowerCase();
+                                let bestIdx = -1;
+                                for (let j = Math.max(0, mapIdx - 1); j < Math.min(mapIdx + 3, wmap.length); j++) {{
+                                    const wc = wmap[j].w.replace(/[^\\w\\u0980-\\u09FF\\u0900-\\u097F\\u0C00-\\u0C7F\\u0C80-\\u0CFF]/g, '').toLowerCase();
+                                    if (wc === clean) {{ bestIdx = j; break; }}
+                                }}
+                                if (bestIdx < 0 && mapIdx < wmap.length) bestIdx = mapIdx;
+                                mapIdx = Math.min(mapIdx + 1, wmap.length);
                                 const span = document.createElement('span');
                                 span.className = 'word-hit';
                                 span.textContent = part;
                                 span.style.cursor = 'pointer';
+                                if (bestIdx >= 0) {{
+                                    span.dataset.idx = bestIdx;
+                                }}
                                 frag.appendChild(span);
-                                words.push(span);
+                                spans.push(span);
                             }}
                         }}
                         node.parentNode.replaceChild(frag, node);
                     }}
-                    return words;
+                    // Attach click-to-seek handlers
+                    spans.forEach(span => {{
+                        span.addEventListener('click', () => {{
+                            const idx = parseInt(span.dataset.idx, 10);
+                            if (isNaN(idx) || idx < 0 || idx >= wmap.length) return;
+                            if (!currentAudio) return;
+                            currentAudio.currentTime = wmap[idx].s;
+                            if (paused) {{
+                                currentAudio.play().catch(() => {{}});
+                                paused = false;
+                                startHighlightLoop();
+                                speakBtn.textContent = '⏸ Pause';
+                            }}
+                        }});
+                    }});
+                    return spans;
                 }}
 
                 function highlightWord(idx) {{
@@ -1089,7 +1118,6 @@ async def read_story(
                     if (idx >= 0 && idx < wordSpans.length) {{
                         currentHighlight = wordSpans[idx];
                         currentHighlight.classList.add('word-highlight');
-                        // Scroll into view if needed
                         const rect = currentHighlight.getBoundingClientRect();
                         if (rect.top < 0 || rect.bottom > window.innerHeight) {{
                             currentHighlight.scrollIntoView({{ block: 'center', behavior: 'smooth' }});
@@ -1101,7 +1129,6 @@ async def read_story(
                     function tick() {{
                         if (!playing || paused || !currentAudio) return;
                         const t = currentAudio.currentTime;
-                        // Binary search for current word
                         let lo = 0, hi = wordMap.length - 1, best = -1;
                         while (lo <= hi) {{
                             const mid = (lo + hi) >> 1;
@@ -1150,7 +1177,6 @@ async def read_story(
                         }}
                         return;
                     }}
-                    // Fresh play
                     abortChain = false;
                     segIdx = 0;
                     segReqId++;
@@ -1173,8 +1199,6 @@ async def read_story(
                         speakBtn.textContent = '⏸ Pause';
                         speakBtn.classList.remove('loading');
                         speakBtn.classList.add('playing');
-                        // Extract words from article for highlight clicking
-                        wordSpans = extractWords(article);
                         await playSegment(myReq);
                     }} catch(e) {{
                         console.warn('Story TTS error:', e);
@@ -1192,6 +1216,48 @@ async def read_story(
                         currentAudio = null;
                         stopHighlightLoop();
                         return;
+                    }}
+                    speakBtn.textContent = 'Loading…';
+                    speakBtn.classList.add('loading');
+                    try {{
+                        const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/audio/' + segIdx);
+                        if (!r.ok) throw new Error('Audio fetch failed');
+                        const blob = await r.blob();
+                        await loadWords(segIdx);
+                        wordSpans = tagWords(article, wordMap);
+                        const url = URL.createObjectURL(blob);
+                        const audio = new Audio(url);
+                        currentAudio = audio;
+                        speakBtn.textContent = '⏸ Pause';
+                        speakBtn.classList.remove('loading');
+                        speakBtn.classList.add('playing');
+                        startHighlightLoop();
+                        audio.onended = () => {{
+                            stopHighlightLoop();
+                            URL.revokeObjectURL(url);
+                            segIdx++;
+                            playSegment(myReq);
+                        }};
+                        audio.onerror = (e) => {{
+                            console.warn('Segment audio error:', e);
+                            stopHighlightLoop();
+                            URL.revokeObjectURL(url);
+                            speakBtn.textContent = '🔊 Play';
+                            speakBtn.classList.remove('loading', 'playing');
+                            playing = false;
+                            currentAudio = null;
+                        }};
+                        await audio.play();
+                    }} catch(e) {{
+                        console.warn('Segment fetch error:', e);
+                        speakBtn.textContent = '🔊 Play';
+                        speakBtn.classList.remove('loading', 'playing');
+                        playing = false;
+                        currentAudio = null;
+                    }}
+                }}
+            }})();
+        </script>
                     }}
                     speakBtn.textContent = 'Loading…';
                     speakBtn.classList.add('loading');
