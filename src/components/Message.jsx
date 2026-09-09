@@ -364,7 +364,7 @@ function _stopActiveAudio() {
   }
 }
 
-function SpeakButton({ text }) {
+function SpeakButton({ text, shareToken }) {
   const [speaking, setSpeaking] = useState(false)
   const [paused, setPaused] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -401,7 +401,7 @@ function SpeakButton({ text }) {
     setPaused(false)
     setLoading(true)
     try {
-      const data = await apiSpeak(text)
+      const data = await apiSpeak(text, undefined, shareToken)
       if (reqRef.current !== reqId) return
       if (!data || !data.audio) throw new Error(data && data.error ? data.error : 'Empty TTS response')
       const mime = data.type || 'audio/mpeg'
@@ -592,7 +592,7 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
   )
 }
 
-function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, selectingRef, onResolved, onLocationNeeded, shareToken }) {
+function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onImageOpen, selectingRef, onResolved, onLocationNeeded, shareToken }) {
   const elRef = useRef(null)
   const chatEl = useRef(null)
   const [popupVisible, setPopupVisible] = useState(null)
@@ -733,13 +733,13 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
         {role === 'user' && msg._research && (
         <span className="tool-badge research" title="This message was sent with the Research toggle on">Research</span>
       )}
-      {role === 'bot' && msg._elapsed_ms != null && (
+      {role === 'bot' && !hideMeta && msg._elapsed_ms != null && (
           <span className="msg-elapsed" title="Time from task start to completion">&#9202; {formatElapsed(msg._elapsed_ms)}</span>
         )}
-        {role === 'bot' && msg._confidence != null && (
+        {role === 'bot' && !hideMeta && msg._confidence != null && (
           <span className="conf-badge" title="Confidence from the verification judge">&#9878; {msg._confidence}%</span>
         )}
-        {role === 'bot' && toolsUsed.length > 0 && (() => {
+        {role === 'bot' && !hideMeta && toolsUsed.length > 0 && (() => {
           let fetchIdx = 0
           return toolsUsed.map((t, i) => {
             const isFetch = t === 'fetch_page'
@@ -775,7 +775,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, onImageOpen, se
             )
           })
         })()}
-        {role === 'bot' && text && !hideSpeak && <SpeakButton text={ttsText} />}
+        {role === 'bot' && text && (!hideSpeak || shareToken) && <SpeakButton text={ttsText} shareToken={shareToken} />}
         <CopyButton text={text} genPrompt={genPrompt} imageUrl={imageUrl} />
         {role === 'bot' && sessionId && msgIndex != null && (
           <ShareButton sessionId={sessionId} msgIndex={msgIndex} />

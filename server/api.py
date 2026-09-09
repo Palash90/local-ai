@@ -276,6 +276,68 @@ def _tts_cache_put(key, value):
             _TTS_AUDIO_CACHE.pop(old, None)
 
 
+def _tts_synthesize(raw_text, voice=""):
+    """Clean, detect language and synthesize speech.
+
+    Shared by the authenticated ``/api/tts`` endpoint and the public
+    share endpoint. Returns ``(audio_b64, mime_type)``. Raises
+    ``ValueError`` when there is nothing speakable.
+    """
+    import hashlib
+
+    text = markdown_to_speech_text(raw_text)
+    tag, text = _detect_tts_lang(text, voice)
+    if not text:
+        raise ValueError("No speakable text found")
+    if len(text) > TTS_MAX_CHARS:
+        cut = text[:TTS_MAX_CHARS].rsplit(" ", 1)[0]
+        text = cut or text[:TTS_MAX_CHARS]
+
+    if tag in PIPER_VOICES:
+        key = hashlib.sha256(f"piper:{tag}:{text}".encode("utf-8")).hexdigest()
+        wav_bytes = _tts_cache_get(key)
+        if wav_bytes is None:
+            wav_bytes = _synthesize_piper_wav(tag, text)
+            _tts_cache_put(key, wav_bytes)
+        else:
+            print(f"[tts] Piper {tag}: cache hit ({len(text)} chars)")
+        return base64.b64encode(wav_bytes).decode(), "audio/wav"
+    import asyncio, edge_tts
+
+    edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
+    key = hashlib.sha256(f"edge:{edge_voice}:{text}".encode("utf-8")).hexdigest()
+    mp3_bytes = _tts_cache_get(key)
+    if mp3_bytes is None:
+        print(f"[tts] edge-tts {tag} ({edge_voice}): {len(text)} chars")
+        communicate = edge_tts.Communicate(text, edge_voice)
+        mp3_data = bytearray()
+
+        async def _gen():
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    mp3_data.extend(chunk["data"])
+
+        asyncio.run(_gen())
+        mp3_bytes = bytes(mp3_data)
+        _tts_cache_put(key, mp3_bytes)
+    else:
+        print(f"[tts] edge-tts {tag}: cache hit ({len(text)} chars)")
+    return base64.b64encode(mp3_bytes).decode(), "audio/mpeg"
+
+
+def _share_message_text(rec):
+    """Extract speakable text from a share snapshot record."""
+    msg = (rec or {}).get("message", {})
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return ""
+
+
 def markdown_to_speech_text(text):
     """Convert chat markdown into speakable plain text.
 
@@ -919,6 +981,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        tts_share_route = re.match(r"^/api/public/share/([A-Za-z0-9]+)/tts$", self.path)
+        if tts_share_route:
+            # Public read-aloud for a shared message. No auth (same as the
+            # other /api/public/* routes), but the spoken text always comes
+            # from the stored snapshot — never from client input.
+            token = tts_share_route.group(1)
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if length:
+                    self.rfile.read(length)
+            except Exception:
+                pass
+            rec = get_share(token)
+            if not rec:
+                self.send_json({"error": "Share not found"}, status=404)
+                return
+            raw_text = _share_message_text(rec)
+            if not raw_text:
+                self.send_json({"error": "No text provided"}, status=400)
+                return
+            try:
+                audio_b64, mime = _tts_synthesize(raw_text)
+                self.send_json({"audio": audio_b64, "type": mime})
+            except ValueError as e:
+                self.send_json({"error": str(e)}, status=400)
+            except Exception as e:
+                print(f"[tts] Error: {e}")
+                traceback.print_exc()
+                self.send_json({"error": str(e)}, status=500)
+            return
         if self.path == "/api/shares":
             user = get_current_user(self.headers)
             if not user:
@@ -1205,52 +1297,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "No text provided"}, status=400)
                 return
             try:
-                import hashlib
-
-                text = markdown_to_speech_text(raw_text)
-                voice = body.get("voice", "")
-                tag, text = _detect_tts_lang(text, voice)
-                if not text:
-                    self.send_json({"error": "No speakable text found"}, status=400)
-                    return
-                if len(text) > TTS_MAX_CHARS:
-                    cut = text[:TTS_MAX_CHARS].rsplit(" ", 1)[0]
-                    text = cut or text[:TTS_MAX_CHARS]
-
-                if tag in PIPER_VOICES:
-                    key = hashlib.sha256(
-                        f"piper:{tag}:{text}".encode("utf-8")
-                    ).hexdigest()
-                    wav_bytes = _tts_cache_get(key)
-                    if wav_bytes is None:
-                        wav_bytes = _synthesize_piper_wav(tag, text)
-                        _tts_cache_put(key, wav_bytes)
-                    else:
-                        print(f"[tts] Piper {tag}: cache hit ({len(text)} chars)")
-                    audio_b64 = base64.b64encode(wav_bytes).decode()
-                    self.send_json({"audio": audio_b64, "type": "audio/wav"})
-                else:
-                    import asyncio, edge_tts
-                    edge_voice = voice or EDGE_VOICES.get(tag, "en-US-AriaNeural")
-                    key = hashlib.sha256(
-                        f"edge:{edge_voice}:{text}".encode("utf-8")
-                    ).hexdigest()
-                    mp3_bytes = _tts_cache_get(key)
-                    if mp3_bytes is None:
-                        print(f"[tts] edge-tts {tag} ({edge_voice}): {len(text)} chars")
-                        communicate = edge_tts.Communicate(text, edge_voice)
-                        mp3_data = bytearray()
-                        async def _gen():
-                            async for chunk in communicate.stream():
-                                if chunk["type"] == "audio":
-                                    mp3_data.extend(chunk["data"])
-                        asyncio.run(_gen())
-                        mp3_bytes = bytes(mp3_data)
-                        _tts_cache_put(key, mp3_bytes)
-                    else:
-                        print(f"[tts] edge-tts {tag}: cache hit ({len(text)} chars)")
-                    audio_b64 = base64.b64encode(mp3_bytes).decode()
-                    self.send_json({"audio": audio_b64, "type": "audio/mpeg"})
+                audio_b64, mime = _tts_synthesize(raw_text, body.get("voice", ""))
+                self.send_json({"audio": audio_b64, "type": mime})
+            except ValueError as e:
+                self.send_json({"error": str(e)}, status=400)
             except Exception as e:
                 print(f"[tts] Error: {e}")
                 traceback.print_exc()
