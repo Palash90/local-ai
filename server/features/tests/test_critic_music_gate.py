@@ -186,3 +186,45 @@ def test_verification_addendum_caps_sources():
     vs = [{"url": f"http://s/{i}", "note": "ok", "model": "m"} for i in range(10)]
     out = _verification_addendum(vs, {})
     assert "…2 more source verdicts" in out
+
+
+def test_quality_judge_excludes_generator_model(stub_state):
+    import threading
+    import types
+    import server.features.judge as jd
+    import server.features.critic as cr
+    calls = {}
+
+    def fake_verify(user_input, answer, model_id=None,
+                    allow_gpu_fallback=False, exclude_models=None):
+        calls["exclude"] = exclude_models
+        calls["fallback"] = allow_gpu_fallback
+        return None  # simulate "no independent judge"
+
+    orig = jd.llm_verify_answer_quality
+    jd.llm_verify_answer_quality = fake_verify
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(),
+        tasks={"t": {"_original_message": "make a jingle", "_user": "zoe"}},
+        sessions={},
+        task_mode=lambda tid: "gpu",
+        server_model_id=lambda mode: "gemma4-e4b-q4",
+    )
+    try:
+        jv = cr._judge_answer_quality("t", "some answer")
+    finally:
+        jd.llm_verify_answer_quality = orig
+    assert calls["exclude"] == {"gemma4-e4b-q4"}
+    assert calls["fallback"] is True
+    assert jv and "self-grade blocked" in jv["note"]
+
+
+def test_self_artifact_citation_filter():
+    from server.features.critic import _is_self_artifact, extract_citations
+    assert _is_self_artifact("https://palashkantikundu.in/output/palash/x.png")
+    assert _is_self_artifact("/music/palash/gen_a.wav")
+    assert not _is_self_artifact("https://example.com/article")
+    answer = ("Here! [Image](https://palashkantikundu.in/output/palash/x.png) "
+              "and (Doe, Science, 2024) [https://ex.org/a]")
+    urls = [c["url"] for c in extract_citations(answer)]
+    assert urls == ["https://ex.org/a"]

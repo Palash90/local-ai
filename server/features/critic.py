@@ -335,6 +335,20 @@ def _parse_verdict(text):
         return None
 
 
+_SELF_ARTIFACT_PATH_RE = re.compile(r"^/(?:output|music|uploads)/")
+
+
+def _is_self_artifact(url):
+    """True for links to this server's own generated files (image/music/upload
+    urls, relative or on our own host). They are artifacts, not sources —
+    never route them through citation existence-probing / LLM verification."""
+    try:
+        path = urlsplit(url or "").path
+    except Exception:
+        return False
+    return bool(_SELF_ARTIFACT_PATH_RE.match(path))
+
+
 def extract_citations(answer):
     """Return a list of citation dicts found in the answer.
 
@@ -385,7 +399,8 @@ def extract_citations(answer):
                 "url": url,
                 "meta": None,
             })
-    return citations
+    return [c for c in citations
+            if not (c.get("url") and _is_self_artifact(c["url"]))]
 
 
 def _norm_url(url):
@@ -801,11 +816,17 @@ def _judge_answer_quality(task_id, answer):
         t = M.tasks.get(task_id) or {}
         user_input = t.get("_original_message", "")
         user = t.get("_user", "")
+    mode = M.task_mode(task_id)
+    try:
+        generator_model = M.server_model_id(mode)
+    except Exception:
+        generator_model = ""
     try:
         result = llm_verify_answer_quality(
             user_input, answer,
             model_id=resolve_judge_model(user or ""),
-            allow_gpu_fallback=M.task_mode(task_id) == "gpu",
+            allow_gpu_fallback=mode == "gpu",
+            exclude_models={generator_model},
         )
     except Exception as e:
         print(f"[critic] answer-quality judge call failed: {e}")
@@ -815,7 +836,14 @@ def _judge_answer_quality(task_id, answer):
             tt = M.tasks.get(task_id)
             if tt:
                 tt["_judge_result"] = None
-        return None
+        # No confidence badge, no self-graded 100 — record the honest skip
+        # so the reasoning trail says why.
+        return {
+            "url": "", "meta": None, "action": "JUDGE",
+            "note": "quality judge skipped — no independent judge model "
+                    "available (self-grade blocked)",
+            "corrected_meta": None, "reason": "", "model": None,
+        }
     with M._data_lock:
         tt = M.tasks.get(task_id)
         if tt:

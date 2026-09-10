@@ -580,7 +580,8 @@ def _gpu_judge_fallback_base(requested_model_id, label):
 
 
 def _judge_completion(label, system_prompt, user_content, base_url, timeout,
-                      max_chars=2000, model_id=None, allow_gpu_fallback=False):
+                      max_chars=2000, model_id=None, allow_gpu_fallback=False,
+                      exclude_models=None):
     """Lowest-level judge POST plumbing shared by every judge entry point.
 
     Resolves the pinned/explicit and candidate model ids (cached, see
@@ -594,6 +595,11 @@ def _judge_completion(label, system_prompt, user_content, base_url, timeout,
     ``allow_gpu_fallback`` (UI-lane callers only) redirects the whole call to
     the GPU server with the user's configured chat model when the CPU judge
     is parked on a foreign judge model — see :func:`_gpu_judge_fallback_base`.
+
+    ``exclude_models``: ids that must never answer this call — a quality
+    judge may not grade its own generation. On the GPU-fallback path the only
+    candidate IS the chat model, so exclusion there means "no independent
+    judge": an honest (None, None) skip rather than a self-graded 100.
     """
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         # Must cover a COLD model load (~25s) plus thinking-model inference;
@@ -615,9 +621,15 @@ def _judge_completion(label, system_prompt, user_content, base_url, timeout,
         print(f"[guardrail][{label}] requests unavailable: {e}")
         return None, None
 
+    exclude = {(m or "").strip() for m in (exclude_models or set()) if m}
     gpu_base = (
         _gpu_judge_fallback_base(model_id, label) if allow_gpu_fallback else None
     )
+    if gpu_base and _chat_model_id() in exclude:
+        print(f"[guardrail][{label}] self-grade blocked: the only fallback "
+              f"judge is the generating chat model — skipping verdict",
+              flush=True)
+        return None, None
     if gpu_base:
         print(
             f"[guardrail][{label}] CPU judge parked on a foreign judge — "
@@ -637,6 +649,12 @@ def _judge_completion(label, system_prompt, user_content, base_url, timeout,
         candidates = list(cached) if isinstance(cached, list) else (
             [cached] if cached else None
         ) or _judge_candidates(base_url, forced=model_id)
+        if exclude:
+            candidates = [c for c in candidates if c not in exclude]
+            if not candidates:
+                print(f"[guardrail][{label}] no independent judge model on "
+                      f"{base_url} — skipping verdict", flush=True)
+                return None, None
 
     # Serialize cross-model judge usage: hold the lane for the model we are
     # about to ensure/POST so a concurrent call on a DIFFERENT judge model
@@ -1013,7 +1031,7 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
 
 def llm_verify_answer_quality(user_input, answer, base_url=None, timeout=None,
                                model_id=None, max_chars=8000,
-                               allow_gpu_fallback=False):
+                               allow_gpu_fallback=False, exclude_models=None):
     """General interactive-answer quality judge (the post-generation gate).
 
     Grades the finished answer against the user's own request with a general
@@ -1048,7 +1066,7 @@ def llm_verify_answer_quality(user_input, answer, base_url=None, timeout=None,
     cand, content = _judge_completion(
         "quality-judge", _get_prompt("judge_quality.txt"), user_content,
         base_url, timeout, max_chars=max_chars, model_id=model_id,
-        allow_gpu_fallback=allow_gpu_fallback,
+        allow_gpu_fallback=allow_gpu_fallback, exclude_models=exclude_models,
     )
     if cand is None:
         print("[guardrail][quality-judge] judge unavailable — fail-open")
