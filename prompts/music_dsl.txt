@@ -2,8 +2,31 @@ Score DSL. A score has THREE axes: GENRE (sound world), song FORM (@section), an
 
 DIRECTIVES (whole-score, one per line, before lanes):
   @tempo <bpm>     20-300 (default 120)
-  @genre <name>    see GENRES below; sets scale/instruments AND the drum
-                   groove — copy that genre's bar from GENRE GROOVES — the default [RHYTHM] bar per genre (every bar must total
+  @genre <name>    see GENRES below; sets scale/instruments AND the drum groove — copy that genre's bar from GENRE GROOVES below
+  @mood <name>     joyful|moody|inspiring|dreamy|tense|epic|calm|playful
+  @section <name> bars=N energy=0.0-1.0 [repeat=N]
+                   song form on a shared bar grid that tiles from bar 1 across ALL lanes; energy auto-scales velocity+expression so a chorus lifts the band without editing notes. Use intro/verse/prechorus/chorus/bridge/outro. LOOP SEMANTICS: if a lane's written material is shorter than the section grid it is automatically repeated (bar-aligned) across the whole form — write your best 2-4 bar vamp and let the sections loop it with their energy lifts; the piece lasts as long as the grid says.
+  '#' starts a comment.
+
+GENRES (authentic palette + groove; feel free to fuse):
+  jazz pop rock edm hiphop rnb funk blues japanese chinese indian_classical bollywood arabic korean latin bossa ambient cinematic. e.g. japanese=hirajoshi/yo pentatonic, koto/shamisen/shakuhachi, sparse taiko; indian_classical=raga (yaman/bhairav/malkauns), sitar/sarangi/shanai + tanpura drone + tabla; arabic=maqam (hijaz/kurd), santoor/oud + darbuka; jazz=dorian/mixo, 7ths/9ths, brush-swing; edm=four-on-floor synth.
+  CROSS-GENRE: you may set one lane's INSTRUMENT (or scale) from a different genre for fusion (koto over jazz, sitar in cinematic, etc.).
+
+LANES: '[ROLE INSTRUMENT vol=NN]' header then note tokens. ROLE any name (MELODY, HARMONY, BASS, RHYTHM/PERC). Any lane may be a melody — PIANO/EPIANO can carry the lead, and a low-register PIANO can be the bass (write low octaves); instrument role is set by register, not by name. INSTRUMENT alias includes world voices: PIANO EPIANO ORGAN CELESTA MUSICBOX GUITAR NYLON EGUITAR BASS EBASS SLAP FRETLESS VIOLIN VIOLA CELLO CONTRABASS STRINGS SYNTHSTRINGS CHOIR FLUTE OBOE CLARINET SAX TRUMPET TROMBONE FRENCHHORN HARP PAD SYNTH LEAD | SITAR VEENA SAROD TAMBRA EKTARA BANJO UKULELE SHAMISEN KOTO GUZHENG YANGQIN SANTOOR DULCIMER KALIMBA MBIRA SHAKUHACHI DIZI OCARINA PANFLUTE BAGPIPE FIDDL SHANAI SHEHNAI SARANGI STEELDRUM, or prog=NN (GM). vol=NN lane mix 0-100 (good defaults). Percussion lane = role RHYTHM/DRUMS/PERC* (channel 9). MELODY = single notes (E4 q); sustained chord voicings like C3:maj7 w belong in a HARMONY lane, not the melody. TEXTURE: to double/harmonise or do call-and-response, emit MULTIPLE same-role lanes (MELODY + MELODY2, HARMONY + PAD, BASS + BASS2, RHYTHM + PERC2); give a voice the full bar of rests 'R w |' on bars where it is silent, so lanes stay bar-aligned. MINIMUM TEXTURE: a full piece needs AT LEAST a MELODY lane AND a HARMONY lane (chord voicings, e.g. [HARMONY epiano vol=72] with C3:maj7/G3:7 tokens — never melody alone). Add BASS + RHYTHM lanes whenever the user mentions rhythm, groove, beat or a full band; a SINGLE lane is valid ONLY for an explicit solo request ('just piano', 'musicbox solo'). Max 8 lanes.
+
+EVENTS (space-separated; '|' = bar line). Each lane plays ONE voice at a time (a chord is one token). Fill EVERY 4-beat bar exactly (w=4 h=2 q=1 e=.5 s=.25, '.' dots), else the piece desyncs. PITCH + DUR [+ DYN]:
+  note:  C4 q, F#5 e, Bb3 h, A0 w (scientific pitch)
+  chord: C:maj A3:min G:7 D:maj7 E:min7 A:sus4 B:dim (opt octave, opt 7th)
+  arpeggio: append ar (up) / ad (down) / au (up-down) to a chord to ROLL its
+    tones across the duration — one token, several notes, and the bar stays
+    exact: "C3:min7 ar w" = root 3rd 5th 7th as four quarters;
+    "G3:7 ar q" = a quick 16th run; "C2:7 ar w" = a walking bass bar. The
+    chord's note count sets the rhythm; you only write harmony + time.
+  rest:  R q   (or R w for a silent bar)
+  drum:  BD KC SN RIM CLAP HH OH PEDAL CR CHIN RD RIDE LT MT HT LFT HFT CONG BONG TBL CAB MAR CLV COWB TAM TRIG + dur (kick snare rimshot clap hats cymbals toms congas timbales cabasa maracas claves cowbell tambourine triangle). TABLA SYLLABLES for indian/bollywood grooves: DHA (bass-open) DHIN (ringing mid) NA (crisp slap) TIN (high ring) GHE (low closed) TA (sharp closed).
+  dynamic suffix on duration (or '!' on the pitch): ! accent, f forte, m mezzo, p soft -> C4 q! / C4! q / E4ep
+
+GENRE GROOVES — the default [RHYTHM] bar per genre (every bar must total
 exactly 4 beats; copy it, then vary the 4th bar of a phrase). NEVER put a
 rock backbeat under raga/bossa/taiko; for fusion, groove of the PRIMARY
 genre.
@@ -27,16 +50,23 @@ genre.
     BD q R q SN q R q | (HH e e e e between)
   edm — four-on-floor:
     BD q BD q BD q BD q | (OH e R e after each BD)
-  pop — backbeat:
-    BD q SN q BD q SN q |
+  pop / rock — backbeat:
+    BD q SN q BD q SN q | (CR on fill bars)
   blues — shuffle:
     BD q R e R e SN q R e R e |
-  rock — straight:
-    BD q SN q BD q SN q | (CR on fill bars)
   cinematic — timpani:
     LT h! MT h | (CR swell at chorus start)
   ambient — none:
     R w | (a sparse CAB/WBH pulse is enough)
+
+ARPENING — broken-chord figures for HARMONY/BASS/PAD lanes (pick what the
+genre asks; block chords stay right for bossa comping and brass hits):
+  ambient / cinematic  slow sparkle:   C3:maj7 ar w | A2:min7 ar w |
+  edm / rnb            rolling drive:  A2:min7 au q | G2:maj7 au q |
+  jazz ballad          light comp:     D3:min7 ar q R q G3:7 ar q R q |
+  indian / bollywood   sargam-like run: C3:min7 au h D3:min7 au h |
+  walking bass (funk/jazz/blues):
+    C2:7 ar w | A1:min7 ar w | D2:min7 ar w | G1:7 ar w |
 
 MUSIC THEORY (write music, not random notes):
   - Melody dances on the harmony: chord tones on strong beats (favour the 3rd/7th), stepwise passing tones on weak beats, neighbour tones, and suspensions that resolve by step across chord changes.

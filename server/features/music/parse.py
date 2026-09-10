@@ -30,10 +30,13 @@ DYN_SUFFIX_RE = re.compile(r"(?<=[whqes.])([fmp!])$")
 LEAD_ACCENT_RE = re.compile(r"!$")
 TOKEN_RE = re.compile(r"^([A-G][#b]?-?\d+|R)([whqes]\.?)$", re.IGNORECASE)
 CHORD_QUAL = "maj7|min7|m7b5|dim7|maj|min|dim|aug|sus4|sus2|7"
+ARP_FLAGS = {"ar": "up", "ad": "down", "au": "updown"}
 CHORD_RE = re.compile(
-    r"^([A-G][#b]?)(-?\d+)?(?::(" + CHORD_QUAL + r"))?([whqes]\.?)$", re.IGNORECASE)
+    r"^([A-G][#b]?)(-?\d+)?(?::(" + CHORD_QUAL + r"))?(ar|ad|au)?([whqes]\.?)$",
+    re.IGNORECASE)
 CHORD_SYM_RE = re.compile(
-    r"^([A-G][#b]?)(-?\d+)?(?::(" + CHORD_QUAL + r"))$", re.IGNORECASE)
+    r"^([A-G][#b]?)(-?\d+)?(?::(" + CHORD_QUAL + r"))?(ar|ad|au)?$",
+    re.IGNORECASE)
 DUR_ONLY_RE = re.compile(r"^([whqes]\.?)$", re.IGNORECASE)
 DUR_DYN_RE = re.compile(r"^([whqes]\.?)([fmp!]?)$", re.IGNORECASE)
 NOTE_SYM_RE = re.compile(r"^([A-G][#b]?-?\d+|R)$", re.IGNORECASE)
@@ -210,6 +213,10 @@ def parse_score(text, tempo=120):
             if LEAD_ACCENT_RE.search(tok):
                 lead_dyn = DYN_MAP["!"]
                 tok = LEAD_ACCENT_RE.sub("", tok)
+            if (CHORD_SYM_RE.match(tok) and i < len(toks)
+                    and toks[i].lower() in ARP_FLAGS):
+                tok = tok + toks[i]
+                i += 1
             if ((CHORD_SYM_RE.match(tok) or NOTE_SYM_RE.match(tok)
                  or DRUM_SYM_RE.match(tok))
                     and i < len(toks) and DUR_DYN_RE.match(toks[i])):
@@ -239,17 +246,33 @@ def parse_score(text, tempo=120):
                         continue
                 cm = CHORD_RE.match(tok)
                 tm = TOKEN_RE.match(tok)
-                if cm and ":" in tok:
+                if cm and (":" in tok or cm.group(4)):
                     root = _canon(cm.group(1))
                     octv = int(cm.group(2)) if cm.group(2) else 4
                     qual = (cm.group(3) or "maj").lower()
-                    beats = _beats(cm.group(4))
+                    beats = _beats(cm.group(5))
                     pitches = chord_pitches(root, qual, octv)
-                    ev = {"type": "chord", "pitches": pitches,
-                          "start": cur["cursor"], "dur": beats}
-                    if dyn is not None:
-                        ev["vel"] = dyn
-                    cur["events"].append(ev)
+                    arp = (cm.group(4) or "").lower()
+                    if not arp:
+                        ev = {"type": "chord", "pitches": pitches,
+                              "start": cur["cursor"], "dur": beats}
+                        if dyn is not None:
+                            ev["vel"] = dyn
+                        cur["events"].append(ev)
+                    else:
+                        # arpeggio: play the chord tones in sequence across the
+                        # written duration — one token, a rolled figure.
+                        seq = (pitches if arp == "ar" else
+                               list(reversed(pitches)) if arp == "ad" else
+                               pitches + list(reversed(pitches))[1:-1])
+                        step = beats / len(seq)
+                        for pi, p in enumerate(seq):
+                            ev = {"type": "note", "midi": p,
+                                  "start": cur["cursor"] + pi * step,
+                                  "dur": step}
+                            if dyn is not None:
+                                ev["vel"] = dyn
+                            cur["events"].append(ev)
                     cur["cursor"] += beats
                 elif tm:
                     pitch, dur = tm.group(1), tm.group(2)

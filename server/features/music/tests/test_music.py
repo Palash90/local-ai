@@ -244,3 +244,45 @@ def test_tiled_bossa_renders_declared_length():
     assert res["errors"] == []
     notes = {l["name"]: l["notes"] for l in res["levels"]}
     assert notes["RHYTHM"] >= 20, notes
+
+
+def test_arpeggio_expansion():
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score(
+        "[HARMONY epiano]\nC3:min7 ar w | C3:min7 w |\n[BASS ebass]\nD2:7 ad q |",
+        120)
+    assert not errs, errs
+    h = secs[0]["events"]
+    assert all(e["type"] == "note" for e in h[:4])
+    up = [e["midi"] for e in h[:4]]
+    assert up == sorted(up) and all(abs(e["dur"] - 1.0) < 1e-6 for e in h[:4])
+    assert h[4]["type"] == "chord"                      # block form untouched
+    d = [e["midi"] for e in secs[1]["events"]]
+    assert d == sorted(d, reverse=True)                 # ad -> descending roll
+    secs2, errs2, _ = parse_score("[HARMONY]\nE4:min7arq |", 120)  # fused form
+    assert not errs2 and len(secs2[0]["events"]) == 4
+
+
+def test_dsl_doc_sections_and_example_bars():
+    """The live DSL doc is hot-swapped by hand — guard its structure and every
+    GENRE GROOVES / ARPENING example bar against the real parser."""
+    import pathlib
+    import re
+    from server.features.music.parse import parse_score
+    doc = (pathlib.Path(__file__).resolve().parents[4] / "prompts" /
+           "music_dsl.txt").read_text()
+    for sec in ("LANES:", "EVENTS", "GENRE GROOVES", "ARPENING",
+                "arpeggio:", "chord:", "drum:", "MUSIC THEORY",
+                "ANTI-EXAMPLE", "LOOP SEMANTICS"):
+        assert sec in doc, sec
+    region = doc[doc.index("GENRE GROOVES —"):doc.index("MUSIC THEORY (write music")]
+    for line in region.splitlines():
+        line = line.strip()
+        if "|" not in line:
+            continue
+        bars = re.findall(r"([A-Z][A-Z0-9:! .]{1,60}?\|)", line)
+        if not bars:
+            continue
+        lane = "[RHYTHM]" if not re.search(r"\d+:", line) else "[HARMONY epiano]"
+        _, errs, _ = parse_score(lane + "\n" + " ".join(bars), 120)
+        assert not errs, (line, errs[:2])
