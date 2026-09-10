@@ -3,6 +3,7 @@ import json
 import html
 import re
 import shutil
+import unicodedata
 from datetime import datetime
 import markdown
 from fastapi import FastAPI, HTTPException, Request, status
@@ -17,6 +18,33 @@ load_dotenv()
 app = FastAPI()
 
 BASE_STORIES_DIR = "./stories"
+
+
+def _nfc(s):
+    """Normalize a path string to NFC (composed form) so it matches
+    filesystem paths created on macOS which default to NFD."""
+    return unicodedata.normalize('NFC', s) if s else s
+
+
+def _resolve_story_folder(collection, story_id):
+    """Resolve story folder path, handling Unicode normalization mismatches.
+
+    Bengali/NFC paths can differ between URL-encoded and on-disk forms
+    (e.g. য় = U+09DF vs য় = U+09AF+U+09BC). This searches the parent
+    directory for a matching folder when the exact path doesn't exist.
+    """
+    base = COLLECTION_RULES[collection]["path"]
+    folder = os.path.join(base, story_id)
+    if os.path.isdir(folder):
+        return folder
+    # Fuzzy match: search parent for NFC-equal folder name
+    parent = os.path.join(base, story_id.rsplit("/", 1)[0] if "/" in story_id else "")
+    if os.path.isdir(parent):
+        target_name = unicodedata.normalize('NFC', story_id.rsplit("/", 1)[-1])
+        for d in os.listdir(parent):
+            if unicodedata.normalize('NFC', d) == target_name:
+                return os.path.join(parent, d)
+    return folder  # return original (will 404 with clear message)
 
 # Directory roots resolved from environment variables.
 # Hierarchy: everyone -> free dir, premium +1 dir, admin +1 more dir.
@@ -556,7 +584,10 @@ async def story_content(
     """Returns the current rendered story HTML for live polling."""
     enforce_rbac(collection, request=request)
 
-    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    story_id = _nfc(story_id)
+
+
+    folder_path = _resolve_story_folder(collection, story_id)
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Story folder not found")
 
@@ -592,7 +623,10 @@ async def story_prose_segments(
 
     enforce_rbac(collection, request=request)
 
-    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    story_id = _nfc(story_id)
+
+
+    folder_path = _resolve_story_folder(collection, story_id)
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Story folder not found")
 
@@ -649,7 +683,10 @@ async def story_audio_segment(
     if not TTS_INTERNAL_TOKEN:
         raise HTTPException(status_code=503, detail="Internal TTS not configured")
 
-    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    story_id = _nfc(story_id)
+
+
+    folder_path = _resolve_story_folder(collection, story_id)
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Story folder not found")
 
@@ -750,7 +787,10 @@ async def story_words_segment(
     if not TTS_INTERNAL_TOKEN:
         raise HTTPException(status_code=503, detail="Internal TTS not configured")
 
-    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    story_id = _nfc(story_id)
+
+
+    folder_path = _resolve_story_folder(collection, story_id)
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Story folder not found")
 
@@ -817,7 +857,10 @@ async def delete_story(
             detail="Admin role required to delete stories.",
         )
 
-    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    story_id = _nfc(story_id)
+
+
+    folder_path = _resolve_story_folder(collection, story_id)
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Story folder not found")
 
@@ -850,7 +893,10 @@ async def read_story(
     """Reads story Markdown dynamically and enforces access controls."""
     enforce_rbac(collection, request=request)
     
-    folder_path = os.path.join(COLLECTION_RULES[collection]["path"], story_id)
+    story_id = _nfc(story_id)
+
+    
+    folder_path = _resolve_story_folder(collection, story_id)
     if not os.path.exists(folder_path):
         raise HTTPException(status_code=404, detail="Story folder not found")
         
