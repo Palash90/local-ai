@@ -499,6 +499,62 @@ def synthesize_piper_wav(tag, text):
 _synthesize_piper_wav = synthesize_piper_wav
 
 
+def _wav_duration(data):
+    """Decoded duration in seconds of a PCM WAV blob (header-accurate)."""
+    import io as _io
+    import wave as _wave
+
+    try:
+        with _wave.open(_io.BytesIO(data), "rb") as r:
+            n = r.getnframes()
+            rate = r.getframerate() or 22050
+            return n / rate
+    except Exception:
+        return 0.0
+
+
+def _mp3_duration(data):
+    """Decoded duration in seconds of an MP3 blob via frame walk.
+
+    Word-boundary timestamps end at the last word, but each MP3 chunk
+    carries trailing silence/encoder padding after it. Summing word ends
+    therefore drifts ~1s per chunk boundary; the true frame duration
+    keeps multi-chunk highlight in sync.
+    """
+    i, frames, srate, ver = 0, 0, 24000, 2
+    n = len(data)
+    while i < n - 4:
+        if data[i] == 0xFF and (data[i + 1] & 0xE0) == 0xE0:
+            b1, b2 = data[i + 1], data[i + 2]
+            v, br_idx, sr_idx, pad = (b1 >> 3) & 3, (b2 >> 4) & 15, (b2 >> 2) & 3, (b2 >> 1) & 1
+            if br_idx in (0, 15) or sr_idx == 3 or v == 1:
+                i += 1
+                continue
+            if v == 3:
+                srate = [44100, 48000, 32000][sr_idx]
+                brs = [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
+            elif v == 2:
+                srate = [22050, 24000, 16000][sr_idx]
+                brs = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+            else:
+                srate = [11025, 12000, 8000][sr_idx]
+                brs = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+            br = brs[br_idx - 1] * 1000
+            fsize = (144 * br // srate + pad) if v == 3 else (72 * br // srate + pad)
+            if fsize < 4 or i + fsize > n:
+                i += 1
+                continue
+            ver = v
+            frames += 1
+            i += fsize
+            continue
+        i += 1
+    if not frames:
+        return 0.0
+    spf = 1152 if ver == 3 else 576
+    return frames * spf / srate
+
+
 # ---------------------------------------------------------------------------
 # Main synthesis entry point (chunked, cached, both Piper and edge-tts)
 # ---------------------------------------------------------------------------
@@ -541,15 +597,16 @@ def tts_synthesize(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown
                 wav_bytes, words = synthesize_piper_wav(tag, chunk)
                 part = wav_bytes
                 _tts_cache_put(key, part)
-                # Words saved per-chunk; adjust to absolute offsets
-                chunk_duration_s = words[-1]["e"] if words else 0
+                # Words saved per-chunk; adjust to absolute offsets.
+                # Advance by the TRUE chunk audio duration (not the last
+                # word end) so trailing silence never shifts later chunks.
                 for w in words:
                     all_words.append({
                         "w": w["w"],
                         "s": round(cumulative_s + w["s"], 3),
                         "e": round(cumulative_s + w["e"], 3),
                     })
-                cumulative_s += chunk_duration_s
+                cumulative_s += _wav_duration(part)
                 _tts_words_cache_put(key, words)
             else:
                 if total_chunks > 1:
@@ -559,14 +616,13 @@ def tts_synthesize(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown
                 # Load words from cache
                 cached_words = _tts_words_cache_get(key)
                 if cached_words:
-                    chunk_duration_s = cached_words[-1]["e"] if cached_words else 0
                     for w in cached_words:
                         all_words.append({
                             "w": w["w"],
                             "s": round(cumulative_s + w["s"], 3),
                             "e": round(cumulative_s + w["e"], 3),
                         })
-                    cumulative_s += chunk_duration_s
+                    cumulative_s += _wav_duration(part)
             wav_parts.append(part)
         combined_wav = _concat_wav_blobs(wav_parts)
         # Save full word list
@@ -614,15 +670,17 @@ def tts_synthesize(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown
             part = bytes(mp3_data)
             _tts_cache_put(key, part)
 
-            # Adjust word timings to absolute offsets and accumulate
-            chunk_duration_ms = chunk_words[-1]["e_ms"] if chunk_words else 0
+            # Adjust word timings to absolute offsets. Advance by the TRUE
+            # chunk audio duration (not the last word end): MP3 chunks carry
+            # ~1s of trailing silence/padding that would otherwise shift
+            # every later chunk late, making highlight lag more per chunk.
             for w in chunk_words:
                 all_words.append({
                     "w": w["w"],
                     "s": round((cumulative_ms + w["s_ms"]) / 1000.0, 3),
                     "e": round((cumulative_ms + w["e_ms"]) / 1000.0, 3),
                 })
-            cumulative_ms += chunk_duration_ms
+            cumulative_ms += _mp3_duration(part) * 1000.0
         else:
             if total_chunks > 1:
                 print(f"[tts] edge-tts {tag} chunk {idx+1}/{total_chunks}: cache hit ({len(chunk)} chars)")
@@ -631,14 +689,13 @@ def tts_synthesize(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown
             # Load per-chunk words from cache and accumulate
             cached_words = _tts_words_cache_get(key)
             if cached_words:
-                chunk_duration_ms = cached_words[-1]["e"] * 1000 if cached_words else 0
                 for w in cached_words:
                     all_words.append({
                         "w": w["w"],
                         "s": round(cumulative_ms / 1000.0 + w["s"], 3),
                         "e": round(cumulative_ms / 1000.0 + w["e"], 3),
                     })
-                cumulative_ms += chunk_duration_ms
+                cumulative_ms += _mp3_duration(part) * 1000.0
         mp3_parts.append(part)
     combined_mp3 = b"".join(mp3_parts)
 
@@ -682,7 +739,8 @@ def get_tts_words(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown_
     if words:
         return words
 
-    # Fallback: combine per-chunk words (may be slightly less accurate)
+    # Fallback: combine per-chunk words. Advance by each chunk's TRUE
+    # audio duration (not last word end) so highlight never drifts.
     cumulative_s = 0.0
     all_words = []
     for chunk in chunks:
@@ -699,7 +757,14 @@ def get_tts_words(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown_
                     "s": round(cumulative_s + w["s"], 3),
                     "e": round(cumulative_s + w["e"], 3),
                 })
-            cumulative_s += chunk_words[-1]["e"] if chunk_words else 0
+            blob = _tts_cache_get(chunk_key)
+            if blob:
+                if tag in PIPER_VOICES:
+                    cumulative_s += _wav_duration(blob)
+                else:
+                    cumulative_s += _mp3_duration(blob)
+            elif chunk_words:
+                cumulative_s += chunk_words[-1]["e"]
     return all_words
 
 
