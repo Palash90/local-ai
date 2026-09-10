@@ -35,3 +35,11 @@
 - Current working theory: the `/end` logout endpoint needs the browser's Authentik session cookie to identify which provider/session to terminate, and it may not be present/forwarded on that request. **Next steps left open:** check dev tools for the `authentik_proxy_*` cookie on that request, and retest the curl call with that cookie attached to confirm.
 
 That last piece (logout 404) is where we left off — still open.
+
+---
+*Note: this file is an nginx/outpost operational log only. For the header/JWT
+contract (exact `X-Authentik-*` names, claim fallbacks, JWKS/issuer rules, role
+mapping) see README "Authentication (SSO)" and `server/auth.py`. The logout 404
+is an outpost-cookie issue, not app-session invalidation — header auth is
+stateless, so there is no server session to end (see TEST_STEPS B8 `POST
+/api/logout` note).*

@@ -90,19 +90,21 @@ Assert a text response and no OOM/error → confirms mmproj + VRAM coexistence.
 
 ## B. Chat UI API (`/api/*` on 3001, SSO-authenticated)
 
-Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that sets `X-Authentik-Username: palash` + `X-Authentik-Groups: admin`.
+Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that sets `X-Authentik-Username: palash` + `X-Authentik-Groups: admin`. Alternate singular headers (`X-Authentik-User`, `X-Authentik-Group`) and `X-Authentik-UID` are also honored; group lists split on `|`/comma/whitespace, role mapping is case-insensitive (highest wins, default `free`).
 
 **B1. Auth & identity**
-- `GET /api/check-auth` (with + without valid headers) → `{authenticated, username, role}`
+- `GET /api/check-auth` (with + without valid headers) → `{authenticated, username, role, email}` (full identity incl. `name/groups/uid` stays server-side)
 - `GET /api/user-context` → 200 w/ username+context; unauthenticated → 401
-- `GET /api/active-users` → array (excludes agents)
+- `GET /api/active-users` → array (excludes agents; 120s active window)
+- Context writes append timestamped entries to `~/local-ai-files/contexts/<safe_user>.txt` (`[^A-Za-z0-9_-]` → `_`)
 
 **B2. Sessions CRUD**
 - `POST /api/sessions` `{name}` → 200 `{session_id}`
 - `GET /api/sessions` → list sorted by `updated` desc, token estimate present
-- `GET /api/sessions/:id/messages` → `{messages, ...token}`; wrong owner → 404/401
+- `GET /api/sessions/:id/messages` → `{messages, ...token}`; wrong owner → 404/401 (ownership from `sessions_meta.user_id`)
 - `PUT /api/sessions/:id` `{name}` → rename
 - `DELETE /api/sessions/:id` → delete; verify output/upload cleanup
+- Storage: per-user `~/local-ai-files/session/sessions_<user>.json`; legacy `sessions.json` is merged once on load then deleted; inline `data:image` parts migrate to `/uploads/` files
 
 **B3. Chat flow (end-to-end)**
 - `POST /api/chat` `{session_id, message}` → `{task_id}`
@@ -120,15 +122,18 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 - `GET /api/model-status` → `{model, predicted_per_second, overheated, gpu_temp, ram_evacuating, max_context, reminder_count}`; assert values sane
 
 **B6. Shares (public snapshots)**
-- `POST /api/shares` `{session_id, msg_index}` (assistant msg) → `{token, url}`; non-assistant index → 4xx; foreign session → 404/401
-- `GET /api/shares` → list own shares; `DELETE /api/shares/:token` → gone from list, `/s/:token` → not-found page
+- `POST /api/shares` `{session_id, msg_index}` (assistant msg) → `{token, url}`; non-assistant index → 4xx; foreign session → 404/401. Exact error strings: `Session not found` / `Not your session` / `Message not found` / `Only assistant messages...`
+- `_steering` messages are unshareable (snapshot is `None`); `_reasoning` is never stored in a snapshot (verify absent in `/api/public/share/:token`, including legacy-strip on read)
+- `GET /api/shares` → list own shares (created-desc, 120-char preview, `session_exists` field); `DELETE /api/shares/:token` → gone from list, `/s/:token` → not-found page
+- `DELETE /api/shares/:token?purge=1` → revokes and deletes only refs unique to that snapshot; response carries `{session_exists, purged}`; refs shared with other shares/sessions survive
+- Share URLs use `SHARE_BASE_URL` when set (portless origin), else the request origin
 - Open `/s/<token>` in a **private window (no SSO)** → snapshot renders read-only
 - Snapshot immutability: after sharing, edit/delete the source session message → share page **unchanged**
 - Image scoping: `/api/public/share/<token>/image/<path>` serves only files referenced by that snapshot; try `/image/../../etc/passwd` and an unrelated `/output/` file → 404/403
 
 **B7. Tasks & themes & context (direct API)**
-- `POST /api/tasks` `{title, priority, due_date, reminder_at}` → id; `GET /api/tasks` lists it; `PUT`/`DELETE /api/tasks/:id` work; cross-user id → 404
-- Reminder: the reminder loop (`_reminder_loop`) scans every **12h** (sleeps 43200s), so a `reminder_at` in the future will not surface within a test. To test: create a task with `reminder_at` in the past → on the next scan `GET /api/model-status` shows `reminder_count` increment / reminder surfaces in UI.
+- `POST /api/tasks` `{title, description, priority, status, due_date, reminder_at, session_id}` → id; `GET /api/tasks` lists it; `PUT`/`DELETE /api/tasks/:id` work; cross-user id → 404
+- Reminder: the reminder loop (`_reminder_loop`) scans every **12h** (sleeps 43200s), so a `reminder_at` in the future will not surface within a test. To test: create a task with `reminder_at` in the past → on the next scan `GET /api/model-status` shows `reminder_count` increment; the UI surfaces it only as the badge number in the user menu (no reminder text panel).
 - `GET /api/themes` (admin) → theme log rows + stats after §F or an agent `track_theme` run
 - `POST /api/user-context` role matrix: `{action:"write"}` any user OK; `{action:"overwrite"}` **admin only** (free/premium → 403); `GET /api/user-context` → own file only
 
@@ -140,10 +145,13 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 - Speak button (browser): play → pause freezes position → resume continues from the paused word → stop resets to the beginning; rapid double-clicks across messages never leave a stuck icon; with no network, hi/te/bn/kn surface an error while en/es still play.
 - TTS disk cache (`~/local-ai-files/tts_cache/`, secondary via `TTS_CACHE_SECONDARY_DIR` in `.env`, unset = skipped): first play writes `<sha256>.wav/.mp3`; replay reads disk (~ms, survives restarts); files moved by hand to secondary still play with no re-synth; corrupt entries are dropped and re-synthesized; primary pruned to `TTS_CACHE_MAX_BYTES` (1 GB default). Chunked long-form synthesis (up to 8000 chars) splits at sentence boundaries into <=1800 char chunks and concatenates audio seamlessly. Session deletion and share revoke (with purge=1) eagerly delete orphaned audio files from both primary and secondary cache directories. All TTS core logic lives in `server/features/tts.py` (shared by chat-webui and markdown_hosting).
 - Story page audio (`markdown_hosting` /stories/ pages): play button on story pages fetches prose segments from `/story/{c}/{id}/prose-segments` then chains audio from `/story/{c}/{id}/audio/{idx}` (proxied to chat-webui internal TTS via loopback + `TTS_INTERNAL_TOKEN`). RBAC enforced by markdown_hosting (guests get free stories only). Player supports pause/resume/stop.
+- `POST /api/tts-words` `{text}` (auth) → `{words:[{w,s,e},…]}` (empty before first synthesis of that text); story equivalent `GET /story/{c}/{id}/words?segment_idx=N` (RBAC-enforced). Assert highlight offsets track true chunk audio durations (no growing lag down multi-chunk stories). Note: audio cached before word-tracking landed has no words file — words appear only after a (re-)synthesis.
+- Public share TTS: `POST /api/public/share/<token>/tts` (no auth) synthesizes **snapshot text only** (client `text` ignored — assert with mismatched-language body); bogus token → 404.
+- Story-folder delete (admin `DELETE /story/<col>/<id>`) removes its TTS cache keys like session delete; Bengali/Hindi folder names resolve via NFC + fuzzy parent match (assert a `সিন্ধু…`-style path plays).
 - SPA fallback: `GET /some/unknown/route` (no dot) → `index.html` 200; `GET /api/nonexistent` → 404 JSON, not HTML
 
 **B9. File serving auth + ownership gate**
-- `GET /output/<file>.png` / `GET /uploads/<file>` **without** identity → 401; with SSO headers or agent JWT → 200
+- `GET /output/<file>.png` / `GET /uploads/<file>` **without** identity → 401; with SSO headers (either `X-Authentik-Username` or `X-Authentik-User` form) or agent JWT → 200
 - **Cross-user ownership**: user A requests user B's `/output/B/gen_*.png` with A's own valid token → 404 (ownership check in `resolve_image_file` rejects path whose first component doesn't match the caller)
 - `GET /api/image/output/B/gen_*.png` as user A → same 404
 - Public shares are **not affected**: `/api/public/share/<token>/image/<path>` omits the user param, so the ownership check is skipped (snapshot scoping applies instead)
@@ -163,9 +171,13 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 | `read_image` | attach image→"what does it show" | describes content |
 | `get_user_location` | "what's the weather here" | status → `location_needed`, then answer w/ location or denial |
 | `update_user_context` | "remember I like science fiction" | context file appended; persists across sessions |
+| `memory_read` | "what do you remember about me" | recall by ids or query (limit 5) |
+| `fetch_page` (chunk walk) | "fetch that 40-page doc in full" | `chunk=N` paging walks the persisted doc without re-fetching |
+| `read_file` (.doc/OCR) | upload `.doc` or scanned PDF | `.doc` text, OCR path, `.ocr.md` artifact handling |
 | `manage_tasks` | "create a task to buy milk tomorrow" | task created; verify via theme/tasks API |
 | `track_theme` | via an **agent** (reserved) | works for agents; rejected with clear error for humans |
-| `tool_details` | ask model to inspect a tool | returns full docs |
+| `tool_details` | ask model to inspect a tool | returns full docs (agent-filtered) |
+| `edit_image` denoise | after an image exists | low values ≈ near-copy, high values ≈ re-imagined |
 
 Also verify **`TOOL_FREE_AGENTS`** (editor/moderator): they get empty tools + `tool_choice:none` → never call `generate_image`. And **`no_tools:true`** in a `/api/chat` body does the same for any user.
 
@@ -175,12 +187,12 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
 
 **C-SSRF. `fetch_page` private-IP rejection**
 - Prompt: "Fetch http://127.0.0.1:8081/health and tell me the status" → tool returns refusal (no request made; check no `[fetch]` GET in logs)
-- Repeat with `http://169.254.169.254/` (cloud metadata) and `http://[::1]:3001/` → refused
+- Repeat with `http://169.254.169.254/` (cloud metadata) and `http://[::1]:3001/` → refused; `ftp://…`/non-http schemes → refused; binary/non-textish content → refused
 - Public URL (example.com) still works → guard isn't over-broad
 
 **C-UPLOAD. File-type whitelist**
 - `POST /api/extract-file` with a disallowed extension (`.sh`, `.exe`) → rejected; `.pdf/.docx/.xlsx` accepted and later readable by `read_file`
-- UI: InputBar rejects the same extensions client-side (belt & braces)
+- UI: unknown types prompt `confirm('Unknown file type…Is this code/text?')` and are accepted on OK — not hard-rejected client-side (belt, braces, and user override)
 
 And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; assert the model unloads → ComfyUI runs → model reloads (see logs `[llama]`/`[image]`), CPU agents keep running throughout.
 
@@ -199,6 +211,8 @@ And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; as
 - **`get_batch_status`/queue position**: start 2+ batches → second reports pending + position; statuses move PENDING→WORKING→COMPLETED/ERROR only forward
 - **Input guard on gateway**: `send_chat_message`/`start_chat_batch` with a jailbreak-pattern message (see §I list) → refused before any LLM call
 - **Cross-user isolation**: token for user A must not read user B's sessions/images via MCP tools
+- **Batch limits**: >50 prompts in one batch → rejected; item timeout note (2400s); poll no faster than 15–20s; `wait_hint` 60s research / 30s tools / 20s plain
+- **Lane split**: force a blocked reply on MCP lane → task failed, output dropped (**fail-closed**); same on UI lane → reply delivered + note (**fail-open**); judge budgets 2048 (retry 4096)
 
 ### D2. Outbound MCP client (`server/mcp_client.py`, `mcp_config.json`)
 
@@ -207,10 +221,17 @@ And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; as
 - Empty index behaves sanely: `list_projects` → `{"projects":[],...,"hint":"No projects indexed..."}` until `index_repository(repo_path=…)` runs; after indexing `local-ai`, `search_graph("is_mcp_tool")` returns `server/mcp_client.py`
 - Result truncation: a tool returning >8k chars is capped with an explicit `[Output truncated: …]` footer
 - Stale sessions: restart chat-webui → `_tools_version` bump forces the per-session tool cache to rebuild (no duplicated schemas across rounds)
+- Disabled servers skipped: a server with `enabled:false` in `mcp_config.json` never connects; raw (non-namespaced) tool names still route; `MCP_TOOL_TIMEOUT` (300s) env-overridable
 
 ---
 
 ## E. markdown_hosting (`:3002`) — story RBAC
+
+Role levels: guest 0 / free(+user) 0 / premium 1 / admin 2. Unauthenticated on a
+gated collection → **401**; authenticated but below level → **403**. Role
+falls back to a hardcoded map (`palash`→admin, `totan`→premium) when headers
+are absent. Startup fails fast if `STORIES_PREMIUM_DIR`/`STORIES_ADMIN_DIR`
+are unset.
 
 - `GET /` (with SSO headers) → collections index (only collections ≤ your role level)
 - As **free** (kolpo): see `free_stories` only
@@ -223,13 +244,14 @@ And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; as
 - `GET /media/<col>/<id>/<file>` → image bytes (auth-gated)
 - **Admin DELETE** `/story/<col>/<id>` → removes folder; non-admin → 403
 - Missing folder/file → 404
+- Unicode folders: Bengali/Hindi story paths (e.g. `সিন্ধু-…`) resolve via NFC + fuzzy parent match — play one end-to-end
 
 ---
 
 ## F. Self-chat production pipeline (offline, `self-chat.py`)
 
 - `--dry-run` w/ default + a `--config` file → prints every task plan, checklist resolution, medium feasibility, missing files, unhandled placeholders; **no LLM call**. `--defaults` combines the default tasks with `--config`. (Valid flags are only `--config/--defaults/--dry-run/--gpu` — turn counts come from the task config, there is no `--turns` flag.)
-- Real short run (`--config tasklist.json` w/ 1 task, minimal turns in the task spec) → verify: agents log in (OIDC password grant via `oidc_password_grant`), sessions created, story file + moderation `.json` written to `~/local-ai-files/stories/...`, GREEN/RED verdict, auto-RED gate (duplicate/citation drop/wrong script/name leak)
+- Real short run (`--config tasklist.json` w/ 1 task, minimal turns in the task spec) → verify: agents log in (OIDC password grant via `oidc_password_grant`), sessions created, story file + moderation `.json` written to tiered dirs (`STORIES_FREE_DIR`/`PREMIUM`/`ADMIN` by role; readers prefer `<story>.edited.md`), GREEN/RED verdict, auto-RED gate (duplicate/citation drop/wrong script/name leak)
 - **Editor gate (re-opened)**: after the deterministic gate the `editor` agent grades the story (`[editor-gate]` logs: `VERDICT: CLEAN|FLAGGED | CONFIDENCE: NN | flags: N`)
   - Clean + confident story → `moderation.json` verdict **GREEN with a `confidence` field** (written for every story now, so the story site badge always shows)
   - Force a FLAGGED path (add a temporarily impossible checklist rule to the task config) → `[editor-gate] FLAGGED … discarding the session and starting fresh` → new sessions/turns; discarded story `.md` files removed; `SELF_CHAT_EDITOR_RESTARTS` (default 2) exhausted → RED with the flags as reasons
@@ -237,6 +259,7 @@ And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; as
   - Editor outage fail-open: unset `SELF_CHAT_EDITOR_PASSWORD` → gate returns CLEAN/None, pipeline continues on the deterministic gate alone
 - CPU lane routing default; `--gpu` flag routes agents to GPU
 - Check **theme dedup**: run identical combo twice → second run must pick a different combo (theme tracker)
+- Knobs: `SELF_CHAT_ALIGNMENT=1` handshake on by default; `MAX_CRITIQUE_RETRIES=2`; cast pinning keeps proposer/checker agents stable across turns
 
 ---
 
@@ -244,28 +267,29 @@ And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; as
 
 With a browser (or headed test) authenticated via SSO:
 1. Load `/` → SPA renders, sidebar lists sessions, `check-auth` populates identity
-2. New chat → message streams in; tool use shows actions (image, search)
+2. New chat → `Thinking…` pending bubble updates via 3s `/api/status` poll (no streaming); tool use shows `StatusBox` states + reasoning
 3. External links inside answers/story HTML → open in a **new tab** with `rel="noopener noreferrer"`; in-app anchors and `[FILE:…]` download chips stay in-tab
-3. Upload a file → appears as attachment; ask the model to read it
-4. Ask for an image → generation task shows status → image renders (VRAM unload/reload visible)
-5. Location prompt (LocationPrompt) when model calls `get_user_location`
-6. ModelBar shows live model-status (temp/tps); OverloadWarning when `overheated`
-7. TaskPanel dropdown for to-dos/reminders
-8. Share button → creates share; public share page loads snapshot images via `/api/public/share/<token>/image/...`
-9. No SSR errors in console; dark-mode prefers-color-scheme works
+4. Upload a file → appears as attachment; ask the model to read it
+5. Ask for an image → generation task shows status → image renders (VRAM unload/reload visible)
+6. Location prompt (LocationPrompt) when model calls `get_user_location`; also test Deny and blocked-permission paths
+7. ModelBar shows live model-status (temp/tps, context donut, compressed raw tokens); OverloadWarning shows RAM-evacuation vs GPU-thermal text when `overheated`
+8. Share button → creates share; public share page loads snapshot images via `/api/public/share/<token>/image/...`; shares tab lists/revokes (purge confirm)
+9. TaskPanel dropdown: create/toggle/delete to-dos with priorities and dates
+10. Stop/Queue: stop a running chat (cancel), queue follow-ups; rename/delete sessions (confirm dialogs)
+11. Lightbox: wheel zoom 0.25–10x, drag/pan, Esc/back-button close
 
 ---
 
 ## H. Infra / deployment interfaces
 
-- **restart_services.sh**: full run → all 3 services UP, WireGuard `wg0` up, backup disk mounted, Nextcloud `files:scan`, health checks pass
-- **nginx (gcp_nginx.conf + local_cloud.sh)**: `https://home.palashkantikundu.in` → 200 via WG; offline page (502) when upstream down; gzip on; auth_request gate on `/ai/ /api/ /stories/ /story/ /cloud`
+- **restart_services.sh**: full run → `rm -rf dist` + `npm run build` first, then all 3 services UP, WireGuard `wg0` up, backup disk mounted, Nextcloud `files:scan`, health checks pass
+- **nginx (gcp_nginx.conf + local_cloud.sh)**: `https://home.palashkantikundu.in` → 200 via WG; offline page (502) when upstream down; gzip on; `auth_request` gate on `/ai/`, `/api/` (except `/api/public/`), `/stories/`, `/story/<free|premium|admin>`, `/media/<col>`, `/search/` — while `/cloud/`, `/code/`, `/v1/`, `/s/`, `/mcp` have **no** `auth_request` (and `gcp_nginx.conf` itself has none at all)
 - **Authentik**: outpost `/outpost.goauthentik.io/*` reachable (9010/404 ok); SSO login round-trip
 - **SearXNG** `:8080` → search returns JSON w/ `results`
 - **ComfyUI** `:8188` → `/health` 200, `/system_stats` reports GPU
 - **GPU llama** `:8081/health` + `/v1/models`; **CPU** `:8079` and **guardrail** `:8083` lazy-start on first use and idle-unload
 - **DDNS/heartbeat** (logs `[ddns] GoDaddy AAAA updated`, `[heartbeat]`) — visit logs; heartbeat receiver = `scripts/gcp_heartbeat_server.py` on the GCP VM over WireGuard (`HEARTBEAT_URL` 10.66.66.1:9863)
-- **stop_services.sh**: run → all 3 services down (ports 3001/3002/9000 free), llama/ComfyUI untouched unless designed
+- **stop_services.sh**: run → chat-webui + markdown-hosting + code host down (ports 3001/3002/9000 free); note it also kills llama-server and ComfyUI processes
 - **encrypt_surface.py round-trip**: `python3 scripts/encrypt_surface.py` → `.enc` files appear under `prompts/surface_attacks/`; with `SURFACE_ATTACKS_KEY` set the guardrail still loads patterns (logs `[guardrail] Fernet decryption enabled`), with wrong/no key → clean warning + plaintext fallback or refusal, **never** a crash; delete `.txt` originals → patterns still load from `.enc`
 - **authentik_bootstrap.py idempotency**: re-run → no duplicate groups/apps/users created, exits clean
 - **code host** `:9000` → responds (service started by restart_services.sh; binary lives outside this repo)
@@ -278,10 +302,14 @@ With a browser (or headed test) authenticated via SSO:
 **I1. L1 input guard (pattern-based, `server/input_guard.py`)**
 - Pattern files (`injection_patterns.txt`, `harmful_request_patterns.txt`, `harmful_output_patterns.txt`, `strict_output_patterns.txt`, `safety_frame.txt`) are deployment data under `prompts/surface_attacks/` (plaintext or `.enc`) — **they are not in the repo**; if absent, first assert the guard degrades safely (no crash, guardrail logs a warning) and create sample files with 2–3 triggers each for the tests below
 - Send each via MCP `send_chat_message`/`start_chat_batch` → refused **before** any llama call (no `[llm]` log line, guardrail server stays unloaded)
-- Unicode/obfuscation bypass attempts: fullwidth chars, zero-width inserts, `SYSTEM:` split across lines → `_normalize` must still catch them
+- Unicode/obfuscation bypass attempts: fullwidth chars, zero-width inserts, `SYSTEM:` split across lines → **known gap**: `_normalize` is lowercase + diacritic-strip only and the injection check uses raw `lower()` — expect these to pass through uncaught; if this changes, update `input_guard.py` first
 - A benign prompt containing one pattern substring (false-positive check) → note result, not necessarily a fail
 
 **I2. L3 output judge (every task, `orchestration._finalize_task`)**
+- Simple turns (≤40 chars, no research/media/`_mcp`/peer-review: `SIMPLE_TASK_MAX_CHARS`) skip the sampling router, quality pass and L3 LLM judge entirely (pattern scan only) — assert a "hi" reply finalizes with no `[L3]` judge log lines
+- `openai_lane` requests are pinned (`no_tools`, `code` sampling bucket, GPU fallback allowed) and skip verification
+- Agent routing stays stable across restarts via `KNOWN_AGENT_USERS` (in-memory registry alone would reroute running self-chat to GPU)
+- `toolstrip.strip_tool_call_text` strips model-emitted `<tool_call>` text spam before finalize**
 - Force an output matching `strict_output_patterns.txt` (or replay via MCP batch with a jail that produces it) → MCP/guardrail lane: task marked failed, output dropped (**fail-closed**); UI lane: reply delivered + judge note recorded (**fail-open**)
 - Guardrail server lifecycle: first L3 verify lazy-starts :8083, `GET :8083/health` 200, after 300s idle → model unloaded (`[verify] idle` logs), RAM freed
 - Per-user judge: `resolve_judge_model` for a user with a custom judge env/config vs default user → correct model id in `[L3] ... judge=` log lines
@@ -291,7 +319,7 @@ With a browser (or headed test) authenticated via SSO:
 
 **I3. Critic citation pass (research answers)**
 - Ask a research-mode question that yields `(Author, Venue, Year) [url]` citations → logs show per-citation re-search/re-fetch, `VERIFY_FETCH_CHARS`-bounded excerpts
-- Fabricated citation (prompt a specific fake source) → verdict flags it; quality < `VERIFY_QUALITY_GATE` (80) or missing cite → re-scheduled ≤ `VERIFY_MAX_RETRIES` (2), then declined/corrected — never silently delivered as verified
+- Fabricated citation (prompt a specific fake source) → verdict flags it; quality < `VERIFY_QUALITY_GATE` (80 via entrypoint `config.py`; standalone `critic` fallback default is 70) or missing cite → re-scheduled ≤ `VERIFY_MAX_RETRIES` (2), then declined/corrected — never silently delivered as verified
 - One URL cited for > `VERIFY_MAX_CITES_PER_URL` (3) distinct claims → over-reliance flagged
 - **Critic token budget / reasoning fallback**: with a reasoning-capable chat model on the lane, logs must NOT show repeated `[critic] LLM call failed … empty content in response`; on an empty `content` the log shows `empty content but reasoning present — judging on reasoning text` and the citation verdict still lands
 - **Existence probe** (`_citation_exists`): cite a real deep link that research never fetched (e.g. a `pmc.ncbi.nlm.nih.gov/articles/PMC…/` page) → the verification block must NOT flag it "likely fabricated"; the log shows the direct fetch succeeding (or `bot-blocked … treating as existing` for 403 hosts like tuftsmedicine.org) instead of a search-only miss
@@ -304,7 +332,7 @@ With a browser (or headed test) authenticated via SSO:
 **I5. Agent peer review (cpu lane, Kaya/Kolpo replies)**
 - Requires the cpu lane (`FORCE_GPU_LANE=False` or explicit `mode:"cpu"`) — gpu-lane agent replies take the UI quality-judge branch instead
 - Chat as kaya (JWT) on the cpu lane → after the final answer, status shows `Peer review...` and logs show `[peer-review] kolpo verdict=PASS|FLAG confidence=NN notes=…`; the reply's message carries the ⚖ confidence chip from the peer verdict
-- The peer round runs **directly on the cpu llama-server** (`:8079/v1/chat/completions`) — assert no second `/api/chat` task is created (recursion guard) and the original task finalizes even if the peer round fails
+- The peer round (300s timeout) runs **directly on the cpu llama-server** (`:8079/v1/chat/completions`) — assert no second `/api/chat` task is created (recursion guard) and the original task finalizes even if the peer round fails
 - Fail-open: unset `AGENT_PEER_MAP` (or review a user without a peer) → falls back to the per-user quality judge; kill :8079 mid-review → fallback path finalizes the reply
 - Per-agent judge: rows in the `user_judges` table (`kolpo`/`kaya` → bigger model) are picked up by `resolve_judge_model` within 30s — visible in `[L3] ... judge=` log lines
 
@@ -322,7 +350,7 @@ With a browser (or headed test) authenticated via SSO:
 - Cool ≤ 75 °C → flag clears, queue drains; assert **no** unload while a GPU task is mid-stream (`_chat_generating` gate) and no flip-flopping between 75–90 (hysteresis)
 
 **J3. RAM evacuation (≥95 %)**
-- Induce RAM pressure (e.g. `python3 -c 'x=bytearray(6*2**30)'` sized to cross 95 %) → `[ram]` logs: in-flight tasks requeued to lane fronts with status error, llama-servers + ComfyUI killed, wait until ≤70 %, `restart_servers()`; then clients can resubmit successfully
+- Induce RAM pressure (e.g. `python3 -c 'x=bytearray(6*2**30)'` sized to cross 95 %) → `[ram]` logs: in-flight tasks requeued to lane fronts with status `requeued` (**non-terminal** — auto-resumes after restart, answer arrives exactly once, no duplicated user turn), llama-servers + ComfyUI killed, wait until ≤70 %, `restart_servers()`; then clients continue successfully without resubmitting
 
 **J4. Image VRAM choreography (gate + serialization)**
 - Fire 2 concurrent `generate_image` chats → `_image_queue` serializes them (one `image_active` at a time); during the render a normal chat request must NOT reload the GPU model into VRAM (`_image_active` gate) — assert no cudaMalloc OOM in logs

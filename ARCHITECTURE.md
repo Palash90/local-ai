@@ -27,8 +27,9 @@ graph TD
     subgraph ExternalServices ["External Services"]
         Docker["Docker Engine"]
         Docker --> SearXNG["SearXNG Container\nlocalhost:8080"]
-        Docker --> Authentik["Authentik IdP\n(SSO portal + JWKS)"]
+        Docker --> Authentik["Authentik IdP (server 127.0.0.1:9008)\n(SSO portal + JWKS)"]
         Docker --> Outpost["Authentik proxy outpost\n127.0.0.1:9010"]
+        Docker --> Nextcloud["Nextcloud cloud-app 127.0.0.1:8082\n+ cloud-db (mariadb)"]
         Nginx["Nginx Reverse Proxy + TLS\nauth_request SSO gate"]
         Avahi["avahi-daemon\nmDNS: chat.local"]
         GCP["GCP VM\nheartbeat + DDNS target\n(scripts/gcp_heartbeat_server.py\nvia WireGuard 10.66.66.1:9863)"]
@@ -37,7 +38,7 @@ graph TD
     subgraph Network ["Network Topology"]
         LAN["LAN Devices"] -->|"https://chat.local"| Nginx
         Nginx -.->|"auth_request"| Outpost
-        Nginx -->|"proxy_pass"| HTTPServer["chat-webui.py\n127.0.0.1:3001\n(API + SPA + /v1 + MCP thread)"]
+        Nginx -->|"proxy_pass"| HTTPServer["chat-webui.py\n127.0.0.1:3001\n(API + SPA + /v1 + MCP :8000 thread)"]
         Nginx -->|"proxy_pass"| MDHost["markdown_hosting.py\n127.0.0.1:3002"]
         Nginx -->|"proxy_pass"| CodeHost["code host\n127.0.0.1:9000"]
         HTTPServer -->|"localhost:8081"| LLamaGPU["llama-server (GPU)\ninteractive UI users"]
@@ -88,7 +89,9 @@ graph TD
         DF9["shares.json — public share snapshots"]
         DF10["kv-slots/ — llama KV slot checkpoints"]
         DF11["stories/ — self-chat output (free/premium/admin trees)"]
-        DF12["local_ai.db — SQLite: tasks, theme_log, MCP batches"]
+        DF12["local_ai.db — SQLite (WAL): tasks, theme_log,\nMCP batches + items, mcp_tasks, user_judges\n(LOCAL_AI_DB override; legacy *.migrated)"]
+        DF13["page_cache.db — persistent search/page cache\n(LOCAL_AI_PAGE_CACHE override)"]
+        DF14["tts_cache/ — TTS audio + words cache\n(TTS_CACHE_* envs; optional secondary archive)"]
     end
 
     subgraph BuildFlags ["Build Flags"]
@@ -105,8 +108,8 @@ graph TD
 graph TD
     subgraph RCNetwork ["Service URLs (server/config.py)"]
         RC1["LLAMA_BASE = localhost:8081 (GPU)"]
-        RC2["LLAMA_BASE_CPU = localhost:8079 (CPU)\nctx 32768, reasoning-budget 1024"]
-        RC3["LLAMA_BASE_GUARDRAIL = localhost:8083\n(VERIFY_PORT, gemma E2B, ctx 16K)"]
+        RC2["LLAMA_BASE_CPU = localhost:8079 (CPU)\nserver ctx 32768, lane budget 24576\n(CPU_CTX_SIZE env, reasoning-budget 1024)"]
+        RC3["LLAMA_BASE_GUARDRAIL = localhost:8083\n(VERIFY_PORT, gemma E2B, server ctx 16384 p2\n→ lane budget 8192)"]
         RC4["COMFYUI_URL = localhost:8188\nSEARXNG_URL = 127.0.0.1:8080"]
         RC5["HOST = 127.0.0.1 (CHAT_HOST)\nPORT = 3001 · MCP gateway :8000"]
     end
@@ -117,8 +120,8 @@ graph TD
         RL3["MAX_TOOL_ROUNDS = default 10 /\nresearch 50 (UI research toggle)"]
         RL4["_llm_pools: gpu 1 / cpu 1 / guardrail 1\n(CPU_PARALLEL_SLOTS = 1)"]
         RL5["_tool_pools: gpu 2 / cpu 2 / guardrail 2"]
-        RL6["Idle unload = 300s per lane\nVERIFY_IDLE_TIMEOUT = 300s"]
-        RL7["LLM timeout = 600s · ComfyUI poll = 120s"]
+        RL6["Idle unload = 300s per lane\nVERIFY_IDLE_TIMEOUT = 300s\n(CPU override: CPU_IDLE_UNLOAD_SECONDS)"]
+        RL7["LLM timeout = 600s · ComfyUI poll = up to ~300s"]
         RL8["ACTIVE_WINDOW_SECONDS = 120 (presence)"]
     end
 
@@ -154,21 +157,23 @@ graph TD
 ```mermaid
 graph TD
     A["python chat-webui.py"] --> A1["At import:\nload .env + configs (model.json, models.json,\nsys_prompt.txt) → server/config.py"]
-    A1 --> A2["Import features/* (they resolve state via M later)\nregister_entrypoint(chat-webui)\n_init_tasks_db + _init_themes_db (SQLite)\nbuild_sys_content\nset_app_state(...) → server/api"]
+    A1 --> A2["Import features/* (they resolve state via M later)\nregister_entrypoint(chat-webui)\n_init_tasks_db + _init_themes_db + init_batches_db\n+ mcp_tasks ensure (SQLite, idempotent)\nbuild_sys_content\nset_app_state(...) → server/api"]
     A2 --> B["__main__: makedirs uploads,\nload_sessions, load_shares"]
     B --> C{"GPU llama-server /health\nlocalhost:8081?"}
     C -- "200 OK" --> D{"SearXNG reachable\n:8080?"}
-    C -- "Dead" --> Restart["restart_servers:\nkill llama-servers + ComfyUI,\nspawn ComfyUI + GPU (+ CPU/guardrail/embed\nonly if their lane is needed),\npoll /health up to 120s, kill on timeout"]
+    C -- "Dead" --> Restart["restart_servers:\nkill llama-servers + ComfyUI,\nspawn ComfyUI + GPU (CPU/guardrail/embed\nlazy-start on first use, not here),\npoll /health up to 120s, kill on timeout"]
     Restart --> D
     D -- "No" --> Exit["print ERROR & sys.exit(1)\n(web search is mandatory)"]
-    D -- "Yes" --> E["Start 12 Daemon Threads"]
+    D -- "Yes" --> E["Start 13 Daemon Threads"]
     E --> E1["ensure_embed_ready\n(embed llama-server :8084)"] & E2["_event_loop"] & E3["_queue_worker gpu"] & E4["_queue_worker cpu"] & E5["_queue_worker guardrail"] & E6["_mcp_db_worker\n(SQLite MCP task queue)"] & E7["_image_worker"] & E8["_idle_unload_loop 10s"] & E9["_periodic_cpu_kv_save_loop"] & E10["_thermal_monitor 10s"] & E11["_reminder_loop 12h"] & E12["run_mcp\n(MCP gateway :8000)"] & E13["start_mcp_client\n(outbound MCP servers)"]
     E --> F["ThreadingHTTPServer.serve_forever\n127.0.0.1:3001"]
 ```
 
-CPU (8079), guardrail (8083) and embed (8084) llama-servers are **lazy**:
-`ensure_llama_server` / the MCP gateway / `ensure_embed_ready` start them on first
-use; `_idle_unload_loop` unloads the CPU/guardrail models after 300s idle.
+CPU (8079) and guardrail (8083) llama-servers are **lazy**:
+`ensure_llama_server` / the MCP gateway start them on first
+use; the embed server (:8084) starts on its own eager thread instead.
+`_idle_unload_loop` unloads the CPU/guardrail models after 300s idle
+(CPU override: `CPU_IDLE_UNLOAD_SECONDS`).
 
 The DDNS + GCP heartbeat component (`connection_manager.py`) is **not** a
 chat-webui thread — it runs as its own systemd service
@@ -232,10 +237,10 @@ graph TD
     Client([User Client])
 
     subgraph AuthEndpoints ["Auth (SSO)"]
-        Client -->|"Browser: nginx auth_request → SSO portal"| SSO["X-Authentik-* forwarded upstream"]
-        Client -->|"GET /api/check-auth"| CheckAuth["identity_from_headers →\n{authenticated, username, role}"]
-        Client -->|"Agents: Authorization: Bearer <JWT>"| Bearer["Verify vs Authentik JWKS\n(server/auth.py)"]
-        Client -->|"POST /api/register-agent · POST /api/logout"| AgentTok["Agent token / session end"]
+        Client -->|"Browser: nginx auth_request → SSO portal"| SSO["X-Authentik-* forwarded upstream\n(Username/User, Groups/Group, Email, Name, UID)"]
+        Client -->|"GET /api/check-auth"| CheckAuth["identity_from_headers →\n{authenticated, username, role, email}"]
+        Client -->|"Agents: Authorization: Bearer <JWT>"| Bearer["Verify vs Authentik JWKS (issuer enforced,\naud not verified, 300s cache, fail-closed)\nserver/auth.py)"]
+        Client -->|"Heartbeat presence"| Presence2["No server session to end;\n/api/leaving only marks heartbeat stale"]
     end
 
     subgraph SessionEndpoints ["Sessions"]
@@ -243,21 +248,22 @@ graph TD
         Client -->|"GET /api/sessions"| ListSessions["List user sessions (updated desc)"]
         Client -->|"GET /api/sessions/:id/messages"| GetMessages["Messages + token_estimate"]
         Client -->|"PUT /api/sessions/:id"| RenameSession
-        Client -->|"DELETE /api/sessions/:id"| DeleteSession["Delete + cleanup output/upload images"]
+        Client -->|"DELETE /api/sessions/:id"| DeleteSession["Delete + cleanup output/upload images\n+ KV slots + TTS audio (share-protected refs kept)"]
     end
 
     subgraph ChatEndpoints ["Chat & Tasks"]
-        Client -->|"POST /api/chat\n{session_id, message, image?, audio?,\nresearch?, cpu?, mode?, no_tools?, peer_review?}"| Chat["→ {task_id}, queued per lane"]
+        Client -->|"POST /api/chat\n{session_id, message, image?, audio?,\nresearch?, cpu?, mode?, no_tools?, peer_review?\n+ always client_timestamp}"| Chat["→ {task_id}, queued per lane"]
         Client -->|"GET /api/status/:task_id"| Poll["status/message/response/tools_used/image"]
-        Client -->|"GET/POST/PUT/DELETE /api/tasks"| Tasks["To-dos + reminders (SQLite)"]
-        Client -->|"GET /api/themes"| Themes["Theme log + stats"]
+        Client -->|"GET/POST/PUT/DELETE /api/tasks"| Tasks["To-dos + reminders (SQLite;\nmanage_tasks ops; reminder cols)"]
+        Client -->|"GET /api/themes"| Themes["Theme log + stats (UNIQUE scope+combo_hash\ndedup; track_theme ops)"]
         Client -->|"GET /api/model-status"| ModelStatus["model, tps, overheated, gpu_temp,\nram_evacuating, max_context, reminders"]
+        Client -->|"POST /api/cancel/:id"| CancelChat["Cancel queued/in-flight task"]
     end
 
     subgraph ShareEndpoints ["Shares"]
-        Client -->|"POST /api/shares · GET /api/shares\nDELETE /api/shares/:token"| Shares["Snapshot a message"]
-        Client -->|"GET /s/:token (SPA page)"| SharePage["Public read-only view"]
-        Client -->|"GET /api/public/share/:token\n+ /image/:path"| ShareAPI["Snapshot JSON + scoped image serving"]
+        Client -->|"POST /api/shares · GET /api/shares\nDELETE /api/shares/:token[?purge=1]"| Shares["Assistant-only + owner-only snapshot\n(whitelist copy; _reasoning never stored)\nrevoke returns {session_exists, purged}"]
+        Client -->|"GET /s/:token (SPA page)"| SharePage["Public read-only view\n(copy-link button; metadata hidden)"]
+        Client -->|"GET /api/public/share/:token\n+ /image/:path + /file/:path\n+ POST .../tts (snapshot-only audio)"| ShareAPI["Snapshot JSON + scoped image/file serving\n+ scoped TTS (no auth, no client text)"]
     end
 
     subgraph UtilityEndpoints ["Utility"]
@@ -265,13 +271,14 @@ graph TD
         Client -->|"GET /api/image/:id"| ImgEdit["Serve working image"]
         Client -->|"POST /api/location"| SetLocation["Nominatim reverse geocode"]
         Client -->|"GET/POST /api/user-context"| UserCtx["read/append; overwrite = admin only"]
-        Client -->|"POST /api/tts"| TTS["md→speech cleanup → lang detect\n(en/es Piper, hi/te/bn/kn edge-tts)\nchunked <=1800 chars -> two-tier cache\n(primary disk + secondary archive)"]
+        Client -->|"POST /api/tts · POST /api/tts-words"| TTS["md→speech cleanup → lang detect\n(en/es Piper, hi/te/bn/kn edge-tts)\nchunked <=1800 chars -> two-tier cache\n+ <key>.words.json; highlight offsets use\ntrue chunk audio durations (no drift)"]
+        Client -->|"POST /api/internal/tts"| InternalTTS["Loopback-only + TTS_INTERNAL_TOKEN\n(story-page proxy; blank disables)"]
         Client -->|"GET /api/active-users · POST /api/leaving"| Presence["Active window tracking"]
         Client -->|"GET /output/… · GET /uploads/…"| ServeFiles["Identity + ownership-gated\nfile serving (resolve_image_file)"]
     end
 
     subgraph OpenAIEndpoints ["OpenAI-compatible /v1/* (Bearer OPENAI_API_KEY)"]
-        Client -->|"GET /v1/models · /v1/models/:id"| V1M["Model list/retrieve"]
+        Client -->|"GET /v1/ · GET /v1/models · /v1/models/:id"| V1M["Model list/retrieve"]
         Client -->|"POST /v1/chat/completions"| V1C["Non-stream + SSE streaming,\nincremental tool_calls, multimodal image_url"]
     end
 
@@ -357,10 +364,12 @@ graph TD
     Resumed -- "yes (resume)" --> Round0
 
     EvDispatch -- "llm_ok" --> LLMOK{"tool_calls?"}
-    LLMOK -- No --> VGate{"research or\nUI gpu answer?"}
-    VGate -- Yes --> Critic2["run_verification_worker\n(features/critic.py):\nresearch citations / answer-quality\njudge with bounded re-runs\n→ then _finalize_task"]
-    VGate -- "no + cpu agent" --> Peer["run_peer_review_worker\n(features/critic.py): full cross-agent\ncritique round — the peer (kaya↔kolpo\nmap) reviews the reply in a dedicated\nLLM round DIRECTLY on the cpu llama\nserver (bypasses the lane queue, which\nis blocked waiting on this very task)\n→ _judge_result → _finalize_task"]
-    VGate -- No --> Final["_finalize_task:\n1. L3 output judge (features/judge.py):\nstrict pattern block + per-user judge;\nMCP lane (_mcp / guardrail) fail-closed,\nUI lane fail-open\n2. append msg, save sessions,\nstatus done, refresh idle stamp"]
+    LLMOK -- No --> Simple{"simple turn? (≤40 chars, no\nresearch/media/_mcp/_peer_review)"}
+    Simple -- Yes --> Final2["_finalize_task directly:\npattern scan only (no sampling router,\nno quality / L3 LLM judge)"]
+    Simple -- No --> VGate{"research? openai_lane?\nagent-user on cpu?"}
+    VGate -- "research (non-openai)" --> Critic2["run_verification_worker\n(features/critic.py):\nresearch citations / answer-quality\njudge with bounded re-runs\n→ then _finalize_task"]
+    VGate -- "cpu agent-user" --> Peer["run_peer_review_worker\n(features/critic.py): full cross-agent\ncritique round — the peer (kaya↔kolpo\nmap) reviews the reply in a dedicated\nLLM round DIRECTLY on the cpu llama\nserver (bypasses the lane queue, which\nis blocked waiting on this very task)\n→ _judge_result → _finalize_task"]
+    VGate -- "else (UI gpu / openai_lane)" --> Final["_finalize_task:\n1. L3 output judge (features/judge.py):\nstrict pattern block + per-user judge;\nMCP lane (_mcp / guardrail) fail-closed,\nUI lane fail-open\n2. append msg, save sessions,\nstatus done, refresh idle stamp"]
     LLMOK -- Yes --> SubmitTools["append assistant msg,\npending_tools = N,\nsubmit to lane's _tool_pools"]
 
     EvDispatch -- "llm_err" --> LLMErr{"cpu lane & image_active?\n(round killed by render eviction)"}
@@ -494,7 +503,7 @@ long research rounds run to completion by design (HARDENING.md §5).
 
 ```mermaid
 graph TD
-    In["User / agent / MCP input"] --> L1{"L1 pattern guard\n(server/input_guard.py, patterns from\nprompts/surface_attacks/, Fernet-optional)"}
+    In["User / agent / MCP input"] --> L1{"L1 pattern guard\n(server/input_guard.py, patterns from\nprompts/surface_attacks/, Fernet-optional;\nmatching is lowercase + diacritic-strip only —\nno fullwidth/zero-width handling, and the\ninjection check uses raw lower() without _normalize)"}
     L1 -- "is_jailbreak_attempt /\nis_harmful_request" --> Block1["refuse (MCP gateway pre-batch;\nguardrail lane)"]
     L1 -- pass --> L2{"L2 input LLM judge\n(mcp_gateway._run_llm_verify\n→ judge.py → guardrail :8083,\nfail-closed: judge down = blocked)"}
     L2 -- harmful --> Block2["refuse before generation"]

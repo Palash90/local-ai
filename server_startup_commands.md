@@ -84,7 +84,13 @@ python comfy_main.py --lowvram --input-directory ~/local-ai-files/ComfyUI/input 
 
 ### Llama Server
 
-Build step was there - read seup.sh
+> **Stale draft** — flags below are an old example. Source of truth is
+> `server/config.py` (`LLAMA_*_ARGS`): GPU `-ngl 99 -fa on`, 24576 ctx,
+> reasoning budget 1024, `--slot-save-path ~/local-ai-files/kv-slots`;
+> CPU `--ctx-size 32768` (`CPU_CTX_SIZE`); guardrail ctx 16384. All servers
+> bind `127.0.0.1` (`CHAT_HOST`), not `0.0.0.0`. CPU (:8079), guardrail
+> (:8083) and embed (:8084) lanes are covered by `restart_services.sh` /
+> lazy-start, not by hand commands.
 
 ```shell
  ~/local-ai/llama.cpp/build/bin/llama-server --host 0.0.0.0 --port 8081 --models-dir ~/local-ai-files/my-models/ --n-gpu-layers 99 --no-kv-offload --ctx-size 24576 --reasoning-budget 2048
@@ -100,9 +106,14 @@ python chat-webui.py
 
 # Configuration Files
 
-List of files - read setup.sh
+List of files - read setup.sh. Runtime knobs live in `.env` (loaded by
+`server/dotenv.py`; real environment wins): `CHAT_HOST`, `LOCAL_AI_DB`,
+`AUTH_*` / `AUTH_AGENTS_*`, `MCP_USER`, `OPENAI_API_KEY`, `SELF_CHAT_MODE`,
+`FORCE_GPU_LANE`, TTS (`TTS_CACHE_*`, `TTS_MAX_CHARS*`, `TTS_CHUNK_CHARS`,
+`TTS_INTERNAL_TOKEN`), `STORIES_*_DIR`, `CPU_IDLE_UNLOAD_SECONDS`, lane ctx
+sizes — see README Voice section and ARCHITECTURE §3 for the full table.
 
-# Reverse Proxy & HTTPS (To be added)
+# Reverse Proxy & HTTPS (see local_cloud.sh / gcp_nginx.conf — live configs)
 
 ## 1. Install Nginx and clean default site
 

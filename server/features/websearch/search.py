@@ -50,6 +50,10 @@ _IN_FLIGHT = {}
 
 
 def _search_cache_get(norm_query, query, now):
+    # NOTE (27385fc): in-memory cache lookup intentionally disabled — cached
+    # entries were blocking fresh/good results. Persistent cache + semantic
+    # recall below remain the live caching layers. Do not re-enable without
+    # re-testing result freshness.
     return None
     """Lock-free cache lookup; caller must hold _CACHE_LOCK."""
     ttl = page_cache.regex_ttl(query)
