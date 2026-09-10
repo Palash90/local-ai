@@ -41,14 +41,21 @@ _KNOWN_OVERRIDES = [
 # lane goes out on a normal channel with a note map from GM-kit numbers).
 # note_map is interim until the ear-check on music/local/tabla-audition/ lands.
 KIT_SOUNDFONTS = {
+    # Tabla.sf2 is a chromatic single-hit set: measured by spectrum, key K
+    # sounds at K-12 semitones (60 -> C3 ~133 Hz ... 82 -> A#4 ~467 Hz);
+    # zones alternate bayan (L, bass) / dayan (R, treble), and keys >82 are
+    # fluidsynth pitch-shifted extrapolations, so the register lives in
+    # 60..82. Syllables mapped by tabla register:
+    #   DHA bass-open(bayan) | GHE bass-closed | DHIN mid-ring | TA mid-closed
+    #   KA mid-flat          | NA treble-open  | TIN treble-ring
     "TABLA": ("Tabla.sf2", {
-        36: 60,  # DHA  (bass open)
-        45: 62,  # GHE
-        38: 64,  # NA
-        50: 66,  # TIN
-        47: 68,  # DHIN
-        37: 70,  # TA
-        40: 72,  # KA
+        36: 60,  # DHA
+        45: 61,  # GHE
+        47: 64,  # DHIN
+        37: 67,  # TA
+        40: 70,  # KA
+        38: 74,  # NA
+        50: 78,  # TIN
     }),
 }
 
