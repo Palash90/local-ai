@@ -9,9 +9,10 @@ def _enabled(tool_docs, monkeypatch):
 
 
 def _music_entry():
-    from server.config import TOOLS_DETAILED
+    from server.config import live_tools_detailed
     return json.dumps(
-        next(t for t in TOOLS_DETAILED if t["function"]["name"] == "generate_music"),
+        next(t for t in live_tools_detailed()
+             if t["function"]["name"] == "generate_music"),
         sort_keys=True,
     )
 

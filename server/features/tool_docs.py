@@ -20,11 +20,14 @@ import threading
 
 from server.config import TOOL_DOCS_CACHE_DIR, live_tools_detailed
 
-# TEMPORARY (music DSL calibration): keep tool_details always-fresh for
-# generate_music — no warm preload, so edits to prompts/music_dsl.txt take
-# effect in every new session immediately. Delete the entry (and re-warm
-# happens naturally) once the DSL doc is considered final.
+# TEMPORARY (music DSL calibration): generate_music docs are NEVER persisted
+# to the per-user cache (a stale cached copy would defeat the iteration loop).
+# Instead they are PRELOADED LIVE from prompts/music_dsl.txt on every music
+# request — the model always sees the current doc, needs no tool_details
+# round, and edits take effect immediately. After calibration, drop the entry
+# from both sets to restore plain per-user warm caching.
 WARM_DISABLED = {"generate_music"}
+LIVE_PRELOAD = {"generate_music"}
 
 _LOCK = threading.Lock()
 
@@ -202,10 +205,14 @@ def docs_block(user, text, messages, cache_dir=None):
         return ""
     text = (text or "").lower()
     already = docs_in_history(messages)
+    stored = fresh(user, cache_dir)
+    for tool in LIVE_PRELOAD:
+        if tool in WARM_TRIGGERS and WARM_TRIGGERS.get(tool):
+            stored[tool] = _detail(tool)  # current file text, not the cache
     parts, names = [], []
-    for tool, payload in fresh(user, cache_dir).items():
+    for tool, payload in stored.items():
         rx = WARM_TRIGGERS.get(tool)
-        if rx is None or tool in already:
+        if rx is None or tool in already or not payload:
             continue
         if not re.search(rx, text):
             continue

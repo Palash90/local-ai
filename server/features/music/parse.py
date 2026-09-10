@@ -61,6 +61,9 @@ DRUM_MAP = {
     "BOG": 60, "BOGL": 61, "TBL": 65, "TBLL": 66,
     "MAR": 70, "CAB": 69, "CLV": 75, "WBH": 76, "WBL": 77, "GUI": 73,
     "GUIR": 74, "CUIC": 79, "TRIG": 81, "WHIS": 71, "TRI": 81,
+    # Tabla syllables (theka voices) -> the kit colours the engine's tabla
+    # groove uses: DHA bass+open, DHIN/GE mid, NA crisp, TIN high, TA closed.
+    "DHA": 36, "DHIN": 47, "NA": 38, "TIN": 50, "GHE": 45, "TA": 37,
 }
 # keep 'R' rest handled specially in the drum branch
 DRUM_SECTION_NAMES = {"DRUMS", "DRUM", "PERC", "PERCUSSION", "RHYTHM"}
