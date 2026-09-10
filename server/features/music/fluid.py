@@ -56,6 +56,7 @@ KIT_SOUNDFONTS = {
         40: 70,  # KA
         38: 74,  # NA
         50: 78,  # TIN
+        49: 76,  # CR (kit rolls end on a high accent)
     }),
 }
 

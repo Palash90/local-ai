@@ -35,7 +35,9 @@ def test_section_energy_timeline():
     assert not errs, errs
     assert [s["name"] for s in structure] == ["verse", "chorus"]
     energies = [e["energy"] for e in secs[0]["events"]]
-    assert energies == [0.4, 0.4, 1.0, 1.0]
+    # energy now RAMPES toward section targets (slope-capped) instead of stepping
+    assert abs(energies[0] - 0.4) < 1e-6 and abs(energies[1] - 0.4) < 1e-6
+    assert abs(energies[2] - 0.6) < 1e-6 and abs(energies[3] - 0.8) < 1e-6
 
 
 def test_flat_accidentals_roundtrip():
@@ -328,7 +330,52 @@ def test_kit_note_map_maps_all_syllables():
     from server.features.music import fluid
     from server.features.music.parse import DRUM_MAP
     path, note_map = fluid.kit_file("tabla")
-    for gm in note_map:
-        assert note_map[gm] >= 60 and DRUM_MAP.get(
-            {36: "DHA", 45: "GHE", 38: "NA", 50: "TIN",
-             47: "DHIN", 37: "TA", 40: "KA"}[gm]) == gm
+    syl = {36: "DHA", 45: "GHE", 38: "NA", 50: "TIN",
+           47: "DHIN", 37: "TA", 40: "KA", 49: "CR"}
+    assert set(syl) <= set(note_map)
+    for gm, nm in syl.items():
+        assert 60 <= note_map[gm] <= 82
+        assert DRUM_MAP.get(nm) in (gm, None) or DRUM_MAP.get(nm) == gm
+
+
+def test_energy_ramp_is_smooth():
+    from server.features.music.parse import _parse_sections
+    text = ("@section intro bars=2 energy=0.3\n"
+            "@section verse bars=4 energy=0.6\n"
+            "@section chorus bars=4 energy=0.9\n"
+            "@section outro bars=2 energy=0.3\n")
+    _, be = _parse_sections(text)
+    assert len(be) == 12
+    assert max(abs(be[i + 1] - be[i]) for i in range(len(be) - 1)) <= 0.201
+    assert be[9] >= 0.89 and be[0] == 0.3
+
+
+def test_variation_tiling_fills_lifts_and_thins():
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score(
+        "@tempo 100\n"
+        "@section verse bars=2 energy=0.8\n"
+        "@section chorus bars=4 energy=0.9\n"
+        "@section outro bars=2 energy=0.3\n"
+        "[RHYTHM]\nBD e HH e SN e HH e |\n"
+        "[MELODY santoor]\nC4 e E4 e G4 e A4 e |\n", 100)
+    assert not errs, errs
+    rhy, mel = secs[0]["events"], secs[1]["events"]
+    fills = {int(e["start"] // 4) for e in rhy if e["midi"] in (45, 47, 50, 49)}
+    assert 1 in fills and 5 in fills, sorted(fills)          # before section changes
+    assert any(e.get("ghost") and e["midi"] >= 60 for e in mel)  # octave ghosts
+    last = [e for e in rhy if 28 <= e["start"] < 32]
+    assert last and all(abs((e["start"] % 1.0) - 0.5) > 0.15
+                        or abs(e["start"] % 1.0) < 0.15 for e in last)
+
+
+def test_full_length_lanes_never_transformed():
+    from server.features.music.parse import parse_score
+    vamp = ("@section a bars=2 energy=0.9\n@section b bars=2 energy=0.9\n"
+            "[RHYTHM]\nBD e HH e SN e HH e | BD e HH e SN e HH e |\n"
+            "BD e HH e SN e HH e | BD e HH e SN e HH e |\n")
+    secs, errs, _ = parse_score(vamp, 100)
+    assert not errs, errs
+    assert sum(len(s["events"]) for s in secs) == 16
+    assert not any(e.get("ghost") for s in secs for e in s["events"])
+    assert all(e["midi"] != 49 for e in secs[0]["events"])     # no synthetic fills

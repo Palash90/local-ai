@@ -6,7 +6,13 @@ DIRECTIVES (whole-score, one per line, before lanes):
                    are silently ignored!). Sets scale/instruments AND the drum groove — copy that genre's bar from GENRE GROOVES below
   @mood <name>     joyful|moody|inspiring|dreamy|tense|epic|calm|playful
   @section <name> bars=N energy=0.0-1.0 [repeat=N]
-                   song form on a shared bar grid that tiles from bar 1 across ALL lanes; energy auto-scales velocity+expression so a chorus lifts the band without editing notes. Use intro/verse/prechorus/chorus/bridge/outro. LOOP SEMANTICS: if a lane's written material is shorter than the section grid it is automatically repeated (bar-aligned) across the whole form — write your best 2-4 bar vamp and let the sections loop it with their energy lifts; the piece lasts as long as the grid says.
+                   song form on a shared bar grid that tiles from bar 1 across ALL lanes; energy auto-scales velocity+expression so a chorus lifts the band without editing notes; levels BUILD smoothly across a section (a capped ramp), so one
+                   @section per musical phase is enough — do not stack
+                   micro-sections to fake a crescendo. Use intro/verse/prechorus/chorus/bridge/outro. LOOP SEMANTICS: if a lane's written material is shorter than the section grid it is automatically repeated (bar-aligned) across the whole form — write your best 2-4 bar vamp and let the sections loop it with their energy lifts; the piece lasts as long as the grid says. Loops ALIVE: boundary fills,
+chorus register-widening (ghosts above the melody, never replacing it),
+outro thinning, and stroke-level dynamics with tiny timing drift are
+applied automatically to looped material — write a vamp you would
+repeat on stage.
   '#' starts a comment.
 
 GENRES (authentic palette + groove; feel free to fuse):

@@ -69,6 +69,30 @@ DRUM_MAP = {
     # groove uses: DHA bass+open, DHIN/GE mid, NA crisp, TIN high, TA closed.
     "DHA": 36, "DHIN": 47, "NA": 38, "TIN": 50, "GHE": 45, "TA": 37,
 }
+# Per-stroke dynamics: a tabla/groove is NOT a metronome — bass strokes
+# (Dha/Dhin) land fuller than closed taps (Ta/Ka), and sam > weak beats.
+STROKE_VEL = {36: 106, 38: 110, 40: 76, 42: 80, 44: 70, 45: 92, 46: 86,
+              47: 98, 49: 98, 50: 102, 51: 90, 52: 84, 53: 82, 55: 84,
+              56: 90, 57: 88, 59: 90, 60: 88, 61: 84, 62: 80, 63: 88,
+              64: 86, 65: 92, 66: 84, 67: 82, 69: 90, 70: 86, 71: 78,
+              73: 88, 74: 84, 75: 90, 76: 82, 77: 80, 78: 86, 79: 88,
+              81: 84}
+
+
+def _stroke_vel(midi, rel):
+    base = STROKE_VEL.get(midi, 92)
+    r = rel % 4.0
+    if abs(r) < 1e-9 or abs(r - 4.0) < 1e-9:
+        pos = 1.0
+    elif abs(r - 2.0) < 1e-9:
+        pos = 0.93
+    elif abs(r - round(r)) < 1e-9:
+        pos = 0.87
+    else:
+        pos = 0.80
+    return max(28, min(127, int(base * pos)))
+
+
 # keep 'R' rest handled specially in the drum branch
 DRUM_SECTION_NAMES = {"DRUMS", "DRUM", "PERC", "PERCUSSION", "RHYTHM"}
 DRUM_NAME_PREFIXES = ("DRUM", "PERC", "RHYTHM")
@@ -163,12 +187,136 @@ def _parse_sections(text):
                               "start_bar": bar})
             for _b in range(nbars):
                 bar += 1
+    # Global energy ramp: instead of a step per section, energy walks
+    # proportionally toward each section's target so it lands exactly on the
+    # section's last bar — dynamics BUILD (crescendo into chorus, gentle
+    # settle in the outro) instead of snapping between fixed levels.
     bar_energy = []
+    cur_e = structure[0]["energy"] if structure else 1.0
     for seg in structure:
-        bar_energy.extend([seg["energy"]] * seg["bars"])
+        tgt, n = seg["energy"], seg["bars"]
+        for j in range(n):
+            step = (tgt - cur_e) / (n - j)
+            cur_e += max(-0.2, min(0.2, step))
+            bar_energy.append(max(0.0, min(1.0, cur_e)))
     if not bar_energy:
         bar_energy = [1.0]
     return structure, bar_energy
+
+
+def _humanize(sections, text):
+    """Deterministic life for percussion: -16..+24 ms timing drift and +/-3
+    velocity drift per hit, seeded from the score itself (same score ->
+    byte-identical render), plus a small 'ahead' lean on odd bars that gives
+    looped thekas forward motion instead of a metronome's dead grid. Downbeats
+    are nudged far less than off-grid strokes so the cycle keeps its spine."""
+    import hashlib
+    seed = hashlib.md5((text or "").encode()).hexdigest()
+    for li, s in enumerate(sections):
+        if not s["drum"]:
+            continue
+        for ei, e in enumerate(s["events"]):
+            if e["type"] == "rest":
+                continue
+            h = hashlib.md5(f"{seed}:{li}:{ei}:{e['start']:.3f}".encode()
+                            ).digest()
+            a = h[0] / 255.0
+            b = h[1] / 255.0
+            rel = e["start"] % 4.0
+            drift = a * 0.040 - 0.016
+            if int(round(e["start"]) // 4 * 4) % 8 == 4:
+                drift += 0.018
+            on_beat = abs(rel - round(rel)) < 1e-9
+            if on_beat:
+                damp = 0.15
+                drift = max(drift, 0.0)   # never drag a beat onset backward
+            else:
+                damp = 1.0
+            e["start"] = max(0.0, e["start"] + drift * damp)
+            if "vel" in e:
+                e["vel"] = max(28, min(127, e["vel"] + int(b * 7) - 3))
+
+
+def _in_bar(e, b):
+    return b * 4 <= e["start"] < (b + 1) * 4
+
+
+def _variation_pass(sections, structure, bar_energy, errors):
+    """Musical interest for LOOPS ONLY.
+
+    Lanes whose written material was shorter than the section grid were
+    tiled (``_tiled``) — verbatim looping otherwise sounds like a drum
+    machine. For those lanes: a rhythm fill replaces the bar before every
+    section change; high-energy bars (>=0.65) widen register (melody doubles
+    its strong beats an octave up as a soft ghost, harmony opens its
+    top voicing, rhythm adds drive) without transposing the tune; low-energy
+    bars (<=0.5, outros and quiet intros) thin rhythm off-beats so the piece lands.
+    Engine-composed full-length scores have no tiled lanes and are never
+    touched. Deterministic: same score -> same audio."""
+    if not structure:
+        return
+    grid_bars = sum(sg["bars"] for sg in structure)
+    if grid_bars < 2:
+        return
+    boundaries = {sg["start_bar"] - 1 for sg in structure if sg["start_bar"] > 0}
+    mel = next((x for x in sections if x.get("_tiled") and not x["drum"]
+                and x["name"].startswith("MELODY")), None)
+    harms = [x for x in sections if x.get("_tiled") and not x["drum"]
+             and x["name"].startswith(("HARMONY", "PAD", "CHORDS"))]
+    rhy = [x for x in sections if x.get("_tiled") and x["drum"]]
+    if not (mel or harms or rhy):
+        return
+    for x in rhy:
+        for b in sorted(boundaries):
+            if b + 1 > grid_bars or b < 1:
+                continue
+            keep = [e for e in x["events"] if not _in_bar(e, b)]
+            for pos, note in ((0, 45), (1, 47), (2, 50), (3, 49)):
+                keep.append({"type": "note", "midi": note,
+                             "start": b * 4 + pos, "dur": 1.0,
+                             "vel": _stroke_vel(note, pos)})
+            x["events"] = sorted(keep, key=lambda e: e["start"])
+    for b in range(grid_bars):
+        ebar = bar_energy[min(b, len(bar_energy) - 1)]
+        if ebar >= 0.65:
+            if mel is not None:
+                strong = [e for e in list(mel["events"])
+                          if _in_bar(e, b) and e["type"] == "note"
+                          and abs((e["start"] - b * 4)
+                                  - round(e["start"] - b * 4)) < 1e-6]
+                for e in strong:
+                    g = dict(e)
+                    g["midi"] = e["midi"] + 12
+                    g["start"] = e["start"]
+                    g["dur"] = e["dur"] * 0.75
+                    g["vel"] = 64
+                    g["ghost"] = True
+                    mel["events"].append(g)
+            for h in harms:
+                tops = []
+                for e in list(h["events"]):
+                    if _in_bar(e, b) and e["type"] == "chord" and e["pitches"]:
+                        tops.append({"type": "note",
+                                     "midi": max(e["pitches"]) + 12,
+                                     "start": e["start"],
+                                     "dur": e["dur"] * 0.5, "vel": 58})
+                h["events"].extend(tops)
+            for r in rhy:
+                be = [e for e in r["events"] if _in_bar(e, b)]
+                if len(be) <= 4 and not any(
+                        abs(e["start"] - (b * 4 + 3.5)) < 0.01 for e in be):
+                    r["events"].append({"type": "note", "midi": 40,
+                                        "start": b * 4 + 3.5, "dur": 0.5,
+                                        "vel": _stroke_vel(40, 3.5)})
+            if mel is not None:
+                mel["events"].sort(key=lambda e: e["start"])
+        elif ebar <= 0.5:
+            for r in rhy:
+                r["events"] = [
+                    e for e in r["events"]
+                    if not (_in_bar(e, b)
+                            and abs((e["start"] - b * 4) % 1.0) > 1e-9)]
+                r["events"].sort(key=lambda e: e["start"])
 
 
 def parse_score(text, tempo=120):
@@ -311,6 +459,9 @@ def parse_score(text, tempo=120):
                                       "start": cur["cursor"], "dur": beats}
                                 if dyn is not None:
                                     ev["vel"] = dyn
+                                else:
+                                    ev["vel"] = _stroke_vel(DRUM_MAP[hit],
+                                                            cur["cursor"])
                                 cur["events"].append(ev)
                             cur["cursor"] += beats
                             continue
@@ -394,6 +545,7 @@ def parse_score(text, tempo=120):
                 if content_bars >= grid_bars:
                     continue
                 span = content_bars * 4.0
+                s["_tiled"] = True
                 tiled = list(evs)
                 offset = span
                 while offset < grid_beats:
@@ -413,6 +565,10 @@ def parse_score(text, tempo=120):
             total = sum(len(s["events"]) for s in sections)
             if total > MAX_NOTES:
                 errors.append(f"too many notes: {total} > {MAX_NOTES}")
+    _variation_pass(sections, structure, bar_energy, errors)
+    _humanize(sections, text)
+    for s in sections:
+        s.pop("_tiled", None)
     # Assign each event the energy of the song-form bar it lands in, so lanes
     # play a section's dynamics even though the notes were written flat.
     def _energy_for(start):
