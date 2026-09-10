@@ -182,8 +182,8 @@ def random_score(seed=None, mood=None, genre=None, fusion=None):
         base_oct = 4
         fusion_partner = genres.resolve(fusion) if fusion else (
             genres.resolve(rng.choice(g.get("fusion", []))) if rng.random() < 0.35 else None)
-        mel_a = _borrow(rng, g["melody"] + PIANO_LIKE, fusion_partner, 0)
-        mel_b = _borrow(rng, g["melody"] + PIANO_LIKE, fusion_partner, 1)
+        mel_a = _borrow(rng, g["melody"], fusion_partner, 0)
+        mel_b = _borrow(rng, g["melody"], fusion_partner, 1)
         harm_instr = _borrow(rng, g["harmony"], fusion_partner, 0)
         pad_instr = _borrow(rng, g["harmony"], fusion_partner, 1)
         bass_instr = _borrow(rng, g["bass"], fusion_partner, 0)
@@ -346,9 +346,16 @@ def random_score(seed=None, mood=None, genre=None, fusion=None):
 
 
 def _borrow(rng, palette, partner, pick=0):
-    pool = list(palette) + PIANO_LIKE
-    if partner and rng.random() < 0.3:
-        pool += partner["melody"] + partner["harmony"]
+    """pick==0 -> genre-authentic primary voice; pick>=1 -> allow piano/duet/
+    cross-genre fusion colour. Primary voices stay true to the genre."""
+    if pick == 0:
+        pool = list(palette)
+        if partner and rng.random() < 0.22:
+            pool += partner["melody"] + partner["harmony"]
+    else:
+        pool = list(palette) + PIANO_LIKE
+        if partner and rng.random() < 0.35:
+            pool += partner["melody"] + partner["harmony"]
     rng.shuffle(pool)
     return pool[pick % len(pool)]
 

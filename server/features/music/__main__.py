@@ -2,8 +2,10 @@
 
     PYTHONPATH=. python3 -m server.features.music                 # paste a score
     PYTHONPATH=. python3 -m server.features.music --random        # random piece
-    PYTHONPATH=. python3 -m server.features.music --mood moody    # by mood
-    PYTHONPATH=. python3 -m server.features.music --seed 7 --mood epic
+    PYTHONPATH=. python3 -m server.features.music --genre jazz    # by genre
+    PYTHONPATH=. python3 -m server.features.music --mood epic     # by mood
+    PYTHONPATH=. python3 -m server.features.music --seed 7 --genre jazz
+    PYTHONPATH=. python3 -m server.features.music --showcase      # audition ALL
 """
 import json
 import sys
@@ -36,12 +38,26 @@ def _fmt(res):
 
 def main():
     from server.features.music.render import render_score
+    if "--showcase" in sys.argv:
+        from server.features.music import showcase
+        user = _arg("--user", "palash")
+        seed = int(_arg("--seed", "7"))
+        if "--genres-only" in sys.argv:
+            showcase.render_genres(user=user, seed=seed)
+        elif "--instruments-only" in sys.argv:
+            showcase.render_instruments(user=user)
+        else:
+            showcase.run_all(user=user, seed=seed)
+        return
     mood = _arg("--mood")
+    genre = _arg("--genre")
     seed = _arg("--seed")
-    if "--random" in sys.argv or mood or seed:
+    if "--random" in sys.argv or mood or genre or seed:
         from server.features.music.random_arrange import random_score
-        text, tempo, info = random_score(seed=int(seed) if seed else None, mood=mood)
-        print(f"--- {info['mood']} arrangement: {info['key']} "
+        text, tempo, info = random_score(seed=int(seed) if seed else None,
+                                         mood=mood, genre=genre)
+        tag = info.get("genre") or info.get("mood") or "random"
+        print(f"--- {tag} arrangement: {info['key']} "
               f"{info['tempo']}bpm {info['bars']}bars [{info['structure']}] ---")
         print(text)
         print()
