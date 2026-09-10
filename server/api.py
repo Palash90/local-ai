@@ -36,6 +36,7 @@ from server.config import (
     KNOWN_AGENT_USERS,
     MCP_USER,
     MUSIC_DIR,
+    MUSIC_SHOWCASE_DIR,
     SELF_CHAT_MODE,
     TTS_CACHE_DIR,
     TTS_CACHE_MAX_BYTES,
@@ -125,6 +126,27 @@ def resolve_image_file(image_id, user=None):
         base, rel = UPLOADS_DIR, os.path.basename(raw)
     root = os.path.realpath(base)
     fpath = os.path.realpath(os.path.join(root, rel))
+    if fpath != root and not fpath.startswith(root + os.sep):
+        return None
+    if not os.path.isfile(fpath):
+        return None
+    return fpath
+
+
+def resolve_showcase_file(rel):
+    """Resolve a PUBLIC showcase file, confined to MUSIC_SHOWCASE_DIR.
+
+    Unauthenticated by design (like a public share): only direct filenames under
+    the showcase directory, only .wav/.mid, no path escapes.
+    """
+    if not rel:
+        return None
+    name = os.path.basename(str(rel).strip("/"))
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in (".wav", ".mid"):
+        return None
+    root = os.path.realpath(MUSIC_SHOWCASE_DIR)
+    fpath = os.path.realpath(os.path.join(root, name))
     if fpath != root and not fpath.startswith(root + os.sep):
         return None
     if not os.path.isfile(fpath):
@@ -385,6 +407,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "Unauthorized"}, status=401)
                 return
             self.send_json({"shares": list_shares(user)})
+        elif self.path.startswith("/api/public/music"):
+            self._handle_public_music()
         elif self.path.startswith("/api/public/share/"):
             file_route = re.match(
                 r"^/api/public/share/([A-Za-z0-9]+)/file/(.+)$", self.path
@@ -1474,6 +1498,41 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self._safe_write(json.dumps(data).encode())
+
+    def _handle_public_music(self):
+        """Unauthenticated showcase page + clip files (public-share style)."""
+        import re as _re
+        from urllib.parse import unquote
+        from server.features.music import showcase_page
+        path = urlparse(self.path).path
+        if path.rstrip("/") in ("/api/public/music", "/api/public/music/showcase"):
+            try:
+                origin = self.headers.get("X-Forwarded-Proto", "https") + "://" + self.headers.get("Host", "")
+                page = showcase_page.build_page(MUSIC_SHOWCASE_DIR, site_origin=origin)
+            except Exception as e:
+                self.send_json({"error": f"showcase unavailable: {e}"}, status=500)
+                return
+            body = page.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self._safe_write(body)
+            return
+        m = _re.match(r"^/api/public/music/(.+)$", path)
+        if m:
+            rel = unquote(m.group(1))
+            fpath = resolve_showcase_file(rel)
+            if not fpath:
+                self.send_error(404)
+                return
+            ctype = "audio/midi" if fpath.endswith(".mid") else "audio/wav"
+            self._serve_file_range(
+                fpath, ctype, cache="public, max-age=86400")
+            return
+        self.send_error(404)
+
 
     def log_message(self, format, *args):
         pass

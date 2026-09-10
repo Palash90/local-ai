@@ -236,6 +236,11 @@ COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
 MUSIC_DIR = os.path.expanduser("~/local-ai-files/music")
 os.makedirs(MUSIC_DIR, exist_ok=True)
+# Public, unauthenticated showcase directory (served like a public share).
+MUSIC_SHOWCASE_DIR = os.environ.get(
+    "MUSIC_SHOWCASE_DIR", os.path.join(MUSIC_DIR, "showcase")
+)
+os.makedirs(MUSIC_SHOWCASE_DIR, exist_ok=True)
 LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-server")
 
 # ─────────────────────────────────────────────────────────────────────────────
