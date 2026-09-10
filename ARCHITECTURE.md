@@ -523,6 +523,13 @@ playable WAV), plus a non-LLM `make music` chat shortcut
   WAVs summed (normalize-on-clip). Override map: `FLUID_SOUNDFONT_MAP` env
   (JSON `{program|"drum": path}`), base via `FLUID_SOUNDFONT`. Single group =
   classic one-pass render.
+- **Named drum kits.** A percussion lane may name a kit (`[RHYTHM tabla]`);
+  kits in `fluid.KIT_SOUNDFONTS` render from their own soundfont as a melodic
+  group (regular channel, prog 0, GM-kit→file key `note_map`), mixed via the
+  multi-pass machinery. Missing registered kit ⇒ render refuses
+  ("not installed") — no rock-kit faking of tabla (provenance of
+  `Tabla.sf2` in `soundfonts/PROVENANCE-Tabla.md`; syllable key map pending
+  ear-audition under `music/local/tabla-audition/`).
 - **Outputs & meta.** WAV/MIDI land in `music/<user>/gen_<id>.*`; the task
   carries `music_file/music_score/music_url/music_levels/music_duration`,
   which `_finalize_task` attaches to the assistant message as

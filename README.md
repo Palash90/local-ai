@@ -487,6 +487,9 @@ and per instrument timbre — lives at `/api/public/music/showcase` (:3001).
   `FLUID_SOUNDFONT_MAP` (JSON `{"<program>|drum": "<path>"}` overrides),
   `MUSIC_SHOWCASE_DIR`. Soundfonts + the vendored fluidsynth live under
   `~/local-ai-files/music/` (see server_startup_commands.md).
+- `[RHYTHM tabla]` renders from a real tabla soundfont when installed
+  (`Tabla.sf2` is wired via `KIT_SOUNDFONTS`; if it's missing the render
+  refuses rather than faking tabla on a rock kit).
 - Missing fluidsynth/soundfonts degrade gracefully to the numpy synth.
 
 ## Voice / read-aloud (TTS)
