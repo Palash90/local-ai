@@ -954,7 +954,7 @@ async def read_story(
             article {{ overflow-wrap: break-word; }}
             article p, article li {{ font-size: 1em; }}
             img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 20px 0; display: block; }}
-            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; }}
+            .topbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; font-family: sans-serif; font-size: 14px; position: sticky; top: 0; z-index: 5; background: #fafafa; padding: 8px 0; }}
             .topbar-actions {{ display: flex; gap: 8px; align-items: center; }}
             a.back {{ color: #666; text-decoration: none; }}
             .topbar button {{ background: none; border: 1px solid #c44; color: #c44; border-radius: 6px; padding: 4px 12px; cursor: pointer; font-family: sans-serif; font-size: 14px; }}
@@ -989,6 +989,7 @@ async def read_story(
             }}
             @media (prefers-color-scheme: dark) {{
                 body {{ background: #16181d; color: #e6e6e6; }}
+                .topbar {{ background: #16181d; }}
                 a.back {{ color: #999; }}
                 .topbar button {{ border-color: #e05a5a; color: #ff7a7a; }}
                 .topbar button:hover {{ background: #2a1c1c; }}
