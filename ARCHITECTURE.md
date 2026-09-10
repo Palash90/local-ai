@@ -603,7 +603,14 @@ satisfied by the session's prior artifact), `image_claimed`/`music_claimed`
 (answer claims generation while this task rendered nothing — catches
 parse-failed lies like "The Santoor piece has been generated"), and
 `duration_claimed` (answer states a length > 1.5× the tool's real
-`duration_s` + 10s — catches "…about a minute if looped"). Verdicts from all
+`duration_s` + 10s — catches "…about a minute if looped"), `score_errors`
+(the DSL compiled but the parser dropped tokens, so the track is broken —
+the retry embeds the rejected tokens verbatim), and `length_mismatch` (an
+explicit user duration — digits or spelled-out "about a minute" — vs a
+rendered `duration_s` outside 0.6×–1.8× of the target). The music DSL docs
+enforce the same contract upstream: minimum texture (MELODY+HARMONY always,
+BASS+RHYTHM when rhythm is asked, single lane only for explicit solos) and
+LENGTH MATH (bars ≈ seconds × BPM ÷ 240, sections sum to the target ±20%). Verdicts from all
 judges, plus the re-run history, are appended to the final answer's reasoning
 block as a `### Guardrail verification` trail (`critic._verification_addendum`).
 Two finalize-side companions (`orchestration`): anaphoric artifact
