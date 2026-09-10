@@ -74,7 +74,7 @@ def test_claim_regex_no_false_positive(stub_state):
 def test_image_anaphora_satisfied_by_session(stub_state):
     # turn 2 of the piano session: music re-generated, image referenced
     tasks = {"t": {"music_file": "palash/gen_2.wav", "music_url": "/music/x.wav",
-                   "music_duration": 26.9}}
+                   "music_duration": 52.0}}
     sessions = {"s1": [
         {"role": "system", "content": "…"},
         {"role": "user", "content": "draw a girl playing piano"},
@@ -89,11 +89,40 @@ def test_image_anaphora_satisfied_by_session(stub_state):
 
 def test_image_anaphora_without_prior_still_fires(stub_state):
     tasks = {"t": {"music_file": "palash/gen_2.wav", "music_url": "/music/x.wav",
-                   "music_duration": 26.9}}
+                   "music_duration": 52.0}}
     reason = _run(stub_state, tasks,
                   "make a longer piece, with the same image",
                   "Done! The image remains the same.")
     assert reason == "image_needed"
+
+
+def test_score_errors_gate(stub_state):
+    # the real bossa case: ok render BUT parser dropped 12 tokens
+    tasks = {"t": {"music_file": "palash/gen_b7678c21.wav",
+                   "music_url": "/music/palash/gen_b7678c21.wav",
+                   "music_duration": 32.16,
+                   "music_errors": ["line 12: bad token 'Dm4'",
+                                    "line 10: bad token '(Verse'"]}}
+    answer = ("The soothing piano piece in Bossa Nova Jazz Fusion style is "
+              "ready, and here is the image.")
+    reason = _run(stub_state, tasks,
+                  "Write a soothing, calming Piano music in Bossa Nova style "
+                  "with nice rhythm", answer)
+    assert reason == "score_errors"
+
+
+def test_length_mismatch_gate(stub_state):
+    base = {"music_file": "palash/x.wav", "music_url": "/music/palash/x.wav"}
+    short = dict(base, music_duration=13.25)
+    reason = _run(stub_state, {"t": short},
+                  "make a longer piece of about 1 minute",
+                  "Here is your extended piece!")
+    assert reason == "length_mismatch"
+    ok = dict(base, music_duration=52.0)
+    reason = _run(stub_state, {"t": ok},
+                  "make a longer piece of about 1 minute",
+                  "Here is your extended piece!")
+    assert reason is None
 
 
 def test_duration_claim_gate(stub_state):

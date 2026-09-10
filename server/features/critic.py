@@ -234,6 +234,19 @@ _STEERING_HINTS = {
         "result, then offer to generate a longer version. Never mention this "
         "rejection or the word looped."
     ),
+    "score_errors": (
+        "The parser rejected tokens in your score, so whole bars were dropped "
+        "and the rendered piece is broken. Rewrite it using ONLY valid "
+        "tokens: chords as D3:min7 or G3:7 (never Dm4), no prose or stage "
+        "directions, every lane bar-complete with '|' at each bar end, and "
+        "keep at least MELODY + HARMONY lanes (plus BASS + RHYTHM if rhythm "
+        "was part of the request)."
+    ),
+    "length_mismatch": (
+        "The rendered piece is far from the length the user asked for. "
+        "Recount with bars ≈ seconds × BPM ÷ 240 and set the @section bars so "
+        "they sum to the requested length within 20%, then render again."
+    ),
     "music_claimed": (
         "Your previous draft claimed music/audio was generated but none was "
         "actually produced — the tool call failed or never ran. NEVER claim or "
@@ -930,11 +943,30 @@ _DURATION_CLAIM_RE = re.compile(
 )
 
 
-def _claimed_duration_seconds(answer):
-    """Largest duration mentioned in the answer, in seconds, or None."""
+_DURATION_WORD_RE = re.compile(
+    r"\b(half(?:\s+(?:a|an))?|a|an|one|two|three|four|five|six|seven|eight|"
+    r"nine|ten|twelve|fifteen|twenty|thirty|forty|sixty)\s+(seconds?|secs?|"
+    r"minutes?|mins?)\b",
+    re.IGNORECASE,
+)
+_NUM_WORDS = {"half": 0.5, "a": 1, "an": 1, "one": 1, "two": 2, "three": 3,
+              "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+              "nine": 9, "ten": 10, "twelve": 12, "fifteen": 15, "twenty": 20,
+              "thirty": 30, "forty": 40, "sixty": 60}
+
+
+def _claimed_duration_seconds(text):
+    """Largest duration mentioned (digits OR spelled-out: "about a minute",
+    "90 seconds"), in seconds, or None."""
+    text = text or ""
     best = None
-    for m in _DURATION_CLAIM_RE.finditer(answer or ""):
+    for m in _DURATION_CLAIM_RE.finditer(text):
         val = float(m.group(1))
+        secs = val * 60.0 if m.group(2).lower().startswith("min") else val
+        if best is None or secs > best:
+            best = secs
+    for m in _DURATION_WORD_RE.finditer(text):
+        val = _NUM_WORDS.get(m.group(1).split()[0].lower(), 0)
         secs = val * 60.0 if m.group(2).lower().startswith("min") else val
         if best is None or secs > best:
             best = secs
@@ -964,6 +996,7 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
         image_file = t.get("image_file")
         music_ok = bool(t.get("music_file") or t.get("music_url"))
         music_duration = t.get("music_duration")
+        music_errors = list(t.get("music_errors") or [])
         is_research = bool(t.get("research"))
     if is_research:
         headings = [
@@ -990,6 +1023,19 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
         return "music_claimed"
     if _MUSIC_NEED_RE.search(user_input) and not has_music:
         return "music_needed"
+    if music_ok:
+        # The score compiled but the parser dropped tokens — the rendered
+        # piece is structurally broken (missing bars/lanes) no matter what
+        # the duration says. Fix-and-rerender once before anything else.
+        if music_errors:
+            return "score_errors"
+        # Explicit user length vs real rendered length: tolerate the model's
+        # counting (0.6×–1.8×) but catch the "minute that came out at 32s".
+        target = _claimed_duration_seconds(user_input)
+        if (target and isinstance(music_duration, (int, float))
+                and music_duration > 0
+                and not (0.6 * target <= music_duration <= 1.8 * target)):
+            return "length_mismatch"
     if music_ok and isinstance(music_duration, (int, float)) and music_duration > 0:
         claimed = _claimed_duration_seconds(answer)
         # Tolerate rounding; catch the real lie: claimed length wildly exceeds
@@ -1122,6 +1168,13 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
         "instructions, and do not ask the user for a new topic — answer what "
         "was already asked."
     )
+    if reason == "score_errors":
+        errs = (t.get("music_errors") or [])[:6]
+        if errs:
+            steering += (
+                "\n\n[Tokens the parser rejected — rewrite without them: "
+                + "; ".join(errs) + "]"
+            )
     qual = (judge_result or {}).get("quality", 0)
     if reason == "quality" and isinstance(qual, int):
         steering += f"\n\n[Quality score received: {qual}/100 — raise it above the gate.]"

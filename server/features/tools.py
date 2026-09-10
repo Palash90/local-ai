@@ -234,6 +234,10 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             res = json.loads(result)
         except Exception:
             res = {"ok": False, "error": "bad render result"}
+        with M._data_lock:
+            te = M.tasks.get(task_id)
+            if te:
+                te["music_errors"] = [str(x) for x in (res.get("errors") or [])][:20]
         if res.get("ok"):
             music_url = res.get("music_url", "")
             rel = music_url[len("/music/"):] if music_url.startswith("/music/") else None
