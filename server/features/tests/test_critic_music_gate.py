@@ -12,12 +12,13 @@ def stub_state():
     st._Registry.entrypoint = prev
 
 
-def _run(st, tasks, task_id, user_input, answer):
+def _run(st, tasks, user_input, answer, task_id="t", sessions=None):
     from server.features.critic import _requirement_mismatch
     st._Registry.entrypoint = types.SimpleNamespace(
-        _data_lock=threading.RLock(), tasks=tasks
+        _data_lock=threading.RLock(), tasks=tasks,
+        sessions=sessions or {},
     )
-    return _requirement_mismatch(task_id, user_input, answer)
+    return _requirement_mismatch(task_id, "s1", user_input, answer)
 
 
 def test_music_claim_without_artifact_caught(stub_state):
@@ -26,7 +27,7 @@ def test_music_claim_without_artifact_caught(stub_state):
         "The soothing Santoor piece has been generated based on your "
         "description.\n\nHere is the image: [IMAGE: /output/palash/x.png]"
     )
-    reason = _run(stub_state, {"t1": {"image_file": "palash/x.png"}}, "t1",
+    reason = _run(stub_state, {"t": {"image_file": "palash/x.png"}},
                   "generate a santoor audio and also generate an image of a "
                   "woman playing santoor", answer)
     assert reason == "music_claimed"
@@ -34,25 +35,26 @@ def test_music_claim_without_artifact_caught(stub_state):
 
 def test_music_claim_with_artifact_passes(stub_state):
     answer = "The piece has been generated. Enjoy your song!"
-    tasks = {"t2": {"music_file": "palash/gen_ab.wav", "music_url": "/music/palash/gen_ab.wav"}}
-    assert _run(stub_state, tasks, "t2", "compose a calm piece", answer) is None
+    tasks = {"t": {"music_file": "palash/gen_ab.wav",
+                   "music_url": "/music/palash/gen_ab.wav"}}
+    assert _run(stub_state, tasks, "compose a calm piece", answer) is None
 
 
 def test_music_needed_not_delivered(stub_state):
-    reason = _run(stub_state, {"t3": {}}, "t3",
+    reason = _run(stub_state, {"t": {}},
                   "make me a short jingle for the podcast",
                   "Podcast jingles usually run 5-10 seconds with bright synths.")
     assert reason == "music_needed"
 
 
 def test_no_music_terms_untouched(stub_state):
-    assert _run(stub_state, {"t4": {}}, "t4",
+    assert _run(stub_state, {"t": {}},
                 "what is the capital of France?",
                 "The capital of France is Paris.") is None
 
 
 def test_topic_question_no_retry(stub_state):
-    reason = _run(stub_state, {"t5": {}}, "t5",
+    reason = _run(stub_state, {"t": {}},
                   "what sound does a santoor make?",
                   "The santoor has a bright, bell-like tone with long sustain.")
     assert reason is None
@@ -67,6 +69,68 @@ def test_claim_regex_no_false_positive(stub_state):
     assert not _MUSIC_CLAIM_RE.search(benign)
     assert _MUSIC_CLAIM_RE.search("I have composed a piece for you")
     assert _MUSIC_CLAIM_RE.search("Your song is ready, press play")
+
+
+def test_image_anaphora_satisfied_by_session(stub_state):
+    # turn 2 of the piano session: music re-generated, image referenced
+    tasks = {"t": {"music_file": "palash/gen_2.wav", "music_url": "/music/x.wav",
+                   "music_duration": 26.9}}
+    sessions = {"s1": [
+        {"role": "system", "content": "…"},
+        {"role": "user", "content": "draw a girl playing piano"},
+        {"role": "assistant", "content": "ok", "_image_url": "/output/palash/g.png"},
+    ]}
+    reason = _run(stub_state, tasks,
+                  "Now make a longer piece of about 1 minute, with the same image",
+                  "Here is the longer piece. The image remains the same.",
+                  sessions=sessions)
+    assert reason is None
+
+
+def test_image_anaphora_without_prior_still_fires(stub_state):
+    tasks = {"t": {"music_file": "palash/gen_2.wav", "music_url": "/music/x.wav",
+                   "music_duration": 26.9}}
+    reason = _run(stub_state, tasks,
+                  "make a longer piece, with the same image",
+                  "Done! The image remains the same.")
+    assert reason == "image_needed"
+
+
+def test_duration_claim_gate(stub_state):
+    tasks = {"t": {"music_file": "palash/g.wav", "music_url": "/music/palash/g.wav",
+                   "music_duration": 9.3}}
+    lie = ("Here is the music: a piano piece that runs for about 9.3 seconds "
+           "(approx. 1 minute if looped).")
+    assert _run(stub_state, tasks, "generate a short piano piece", lie) == "duration_claimed"
+    honest = "The piece runs for about 9 seconds. Want it longer?"
+    assert _run(stub_state, tasks, "generate a short piano piece", honest) is None
+
+
+def test_claimed_duration_parsing():
+    from server.features.critic import _claimed_duration_seconds
+    assert _claimed_duration_seconds("runs for about 9.3 seconds") == 9.3
+    assert _claimed_duration_seconds("approx. 1 minute if looped") == 60.0
+    assert _claimed_duration_seconds("no durations here") is None
+
+
+def test_strip_pasted_artifact_paths():
+    from server.features.orchestration import _strip_pasted_artifact_paths
+    text = (
+        "Here is the music and the image you requested.\n\n"
+        "**Music:** A short, dreamy piano piece.\n"
+        "*   **Audio Link:** [Listen to the Piano Piece](/music/palash/gen_1a.wav)\n\n"
+        "**Image:** A portrait shot of a girl playing the piano.\n"
+        "*   **Image Link:** [View the Image](/output/palash/gen_56b.png)"
+    )
+    out = _strip_pasted_artifact_paths(text, True, True)
+    assert "/music/" not in out and "/output/" not in out
+    assert "Here is the music and the image you requested." in out
+    # not attached -> kept verbatim (a reference the UI cannot show survives)
+    kept = _strip_pasted_artifact_paths(text, False, False)
+    assert "/music/palash/gen_1a.wav" in kept and "/output/palash/gen_56b.png" in kept
+    partial = _strip_pasted_artifact_paths(text, False, True)
+    assert "/output/palash/gen_56b.png" in partial
+    assert "/music/" not in partial
 
 
 def test_verification_addendum_formatting():

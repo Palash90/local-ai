@@ -32,6 +32,7 @@ def _render_make_music(task_id, sid, user_message, user):
         t["music_score"] = res.get("score", score_text)
         t["music_url"] = music_url
         t["music_levels"] = res.get("levels", [])
+        t["music_duration"] = res.get("duration_s")
         t.setdefault("_tools_used", []).append("generate_music")
     lanes = ", ".join(info.get("lanes", []))
     reply = (

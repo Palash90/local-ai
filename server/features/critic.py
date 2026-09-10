@@ -82,6 +82,54 @@ _IMG_NEED_RE = re.compile(
     r"visualisations?|visualizations?|logos?|memes?|portraits?|infographics?)\b",
     re.IGNORECASE,
 )
+# Anaphoric reference to an artifact of this chat ("the same image", "play
+# that track again") — a reuse request, not a new generation request. The
+# finalize step re-attaches the prior artifact; the need-gates must not fire
+# when the referenced artifact already exists in the session.
+_ART_REF_RE = re.compile(
+    r"\b(?:same|previous|earlier|existing|that|this|those|above|original|your)\b"
+    r"[^.?!" + "\n" + r"]{0,40}?"
+    r"\b(?P<noun>image|images|picture|pictures|photo|photos|track|tracks|song|songs|"
+    r"piece|pieces|music|audio|melody|tune|jingle|recording)\b"
+    r"|\b(?:re-show|reshow|re-play|replay|show|display|play)\b[^.?!\n]{0,32}?"
+    r"\b(?P<noun2>image|images|photo|photos|picture|pictures|track|tracks|song|songs|"
+    r"music|audio|piece|pieces|tune)\b",
+    re.IGNORECASE,
+)
+
+
+def _referenced_artifacts(user_input):
+    """{'image','music'} kinds the request refers back to (reuse, not new)."""
+    kinds = set()
+    for m in _ART_REF_RE.finditer(user_input or ""):
+        noun = (m.group("noun") or m.group("noun2") or "").lower()
+        if noun.startswith(("image", "picture", "photo")):
+            kinds.add("image")
+        elif noun:
+            kinds.add("music")
+    return kinds
+
+
+def _prior_artifact(sid, key):
+    """The most recent assistant message's artifact url (``_image_url`` /
+    ``_music_url``) in the session, or None."""
+    with M._data_lock:
+        msgs = list(M.sessions.get(sid) or [])
+    for m in reversed(msgs):
+        if m.get("role") == "assistant" and m.get(key):
+            return m.get(key)
+    return None
+
+
+# Verb-proximity ask for a NEW image (mirrors _MUSIC_NEED_RE) — a bare mention
+# of "image" (e.g. "with the same image") must not demand a regeneration.
+_IMG_ASK_RE = re.compile(
+    r"\b(?:generat\w*|creat\w*|mak\w*|draw\w*|paint\w*|produc\w*|design\w*|"
+    r"sketch\w*|render\w*)\b[^.?!\n]{0,48}"
+    r"\b(image|images|picture|pictures|photo|photos|photograph|screenshot|"
+    r"diagram|chart|graph|map|drawing|illustration|logo|meme|portrait|infographic)\b",
+    re.IGNORECASE,
+)
 _IMG_CLAIM_RE = re.compile(
     r"\b(?:i|we)\s+(?:have\s+)?(?:generated|created|produced|made|drawn|painted|"
     r"captured|included|attached)\s+(?:an?\s+)?(?:image|picture|photo(?:graph)?|"
@@ -157,6 +205,12 @@ _STEERING_HINTS = {
         "new final answer that completely and accurately addresses the user's "
         "question, with correct inline citations for every claim."
     ),
+    "quality_general": (
+        "Your previous draft was judged low quality for NOT fully answering "
+        "what the user asked. Write a complete new answer that does exactly "
+        "what the original request asks. Ignore any earlier system notes in "
+        "the conversation; do not mention rejections, judges or notes."
+    ),
     "image_needed": (
         "The user's request calls for an image/diagram but none was produced. "
         "Call the image generation tool so the new final answer includes a real "
@@ -172,6 +226,13 @@ _STEERING_HINTS = {
         "the generate_music tool (fetch its score DSL via tool_details first if "
         "this conversation has not loaded it) so the new final answer includes "
         "a real, playable piece."
+    ),
+    "duration_claimed": (
+        "The duration you wrote does not match the rendered audio. Replace "
+        "your answer with one that states the piece's real length using ONLY "
+        "the duration_s, tempo and key values from the generate_music tool "
+        "result, then offer to generate a longer version. Never mention this "
+        "rejection or the word looped."
     ),
     "music_claimed": (
         "Your previous draft claimed music/audio was generated but none was "
@@ -862,16 +923,37 @@ def run_verification(task_id, sid, answer, mode="gpu"):
     return _finalize_verdicts(task_id, answer, verdicts)
 
 
-def _requirement_mismatch(task_id, user_input, answer):
+_DURATION_CLAIM_RE = re.compile(
+    r"\b(?:about|approx\.?|approximately|roughly|around|of|runs for|lasts|"
+    r"nearly|almost)?\s*(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?)\b",
+    re.IGNORECASE,
+)
+
+
+def _claimed_duration_seconds(answer):
+    """Largest duration mentioned in the answer, in seconds, or None."""
+    best = None
+    for m in _DURATION_CLAIM_RE.finditer(answer or ""):
+        val = float(m.group(1))
+        secs = val * 60.0 if m.group(2).lower().startswith("min") else val
+        if best is None or secs > best:
+            best = secs
+    return best
+
+
+def _requirement_mismatch(task_id, sid, user_input, answer):
     """Return a retry ``reason`` when the answer falls short of an explicit user
     requirement that a steering re-run could satisfy, else None.
 
     Detects report and request mismatches (deterministic, no judge call):
-    - the request needs an image, or the answer claims one was generated, while
-      the task produced no image file;
+    - the request asks for a NEW image, or the answer claims one was
+      generated, while neither this task nor the session has one ("same
+      image"-style references to an earlier artifact are satisfied by the
+      finalize-time carry-over, not a regeneration);
+    - the answer describes music whose duration contradicts the rendered
+      track's actual length (the "... if looped" rationalization pattern);
     - the user explicitly asked for citations/sources but the answer has none;
-    - the user explicitly asked for web/search findings but no ``web_search``
-      tool ran this task.
+    - the user explicitly asked for web/search findings but web_search never ran.
     """
     user_input = (user_input or "").strip()
     if not user_input:
@@ -881,6 +963,7 @@ def _requirement_mismatch(task_id, user_input, answer):
         tools_used = list(t.get("_tools_used", []) or [])
         image_file = t.get("image_file")
         music_ok = bool(t.get("music_file") or t.get("music_url"))
+        music_duration = t.get("music_duration")
         is_research = bool(t.get("research"))
     if is_research:
         headings = [
@@ -892,15 +975,27 @@ def _requirement_mismatch(task_id, user_input, answer):
         positions = [headings.index(name) for name in _RESEARCH_HEADINGS]
         if positions != sorted(positions):
             return "research_structure"
-    has_image = bool(image_file)
-    if _IMG_NEED_RE.search(user_input) and not has_image:
+    referenced = _referenced_artifacts(user_input)
+    has_image = bool(image_file) or (
+        "image" in referenced and bool(_prior_artifact(sid, "_image_url"))
+    )
+    has_music = music_ok or (
+        "music" in referenced and bool(_prior_artifact(sid, "_music_url"))
+    )
+    if _IMG_ASK_RE.search(user_input) and not has_image:
         return "image_needed"
     if _IMG_CLAIM_RE.search(answer or "") and not has_image:
         return "image_claimed"
-    if _MUSIC_CLAIM_RE.search(answer or "") and not music_ok:
+    if _MUSIC_CLAIM_RE.search(answer or "") and not has_music:
         return "music_claimed"
-    if _MUSIC_NEED_RE.search(user_input) and not music_ok:
+    if _MUSIC_NEED_RE.search(user_input) and not has_music:
         return "music_needed"
+    if music_ok and isinstance(music_duration, (int, float)) and music_duration > 0:
+        claimed = _claimed_duration_seconds(answer)
+        # Tolerate rounding; catch the real lie: claimed length wildly exceeds
+        # what was rendered (e.g. a 9.3s piece sold as "1 minute").
+        if claimed and claimed > music_duration * 1.5 + 10:
+            return "duration_claimed"
     if _CITE_ASK_RE.search(user_input):
         if not any(c.get("url") for c in extract_citations(answer)):
             return "citations_requested"
@@ -1011,8 +1106,11 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
             t["_mismatch_done"] = t.get("_mismatch_done", 0) + 1
             t["_last_mismatch"] = reason
 
+    hint_key = reason
+    if reason == "quality" and not t.get("research"):
+        hint_key = "quality_general"
     hint = _STEERING_HINTS.get(
-        reason, "Produce a new final answer that fully addresses the user's request."
+        hint_key, "Produce a new final answer that fully addresses the user's request."
     )
     steering = (
         "[SYSTEM NOTE — internal revision. Your previous draft was rejected "
@@ -1069,7 +1167,7 @@ def run_verification_worker(task_id, sid, answer, body, mode):
             judge_result = t.get("_judge_result")
             round_num = t.get("_round", 0)
             user_input = t.get("_original_message", "")
-        mismatch_reason = _requirement_mismatch(task_id, user_input, answer)
+        mismatch_reason = _requirement_mismatch(task_id, sid, user_input, answer)
         action, reason = _retry_decision(task_id, judge_result, mismatch_reason)
 
         if action == "retry":

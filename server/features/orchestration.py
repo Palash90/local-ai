@@ -186,6 +186,39 @@ def _delete_task_music(task_id):
             pass
 
 
+_ART_LINK_LINE_RE = re.compile(
+    r"(?im)^[ \t]*(?:[-*+][ \t]+)?(?:\*\*)?\s*"
+    r"(?:audio|image|music|track|song)(?:\s+link)?\s*:?\s*(?:\*\*)?[ \t]*"
+    r"\[[^\]\n]*\]\((/(?:output|music)/[^)\s]+)\)[ \t]*\n?",
+)
+_ART_LABEL_LINE_RE = re.compile(
+    r"(?im)^[ \t]*(?:\*\*)?\s*(?:audio|image|music|track|song)(?:\s+link)?\s*:?\s*"
+    r"(?:\*\*)?[ \t]*\n+",
+)
+
+
+def _strip_pasted_artifact_paths(text, image_attached, music_attached):
+    """Drop text lines that merely restate an artifact path ("**Image Link:**
+    [View](/output/...)") when the UI already attaches that very artifact as
+    a card/player. Only lines whose artifact is attached are removed, so a
+    reference the UI does not show is never silently deleted."""
+    if not text:
+        return text
+
+    def _drop(match):
+        line = match.group(0)
+        if "/output/" in line and image_attached:
+            return ""
+        if "/music/" in line and music_attached:
+            return ""
+        return line
+
+    out = _ART_LINK_LINE_RE.sub(_drop, text)
+    out = _ART_LABEL_LINE_RE.sub("", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip() if out.strip() else text
+
+
 def _finalize_task(task_id, sid, msg_content, body):
     with M._data_lock:
         t = M.tasks.get(task_id)
@@ -205,6 +238,22 @@ def _finalize_task(task_id, sid, msg_content, body):
         judge_result = t.get("_judge_result")
     image_url = f"/output/{image_filename}" if image_filename else None
     music_url = f"/music/{music_rel}" if music_rel else None
+    # Anaphoric reuse ("with the same image", "play that track again"): re-show
+    # the earlier artifact on THIS message so the UI re-attaches its card/player
+    # even though this task only generated one of them.
+    user_text = t.get("_original_message") or ""
+    try:
+        from server.features.critic import _referenced_artifacts, _prior_artifact
+        referenced = _referenced_artifacts(user_text)
+        if not image_url and "image" in referenced:
+            image_url = _prior_artifact(sid, "_image_url")
+        if not music_url and "music" in referenced:
+            music_url = _prior_artifact(sid, "_music_url")
+    except Exception as e:
+        print(f"[finalize] artifact carry-over skipped: {e}")
+    msg_content = _strip_pasted_artifact_paths(
+        msg_content, bool(image_url), bool(music_url)
+    )
     if image_url:
         print(f"[finalize] image_file='{image_filename}' → image_url='{image_url}' for task {task_id}")  # DEBUG
     timings = body.get("timings", {})
