@@ -2,7 +2,7 @@
 
 A self-hosted AI stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM): a
 chat web UI with tool use (web search, page fetch, image generation/editing,
-file reading, tasks, reminders), an OpenAI-compatible API, an MCP gateway with
+on-device music composition, file reading, tasks, reminders), an OpenAI-compatible API, an MCP gateway with
 batched agent jobs, a multi-agent story-writing pipeline, tiered story hosting,
 and Authentik SSO in front of everything.
 
@@ -321,8 +321,9 @@ machinery, model state machines, REST surface, event loop, tool dispatch,
 resource management and the moderation/verification pipeline — is documented
 with diagrams in **[ARCHITECTURE.md](ARCHITECTURE.md)**. That also covers the
 newer subsystems: the embedding server (`:8084`) powering the `page_cache`
-vector layer, the `websearch/` relevance + vector-store pipeline, and the
-Pensieve archival-compaction layer (ARCHITECTURE.md §10.5).
+vector layer, the `websearch/` relevance + vector-store pipeline, the Pensieve
+archival-compaction layer (ARCHITECTURE.md §10.5), the music subsystem (§11.6),
+and the deterministic artifact/verification gates (§13).
 
 Resource hardening — how lanes stay isolated, when models auto-unload (and how
 that is verified), and how tasks survive an image render or RAM evacuation — is
@@ -461,6 +462,32 @@ topbar, `Shared by` line, metadata hidden).
 Build with `npm install && npm run build` (Vite → `dist/`, `base: './'`); `npm run dev`
 proxies only `/api` and `/output` to `http://localhost:3000` (stale: backend is
 :3001), `npm run preview` serves the build locally.
+
+## Music generation
+
+The chat composes original music on-device: the `generate_music` tool takes a
+compact score DSL (`@genre/@mood/@tempo/@section` directives plus lanes like
+`[MELODY musicbox vol=90]` of note/chord/percussion tokens) and renders it to
+a playable WAV + MIDI through a vendored FluidSynth — no network, no neural
+model. The UI attaches an audio player with per-lane level meters and a
+fold-out score; a public, unauthenticated **showcase** — one clip per genre
+and per instrument timbre — lives at `/api/public/music/showcase` (:3001).
+
+- Typing exactly `make music` in chat renders a random full arrangement
+  instantly (non-LLM shortcut; handy for testing the render stack).
+- The model fetches the DSL language once per conversation via
+  `tool_details('generate_music')`; per-user caching makes later sessions
+  compose directly (see ARCHITECTURE §10/§11).
+- Re-render all audition clips after soundfont/DSL changes:
+  `PYTHONPATH=. python3 -m server.features.music --showcase`.
+- **Per-voice soundfonts:** every lane resolves to exactly one SF2/SF3 by GM
+  program — base `GeneralUser-GS.sf2`, with auto-discovered upgrades (e.g.
+  real strings/choirs from `MuseScore_General.sf3`); groups render as
+  separate passes and are mixed. Env: `FLUID_SOUNDFONT` (base file),
+  `FLUID_SOUNDFONT_MAP` (JSON `{"<program>|drum": "<path>"}` overrides),
+  `MUSIC_SHOWCASE_DIR`. Soundfonts + the vendored fluidsynth live under
+  `~/local-ai-files/music/` (see server_startup_commands.md).
+- Missing fluidsynth/soundfonts degrade gracefully to the numpy synth.
 
 ## Voice / read-aloud (TTS)
 

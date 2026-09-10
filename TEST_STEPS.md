@@ -177,6 +177,7 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 | `manage_tasks` | "create a task to buy milk tomorrow" | task created; verify via theme/tasks API |
 | `track_theme` | via an **agent** (reserved) | works for agents; rejected with clear error for humans |
 | `tool_details` | ask model to inspect a tool | returns full docs (agent-filtered) |
+| `generate_music` | "Compose a calm ambient piece with musicbox and soft strings" | first-ever conversation: `tool_details`→`generate_music`; later sessions: `generate_music` directly (warm docs); message carries `_music_url` → player + lane meters + score fold-out; result JSON lists `soundfonts` |
 | `edit_image` denoise | after an image exists | low values ≈ near-copy, high values ≈ re-imagined |
 
 Also verify **`TOOL_FREE_AGENTS`** (editor/moderator): they get empty tools + `tool_choice:none` → never call `generate_image`. And **`no_tools:true`** in a `/api/chat` body does the same for any user.
@@ -193,6 +194,27 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
 **C-UPLOAD. File-type whitelist**
 - `POST /api/extract-file` with a disallowed extension (`.sh`, `.exe`) → rejected; `.pdf/.docx/.xlsx` accepted and later readable by `read_file`
 - UI: unknown types prompt `confirm('Unknown file type…Is this code/text?')` and are accepted on OK — not hard-rejected client-side (belt, braces, and user override)
+
+**C-MUSIC. Music generation + warm docs + prefix stability**
+- `make music` (exact prefix) in chat → instant random piece, **no LLM round**
+  (`Composing music...` status, no `[llm_round]` for that task); player renders.
+- First music ask for a fresh user fetches the DSL via `tool_details`; the
+  response must NOT paste raw `/music/...` text paths when the player is
+  attached (finalize strips them). After that,
+  `~/local-ai-files/tool_docs_cache/<user>.json` exists; in a NEW session the
+  log shows `[tool_docs] warm docs injected` and there is **no** `tool_details`
+  round before `generate_music`.
+- Showcase: `curl -s -o /dev/null -w '%{http_code}' http://localhost:3001/api/public/music/showcase`
+  → 200 unauthenticated; a clip file URL → 200 `audio/wav`;
+  re-render all clips with `PYTHONPATH=. python3 -m server.features.music --showcase`.
+- Per-voice soundfonts: a genre with real strings → result JSON `"soundfonts"`
+  lists both the base SF2 and the override SF3 (only when the override file is
+  present); unit: `python -m pytest server/features/music/tests/test_music.py -q --import-mode=importlib`.
+- Stable prefix: over 2+ turns of one session the `[llm_payload]` log shows the
+  same `system0_chars` and the volatile `<current_info>`/docs block only ever
+  at the tail (`n_sys=2`); editing `prompts/sys_prompt.txt` changes
+  `system0_chars` on the NEXT turn without any restart (hot reload), and music
+  tests must keep passing after the edit.
 
 And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; assert the model unloads → ComfyUI runs → model reloads (see logs `[llama]`/`[image]`), CPU agents keep running throughout.
 
@@ -322,6 +344,13 @@ With a browser (or headed test) authenticated via SSO:
 - Fabricated citation (prompt a specific fake source) → verdict flags it; quality < `VERIFY_QUALITY_GATE` (80 via entrypoint `config.py`; standalone `critic` fallback default is 70) or missing cite → re-scheduled ≤ `VERIFY_MAX_RETRIES` (2), then declined/corrected — never silently delivered as verified
 - One URL cited for > `VERIFY_MAX_CITES_PER_URL` (3) distinct claims → over-reliance flagged
 - **Critic token budget / reasoning fallback**: with a reasoning-capable chat model on the lane, logs must NOT show repeated `[critic] LLM call failed … empty content in response`; on an empty `content` the log shows `empty content but reasoning present — judging on reasoning text` and the citation verdict still lands
+
+**I4. Deterministic requirement gates (`critic._requirement_mismatch`, no judge call)**
+- Two-turn reuse flow: turn 1 "Draw an image of a girl playing santoor. Also generate an audio to go with the image." → both cards on one message. Turn 2 "Now make a longer piece of about 1 minute, with the same image." → **no** `image_needed` re-run (anaphora satisfied), the OLD image card is re-attached to the new message (carry-over), only new audio is generated, and the text states the tool's real `duration_s`.
+- If the answer inflates the length (> 1.5×`duration_s`+10s), logs show `re-scheduling ... (reason=duration_claimed)` and the delivered answer carries the true number; the reasoning block ends with a `### Guardrail verification` trail (judge model, quality, re-runs).
+- If the model writes scratch prose next to a tool call, that bubble must NOT render in the UI; its text appears folded into the final message's reasoning block instead.
+- Topic mentions must not fire media gates: "what sound does a santoor make?" and "benefits of LLMs" → no `[critic] re-scheduling` lines.
+- The lie-detection regexes + gates are unit-covered: `python -m pytest server/features/tests -q --import-mode=importlib` (music/image claim gates, anaphora, duration parser, path stripper, warm-docs cache, sys-prompt hot reload).
 - **Existence probe** (`_citation_exists`): cite a real deep link that research never fetched (e.g. a `pmc.ncbi.nlm.nih.gov/articles/PMC…/` page) → the verification block must NOT flag it "likely fabricated"; the log shows the direct fetch succeeding (or `bot-blocked … treating as existing` for 403 hosts like tuftsmedicine.org) instead of a search-only miss
 - **Search-only probe regression**: a genuinely fake URL (404 + no search hits) must still be flagged "likely fabricated" — the probe's last-resort search path remains authoritative
 

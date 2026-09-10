@@ -61,7 +61,7 @@ graph TD
     subgraph CodeRepo ["Code (~/git/local-ai/)"]
         CR0["chat-webui.py\nEntrypoint — owns shared state,\nimports server.* + features.*"]
         CR0 --> CRa["server/\napi.py (HTTP layer), auth.py (SSO),\nconfig.py (constants+tools),\ndb.py (SQLite), input_guard.py,\nopenai_api.py, mcp_client/gateway"]
-        CR0 --> CRb["server/features/\nllm, orchestration, tools,\nimages, sessions, context, shares,\njudge, critic, monitoring, tasks/themes_db"]
+        CR0 --> CRb["server/features/\nllm, orchestration, tools,\nimages, sessions, context, shares,\njudge, critic, monitoring, tasks/themes_db,\nmusic/ (score DSL→WAV), tool_docs"]
         CR1["markdown_hosting.py\nStory site (FastAPI :3002)"]
         CR2["self-chat.py\nOffline agent pipeline (CLI)"]
         CR3["setup.sh\nBootstrap: deps, clones, build"]
@@ -92,6 +92,8 @@ graph TD
         DF12["local_ai.db — SQLite (WAL): tasks, theme_log,\nMCP batches + items, mcp_tasks, user_judges\n(LOCAL_AI_DB override; legacy *.migrated)"]
         DF13["page_cache.db — persistent search/page cache\n(LOCAL_AI_PAGE_CACHE override)"]
         DF14["tts_cache/ — TTS audio + words cache\n(TTS_CACHE_* envs; optional secondary archive)"]
+        DF15["music/ — generated WAV/MIDI per user,\nshowcase/ (public audition clips),\nsoundfonts/ + vendor/ (fluidsynth)"]
+        DF16["tool_docs_cache/<user>.json — warm\ntool_details docs (hash-keyed,\nself-invalidating)"]
     end
 
     subgraph BuildFlags ["Build Flags"]
@@ -264,6 +266,7 @@ graph TD
         Client -->|"POST /api/shares · GET /api/shares\nDELETE /api/shares/:token[?purge=1]"| Shares["Assistant-only + owner-only snapshot\n(whitelist copy; _reasoning never stored)\nrevoke returns {session_exists, purged}"]
         Client -->|"GET /s/:token (SPA page)"| SharePage["Public read-only view\n(copy-link button; metadata hidden)"]
         Client -->|"GET /api/public/share/:token\n+ /image/:path + /file/:path\n+ POST .../tts (snapshot-only audio)"| ShareAPI["Snapshot JSON + scoped image/file serving\n+ scoped TTS (no auth, no client text)"]
+        Client -->|"GET /api/public/music[/showcase]\n+ /api/public/music/:file"| Showcase["Unauthenticated music showcase page\n+ audition clips (music/showcase/)"]
     end
 
     subgraph UtilityEndpoints ["Utility"]
@@ -399,6 +402,26 @@ graph TD
     end
 ```
 
+**Stable prompt prefix & warm tool docs (`llm._append_turn_context`,
+`features/tool_docs.py`)** — the session's `system` message (message[0]) holds
+only *stable* content: system prompt base + `<user_context>` + extra prompts.
+Date/location (`<current_info>`), the research directive and cached tool docs
+are appended per round as a trailing `system` block at the END of the payload
+copy (never stored), so the prompt prefix — system block + history — stays
+byte-identical turn over turn and KV checkpoints / `--cache-reuse` actually
+hit. `_prepare_session` rewrites message[0] only when its stable content
+changed (prompt hot-reload, user-context update) and then invalidates the
+session's KV on both chat lanes. Related machinery: `get_sys_content()`
+rebuilds `SYS_CONTENT` when `sys_prompt.txt`'s mtime changes (no restart
+needed for prompt edits); `read_user_context` memoizes per user keyed on
+`(mtime, size)`; and `tool_docs` persists each user's `tool_details` fetches
+in `tool_docs_cache/<user>.json` keyed by a content hash of the live
+`TOOLS_DETAILED` entry — later sessions whose request matches the tool's
+keyword gate (`WARM_TRIGGERS`) get the docs injected without an LLM round,
+and stale hashes silently re-fetch. A `[music-directive]` line rides the same
+tail when the current request asks for music and none has been rendered,
+keeping the small chat model's `generate_music` calling deterministic.
+
 ### 10.5 Archival Compaction (Pensieve — `features/pensieve/`)
 
 Before the payload reaches any lane, `prepare_context_for_llm`
@@ -452,10 +475,14 @@ graph TD
     Choose -- update_user_context --> UC["append timestamped entry to contexts/<user>.txt"]
     Choose -- manage_tasks --> MT["SQLite tasks CRUD + reminders"]
     Choose -- track_theme --> TT["theme_log: log/check/stats (agent-only)"]
-    Choose -- tool_details --> TD["return full TOOLS_DETAILED docs"]
+    Choose -- generate_music --> GMusic["features/music: score DSL → parse → MIDI →
+FluidSynth (per-voice soundfonts, multi-pass
++ PCM mix) → WAV; numpy-synth fallback"]
+    Choose -- tool_details --> TD["return full TOOLS_DETAILED docs
+(warms tool_docs cache per user)"]
     Choose -- "<server>__<tool>\n(mcp_client.py)" --> MCT["mcp_manager.is_mcp_tool →\ndispatch_mcp_tool (asyncio bridge,\nmcp_config.json server, 8k-char cap)"]
     Choose -- unknown --> Unk["error: unknown tool"]
-    Search & Fetch & Img & Loc & RF & RI & UC & MT & TT & TD & MCT & Unk --> Post["event tool_ok / tool_err"]
+    Search & Fetch & Img & GMusic & Loc & RF & RI & UC & MT & TT & TD & MCT & Unk --> Post["event tool_ok / tool_err"]
 ```
 
 Outbound MCP tools (`mcp_config.json` servers — e.g. `codebase-search`, the
@@ -468,6 +495,44 @@ client's asyncio loop (8k-char result cap). A repo yields no search results
 until indexed once via `index_repository`; the graph persists under
 `~/.cache/codebase-memory-mcp/`. The OpenAI lane pins `no_tools: true`, so only
 UI/agent-lane tasks ever see these tools.
+
+### 11.6 Music generation (features/music/)
+
+A self-contained compose→render stack; no LLM or external service required at
+render time. The chat-facing surface is the `generate_music` tool (score DSL →
+playable WAV), plus a non-LLM `make music` chat shortcut
+(`orchestration` start branch → `music.entry`) and a bulk-audition
+**showcase** (`python -m server.features.music --showcase`).
+
+- **DSL & arrangement.** `parse.py` compiles `@tempo/@genre/@mood/@section`
+  directives and lane blocks (`[MELODY piano vol=90]`, note/chord/drug-hit
+  tokens) via `theory.py` (pitch↔MIDI, GM program map incl. world-instrument
+  aliases mapped to nearest GM colour). `random_arrange.py` composes full
+  pieces from `genres.py`/`moods.py`/`harmony.py`/`rhythm.py`/`world_scales.py`
+  (genre-authentic leads, tonic-cadence endings, song-form energy curves) —
+  used by the shortcut, `--genre`, and the showcase.
+- **Render.** `render.py` → `midi_out.py` (stdlib Type-0 writer: per-lane
+  channels, drums→ch9, CC7 lane volumes, energy→CC11, legato articulation,
+  release tail) → `fluid.py` renders with the vendored FluidSynth
+  (`~/local-ai-files/music/vendor/`); `synth.py` is the numpy fallback and
+  owns trailing-silence trimming (`trim_wav_silence`).
+- **Per-voice soundfonts** (`fluid.py`): each lane's GM program maps to one
+  SF2/SF3 — base `GeneralUser-GS.sf2`, with auto-discovered overrides
+  (MuseScore_General.sf3 wins real strings/choir). Lanes are grouped per
+  soundfont, each group rendered as its own `--fast-render` MIDI pass, and the
+  WAVs summed (normalize-on-clip). Override map: `FLUID_SOUNDFONT_MAP` env
+  (JSON `{program|"drum": path}`), base via `FLUID_SOUNDFONT`. Single group =
+  classic one-pass render.
+- **Outputs & meta.** WAV/MIDI land in `music/<user>/gen_<id>.*`; the task
+  carries `music_file/music_score/music_url/music_levels/music_duration`,
+  which `_finalize_task` attaches to the assistant message as
+  `_music_url/_music_score/_music_levels` (UI player + lane meters + score
+  fold-out). `duration_s` also feeds the critic's duration-claim gate (§13).
+  Music files are share-protected and cleaned on chat deletion like images.
+- **Showcase.** `showcase.py` renders every genre + instrument timbre once
+  into the PUBLIC `music/showcase/` dir with `index.json`; served
+  unauthenticated at `/api/public/music[/showcase]` (`api.py`) as a
+  self-contained player page (`showcase_page.py`).
 
 ### 12. Resource Management (features/monitoring.py)
 
@@ -527,6 +592,27 @@ run via `run_verification_worker` with bounded re-runs; the former
 input-request judge (pre-generation "request NN%" chip) was removed — its
 load colliding with image renders was the main trigger of emergency RAM
 evacuations.
+
+**Deterministic requirement gates (`critic._requirement_mismatch`)** —
+between the quality judge and delivery, a no-LLM pass compares the ANSWER and
+the TASK against what was actually produced, and forces one bounded steering
+re-run per mismatch: `image_needed`/`music_needed` (the request *asks for*
+one — verb-proximity regexes, so a topic mention like "what sound does a
+santoor make" never triggers; anaphoric reuse like "with the same image" is
+satisfied by the session's prior artifact), `image_claimed`/`music_claimed`
+(answer claims generation while this task rendered nothing — catches
+parse-failed lies like "The Santoor piece has been generated"), and
+`duration_claimed` (answer states a length > 1.5× the tool's real
+`duration_s` + 10s — catches "…about a minute if looped"). Verdicts from all
+judges, plus the re-run history, are appended to the final answer's reasoning
+block as a `### Guardrail verification` trail (`critic._verification_addendum`).
+Two finalize-side companions (`orchestration`): anaphoric artifact
+**carry-over** (re-attaches the referenced prior `_image_url`/`_music_url`
+card onto the new message) and pasted-path **stripping** (text lines that
+merely restate a path the UI already renders as a card are removed; lines
+whose artifact is *not* attached are kept). Assistant messages that contain
+tool calls plus scratch prose are flagged `_draft`: kept in the LLM history,
+hidden by the UI, and folded into the final answer's reasoning at finalize.
 
 **Critic call budget & reasoning fallback** — `critic._critic_completion`
 issues the critic's LLM calls with `max_tokens=2048` (retry doubles to 4096).

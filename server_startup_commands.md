@@ -104,6 +104,19 @@ cd ~/git/local-ai
 python chat-webui.py    
 ```
 
+### Music stack (one-time setup, under ~/local-ai-files/music/)
+
+- Vendored fluidsynth (no root): extract the deb's `usr/` into
+  `~/local-ai-files/music/vendor/` so `vendor/usr/bin/fluidsynth` +
+  `vendor/usr/lib/x86_64-linux-gnu/libfluidsynth.so*` exist
+  (`apt-get download fluidsynth libfluidsynth3 && dpkg -x … vendor/`).
+- Soundfonts in `~/local-ai-files/music/soundfonts/`:
+  `GeneralUser-GS.sf2` (base; CC-BY-NC) and optionally
+  `MuseScore_General.sf3` (strings/choir upgrade; auto-routed when present).
+- Bulk audition after any change:
+  `PYTHONPATH=. python3 -m server.features.music --showcase`
+  (writes the public showcase served at `/api/public/music/showcase`).
+
 # Configuration Files
 
 List of files - read setup.sh. Runtime knobs live in `.env` (loaded by
@@ -111,7 +124,13 @@ List of files - read setup.sh. Runtime knobs live in `.env` (loaded by
 `AUTH_*` / `AUTH_AGENTS_*`, `MCP_USER`, `OPENAI_API_KEY`, `SELF_CHAT_MODE`,
 `FORCE_GPU_LANE`, TTS (`TTS_CACHE_*`, `TTS_MAX_CHARS*`, `TTS_CHUNK_CHARS`,
 `TTS_INTERNAL_TOKEN`), `STORIES_*_DIR`, `CPU_IDLE_UNLOAD_SECONDS`, lane ctx
-sizes — see README Voice section and ARCHITECTURE §3 for the full table.
+sizes, `REASONING_BUDGET` / `MAX_OUTPUT_TOKENS` (llama-server thinking/output caps —
+note llama-server processes must be bounced for budget changes to land, they
+survive chat-webui restarts), music stack (`FLUID_SOUNDFONT`,
+`FLUID_SOUNDFONT_MAP`, `FLUIDSYNTH_BIN`/`FLUIDSYNTH_LIB`, `MUSIC_SHOWCASE_DIR`,
+`TOOL_DOCS_CACHE_DIR`) — see README Voice section and ARCHITECTURE §3 for the
+full table. `prompts/sys_prompt.txt` hot-reloads by mtime (edit live, no restart);
+`server/features/tool_docs.py` docs cache self-invalidates on tool-doc edits.
 
 # Reverse Proxy & HTTPS (see local_cloud.sh / gcp_nginx.conf — live configs)
 
