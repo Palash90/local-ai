@@ -1113,14 +1113,20 @@ async def read_story(
                     }}
                 }}
 
-                // Map wordMap entries to DOM spans by fuzzy text matching
+                // Map wordMap entries to DOM spans by fuzzy text matching.
+                // NOTE: text nodes are collected FIRST, then wrapped. Mutating
+                // the DOM inside a live TreeWalker traversal breaks the walk
+                // (only the first line would get spans).
                 function tagWords(article, wmap) {{
-                    // Walk text nodes, split into tokens, find matching wordMap entry
                     const spans = [];
                     let mapIdx = 0;
                     const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, null, false);
+                    const nodes = [];
                     let node;
                     while ((node = walker.nextNode())) {{
+                        nodes.push(node);
+                    }}
+                    for (const node of nodes) {{
                         const text = node.textContent;
                         if (!text.trim()) continue;
                         const parts = text.split(/(\\s+)/);
