@@ -244,6 +244,7 @@ from server.features.tts import (
     PIPER_VOICES,
     EDGE_VOICES,
     tts_synthesize as _tts_synthesize,
+    get_tts_words as _get_tts_words,
     detect_tts_lang as _detect_tts_lang,
     markdown_to_speech_text,
     story_markdown_to_speech_text,
@@ -863,7 +864,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "No text provided"}, status=400)
                 return
             try:
-                audio_b64, mime = _tts_synthesize(raw_text, max_chars=TTS_MAX_CHARS_PUBLIC)
+                audio_b64, mime, _words = _tts_synthesize(raw_text, max_chars=TTS_MAX_CHARS_PUBLIC)
                 self.send_json({"audio": audio_b64, "type": mime})
             except ValueError as e:
                 self.send_json({"error": str(e)}, status=400)
@@ -1178,13 +1179,32 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 from server.features.tts import story_markdown_to_speech_text as _story_clean
                 cleaner = _story_clean if cleaner_name == "story" else markdown_to_speech_text
-                audio_b64, mime = _tts_synthesize(raw_text, max_chars=max_chars, cleaner=cleaner)
+                audio_b64, mime, _words = _tts_synthesize(raw_text, max_chars=max_chars, cleaner=cleaner)
                 self.send_json({"audio": audio_b64, "type": mime})
             except ValueError as e:
                 self.send_json({"error": str(e)}, status=400)
             except Exception as e:
                 print(f"[tts] Internal error: {e}")
                 traceback.print_exc()
+                self.send_json({"error": str(e)}, status=500)
+        elif self.path == "/api/tts-words":
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            raw_text = body.get("text", "")
+            if not raw_text:
+                self.send_json({"error": "No text provided"}, status=400)
+                return
+            try:
+                from server.features.tts import story_markdown_to_speech_text as _story_clean
+                cleaner = _story_clean if body.get("cleaner") == "story" else markdown_to_speech_text
+                words = _get_tts_words(raw_text, body.get("voice", ""), max_chars=TTS_MAX_CHARS, cleaner=cleaner)
+                self.send_json({"words": words})
+            except Exception as e:
+                print(f"[tts-words] Error: {e}")
                 self.send_json({"error": str(e)}, status=500)
         elif self.path == "/api/tts":
             user = get_current_user(self.headers)
@@ -1198,7 +1218,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({"error": "No text provided"}, status=400)
                 return
             try:
-                audio_b64, mime = _tts_synthesize(raw_text, body.get("voice", ""), max_chars=TTS_MAX_CHARS)
+                audio_b64, mime, _words = _tts_synthesize(raw_text, body.get("voice", ""), max_chars=TTS_MAX_CHARS)
                 self.send_json({"audio": audio_b64, "type": mime})
             except ValueError as e:
                 self.send_json({"error": str(e)}, status=400)
