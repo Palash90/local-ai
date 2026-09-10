@@ -45,7 +45,12 @@ def render_score(score_text, tempo=120, title="music", user="local"):
             f.write(build_midi(sections, tempo))
         engine = "fluidsynth"
         from server.features.music import fluid
-        if not fluid.render_midi_to_wav(base + ".mid", base + ".wav"):
+        soundfonts = []
+        if fluid.render_midi_to_wav(base + ".mid", base + ".wav",
+                                    sections=sections, tempo=tempo):
+            soundfonts = sorted(os.path.basename(sf)
+                                for sf in fluid.plan(sections))
+        else:
             engine = "numpy"
             pcm, sr = render_pcm(sections, tempo)
             with wave.open(base + ".wav", "wb") as w:
@@ -73,5 +78,6 @@ def render_score(score_text, tempo=120, title="music", user="local"):
     return json.dumps({"ok": True, "music_url": f"/music/{rel}",
                        "mid_path": base + ".mid", "wav_path": base + ".wav",
                        "duration_s": round(dur, 2), "notes": n, "engine": engine,
+                       "soundfonts": soundfonts,
                        "tempo": tempo, "levels": levels, "structure": structure,
                        "score": score_text, "errors": errors})

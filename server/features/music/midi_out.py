@@ -42,12 +42,14 @@ def _energy_vel(vel, energy):
     return int(round(vel * (0.55 + 0.45 * e)))
 
 
-def build_midi(sections, tempo=120, ppq=480, tail_beats=3):
+def build_midi(sections, tempo=120, ppq=480, tail_beats=3, lanes=None):
     us_per_q = int(60_000_000 / tempo)
     chans = _assign_channels(sections)
     evs = []  # (tick, priority, kind, data)
     max_tick = 0
     for si, sec in enumerate(sections):
+        if lanes is not None and si not in lanes:
+            continue
         ch = chans[si]
         vol = max(0, min(127, int(round(sec.get("vol", 100) * 127 / 100))))
         evs.append((0, 0, "chvol", (ch, vol)))
