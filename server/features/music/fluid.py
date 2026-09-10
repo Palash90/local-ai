@@ -37,7 +37,31 @@ _KNOWN_OVERRIDES = [
     ("musescore_general.sf3", [48, 49, 52, 53, 55]),  # real strings/choir/orch-hit
 ]
 
+# Named drum kits rendered from their own soundfont (melodic preset, so the
+# lane goes out on a normal channel with a note map from GM-kit numbers).
+# note_map is interim until the ear-check on music/local/tabla-audition/ lands.
+KIT_SOUNDFONTS = {
+    "TABLA": ("Tabla.sf2", {
+        36: 60,  # DHA  (bass open)
+        45: 62,  # GHE
+        38: 64,  # NA
+        50: 66,  # TIN
+        47: 68,  # DHIN
+        37: 70,  # TA
+        40: 72,  # KA
+    }),
+}
+
 _map_cache = None
+
+
+def kit_file(kit):
+    """(path_or_None, note_map) for a lane kit name; (None, None) otherwise."""
+    entry = KIT_SOUNDFONTS.get((kit or "").upper())
+    if not entry:
+        return None, None
+    path = os.path.join(_SF_DIR, entry[0])
+    return (path if os.path.isfile(path) else None), dict(entry[1])
 
 
 def _candidate():
@@ -75,6 +99,9 @@ def voice_soundfont_map():
 
 
 def soundfont_for_section(sec):
+    kpath, _ = kit_file(sec.get("kit"))
+    if kpath:
+        return kpath
     m = voice_soundfont_map()
     key = "drum" if sec.get("drum") else int(sec.get("program", 0))
     return m.get(key, soundfont_path())
@@ -170,7 +197,8 @@ def render_midi_to_wav(mid_path, wav_path, sections=None, tempo=None):
     if not available():
         return False
     groups = plan(sections) if sections else OrderedDict()
-    if len(groups) <= 1:
+    base = soundfont_path()
+    if len(groups) <= 1 and (not groups or next(iter(groups)) == base):
         tmp = tempfile.mktemp(suffix=".wav")
         ok = _fast_render(soundfont_path(), mid_path, tmp)
         if ok:
@@ -185,9 +213,13 @@ def render_midi_to_wav(mid_path, wav_path, sections=None, tempo=None):
     tmp_wavs = []
     try:
         for sf, idxs in groups.items():
+            lanes_secs = [sections[i] for i in idxs]
+            kit = sf != base and any(s.get("kit") for s in lanes_secs)
+            _, note_map = kit_file(next((s.get("kit") for s in lanes_secs if s.get("kit")), None))
             mid_tmp = tempfile.mktemp(suffix=".mid")
             with open(mid_tmp, "wb") as f:
-                f.write(build_midi(sections, tempo, lanes=set(idxs)))
+                f.write(build_midi(sections, tempo, lanes=set(idxs),
+                                   kit=kit, note_map=note_map if kit else None))
             wav_tmp = _fast_render(sf, mid_tmp, tempfile.mktemp(suffix=".wav"))
             os.remove(mid_tmp)
             if wav_tmp is None:

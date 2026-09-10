@@ -30,6 +30,20 @@ def render_score(score_text, tempo=120, title="music", user="local"):
     if not sections or n == 0:
         return json.dumps({"ok": False, "error": "no notes parsed",
                            "errors": errors})
+    # No compromise on named kits: a score that asks for tabla must render
+    # with real tabla — a rock-kit substitute is a lie, not a fallback.
+    from server.features.music import fluid
+    for s in sections:
+        kname = (s.get("kit") or "").upper()
+        if kname in fluid.KIT_SOUNDFONTS and not fluid.kit_file(s["kit"])[0]:
+            return json.dumps({
+                "ok": False,
+                "error": f"{kname.title()} soundfont not installed — place "
+                         f"{fluid.KIT_SOUNDFONTS[kname][0]} in "
+                         "~/local-ai-files/music/soundfonts/ (a "
+                         f"{kname.title()}-style kit is required for this "
+                         "score; the GM rock kit will not fake it)",
+                "errors": errors})
     safe_user = "".join(c if c.isalnum() or c in "-_" else "_" for c in (user or "local")) or "local"
     try:
         from server.features.users import _safe_username

@@ -291,3 +291,44 @@ def test_dsl_doc_sections_and_example_bars():
             assert not errs, (spec[:60], errs[:2])
             checked += 1
     assert checked >= 12, f"guard barely checked anything: {checked}"
+
+
+def test_kit_routing_and_policy():
+    import json
+    from server.features.music import fluid
+    from server.features.music.render import render_score
+    path, note_map = fluid.kit_file("tabla")
+    assert path and path.endswith("Tabla.sf2")
+    assert note_map[36] == 60                      # DHA into the kit range
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score(
+        "[RHYTHM tabla]\nDHA e DHIN e NA e TIN q |", 100)
+    assert not errs and secs[0]["kit"] == "TABLA"
+    groups = fluid.plan(secs)
+    assert list(groups) == [path]                  # its own render pass
+    # melodic kit: not channel 9, program 0 emitted
+    from server.features.music.midi_out import build_midi
+    kit_mid = build_midi(secs, 100, kit=True, note_map=note_map)
+    assert b"\xc0\x00" in kit_mid                  # prog 0 on a normal channel
+    # policy: registered kit with a missing file must refuse, not fake
+    import server.features.music.theory as th
+    fluid.KIT_SOUNDFONTS["ZZFAKE"] = ("Nope.sf2", {36: 60})
+    styles = th.DRUM_STYLES
+    th.DRUM_STYLES = set(styles) | {"ZZFAKE"}
+    try:
+        res = json.loads(render_score(
+            "[RHYTHM zzfake]\nDHA q |", 100, title="t", user="local"))
+        assert not res["ok"] and "not installed" in res["error"], res
+    finally:
+        th.DRUM_STYLES = styles
+        fluid.KIT_SOUNDFONTS.pop("ZZFAKE")
+
+
+def test_kit_note_map_maps_all_syllables():
+    from server.features.music import fluid
+    from server.features.music.parse import DRUM_MAP
+    path, note_map = fluid.kit_file("tabla")
+    for gm in note_map:
+        assert note_map[gm] >= 60 and DRUM_MAP.get(
+            {36: "DHA", 45: "GHE", 38: "NA", 50: "TIN",
+             47: "DHIN", 37: "TA", 40: "KA"}[gm]) == gm

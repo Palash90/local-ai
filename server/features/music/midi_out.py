@@ -20,11 +20,13 @@ def _varlen(n):
     return bytes(reversed(out))
 
 
-def _assign_channels(sections):
-    """Give each lane a distinct channel; drums -> 9, others skip 9."""
+def _assign_channels(sections, kit=False):
+    """Give each lane a distinct channel; drums -> 9, others skip 9.
+    Kit-soundfont groups are rendered melodic (a dedicated SF2 with a normal
+    preset answers on a regular channel; channel 9 would demand bank 128)."""
     chans, next_ch = {}, 0
     for si, sec in enumerate(sections):
-        if sec.get("drum"):
+        if sec.get("drum") and not kit:
             chans[si] = DRUM_CHANNEL
         else:
             while next_ch == DRUM_CHANNEL:
@@ -42,9 +44,10 @@ def _energy_vel(vel, energy):
     return int(round(vel * (0.55 + 0.45 * e)))
 
 
-def build_midi(sections, tempo=120, ppq=480, tail_beats=3, lanes=None):
+def build_midi(sections, tempo=120, ppq=480, tail_beats=3, lanes=None,
+               kit=False, note_map=None):
     us_per_q = int(60_000_000 / tempo)
-    chans = _assign_channels(sections)
+    chans = _assign_channels(sections, kit=kit)
     evs = []  # (tick, priority, kind, data)
     max_tick = 0
     for si, sec in enumerate(sections):
@@ -56,6 +59,8 @@ def build_midi(sections, tempo=120, ppq=480, tail_beats=3, lanes=None):
         evs.append((0, 0, "cc11", (ch, 127)))          # expression (set by energy)
         if not sec.get("drum"):
             evs.append((0, 1, "prog", (ch, sec.get("program", 0))))
+        elif kit:
+            evs.append((0, 1, "prog", (ch, 0)))
         drum = sec.get("drum")
         prev = None
         for e in sec["events"]:
@@ -66,6 +71,8 @@ def build_midi(sections, tempo=120, ppq=480, tail_beats=3, lanes=None):
             if energy is not None and not drum:
                 evs.append((start, 0, "cc11", (ch, max(0, min(127, int(round(energy * 127)))))))
             mids = e.get("pitches") or ([e["midi"]] if "midi" in e else [])
+            if kit and note_map:
+                mids = [note_map.get(x, x) for x in mids]
             beat = e["start"]
             if abs(beat - round(beat)) < 0.01 and int(round(beat)) % 4 == 0:
                 vel = 108
