@@ -1099,6 +1099,19 @@ async def read_story(
                 let wordSpans = []; // DOM spans with data-idx
                 let highlightTimer = null;
                 let currentHighlight = null;
+                let awaitingTap = false;
+
+                // Remove previously injected .word-hit spans (innermost first)
+                // so re-tagging a new segment never nests spans or handlers.
+                function unwrapWords(article) {{
+                    const spans = Array.from(article.querySelectorAll('span.word-hit')).reverse();
+                    for (const span of spans) {{
+                        const parent = span.parentNode;
+                        if (!parent) continue;
+                        parent.replaceChild(document.createTextNode(span.textContent), span);
+                        parent.normalize();
+                    }}
+                }}
 
                 // Map wordMap entries to DOM spans by fuzzy text matching
                 function tagWords(article, wmap) {{
@@ -1206,6 +1219,27 @@ async def read_story(
                 }}
 
                 speakBtn.addEventListener('click', async () => {{
+                    if (awaitingTap && currentAudio) {{
+                        // Browser blocked autoplay after a long fetch; the user
+                        // tapped, so this click carries a fresh gesture.
+                        awaitingTap = false;
+                        try {{
+                            await currentAudio.play();
+                            paused = false;
+                            playing = true;
+                            startHighlightLoop();
+                            speakBtn.textContent = '⏸ Pause';
+                            speakBtn.classList.remove('loading');
+                            speakBtn.classList.add('playing');
+                        }} catch(e2) {{
+                            console.warn('Story TTS tap-to-play failed:', e2);
+                            speakBtn.textContent = '🔊 Play';
+                            speakBtn.classList.remove('loading', 'playing');
+                            playing = false;
+                            currentAudio = null;
+                        }}
+                        return;
+                    }}
                     if (playing && !paused) {{
                         if (currentAudio) currentAudio.pause();
                         paused = true;
@@ -1224,6 +1258,7 @@ async def read_story(
                         return;
                     }}
                     abortChain = false;
+                    awaitingTap = false;
                     segIdx = 0;
                     segReqId++;
                     const myReq = segReqId;
@@ -1270,6 +1305,7 @@ async def read_story(
                         if (!r.ok) throw new Error('Audio fetch failed');
                         const blob = await r.blob();
                         await loadWords(segIdx);
+                        unwrapWords(article);
                         wordSpans = tagWords(article, wordMap);
                         const url = URL.createObjectURL(blob);
                         const audio = new Audio(url);
@@ -1295,48 +1331,16 @@ async def read_story(
                         }};
                         await audio.play();
                     }} catch(e) {{
-                        console.warn('Segment fetch error:', e);
-                        speakBtn.textContent = '🔊 Play';
-                        speakBtn.classList.remove('loading', 'playing');
-                        playing = false;
-                        currentAudio = null;
-                    }}
-                }}
-            }})();
-        </script>
-                    }}
-                    speakBtn.textContent = 'Loading…';
-                    speakBtn.classList.add('loading');
-                    try {{
-                        const r = await fetch('/story/{encoded_collection}/{encoded_story_path}/audio/' + segIdx);
-                        if (!r.ok) throw new Error('Audio fetch failed');
-                        const blob = await r.blob();
-                        // Words are saved by the audio synthesis; fetch them now
-                        await loadWords(segIdx);
-                        const url = URL.createObjectURL(blob);
-                        const audio = new Audio(url);
-                        currentAudio = audio;
-                        speakBtn.textContent = '⏸ Pause';
-                        speakBtn.classList.remove('loading');
-                        speakBtn.classList.add('playing');
-                        startHighlightLoop();
-                        audio.onended = () => {{
+                        if (e && e.name === 'NotAllowedError' && currentAudio) {{
+                            // Long fetch outlived the click gesture; keep the
+                            // loaded audio and let one more tap start it.
+                            awaitingTap = true;
                             stopHighlightLoop();
-                            URL.revokeObjectURL(url);
-                            segIdx++;
-                            playSegment(myReq);
-                        }};
-                        audio.onerror = (e) => {{
-                            console.warn('Segment audio error:', e);
-                            stopHighlightLoop();
-                            URL.revokeObjectURL(url);
-                            speakBtn.textContent = '🔊 Play';
-                            speakBtn.classList.remove('loading', 'playing');
-                            playing = false;
-                            currentAudio = null;
-                        }};
-                        await audio.play();
-                    }} catch(e) {{
+                            speakBtn.textContent = '▶ Tap to play';
+                            speakBtn.classList.remove('loading');
+                            speakBtn.classList.add('playing');
+                            return;
+                        }}
                         console.warn('Segment fetch error:', e);
                         speakBtn.textContent = '🔊 Play';
                         speakBtn.classList.remove('loading', 'playing');
