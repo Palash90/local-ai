@@ -34,6 +34,21 @@ const normalizeCitationLinks = (text) => {
     .join('')
 }
 
+// The model sometimes pastes raw /output/... or /music/... paths as markdown
+// links; the frontend does not serve those paths, so rewrite them to the
+// API form (share-aware) exactly like the artifact cards do.
+const fixLocalLinks = (text, shareToken) => {
+  if (!text) return text
+  const RE = /(\]\()(\/(?:output|music|uploads)\/[^)\s]+)(\))/g
+  return text
+    .split(/(```[\s\S]*?```)/g)
+    .map((seg, i) => i % 2 === 1 ? seg : seg.replace(RE, (m, open, url, close) => {
+      const fixed = url.startsWith('/music/') ? toApiMusic(url, shareToken) : toApiImage(url, shareToken)
+      return open + fixed + close
+    }))
+    .join('')
+}
+
 const fileLinkExt = {
   name: 'fileLink',
   level: 'inline',
@@ -668,13 +683,13 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
         const langAttr = lang ? ` class="language-${lang.split(/\s/)[0]}"` : ''
         return `<div class="code-block"><button type="button" class="copy-code-btn" data-i="${idx}" title="Copy code">Copy</button><pre><code${langAttr}>${code}</code></pre></div>\n`
       }
-      const out = DOMPurify.sanitize(marked.parse(normalizeCitationLinks(text), { renderer }))
+      const out = DOMPurify.sanitize(marked.parse(normalizeCitationLinks(fixLocalLinks(text, shareToken)), { renderer }))
       codeRef.current = codeBlocks
       return out
     } catch {
       return escHtml(text)
     }
-  }, [text])
+  }, [text, shareToken])
 
   if (pending) {
     return (

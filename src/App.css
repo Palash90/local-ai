@@ -729,6 +729,48 @@ html, body {
 .music-wrap .img-actions {
   margin-top: 0;
 }
+.music-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 420px;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.music-level-row {
+  display: grid;
+  grid-template-columns: 74px 1fr 28px;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: #9ca3af;
+}
+.music-level-name {
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.music-level-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+.music-level-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #34d399, #60a5fa);
+}
+.music-level-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .music-score {
   font-size: 12px;
   color: #999;
