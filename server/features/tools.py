@@ -218,6 +218,43 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             tool_index=tool_index,
         )
 
+    elif tool_name == "generate_music":
+        M.set_status(task_id, "Composing music...")
+        with M._data_lock:
+            t_user = M.tasks.get(task_id, {}).get("_user", "")
+        try:
+            result = M.render_music_score(
+                args.get("score", ""), tempo=int(args.get("tempo") or 120),
+                title=args.get("title", "music"), user=t_user,
+            )
+        except Exception as e:
+            print(f"[generate_music] Unhandled exception for task {task_id}: {e}")
+            result = json.dumps({"ok": False, "error": str(e)})
+        try:
+            res = json.loads(result)
+        except Exception:
+            res = {"ok": False, "error": "bad render result"}
+        if res.get("ok"):
+            music_url = res.get("music_url", "")
+            rel = music_url[len("/music/"):] if music_url.startswith("/music/") else None
+            with M._data_lock:
+                t = M.tasks.get(task_id)
+                if t:
+                    t.setdefault("_tools_used", []).append(tool_name)
+                    t["music_file"] = rel
+                    t["music_score"] = res.get("score", args.get("score", ""))
+                    t["music_url"] = music_url
+                    t["music_levels"] = res.get("levels", [])
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
+
     elif tool_name == "edit_image":
         M._enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index)
         return

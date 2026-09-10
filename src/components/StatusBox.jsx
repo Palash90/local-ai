@@ -1,6 +1,7 @@
 function statusState(msg) {
   if (!msg) return 'thinking'
   if (/^Searching/.test(msg)) return 'search'
+  if (/^Composing/.test(msg)) return 'generate-music'
   if (/^Generating image/.test(msg)) return 'generate-image'
   if (/^Editing image/.test(msg)) return 'edit-image'
   return 'thinking'
@@ -8,6 +9,7 @@ function statusState(msg) {
 
 const icons = {
   search: '\uD83D\uDD0D',
+  'generate-music': '\uD83C\uDFB5',
   'generate-image': '\uD83C\uDFA8',
   'edit-image': '\u270F\uFE0F',
   thinking: '\uD83D\uDCAD',

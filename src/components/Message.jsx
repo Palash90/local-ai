@@ -4,7 +4,7 @@ import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import DOMPurify from 'dompurify'
 import { speak as apiSpeak, getTaskStatus as apiGetTaskStatus, shareMessage as apiShareMessage } from '../api'
-import { downloadFile, toApiImage } from '../utils'
+import { downloadFile, toApiImage, toApiMusic } from '../utils'
 import StatusBox from './StatusBox'
 
 marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
@@ -692,6 +692,9 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
   const fetchDetails = searchDetails.filter(d => d && d.tool === 'fetch_page')
   const genPrompt = msg._gen_prompt
   const imageUrl = toApiImage(msg._image_url, shareToken)
+  const musicUrl = toApiMusic(msg._music_url, shareToken)
+  const musicScore = msg._music_score
+  const musicLevels = msg._music_levels
   const imageModel = msg._image_model
   const artifacts = msg._artifacts || []
   const isUserImgUrl = typeof userImg === 'string' && (userImg.startsWith('/') || /^https?:/.test(userImg))
@@ -701,6 +704,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
     msg.role === 'assistant' &&
     !text &&
     !imageUrl &&
+    !musicUrl &&
     !userImg &&
     !genPrompt &&
     msg.tool_calls &&
@@ -747,11 +751,11 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
             return (
               <span
                 key={i}
-                className={`tool-badge ${t === 'web_search' ? 'search' : t === 'generate_image' ? 'image' : t === 'edit_image' ? 'edit' : t === 'fetch_page' ? 'fetch' : ''}`}
+                className={`tool-badge ${t === 'web_search' ? 'search' : t === 'generate_image' ? 'image' : t === 'edit_image' ? 'edit' : t === 'fetch_page' ? 'fetch' : t === 'generate_music' ? 'music' : ''}`}
                 onMouseEnter={() => t === 'web_search' && searchDetails.length > 0 && showPopup(i)}
                 onMouseLeave={hidePopup}
               >
-                {t === 'web_search' ? 'Web Search' : t === 'generate_image' ? `Image Gen${imageModel ? ' (' + imageModel + ')' : ''}` : t === 'edit_image' ? 'Edit Image' : t === 'fetch_page' ? (fetchDetail?.url ? 'Fetched Page · ' + hostnameFromUrl(fetchDetail.url) : 'Fetched Page') : t}
+                {t === 'web_search' ? 'Web Search' : t === 'generate_image' ? `Image Gen${imageModel ? ' (' + imageModel + ')' : ''}` : t === 'edit_image' ? 'Edit Image' : t === 'fetch_page' ? (fetchDetail?.url ? 'Fetched Page · ' + hostnameFromUrl(fetchDetail.url) : 'Fetched Page') : t === 'generate_music' ? 'Music' : t}
                 {isFetch && fetchDetail && (
                   <button
                     type="button"
@@ -796,6 +800,33 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
           </div>
         </div>
       )}
+      {musicUrl && (
+        <div className="music-wrap">
+          <audio controls preload="metadata" src={musicUrl} />
+          <div className="img-actions">
+            <button type="button" className="img-download-btn" onClick={() => downloadFile(musicUrl, 'music.wav')}>
+              Download
+            </button>
+          </div>
+          {Array.isArray(musicLevels) && musicLevels.length > 0 && (
+            <div className="music-levels">
+              {musicLevels.map((lv, i) => (
+                <div className="music-level-row" key={i} title={`${lv.name} · ${lv.drum ? 'drums' : 'program ' + lv.program} · ${lv.notes} notes`}>
+                  <span className="music-level-name">{lv.drum ? '🥁 ' : ''}{lv.name}</span>
+                  <span className="music-level-bar"><span style={{ width: (lv.vol || 0) + '%' }} /></span>
+                  <span className="music-level-num">{lv.vol}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {musicScore && (
+            <details className="music-score">
+              <summary>Score</summary>
+              <pre>{musicScore}</pre>
+            </details>
+          )}
+        </div>
+      )}
       {userImgSrc && (
         <img
           src={userImgSrc}
@@ -817,7 +848,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
           onClick={handleContentClick}
           dangerouslySetInnerHTML={{ __html: html }}
         />
-      ) : !imageUrl && !userImg ? (
+      ) : !imageUrl && !musicUrl && !userImg ? (
         <div className="msg-content empty-response">
           <em>(No response text generated)</em>
         </div>

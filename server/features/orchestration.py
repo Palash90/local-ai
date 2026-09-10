@@ -165,6 +165,27 @@ def _delete_task_image(task_id):
         pass
 
 
+def _delete_task_music(task_id):
+    """Remove the generated music files attached to a (cancelled) task, if any."""
+    with M._data_lock:
+        t = M.tasks.get(task_id)
+        if not t:
+            return
+        rel = t.get("music_file")
+    if not rel:
+        return
+    for fpath in (
+        os.path.join(M.MUSIC_DIR, rel),
+        os.path.splitext(os.path.join(M.MUSIC_DIR, rel))[0] + ".mid",
+    ):
+        try:
+            if os.path.exists(fpath):
+                os.remove(fpath)
+                print(f"[cancel] Removed music for cancelled task {task_id}: {fpath}")
+        except OSError:
+            pass
+
+
 def _finalize_task(task_id, sid, msg_content, body):
     with M._data_lock:
         t = M.tasks.get(task_id)
@@ -176,10 +197,14 @@ def _finalize_task(task_id, sid, msg_content, body):
         image_filename = t.get("image_file")
         gen_prompt = t.get("gen_prompt")
         image_model = t.get("_image_model")
+        music_rel = t.get("music_file")
+        music_score = t.get("music_score")
+        music_levels = t.get("music_levels")
         verification = t.get("_verification")
         verification_duration = t.get("_verification_duration")
         judge_result = t.get("_judge_result")
     image_url = f"/output/{image_filename}" if image_filename else None
+    music_url = f"/music/{music_rel}" if music_rel else None
     if image_url:
         print(f"[finalize] image_file='{image_filename}' → image_url='{image_url}' for task {task_id}")  # DEBUG
     timings = body.get("timings", {})
@@ -212,6 +237,9 @@ def _finalize_task(task_id, sid, msg_content, body):
         "_image_url": image_url,
         "_gen_prompt": gen_prompt,
         "_image_model": image_model,
+        "_music_url": music_url,
+        "_music_score": music_score,
+        "_music_levels": music_levels,
         "_search_details": search_details,
         "_artifacts": artifacts,
         "_research": bool(t.get("research")),
@@ -253,6 +281,10 @@ def _finalize_task(task_id, sid, msg_content, body):
                 "_image_url": image_url,
                 "gen_prompt": gen_prompt,
                 "_image_model": image_model,
+                "music": music_url,
+                "_music_url": music_url,
+                "_music_score": music_score,
+                "_music_levels": music_levels,
                 "_search_details": search_details,
                 "_artifacts": artifacts,
                 "_elapsed_ms": elapsed_ms,
@@ -355,6 +387,7 @@ def _event_loop():
             continue
         if t.get("status") == "cancelled":
             M._delete_task_image(task_id)
+            M._delete_task_music(task_id)
             continue
 
         if ev_type == "start":
@@ -391,6 +424,12 @@ def _event_loop():
                     print(f"[openai] processing OpenAI lane request for task {task_id}")
             # (The owning lane's _current_task_ids[mode] was already set by
             # _queue_worker before this "start" event was posted.)
+            if isinstance(user_message, str) and user_message.strip().lower().startswith("make music"):
+                # TEMPORARY dummy shortcut (no LLM): render a random arrangement
+                # synchronously. Replaced soon by a real LLM tool call.
+                M._prepare_session(task_id, sid, user_message, image_b64, audio_b64, client_ts)
+                M._render_make_music(task_id, sid, user_message, user)
+                continue
             if data.get("_resumed"):
                 # RAM-evacuation resume: _prepare_session already ran on the
                 # first attempt — the user message and everything the model

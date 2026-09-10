@@ -234,6 +234,8 @@ MODEL_ID, MODEL_ID_CPU = _load_model_ids(
 
 COMFYUI_OUTPUT = os.path.expanduser("~/local-ai-files/ComfyUI/output")
 UPLOADS_DIR = os.path.expanduser("~/local-ai-files/uploads")
+MUSIC_DIR = os.path.expanduser("~/local-ai-files/music")
+os.makedirs(MUSIC_DIR, exist_ok=True)
 LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-server")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -805,7 +807,144 @@ TOOLS_DETAILED = [
                         "description": "list only: max number of records to return (default 50).",
                     },
                 },
-                "required": ["operation"],
+                 "required": ["operation"],
+             },
+         },
+     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_music",
+            "description": (
+                "Compose music from a score DSL and return a playable WAV. Use "
+                "when the user asks to make/write/compose music, a melody, tune, "
+                "jingle or song. ALWAYS call tool_details('generate_music') first "
+                "to load the full language before writing a score. The result "
+                "carries a music_url the UI renders as audio player + download."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "score": {
+                        "type": "string",
+                        "description": (
+                            "Score DSL. A score has THREE axes: GENRE (sound "
+                            "world), song FORM (@section), and instrument LANES "
+                            "([ROLE instr]); plus TEXTURE (how many voices play "
+                            "together over time).\n\n"
+                            "DIRECTIVES (whole-score, one per line, before lanes):\n"
+                            "  @tempo <bpm>     20-300 (default 120)\n"
+                            "  @genre <name>    see GENRES below; sets scale/"
+                            "instruments/groove feel\n"
+                            "  @mood <name>     joyful|moody|inspiring|dreamy|"
+                            "tense|epic|calm|playful\n"
+                            "  @section <name> bars=N energy=0.0-1.0 [repeat=N]\n"
+                            "                   song form on a shared bar grid that "
+                            "tiles from bar 1 across ALL lanes; energy auto-"
+                            "scales velocity+expression so a chorus lifts the band "
+                            "without editing notes. Use intro/verse/prechorus/"
+                            "chorus/bridge/outro.\n"
+                            "  '#' starts a comment.\n\n"
+                            "GENRES (authentic palette + groove; feel free to fuse):"
+                            "\n  jazz pop rock edm hiphop rnb funk blues japanese "
+                            "chinese indian_classical bollywood arabic korean "
+                            "latin bossa ambient cinematic. e.g. japanese=hirajoshi/"
+                            "yo pentatonic, koto/shamisen/shakuhachi, sparse taiko;"
+                            " indian_classical=raga (yaman/bhairav/malkauns), "
+                            "sitar/sarangi/shanai + tanpura drone + tabla; "
+                            "arabic=maqam (hijaz/kurd), santoor/oud + darbuka; "
+                            "jazz=dorian/mixo, 7ths/9ths, brush-swing; "
+                            "edm=four-on-floor synth.\n"
+                            "  CROSS-GENRE: you may set one lane's INSTRUMENT (or "
+                            "scale) from a different genre for fusion (koto over "
+                            "jazz, sitar in cinematic, etc.).\n\n"
+                            "LANES: '[ROLE INSTRUMENT vol=NN]' header then note "
+                            "tokens. ROLE any name (MELODY, HARMONY, BASS, RHYTHM/"
+                            "PERC). Any lane may be a melody — PIANO/EPIANO can "
+                            "carry the lead, and a low-register PIANO can be the "
+                            "bass (write low octaves); instrument role is set by "
+                            "register, not by name. INSTRUMENT alias includes "
+                            "world voices: PIANO EPIANO ORGAN CELESTA MUSICBOX "
+                            "GUITAR NYLON EGUITAR BASS EBASS SLAP FRETLESS VIOLIN "
+                            "VIOLA CELLO CONTRABASS STRINGS SYNTHSTRINGS CHOIR "
+                            "FLUTE OBOE CLARINET SAX TRUMPET TROMBONE FRENCHHORN "
+                            "HARP PAD SYNTH LEAD | SITAR VEENA SAROD TAMBRA EKTARA "
+                            "BANJO UKULELE SHAMISEN KOTO GUZHENG YANGQIN SANTOOR "
+                            "DULCIMER KALIMBA MBIRA SHAKUHACHI DIZI OCARINA "
+                            "PANFLUTE BAGPIPE FIDDL SHANAI SHEHNAI SARANGI "
+                            "STEELDRUM, or prog=NN (GM). vol=NN lane mix 0-100 "
+                            "(good defaults). Percussion lane = role RHYTHM/DRUMS/"
+                            "PERC* (channel 9). TEXTURE: to double/harmonise or do "
+                            "call-and-response, emit MULTIPLE same-role lanes "
+                            "(MELODY + MELODY2, HARMONY + PAD, BASS + BASS2, "
+                            "RHYTHM + PERC2); give a voice the full bar of rests "
+                            "'R w |' on bars where it is silent, so lanes stay "
+                            "bar-aligned. 1-8 lanes fine.\n\n"
+                            "EVENTS (space-separated; '|' = bar line). Each lane "
+                            "plays ONE voice at a time (a chord is one token). Fill "
+                            "EVERY 4-beat bar exactly (w=4 h=2 q=1 e=.5 s=.25, '.' "
+                            "dots), else the piece desyncs. PITCH + DUR [+ DYN]:\n"
+                            "  note:  C4 q, F#5 e, Bb3 h, A0 w (scientific pitch)\n"
+                            "  chord: C:maj A3:min G:7 D:maj7 E:min7 A:sus4 B:dim "
+                            "(opt octave, opt 7th)\n"
+                            "  rest:  R q   (or R w for a silent bar)\n"
+                            "  drum:  BD KC SN RIM CLAP HH OH PEDAL CR CHIN RD RIDE"
+                            " LT MT HT LFT HFT CONG BONG TBL CAB MAR CLV COWB TAM "
+                            "TRIG + dur (kick snare rimshot clap hats cymbals toms "
+                            "congas timbales cabasa maracas claves cowbell "
+                            "tambourine triangle)\n"
+                            "  dynamic suffix on duration (or '!' on the pitch): "
+                            "! accent, f forte, m mezzo, p soft -> C4 q! / C4! q / "
+                            "E4ep\n\n"
+                            "MUSIC THEORY (write music, not random notes):\n"
+                            "  - Melody dances on the harmony: chord tones on "
+                            "strong beats (favour the 3rd/7th), stepwise passing "
+                            "tones on weak beats, neighbour tones, and suspensions "
+                            "that resolve by step across chord changes.\n"
+                            "  - State a short MOTIF and DEVELOP it (repeat, "
+                            "transpose, sequence); don't invent new notes per bar.\n"
+                            "  - Harmony: functional progressions (I-V-vi-IV; minor "
+                            "i-VI-III-VII) with 7th/sus colour for jazz/dreamy; "
+                            "for non-heptatonic genres (pentatonic/raga/maqam) "
+                            "prefer a tonic drone + moving melody.\n"
+                            "  - Match mode/tempo to genre+mood (moody/tense minor "
+                            "66-104; joyful/playful major 110-150; dreamy/calm "
+                            "58-96 soft; inspiring rises).\n"
+                            "  - END with a CADENCE resolving to the tonic (last "
+                            "two bars V->I or IV->I; final tonic 'w'; melody on the "
+                            "tonic) so it never cuts off abruptly. Keep pieces "
+                            "~16-28 bars (~30-75s).\n\n"
+                            "EXAMPLE (jazz fusion, verse->chorus, duet melody, "
+                            "voice-led, cadenced):\n"
+                            "  @tempo 120\n"
+                            "  @genre jazz\n"
+                            "  @section verse bars=2 energy=0.5\n"
+                            "  @section chorus bars=2 energy=1.0\n"
+                            "  [MELODY sax vol=88]\n"
+                            "  D4! q F4 e A4 e G4 h | D4! q C4 e D4 e R q | "
+                            "A4! q C5 q E5! h | D5! q C5 e D5 e E5 w |\n"
+                            "  [MELODY2 epiano vol=80]\n"
+                            "  R w | R w | A5! q C6 q E6! h | R e R e R h |\n"
+                            "  [HARMONY epiano vol=72]\n"
+                            "  D3:min7 w | G3:7 w | C4:maj7 w | G3:7 q C4:maj7 w |\n"
+                            "  [BASS ebass vol=82]\n"
+                            "  D2 h D2 q A2 q | G2 h G2 q D2 q | C2 w | G2 q C2 e "
+                            "G2 e C2 q |\n"
+                            "  [RHYTHM]\n"
+                            "  BD e R e HH e R e BD e R e HH e R e | "
+                            "BD e R e SN e R e BD e OH e SN e R e |"
+                        ),
+                    },
+                    "tempo": {
+                        "type": "integer",
+                        "description": "Beats per minute (20-300). Overridden by an '@tempo' line in the score.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional short title for the piece.",
+                    },
+                },
+                "required": ["score"],
             },
         },
     },
@@ -827,6 +966,12 @@ _TOOL_SHORT_DESC = {
     ),
     "generate_image": (
         "Generate/draw an image from a prompt. A style model MUST be chosen."
+    ),
+    "generate_music": (
+        "Compose music (genre/mood, song form, voice-led melody/harmony/bass/"
+        "drums, multi-voice texture, dynamics) from a score DSL -> playable WAV. "
+        "Call tool_details('generate_music') for the full language (genres, "
+        "instruments, drums, cadence, fusion) before writing a score."
     ),
     "edit_image": (
         "Img2img editor: restyle/modify an existing or uploaded image via "

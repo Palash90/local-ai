@@ -61,6 +61,7 @@ from server.config import (  # noqa: F401
     MODEL_ID_GUARDRAIL,
     MODEL_ID_EMBED,
     MCP_USER,
+    MUSIC_DIR,
     PER_MESSAGE_OVERHEAD,
     PORT,
     PROMPT_PATH,
@@ -273,6 +274,9 @@ from server.features.images import (  # noqa: E402
     generate_image,
 )
 
+from server.features.music import render_score as render_music_score
+from server.features.music.entry import _render_make_music
+
 from server.features.monitoring import (  # noqa: E402
     _cpu_lane_needed,
     _ensure_llama_server_for_task,
@@ -297,6 +301,7 @@ from server.features.monitoring import (  # noqa: E402
 
 from server.features.orchestration import (  # noqa: E402
     _delete_task_image,
+    _delete_task_music,
     _event_loop,
     _event_post,
     _finalize_task,

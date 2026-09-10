@@ -24,12 +24,12 @@ import re
 import time
 import uuid
 
-from server.config import COMFYUI_OUTPUT, UPLOADS_DIR
+from server.config import COMFYUI_OUTPUT, MUSIC_DIR, UPLOADS_DIR
 from server.features.state import M
 
-# Image/upload references embedded anywhere inside a message snapshot
-# ("[IMAGE: /output/x.png]", "[FILE: /uploads/y.pdf]", image_url parts, ...).
-_IMAGE_REF_RE = re.compile(r"/(?:uploads|output)/[A-Za-z0-9._\-/]+")
+# Image/upload/music references embedded anywhere inside a message snapshot
+# ("[IMAGE: /output/x.png]", "[FILE: /uploads/y.pdf]", "/music/x.wav", ...).
+_IMAGE_REF_RE = re.compile(r"/(?:uploads|output|music)/[A-Za-z0-9._\-/]+")
 
 
 def message_image_refs(obj):
@@ -62,6 +62,8 @@ def _ref_file_path(ref):
         root, rest = UPLOADS_DIR, ref[len("uploads/"):]
     elif ref.startswith("output/"):
         root, rest = COMFYUI_OUTPUT, ref[len("output/"):]
+    elif ref.startswith("music/"):
+        root, rest = MUSIC_DIR, ref[len("music/"):]
     else:
         return None
     real_root = os.path.realpath(root)
@@ -107,6 +109,9 @@ _SNAPSHOT_KEYS = (
     "content",
     "_image_url",
     "_image_model",
+    "_music_url",
+    "_music_score",
+    "_music_levels",
     "_gen_prompt",
     "_tools_used",
     "_search_details",

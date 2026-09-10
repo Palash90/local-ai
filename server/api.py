@@ -35,6 +35,7 @@ from server.config import (
     IMG_PATH,
     KNOWN_AGENT_USERS,
     MCP_USER,
+    MUSIC_DIR,
     SELF_CHAT_MODE,
     TTS_CACHE_DIR,
     TTS_CACHE_MAX_BYTES,
@@ -84,7 +85,7 @@ def _snapshot_image_refs(msg):
 
     def walk(obj):
         if isinstance(obj, str):
-            for match in re.findall(r"/(?:uploads|output)/[A-Za-z0-9._\-/]+", obj):
+            for match in re.findall(r"/(?:uploads|output|music)/[A-Za-z0-9._\-/]+", obj):
                 refs.add(match.strip("/"))
         elif isinstance(obj, dict):
             for value in obj.values():
@@ -124,6 +125,33 @@ def resolve_image_file(image_id, user=None):
         base, rel = UPLOADS_DIR, os.path.basename(raw)
     root = os.path.realpath(base)
     fpath = os.path.realpath(os.path.join(root, rel))
+    if fpath != root and not fpath.startswith(root + os.sep):
+        return None
+    if not os.path.isfile(fpath):
+        return None
+    return fpath
+
+
+def resolve_music_file(url, user=None):
+    """Resolve a ``/music/<rel>`` URL to a local WAV file path.
+
+    Mirrors resolve_image_file's ownership gate: when *user* is supplied, the
+    first path component must match the user's safe username, so one
+    authenticated user can never read another's generated music. Path
+    traversal is rejected via realpath containment. Only .wav is served (the
+    .mid sidecar stays off the public path).
+    """
+    if not url:
+        return None
+    raw = urlparse(url).path.lstrip("/")
+    if raw.startswith("music/"):
+        raw = raw[len("music/"):]
+    if user and not raw.startswith(_safe_username(user) + "/"):
+        return None
+    if os.path.splitext(raw)[1].lower() not in (".wav",):
+        return None
+    root = os.path.realpath(MUSIC_DIR)
+    fpath = os.path.realpath(os.path.join(root, raw))
     if fpath != root and not fpath.startswith(root + os.sep):
         return None
     if not os.path.isfile(fpath):
@@ -409,6 +437,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 with open(fpath, "rb") as f:
                     self._safe_write(f.read())
                 return
+            music_route = re.match(
+                r"^/api/public/share/([A-Za-z0-9]+)/music/(.+)$", self.path
+            )
+            if music_route:
+                token, music_id = music_route.group(1), music_route.group(2)
+                rec = get_share(token)
+                if not rec:
+                    self.send_error(404)
+                    return
+                normalized = music_id.strip("/")
+                if f"music/{normalized}" not in _snapshot_image_refs(
+                    rec.get("message", {})
+                ):
+                    self.send_error(404)
+                    return
+                fpath = resolve_music_file("music/" + normalized)
+                if not fpath:
+                    self.send_error(404)
+                    return
+                self._serve_file_range(fpath, "audio/wav", cache="private, max-age=3600")
+                return
             token = os.path.basename(self.path)
             rec = get_share(token)
             if not rec:
@@ -448,6 +497,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 with open(fpath, "rb") as f:
                     self._safe_write(f.read())
+                return
+            self.send_error(404)
+        elif self.path.startswith("/music/"):
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            fpath = resolve_music_file(self.path, user=user)
+            if fpath:
+                self._serve_file_range(fpath, "audio/wav")
+                return
+            self.send_error(404)
+        elif self.path.startswith("/api/music/"):
+            user = get_current_user(self.headers)
+            if not user:
+                self.send_json({"error": "Unauthorized"}, status=401)
+                return
+            music_id = self.path[len("/api/music/"):]
+            fpath = resolve_music_file("music/" + music_id, user=user)
+            if fpath:
+                self._serve_file_range(fpath, "audio/wav")
                 return
             self.send_error(404)
         elif self.path.startswith("/api/image/"):
@@ -676,6 +746,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             protected_uploads = {
                 os.path.basename(r) for r in protected_refs if r.startswith("uploads/")
             }
+            protected_music = {
+                r[len("music/"):] for r in protected_refs if r.startswith("music/")
+            }
             for msg in msgs:
                 if msg.get("role") == "assistant":
                     url = msg.get("_image_url", "") or ""
@@ -687,6 +760,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         elif os.path.exists(fpath):
                             print(f"[delete] Removed output image: {fpath}")
                             os.remove(fpath)
+                    murl = msg.get("_music_url", "") or ""
+                    if murl.startswith("/music/"):
+                        mrel = murl[len("/music/"):]
+                        fpath = os.path.join(MUSIC_DIR, mrel)
+                        if mrel in protected_music:
+                            print(f"[delete] Kept shared music: {fpath}")
+                        else:
+                            for p in (fpath, os.path.splitext(fpath)[0] + ".mid"):
+                                if os.path.exists(p):
+                                    print(f"[delete] Removed music: {p}")
+                                    try:
+                                        os.remove(p)
+                                    except OSError:
+                                        pass
                 raw = msg.get("content", "")
                 texts = []
                 if isinstance(raw, str):
@@ -1325,6 +1412,59 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _safe_write(self, data):
         try:
             self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _serve_file_range(self, fpath, ctype, *, inline=True, cache="public, max-age=31536000, immutable"):
+        """Serve a file with Content-Length + Range support.
+
+        Sending a fixed Content-Length and honouring byte ranges is what lets
+        an <audio> element know the true duration and seek immediately, instead
+        of guessing from an unbounded stream (which reads as 'live' and can't
+        scrub on first play).
+        """
+        try:
+            size = os.path.getsize(fpath)
+        except OSError:
+            self.send_error(404)
+            return
+        start, end = 0, size - 1
+        status = 200
+        rng = self.headers.get("Range")
+        if rng:
+            m = re.match(r"bytes=(\d*)-(\d*)", rng.strip())
+            if m:
+                s, e = m.group(1), m.group(2)
+                if s:
+                    start = int(s)
+                if e:
+                    end = min(int(e), size - 1)
+                if start >= size or start > end:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+                status = 206
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Disposition", "inline" if inline else "attachment")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Cache-Control", cache)
+        self.end_headers()
+        try:
+            with open(fpath, "rb") as f:
+                f.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = f.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
         except (BrokenPipeError, ConnectionResetError):
             pass
 

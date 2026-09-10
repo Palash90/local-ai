@@ -7,6 +7,14 @@ export function toApiImage(url, shareToken) {
   return url
 }
 
+export function toApiMusic(url, shareToken) {
+  if (!url || typeof url !== 'string') return url
+  if (url.startsWith('data:') || /^https?:/i.test(url) || url.startsWith('/api/')) return url
+  if (shareToken && url.startsWith('/music/')) return `/api/public/share/${shareToken}/music/${url.slice('/music/'.length)}`
+  if (url.startsWith('/music/')) return '/api/music/' + url.slice('/music/'.length)
+  return url
+}
+
 export async function downloadFile(url, fallbackName = 'file') {
   const full = url.startsWith('http') || url.startsWith('data:') ? url : window.location.origin + url
   const filename = full.split('/').pop() || fallbackName
