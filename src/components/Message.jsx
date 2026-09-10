@@ -741,6 +741,13 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
     return null
   }
 
+  // Scratch drafts the model wrote alongside tool calls stay in the LLM
+  // history but never render — they are folded into the final answer's
+  // reasoning block server-side.
+  if (msg.role === 'assistant' && msg._draft && msg.tool_calls?.length) {
+    return null
+  }
+
   const ttsText = text
   if (role === 'bot') text = text.replace(/^\s*\[(bn|hi|te|kn|es|en)\]\s*/, '')
 

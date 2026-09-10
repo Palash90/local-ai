@@ -271,6 +271,17 @@ def _finalize_task(task_id, sid, msg_content, body):
     if not msg_content:
         msg_content = "(No response content generated)"
     reasoning = body.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
+    drafts = []
+    with M._data_lock:
+        for m in M.sessions.get(sid, []):
+            if (m.get("role") == "assistant" and m.get("_draft")
+                    and m.get("_task_id") == task_id):
+                if m.get("_draft_reasoning"):
+                    drafts.append(m["_draft_reasoning"])
+                if m.get("content"):
+                    drafts.append(m["content"])
+    if drafts:
+        reasoning = ("\n\n".join(drafts) + "\n\n" + reasoning).strip()
     source_timestamp = next(
         (d.get("retrieved_at") for d in reversed(search_details)
          if isinstance(d, dict) and d.get("retrieved_at")),
@@ -537,6 +548,20 @@ def _event_loop():
                             assistant_msg["content"] = msg["content"]
                         if msg.get("tool_calls"):
                             assistant_msg["tool_calls"] = msg["tool_calls"]
+                            if msg.get("content"):
+                                # The model wrote scratch prose alongside its
+                                # tool calls (e.g. score drafts). Keep it in
+                                # the LLM history for continuity, but mark it:
+                                # the UI hides the bubble and _finalize_task
+                                # folds the drafts into the final answer's
+                                # reasoning block instead of leaking them as
+                                # visible messages.
+                                assistant_msg["_draft"] = True
+                                assistant_msg["_task_id"] = task_id
+                                r = body.get("choices", [{}])[0].get(
+                                    "message", {}).get("reasoning_content")
+                                if r:
+                                    assistant_msg["_draft_reasoning"] = r
                         M.sessions[sid].append(assistant_msg)
                         M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
                 M.save_sessions()
