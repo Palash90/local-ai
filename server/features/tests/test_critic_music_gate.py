@@ -67,3 +67,29 @@ def test_claim_regex_no_false_positive(stub_state):
     assert not _MUSIC_CLAIM_RE.search(benign)
     assert _MUSIC_CLAIM_RE.search("I have composed a piece for you")
     assert _MUSIC_CLAIM_RE.search("Your song is ready, press play")
+
+
+def test_verification_addendum_formatting():
+    from server.features.critic import _verification_addendum
+    verdicts = [
+        {
+            "url": "", "note": "LLM quality judge: answer addresses the user's "
+            "request (quality 90/100)", "reason": "VERDICT: OK\nQUALITY: 90",
+            "model": "gemma-judge",
+        },
+        {"url": "http://x.example/a", "note": "verified", "reason": "", "model": "m"},
+    ]
+    out = _verification_addendum(verdicts, {"_mismatch_done": 1, "_last_mismatch": "music_claimed"})
+    assert "### Guardrail verification" in out
+    assert "quality 90/100" in out and "`gemma-judge`" in out
+    assert "VERDICT: OK QUALITY: 90" in out
+    assert "http://x.example/a" in out
+    assert "1 requirement re-run (music claimed)" in out
+    assert _verification_addendum([], {}) == ""
+
+
+def test_verification_addendum_caps_sources():
+    from server.features.critic import _verification_addendum
+    vs = [{"url": f"http://s/{i}", "note": "ok", "model": "m"} for i in range(10)]
+    out = _verification_addendum(vs, {})
+    assert "…2 more source verdicts" in out

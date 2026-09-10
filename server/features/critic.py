@@ -952,6 +952,47 @@ def _retry_decision(task_id, judge_result, mismatch_reason):
     return "finalize", None
 
 
+def _verification_addendum(verification, t):
+    """Markdown block summarizing the guardrail judge verdicts for the
+    reasoning section: what the judges concluded, the raw verdict lines, and
+    how many steering re-runs this answer went through. Returns "" when there
+    is nothing to report."""
+    lines = []
+    for v in (verification or [])[:8]:
+        if not isinstance(v, dict):
+            continue
+        note = (v.get("note") or "").strip()
+        if not note:
+            continue
+        model = v.get("model") or "judge"
+        url = v.get("url") or ""
+        reason = re.sub(r"\s+", " ", (v.get("reason") or "").strip())[:200]
+        prefix = f"[{url}] " if url else ""
+        line = f"- {prefix}{note} (`{model}`)"
+        if reason:
+            line += f" — {reason}"
+        lines.append(line)
+    extra = len(verification or []) - 8
+    if extra > 0:
+        lines.append(f"- …{extra} more source verdicts in the answer trail")
+    verify_done = int(t.get("_verify_done") or 0)
+    mismatch_done = int(t.get("_mismatch_done") or 0)
+    reruns = []
+    if verify_done:
+        reruns.append(f"{verify_done} judge re-{'run' if verify_done == 1 else 'runs'}")
+    if mismatch_done:
+        reason_txt = (t.get("_last_mismatch") or "").replace("_", " ")
+        reruns.append(
+            f"{mismatch_done} requirement re-{'run' if mismatch_done == 1 else 'runs'}"
+            + (f" ({reason_txt})" if reason_txt else "")
+        )
+    if reruns:
+        lines.append("- steering re-runs: " + " + ".join(reruns))
+    if not lines:
+        return ""
+    return "\n\n### Guardrail verification\n" + "\n".join(lines) + "\n"
+
+
 def _reschedule(task_id, sid, round_num, reason, judge_result):
     """Re-generate the final answer through the generation model.
 
@@ -968,6 +1009,7 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
             t["_verify_done"] = t.get("_verify_done", 0) + 1
         else:
             t["_mismatch_done"] = t.get("_mismatch_done", 0) + 1
+            t["_last_mismatch"] = reason
 
     hint = _STEERING_HINTS.get(
         reason, "Produce a new final answer that fully addresses the user's request."
@@ -975,7 +1017,12 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
     steering = (
         "[SYSTEM NOTE — internal revision. Your previous draft was rejected "
         f"and must NOT be reused or repeated. Reason: {reason.replace('_', ' ')}. "
-        f"{hint}]"
+        f"{hint}] "
+        "Reply ONLY with the new final answer to the user's ORIGINAL request. "
+        "Do not acknowledge this note, do not describe why the draft was "
+        "rejected, do not mention system notes, judges, retries or your own "
+        "instructions, and do not ask the user for a new topic — answer what "
+        "was already asked."
     )
     qual = (judge_result or {}).get("quality", 0)
     if reason == "quality" and isinstance(qual, int):
@@ -1040,6 +1087,16 @@ def run_verification_worker(task_id, sid, answer, body, mode):
                 sid,
             )
             return
+        # Surface the judges' verdicts in the UI reasoning section.
+        try:
+            addendum = _verification_addendum(verdicts, t)
+            if addendum:
+                msgb = (body.get("choices") or [{}])[0].setdefault("message", {})
+                msgb["reasoning_content"] = (
+                    msgb.get("reasoning_content") or ""
+                ) + addendum
+        except Exception as e:
+            print(f"[critic] reasoning addendum skipped: {e}")
         M._finalize_task(task_id, sid, final, body)
     except Exception as e:
         print(f"[critic] verification pass failed for task {task_id}: {e}")
