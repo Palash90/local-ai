@@ -777,7 +777,7 @@ _tts_synthesize = tts_synthesize
 # ---------------------------------------------------------------------------
 
 def _tts_words_cache_put(key, words):
-    """Save word boundaries JSON to the primary cache dir."""
+    """Save word boundaries JSON to the primary cache dir (atomic)."""
     import json as _json
 
     if not words:
@@ -785,14 +785,20 @@ def _tts_words_cache_put(key, words):
     try:
         os.makedirs(TTS_CACHE_DIR, exist_ok=True)
         path = os.path.join(TTS_CACHE_DIR, f"{key}.words.json")
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = os.path.join(TTS_CACHE_DIR, f".{key}.words.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             _json.dump(words, f, ensure_ascii=False)
+        os.replace(tmp, path)
     except OSError as e:
         print(f"[tts] words cache write skipped: {e}")
 
 
 def _tts_words_cache_get(key):
-    """Load word boundaries from cache (primary, then secondary)."""
+    """Load word boundaries from cache (primary, then secondary).
+
+    Unparseable primary files are deleted so they regenerate instead of
+    poisoning every future lookup.
+    """
     import json as _json
 
     for base in (TTS_CACHE_DIR, TTS_CACHE_SECONDARY_DIR or None):
@@ -801,8 +807,17 @@ def _tts_words_cache_get(key):
         try:
             path = os.path.join(base, f"{key}.words.json")
             if os.path.isfile(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    return _json.load(f)
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        return _json.load(f)
+                except Exception:
+                    if base == TTS_CACHE_DIR:
+                        try:
+                            os.remove(path)
+                            print(f"[tts] removed corrupt words file: {path}")
+                        except OSError:
+                            pass
+                    continue
         except Exception:
             continue
     return None
