@@ -1097,7 +1097,8 @@ async def read_story(
                 let abortChain = false;
                 let segReqId = 0;
                 let wordMap = [];   // absolute timestamps per word
-                let wordSpans = []; // DOM spans with data-idx
+                let wordSpans = []; // DOM spans (wrapping only; see spanByIdx)
+                let spanByIdx = {{}}; // wordMap index -> DOM span (built by alignment)
                 let highlightTimer = null;
                 let currentHighlight = null;
                 let awaitingTap = false;
@@ -1120,7 +1121,7 @@ async def read_story(
                 // (only the first line would get spans).
                 function tagWords(article, wmap) {{
                     const spans = [];
-                    let mapIdx = 0;
+                    const toks = [];
                     const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, null, false);
                     const nodes = [];
                     let node;
@@ -1138,26 +1139,47 @@ async def read_story(
                             }} else {{
                                 // Find matching wordMap entry (advance past punctuation mismatches)
                                 const clean = part.replace(/[^\\w\\u0980-\\u09FF\\u0900-\\u097F\\u0C00-\\u0C7F\\u0C80-\\u0CFF]/g, '').toLowerCase();
-                                let bestIdx = -1;
-                                for (let j = Math.max(0, mapIdx - 1); j < Math.min(mapIdx + 3, wmap.length); j++) {{
-                                    const wc = wmap[j].w.replace(/[^\\w\\u0980-\\u09FF\\u0900-\\u097F\\u0C00-\\u0C7F\\u0C80-\\u0CFF]/g, '').toLowerCase();
-                                    if (wc === clean) {{ bestIdx = j; break; }}
-                                }}
-                                if (bestIdx < 0 && mapIdx < wmap.length) bestIdx = mapIdx;
-                                mapIdx = Math.min(mapIdx + 1, wmap.length);
                                 const span = document.createElement('span');
                                 span.className = 'word-hit';
                                 span.textContent = part;
                                 span.style.cursor = 'pointer';
-                                if (bestIdx >= 0) {{
-                                    span.dataset.idx = bestIdx;
-                                }}
                                 frag.appendChild(span);
                                 spans.push(span);
+                                toks.push({{ span: span, clean: clean }});
                             }}
                         }}
                         node.parentNode.replaceChild(frag, node);
                     }}
+                    // Pass 2: align DOM tokens against wordMap with lookahead.
+                    // The article holds tokens synthesis never saw (metadata
+                    // header, round markers, image alts) and vice versa, so
+                    // positional matching misaligns most words. Skipping
+                    // insertions on either side keeps real matches exact.
+                    // spanByIdx maps wordMap index -> DOM span for highlight.
+                    spanByIdx = {{}};
+                    (function align() {{
+                        const wclean = wmap.map((e) => (e.w || '').replace(/[^\\w\\u0980-\\u09FF\\u0900-\\u097F\\u0C00-\\u0C7F\\u0C80-\\u0CFF]/g, '').toLowerCase());
+                        const WIN = 40;
+                        let i = 0, j = 0;
+                        while (i < toks.length && j < wclean.length) {{
+                            if (toks[i].clean !== '' && toks[i].clean === wclean[j]) {{
+                                toks[i].span.dataset.idx = j;
+                                spanByIdx[j] = toks[i].span;
+                                i++; j++;
+                                continue;
+                            }}
+                            let advanced = false;
+                            for (let a = 1; a <= WIN; a++) {{
+                                if (j + a < wclean.length && toks[i].clean !== '' && toks[i].clean === wclean[j + a]) {{
+                                    j += a; advanced = true; break;
+                                }}
+                                if (i + a < toks.length && toks[i + a].clean !== '' && toks[i + a].clean === wclean[j]) {{
+                                    i += a; advanced = true; break;
+                                }}
+                            }}
+                            if (!advanced) {{ i++; j++; }}
+                        }}
+                    }})();
                     // Attach click-to-seek handlers
                     spans.forEach(span => {{
                         span.addEventListener('click', () => {{
@@ -1181,8 +1203,9 @@ async def read_story(
                         currentHighlight.classList.remove('word-highlight');
                         currentHighlight = null;
                     }}
-                    if (idx >= 0 && idx < wordSpans.length) {{
-                        currentHighlight = wordSpans[idx];
+                    const span = (typeof spanByIdx !== 'undefined') ? spanByIdx[idx] : null;
+                    if (span) {{
+                        currentHighlight = span;
                         currentHighlight.classList.add('word-highlight');
                         const rect = currentHighlight.getBoundingClientRect();
                         if (rect.top < 0 || rect.bottom > window.innerHeight) {{
