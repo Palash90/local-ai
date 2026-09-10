@@ -89,6 +89,32 @@ _IMG_CLAIM_RE = re.compile(
     r"infographic)\b",
     re.IGNORECASE,
 )
+# "produce/create a X" proximity — a bare word like "music" discussing the
+# topic must not demand a tool call; that precision matters less than the
+# claim gate (which catches the actual lie) but keeps retries targeted.
+_MUSIC_NEED_RE = re.compile(
+    r"\b(?:generat\w*|creat\w*|mak\w*|compos\w*|produc\w*|writ\w*|play\w*|"
+    r"record\w*|render\w*|give\w*)\b[^.?!\n]{0,48}"
+    r"\b(music|audio|soundtrack|songs?|melod(?:y|ies)|tunes?|jingles?|"
+    r"beats?|instrumentals?|compositions?|symphon(?:y|ies)|lullabies?|"
+    r"anthems?|soundscapes?|piece|pieces|track|recording)\b"
+    r"|\b(music|audio|song|jingle|tune|melody|track|piece|soundtrack)\b"
+    r"[^.?!\n]{0,32}\b(?:generat\w*|creat\w*|compos\w*|produc\w*|made|written|"
+    r"played|recorded)\b",
+    re.IGNORECASE,
+)
+_MUSIC_CLAIM_RE = re.compile(
+    r"\b(?:i|we)\s+(?:have\s+|has\s+)?(?:just\s+|also\s+)?"
+    r"(?:generated|created|produced|made|composed|written|prepared|rendered|finished)\s+"
+    r"(?:the\s+|a\s+|an\s+|your\s+|one\s+)?(?:music|audio|song|piece|track|tune|"
+    r"jingle|melody|composition|instrumental|recording)\b"
+    r"|\b(?:the\s+|your\s+)?(?:music|audio|song|piece|track|composition|jingle|"
+    r"melody|instrumental)\s+(?:has\s+been|is\s+been|has\s+now\s+been|was)\s+"
+    r"(?:generated|created|produced|composed|made|rendered|prepared|finished)\b"
+    r"|\b(?:the\s+)?(?:music|audio|song|piece|track)\s+(?:is\s+ready|is\s+done|"
+    r"is\s+attached|is\s+below|is\s+playing)\b",
+    re.IGNORECASE,
+)
 _CITE_ASK_RE = re.compile(
     r"\b(citations?|cite\b|sources?\b|references?\b|bibliography|"
     r"source\s+(?:links?|urls?|material)|with\s+(?:links?|urls?)\b|"
@@ -140,6 +166,19 @@ _STEERING_HINTS = {
         "Your previous draft claimed to include/generate an image but none was "
         "actually produced. Do not claim an image unless one was generated; call "
         "the image generation tool this time if the user needs one."
+    ),
+    "music_needed": (
+        "The user's request calls for music/audio but none was produced. Call "
+        "the generate_music tool (fetch its score DSL via tool_details first if "
+        "this conversation has not loaded it) so the new final answer includes "
+        "a real, playable piece."
+    ),
+    "music_claimed": (
+        "Your previous draft claimed music/audio was generated but none was "
+        "actually produced — the tool call failed or never ran. NEVER claim or "
+        "describe audio that does not exist: either produce it with the "
+        "generate_music tool using a correct score DSL, or state plainly that "
+        "the music could not be generated."
     ),
     "citations_requested": (
         "The user explicitly asked for citations or sources but the answer "
@@ -841,6 +880,7 @@ def _requirement_mismatch(task_id, user_input, answer):
         t = M.tasks.get(task_id) or {}
         tools_used = list(t.get("_tools_used", []) or [])
         image_file = t.get("image_file")
+        music_ok = bool(t.get("music_file") or t.get("music_url"))
         is_research = bool(t.get("research"))
     if is_research:
         headings = [
@@ -857,6 +897,10 @@ def _requirement_mismatch(task_id, user_input, answer):
         return "image_needed"
     if _IMG_CLAIM_RE.search(answer or "") and not has_image:
         return "image_claimed"
+    if _MUSIC_CLAIM_RE.search(answer or "") and not music_ok:
+        return "music_claimed"
+    if _MUSIC_NEED_RE.search(user_input) and not music_ok:
+        return "music_needed"
     if _CITE_ASK_RE.search(user_input):
         if not any(c.get("url") for c in extract_citations(answer)):
             return "citations_requested"
@@ -945,7 +989,9 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
     with M._data_lock:
         if sid in M.sessions:
             M.sessions[sid].append({"role": "user", "content": steering, "_steering": True})
-            M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
+        meta = M.sessions_meta.get(sid)
+        if meta is not None:
+            meta["updated"] = time.time()
     M.save_sessions()
     M.set_status(task_id, f"Re-running ({reason.replace('_', ' ')})...")
     print(
