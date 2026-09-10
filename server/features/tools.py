@@ -353,6 +353,16 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         found = [known[n] for n in wanted if n in known]
         if found:
             result = json.dumps(found)
+            # Warm the per-user docs cache so future sessions skip this round
+            # (agents keep their own prompt pipelines; humans/MCP only).
+            if req_user and req_user not in M._agent_users:
+                try:
+                    from server.features import tool_docs
+                    tool_docs.warm(
+                        req_user, [e["function"]["name"] for e in found]
+                    )
+                except Exception as e:
+                    print(f"[tool_docs] warm failed: {e}")
         else:
             result = json.dumps(
                 {

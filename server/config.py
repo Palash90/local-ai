@@ -241,6 +241,12 @@ MUSIC_SHOWCASE_DIR = os.environ.get(
     "MUSIC_SHOWCASE_DIR", os.path.join(MUSIC_DIR, "showcase")
 )
 os.makedirs(MUSIC_SHOWCASE_DIR, exist_ok=True)
+# Per-user cache of full tool documentation (tool_details payloads) so later
+# sessions skip the fetch round. See server/features/tool_docs.py.
+TOOL_DOCS_CACHE_DIR = os.environ.get(
+    "TOOL_DOCS_CACHE_DIR", os.path.expanduser("~/local-ai-files/tool_docs_cache")
+)
+os.makedirs(TOOL_DOCS_CACHE_DIR, exist_ok=True)
 LLAMA_SERVER_PATH = os.path.expanduser("~/local-ai/llama.cpp/build/bin/llama-server")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1087,3 +1093,24 @@ def build_sys_content():
     sys_content = sys_content.replace("%model_list%", model_list)
     sys_content = sys_content.replace("%_image_keys%", str(list(IMAGE_MODELS.keys())))
     return sys_content
+
+
+_SYS_STATE = {"mtime": None, "content": None}
+
+
+def get_sys_content():
+    """The system prompt, rebuilt only when sys_prompt.txt changes on disk.
+
+    Repo prompts are edited far more often than the server is restarted, so
+    trigger-rule edits go live at the next session turn on their own. When the
+    base text does change, _prepare_session sees the stored system message
+    differ and invalidates the session's KV checkpoints.
+    """
+    try:
+        mt = os.stat(PROMPT_PATH).st_mtime_ns
+    except OSError:
+        return build_sys_content()
+    if _SYS_STATE["content"] is None or mt != _SYS_STATE["mtime"]:
+        _SYS_STATE["mtime"] = mt
+        _SYS_STATE["content"] = build_sys_content()
+    return _SYS_STATE["content"]

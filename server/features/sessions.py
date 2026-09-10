@@ -206,9 +206,9 @@ def save_sessions():
             )
             user = meta.get("user_id", "")
             by_user.setdefault(user, {}).setdefault("sessions", {})[sid] = {
-                "name": meta["name"],
-                "created": meta["created"],
-                "updated": meta["updated"],
+                "name": meta.get("name") or "Chat",
+                "created": meta.get("created", time.time()),
+                "updated": meta.get("updated", time.time()),
                 "user_id": meta.get("user_id", ""),
                 "system_prompts": meta.get("system_prompts", []),
                 "context_tokens": meta.get("context_tokens", {}),
@@ -253,7 +253,7 @@ def _prepare_session(
     )
     # A session created with its own system prompt (e.g. a self-chat agent
     # directive) uses it as the base instead of the global sys_prompt.txt.
-    base_sys = system_prompt if system_prompt else M.SYS_CONTENT
+    base_sys = system_prompt if system_prompt else M.get_sys_content()
     # Wrap the base prompt in a <system_prompt> boundary unless it already
     # carries one (the global sys_prompt.txt is tagged at build time), so we
     # never double-wrap.
@@ -261,21 +261,18 @@ def _prepare_session(
         base_block = base_sys
     else:
         base_block = f"<system_prompt>\n{base_sys}\n</system_prompt>"
-    full_sys_content = (
-        f"{base_block}\n\n"
-        f"<current_info>\n{date_loc_context}\n</current_info>{context_block}"
-    )
+    # Stable session prefix by design: volatile per-turn content (date/location,
+    # the research directive, warm tool docs) is deliberately NOT here — it is
+    # appended per round in llm._append_turn_context so the stored prompt
+    # prefix (this block + past messages) stays byte-identical turn over turn
+    # and llama.cpp prefix reuse / KV checkpoints hit instead of re-prefilling.
+    full_sys_content = f"{base_block}{context_block}"
     for blk in extra_prompts:
         name = blk.get("name", "System Prompt")
         full_sys_content += (
             f"\n\n<extra_prompt name=\"{name}\">\n{blk.get('content', '')}\n"
             f"</extra_prompt>"
         )
-    with M._data_lock:
-        if M.tasks.get(task_id, {}).get("research"):
-            full_sys_content += (
-                f"\n\n<research_mode>\n{RESEARCH_DIRECTIVE}\n</research_mode>"
-            )
     full_sys_content = full_sys_content.replace(
         "%current_time%", ts.strftime("%Y-%m-%d %A %H:%M")
     )
@@ -290,16 +287,30 @@ def _prepare_session(
         )
     for token, value in context_tokens.items():
         full_sys_content = full_sys_content.replace(token, value)
+    # Per-task volatile context, consumed by llm._append_turn_context each
+    # round (a RAM-resume reuses the task's stored value, so the date shown
+    # mid-task never jumps).
+    with M._data_lock:
+        t_env = M.tasks.get(task_id)
+        if t_env is not None:
+            t_env["_turn_env"] = (
+                f"<current_info>\n{date_loc_context}\n</current_info>"
+            )
     image_url = _resolve_image_url(image_b64, user)
     if user_context:
         print(
             f"[context] Injected {len(user_context)} chars of context for user '{user}'"
         )
+    prefix_changed = False
     with M._data_lock:
         if sid not in M.sessions or not M.sessions[sid]:
             M.sessions[sid] = [{"role": "system", "content": full_sys_content}]
         elif M.sessions[sid][0].get("role") == "system":
-            M.sessions[sid][0]["content"] = full_sys_content
+            if M.sessions[sid][0]["content"] != full_sys_content:
+                # Material change (prompt hot-reload, user-context update,
+                # new extra prompt): the session's cached KV no longer matches.
+                M.sessions[sid][0]["content"] = full_sys_content
+                prefix_changed = True
         else:
             M.sessions[sid].insert(0, {"role": "system", "content": full_sys_content})
         if sid not in M.sessions_meta:
@@ -337,4 +348,11 @@ def _prepare_session(
                 "..." if len(user_message) > 50 else ""
             )
         M.sessions_meta[sid]["updated"] = time.time()
+    if prefix_changed:
+        try:
+            from server.features.llm import invalidate_session_kv
+            for _mode in ("gpu", "cpu"):
+                invalidate_session_kv(_mode, sid)
+        except Exception:
+            pass
     M.save_sessions()

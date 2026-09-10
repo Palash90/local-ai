@@ -69,24 +69,35 @@ def get_user_context_path(username):
     return os.path.join(CONTEXTS_DIR, _safe_username(username) + ".txt")
 
 
+_context_memo = {}  # username -> (stat-key, text); key = (mtime_ns, size)
+
+
 def read_user_context(username):
     path = get_user_context_path(username)
-    # print("Context path", path, "for", username)  # Disabled for cleaner logs
-    if path and os.path.exists(path):
-        try:
-            # print("Reading", path)  # Disabled for cleaner logs
-            with open(path) as f:
-                context = f.read()
-                # print(context)  # Disabled for cleaner logs
-                return context
-        except:
-            return ""
-    return ""
+    if not path:
+        return ""
+    try:
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        _context_memo.pop(username, None)
+        return ""
+    hit = _context_memo.get(username)
+    if hit and hit[0] == key:
+        return hit[1]
+    try:
+        with open(path) as f:
+            context = f.read()
+    except OSError:
+        return ""
+    _context_memo[username] = (key, context)
+    return context
 
 
 def write_user_context(username, content):
     path = get_user_context_path(username)
     if path:
+        _context_memo.pop(username, None)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         existing = read_user_context(username)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")

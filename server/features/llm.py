@@ -962,6 +962,66 @@ def _route_sampling(mode, messages):
     return {}
 
 
+def _append_turn_context(messages, task_id, user, tool_free):
+    """Append this round's volatile context as one trailing system message:
+    the task's date/location block, the research directive when the task
+    asked for research, and the user's warm tool docs for any tool their
+    text triggers.
+
+    The block rides at the END of the prompt (after the whole history) and is
+    never stored in the session, so the stable prefix — system block plus past
+    messages — stays byte-identical round over round. That keeps llama.cpp
+    prefix reuse and the per-session KV checkpoints hitting instead of
+    re-prefilling on the first timestamp change. Returns a new list.
+    """
+    with M._data_lock:
+        t = M.tasks.get(task_id) or {}
+        env = t.get("_turn_env") or ""
+        research = bool(t.get("research"))
+        orig = t.get("_original_message") or ""
+    if not env:
+        # Task built without _prepare_session (or pre-dating this): make a
+        # fresh, equivalent block rather than send a prompt with no date.
+        loc = ""
+        try:
+            loc = M.location_str()
+        except Exception:
+            pass
+        env = (
+            "<current_info>\n[Current date: "
+            + time.strftime("%Y-%m-%d %A %H:%M")
+            + (f"] [User location: {loc}]" if loc else "]")
+            + "\n</current_info>"
+        )
+    parts = [env]
+    if research:
+        try:
+            from server.features.sessions import RESEARCH_DIRECTIVE
+            parts.append(f"<research_mode>\n{RESEARCH_DIRECTIVE}\n</research_mode>")
+        except Exception:
+            pass
+    if not tool_free and user and user not in M._agent_users:
+        try:
+            from server.features import tool_docs
+            text = f"{_last_user_text(messages)}\n{orig}".lower()
+            block = tool_docs.docs_block(user, text, messages)
+            if block:
+                parts.append(block)
+                print(f"[tool_docs] warm docs injected for user '{user}'")
+            delivered = bool(t.get("music_file") or t.get("music_url"))
+            directive = tool_docs.music_directive(
+                f"{_last_user_text(messages)}\n{orig}", delivered
+            )
+            if directive:
+                parts.append(directive)
+        except Exception as e:
+            print(f"[tool_docs] inject failed: {e}")
+    body = "\n\n".join(p for p in parts if p)
+    if not body:
+        return messages
+    return list(messages) + [{"role": "system", "content": body}]
+
+
 def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
     print("Entered LLM ")
     phase_start = time.monotonic()
@@ -984,6 +1044,7 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             task_user = M.tasks.get(task_id, {}).get("_user", "")
             task_no_tools = M.tasks.get(task_id, {}).get("no_tools", False)
         tool_free = task_user in M.TOOL_FREE_AGENTS or task_no_tools
+        messages = _append_turn_context(messages, task_id, task_user, tool_free)
         # Agents (Kaya/Kolpo pipeline) get the full tool set; humans never see
         # AGENT_ONLY_TOOLS (track_theme), saving its tokens on every turn.
         if task_user in M._agent_users:

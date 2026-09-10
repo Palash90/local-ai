@@ -91,6 +91,7 @@ from server.config import (  # noqa: F401
     VERIFY_QUALITY_GATE,
     VERIFY_RETRIES,
     build_sys_content,
+    get_sys_content,
 )
 
 from server.api import APP_STATE_NAMES, Handler, set_app_state
@@ -331,7 +332,7 @@ register_entrypoint(sys.modules[__name__])
 _init_tasks_db()
 _init_themes_db()
 
-SYS_CONTENT = build_sys_content()
+SYS_CONTENT = get_sys_content()
 
 # print("Prompt:\n", "*" * 80, "\n", SYS_CONTENT, "\n", "*" * 80)  # Disabled for cleaner logs
 
