@@ -267,6 +267,47 @@ def parse_score(text, tempo=120):
     total = sum(len(s["events"]) for s in sections)
     if total > MAX_NOTES:
         errors.append(f"too many notes: {total} > {MAX_NOTES}")
+    # ---- Section-grid tiling ----
+    # @section lines declare the song's bar grid. When a lane wrote LESS
+    # material than the grid (a 2-bar vamp under a 21-bar song — which is
+    # exactly how loop-based genres work), loop-tile that lane's bar-aligned
+    # span across the grid, so the declared form — and its energy curve —
+    # matches the rendered audio instead of the piece truncating to the
+    # vamp's length. Lanes that already cover the grid are untouched, and
+    # engine-composed full-length scores always do: zero behavior change
+    # for them.
+    if structure:
+        grid_bars = sum(seg["bars"] for seg in structure)
+        if 0 < grid_bars <= 256:
+            grid_beats = grid_bars * 4.0
+            for s in sections:
+                evs = s["events"]
+                if not evs:
+                    continue
+                lane_end = max(e["start"] + e["dur"] for e in evs)
+                content_bars = max(1, (int(lane_end) + 3) // 4)
+                if content_bars >= grid_bars:
+                    continue
+                span = content_bars * 4.0
+                tiled = list(evs)
+                offset = span
+                while offset < grid_beats:
+                    for e in evs:
+                        st = e["start"] + offset
+                        if st >= grid_beats:
+                            continue
+                        dup = dict(e)
+                        dup["start"] = st
+                        if st + dup["dur"] > grid_beats:
+                            dup["dur"] = grid_beats - st
+                            if dup["dur"] <= 0:
+                                continue
+                        tiled.append(dup)
+                    offset += span
+                s["events"] = tiled
+            total = sum(len(s["events"]) for s in sections)
+            if total > MAX_NOTES:
+                errors.append(f"too many notes: {total} > {MAX_NOTES}")
     # Assign each event the energy of the song-form bar it lands in, so lanes
     # play a section's dynamics even though the notes were written flat.
     def _energy_for(start):

@@ -183,3 +183,64 @@ def test_multi_soundfont_render_matches_single():
             os.environ["FLUID_SOUNDFONT_MAP"] = old
         fluid._map_cache = None
         shutil.rmtree(d, ignore_errors=True)
+
+
+BOSSA_VAMP = """@tempo 90
+@genre bossa
+@mood calm
+@section intro bars=2 energy=0.3
+@section verse bars=4 energy=0.5
+@section chorus bars=4 energy=0.8
+@section outro bars=3 energy=0.4
+[MELODY piano vol=85]
+E4 q G4 q B4 q A4 q |
+R q E4 q G4 q A4 q |
+[HARMONY epiano vol=75]
+C3:maj7 w | G3:7 w |
+[BASS ebass vol=88]
+C2 h G2 q G2 q | C2 h G2 q G2 q |
+[RHYTHM]
+BD e R e HH e R e BD e R e HH e R e | BD e R e SN e R e BD e R e HH e R e |"""
+
+
+def test_tiling_fills_section_grid():
+    from server.features.music.parse import parse_score
+    secs, errs, structure = parse_score(BOSSA_VAMP, 90)
+    assert not errs, errs
+    grid_beats = sum(s["bars"] for s in structure) * 4.0
+    for lane in secs:
+        if not lane["events"]:
+            continue
+        end = max(e["start"] + e["dur"] for e in lane["events"])
+        assert end >= grid_beats - 4.0, (lane["name"], end, grid_beats)
+
+
+def test_tiling_leaves_full_lanes_untouched():
+    from server.features.music.parse import parse_score
+    from server.features.music.random_arrange import random_score
+    for seed in (3, 7, 42):
+        for g in ("bossa", "cinematic", "edm"):
+            score, tempo, info = random_score(seed=seed, genre=g)
+            secs, errs, structure = parse_score(score, tempo)
+            assert not errs, errs
+            grid = sum(sg["bars"] for sg in structure)
+            for lane in secs:
+                if not lane["events"]:
+                    continue
+                end = max(e["start"] + e["dur"] for e in lane["events"])
+                # same bar-aligned gate parse.py uses for tiling: engine
+                # cadences may breathe a beat under the final barline, but
+                # the last written bar must count as content (no loop added)
+                assert (int(end) + 3) // 4 >= grid, (seed, g, lane["name"])
+
+
+def test_tiled_bossa_renders_declared_length():
+    import json
+    from server.features.music.render import render_score
+    res = json.loads(render_score(BOSSA_VAMP, 90, title="bossa-tile", user="local"))
+    assert res["ok"], res
+    # 13 declared bars @ 90 BPM = 34.7s; old behavior truncated to ~7s
+    assert 30.0 <= res["duration_s"] <= 40.0, res["duration_s"]
+    assert res["errors"] == []
+    notes = {l["name"]: l["notes"] for l in res["levels"]}
+    assert notes["RHYTHM"] >= 20, notes
