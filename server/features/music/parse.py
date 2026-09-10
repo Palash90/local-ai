@@ -104,19 +104,33 @@ def _canon(root):
     return root[0].upper() + root[1:] if root else root
 
 
+ROLE_WORDS = {"MELODY", "HARMONY", "BASS", "PAD", "DRONE", "LEAD",
+              "TEXTURE", "CHORDS", "RHYTHM", "PERC", "PERCUSSION", "DRUMS",
+              "DRUM"}
+ROLE_PREFIXES = ("MELODY", "HARMONY", "BASS", "RHYTHM", "PERC", "DRUM",
+                 "TEXTURE", "PAD")
+
+
+def _is_role(u):
+    return u in ROLE_WORDS or any(u.startswith(p) for p in ROLE_PREFIXES)
+
+
 def _parse_header(content):
-    """Split 'MELODY flute vol=90' into (name, {attr: value})."""
+    """Split a lane header into (label, words, {attr: value}).
+
+    Words are any of: role (MELODY2, DRONE, ...), instrument (a PROGRAMS
+    key), a drum-kit word (TABLA...), or a raw GM program number — in ANY
+    order, because the LLM word order is not. attrs hold vol=NN/prog=NN."""
     parts = content.split()
-    name = (parts[0] if parts else "PIANO").upper()
-    attrs = {}
-    for tok in parts[1:]:
+    words, attrs = [], {}
+    for tok in parts:
         m = ATTR_RE.match(tok)
         if m:
             attrs[m.group(1).lower()] = m.group(2)
         else:
-            # a bare second word names the instrument (e.g. [MELODY flute])
-            attrs.setdefault("prog", tok)
-    return name, attrs
+            words.append(tok)
+    label = (words[0] if words else "PIANO").upper()
+    return label, words, attrs
 
 
 def _parse_sections(text):
@@ -175,38 +189,64 @@ def parse_score(text, tempo=120):
             continue
         m = BRACKET_RE.match(line)
         if m:
-            name, attrs = _parse_header(m.group(1).strip())
-            pval = str(attrs.get("prog", "") or "").upper()
-            drum = (name in DRUM_SECTION_NAMES
-                    or any(name.startswith(p) for p in DRUM_NAME_PREFIXES)
-                    or pval in ("DRUMS", "DRUM") or pval in DRUM_STYLES)
+            label, words, attrs = _parse_header(m.group(1).strip())
             kit = None
+            instr = None
+            role = None
+            number = None
+            leftovers = []
+            for w in words:
+                u = w.upper()
+                if u in DRUM_STYLES:
+                    if u != "KIT":
+                        kit = u
+                    continue
+                if role is None and _is_role(u):
+                    role = u
+                    continue
+                if u.isdigit():
+                    number = int(u)
+                    continue
+                if u in PROGRAMS:
+                    if instr is None:
+                        instr = u
+                    continue
+                leftovers.append(w)
+            pval = str(attrs.get("prog", "") or "").upper()
+            if pval and pval in PROGRAMS and instr is None:
+                instr = pval
+            elif pval.isdigit():
+                number = int(pval)
+            elif pval and pval not in DRUM_STYLES and not _is_role(pval):
+                leftovers.append(attrs["prog"])
+            drum = (kit is not None
+                    or (role is not None and (
+                        role in DRUM_SECTION_NAMES
+                        or any(role.startswith(p) for p in DRUM_NAME_PREFIXES))))
             if drum:
-                kit = pval if pval in DRUM_STYLES and pval != "KIT" else None
                 program = 0
-            elif attrs.get("prog") is not None:
-                try:
-                    program = int(attrs["prog"])
-                except ValueError:
-                    if pval in PROGRAMS:
-                        program = PROGRAMS[pval]
-                    else:
-                        near = difflib.get_close_matches(pval, sorted(PROGRAMS), 1)
-                        errors.append(
-                            f"line {lineno}: unknown instrument {attrs['prog']!r}"
-                            + (f" (did you mean {near[0].title()}?)" if near
-                               else " — see the INSTRUMENTS list"))
-                        program = PROGRAMS.get(pval, DEFAULT_PROGRAM)
+            elif instr is not None:
+                program = PROGRAMS[instr]
+            elif number is not None:
+                program = number
+            elif role is not None and role in PROGRAMS:
+                program = PROGRAMS[role]
             else:
-                if name in PROGRAMS:
-                    program = PROGRAMS[name]
-                else:
-                    near = difflib.get_close_matches(name, sorted(PROGRAMS), 1)
-                    errors.append(
-                        f"line {lineno}: lane '{name}' has no instrument"
-                        + (f" (did you mean {near[0].title()}?)" if near
-                           else " — e.g. [MELODY santoor vol=90]"))
-                    program = DEFAULT_PROGRAM
+                program = DEFAULT_PROGRAM
+            name = role or instr or label
+            for w in leftovers:
+                u = w.upper()
+                near = difflib.get_close_matches(
+                    u, sorted(set(PROGRAMS) | DRUM_STYLES), 1)
+                errors.append(
+                    f"line {lineno}: unknown lane word {w!r}"
+                    + (f" (did you mean {near[0].title()}?)" if near
+                       else " — header = [ROLE instrument vol=NN], any order"))
+            if not drum and instr is None and number is None and not (
+                    role and role in PROGRAMS) and not leftovers:
+                errors.append(
+                    f"line {lineno}: lane '{label}' has no instrument"
+                    " — e.g. [MELODY santoor vol=90]")
             try:
                 default_v = 80 if drum else DEFAULT_VOL.get(program, 100)
                 vol = max(0, min(100, int(attrs.get("vol", default_v))))
