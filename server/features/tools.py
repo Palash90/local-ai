@@ -350,7 +350,7 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         )
     elif tool_name == "tool_details":
         wanted = [n.strip() for n in str(args.get("name", "")).split(",") if n.strip()]
-        known = {t["function"]["name"]: t for t in M.TOOLS_DETAILED}
+        known = {t["function"]["name"]: t for t in M.live_tools_detailed()}
         with M._data_lock:
             req_user = M.tasks.get(task_id, {}).get("_user", "")
         if req_user not in M._agent_users:

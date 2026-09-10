@@ -144,6 +144,11 @@ if [ ! -e "$FILES_DIR/sys_prompt.txt" ]; then
     ln -s "$CHAT_DIR/prompts/sys_prompt.txt" "$FILES_DIR/sys_prompt.txt"
     echo "    $FILES_DIR/sys_prompt.txt -> $CHAT_DIR/prompts/sys_prompt.txt"
 fi
+# The music DSL doc is hot-swappable calibration surface (see config.get_music_dsl)
+if [ ! -e "$FILES_DIR/music_dsl.txt" ]; then
+    ln -s "$CHAT_DIR/prompts/music_dsl.txt" "$FILES_DIR/music_dsl.txt"
+    echo "    $FILES_DIR/music_dsl.txt -> $CHAT_DIR/prompts/music_dsl.txt"
+fi
 
 mkdir -p "$FILES_DIR/contexts"
 

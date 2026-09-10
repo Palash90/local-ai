@@ -2,6 +2,12 @@ import json
 import os
 
 
+def _enabled(tool_docs, monkeypatch):
+    """Cache tests exercise the mechanism, independent of the temporary
+    calibration switch that keeps generate_music out of the warm cache."""
+    monkeypatch.setattr(tool_docs, "WARM_DISABLED", set())
+
+
 def _music_entry():
     from server.config import TOOLS_DETAILED
     return json.dumps(
@@ -10,8 +16,9 @@ def _music_entry():
     )
 
 
-def test_warm_fresh_roundtrip(tmp_path):
+def test_warm_fresh_roundtrip(tmp_path, monkeypatch):
     from server.features import tool_docs
+    _enabled(tool_docs, monkeypatch)
     assert tool_docs.warm("alice", ["generate_music"], cache_dir=str(tmp_path))
     f = tmp_path / "alice.json"
     assert f.exists()
@@ -23,6 +30,7 @@ def test_warm_fresh_roundtrip(tmp_path):
 
 def test_stale_hash_dropped(tmp_path, monkeypatch):
     from server.features import tool_docs
+    _enabled(tool_docs, monkeypatch)
     tool_docs.warm("bob", ["generate_music"], cache_dir=str(tmp_path))
     monkeypatch.setattr(tool_docs, "_detail", lambda name: '{"edited": true}')
     assert tool_docs.fresh("bob", cache_dir=str(tmp_path)) == {}
@@ -31,8 +39,9 @@ def test_stale_hash_dropped(tmp_path, monkeypatch):
     assert stored == {}
 
 
-def test_docs_block_keyword_gate(tmp_path):
+def test_docs_block_keyword_gate(tmp_path, monkeypatch):
     from server.features import tool_docs
+    _enabled(tool_docs, monkeypatch)
     tool_docs.warm("carol", ["generate_music"], cache_dir=str(tmp_path))
     b = tool_docs.docs_block("carol", "please compose a calm ambient song", [],
                              cache_dir=str(tmp_path))
@@ -43,8 +52,9 @@ def test_docs_block_keyword_gate(tmp_path):
                                 cache_dir=str(tmp_path)) == ""
 
 
-def test_docs_block_skips_history(tmp_path):
+def test_docs_block_skips_history(tmp_path, monkeypatch):
     from server.features import tool_docs
+    _enabled(tool_docs, monkeypatch)
     tool_docs.warm("dave", ["generate_music"], cache_dir=str(tmp_path))
     entry = json.loads(_music_entry())
     history = [{"role": "tool", "content": json.dumps([entry])}]
@@ -56,8 +66,9 @@ def test_docs_block_skips_history(tmp_path):
         "dave", "compose me a jingle tune", [], cache_dir=str(tmp_path))
 
 
-def test_max_entries_cap(tmp_path):
+def test_max_entries_cap(tmp_path, monkeypatch):
     from server.features import tool_docs
+    _enabled(tool_docs, monkeypatch)
     tool_docs.warm("erin", ["generate_music", "generate_image", "edit_image",
                             "web_search", "fetch_page"], cache_dir=str(tmp_path))
     stored = json.loads((tmp_path / "erin.json").read_text())
@@ -96,3 +107,12 @@ def test_sys_content_hot_reload(tmp_path, monkeypatch):
     st = f.stat()
     os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
     assert "v2" in config.get_sys_content() and "v1" not in config.get_sys_content()
+
+
+def test_generate_music_warm_disabled_during_calibration(tmp_path):
+    from server.features import tool_docs
+    assert "generate_music" in tool_docs.WARM_DISABLED
+    assert tool_docs.warm("cal", ["generate_music", "web_search"],
+                          cache_dir=str(tmp_path)) == ["web_search"]
+    docs = tool_docs.fresh("cal", cache_dir=str(tmp_path))
+    assert set(docs) == {"web_search"}

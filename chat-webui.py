@@ -80,6 +80,7 @@ from server.config import (  # noqa: F401
     TOOL_FREE_AGENTS,
     TOOLS,
     TOOLS_DETAILED,
+    live_tools_detailed,
     TOOLS_HUMAN,
     TOOLS_TOKEN_COST,
     AGENT_ONLY_TOOLS,

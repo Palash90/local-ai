@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import copy
 import json
 import os
 
@@ -1044,6 +1045,50 @@ _TOOL_SHORT_DESC = {
         "variety (never repeat one)."
     ),
 }
+
+
+# ── Hot-swappable music DSL doc ─────────────────────────────────────────────
+# The generate_music score-DSL documentation is calibration surface: it must
+# be editable and picked up WITHOUT a restart while we tune it. The file is
+# the live source of truth; the built-in string remains as fallback.
+MUSIC_DSL_PATH = os.environ.get(
+    "MUSIC_DSL_PATH", os.path.expanduser("~/local-ai-files/music_dsl.txt")
+)
+DEFAULT_MUSIC_DSL = next(
+    t["function"]["parameters"]["properties"]["score"]["description"]
+    for t in TOOLS_DETAILED if t["function"]["name"] == "generate_music"
+)
+_MUSIC_DSL_STATE = {"mtime": None, "text": None}
+
+
+def get_music_dsl():
+    """The DSL doc text: prompts/music_dsl.txt (deployed as a symlink, mtime
+    hot-reload), falling back to the built-in copy when absent/unreadable."""
+    try:
+        mt = os.stat(MUSIC_DSL_PATH).st_mtime_ns
+    except OSError:
+        return DEFAULT_MUSIC_DSL
+    if _MUSIC_DSL_STATE["text"] is None or mt != _MUSIC_DSL_STATE["mtime"]:
+        try:
+            with open(MUSIC_DSL_PATH, "r") as f:
+                _MUSIC_DSL_STATE["text"] = f.read().rstrip("\n")
+        except OSError:
+            _MUSIC_DSL_STATE["text"] = DEFAULT_MUSIC_DSL
+        _MUSIC_DSL_STATE["mtime"] = mt
+    return _MUSIC_DSL_STATE["text"]
+
+
+def live_tools_detailed():
+    """TOOLS_DETAILED with generate_music's score doc replaced by the live
+    file text — what tool_details serves and what the docs-cache hashes."""
+    dsl = get_music_dsl()
+    out = []
+    for t in TOOLS_DETAILED:
+        if t.get("function", {}).get("name") == "generate_music":
+            t = copy.deepcopy(t)
+            t["function"]["parameters"]["properties"]["score"]["description"] = dsl
+        out.append(t)
+    return out
 
 
 def _slim_tools(detailed):

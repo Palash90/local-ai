@@ -18,7 +18,13 @@ import os
 import re
 import threading
 
-from server.config import TOOLS_DETAILED, TOOL_DOCS_CACHE_DIR
+from server.config import TOOL_DOCS_CACHE_DIR, live_tools_detailed
+
+# TEMPORARY (music DSL calibration): keep tool_details always-fresh for
+# generate_music — no warm preload, so edits to prompts/music_dsl.txt take
+# effect in every new session immediately. Delete the entry (and re-warm
+# happens naturally) once the DSL doc is considered final.
+WARM_DISABLED = {"generate_music"}
 
 _LOCK = threading.Lock()
 
@@ -42,7 +48,7 @@ WARM_TRIGGERS = {
 
 
 def _detail(name):
-    for t in TOOLS_DETAILED:
+    for t in live_tools_detailed():
         if t.get("function", {}).get("name") == name:
             return json.dumps(t, sort_keys=True)
     return None
@@ -65,6 +71,8 @@ def warm(user, names, cache_dir=None):
     """Persist the current full docs for ``names`` under ``user``."""
     rec = {}
     for name in names:
+        if name in WARM_DISABLED:
+            continue
         payload = _detail(name)
         if payload is None:
             continue
@@ -108,6 +116,8 @@ def fresh(user, cache_dir=None):
             return {}
         out, changed = {}, False
         for name, entry in list(stored.items()):
+            if name in WARM_DISABLED:
+                continue
             live = _detail(name) if isinstance(entry, dict) else None
             h = entry.get("hash") if isinstance(entry, dict) else None
             if live and h == hashlib.sha256(live.encode()).hexdigest()[:16]:
