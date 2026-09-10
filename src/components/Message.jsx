@@ -364,6 +364,18 @@ function _stopActiveAudio() {
   }
 }
 
+// One music clip at a time across the whole chat: starting a track pauses
+// whichever native <audio> element was last playing.
+let _activeMusic = null
+
+function _registerMusic(el) {
+  if (_activeMusic && _activeMusic !== el) {
+    try { _activeMusic.pause() } catch {}
+  }
+  _stopActiveAudio()
+  _activeMusic = el
+}
+
 function SpeakButton({ text, shareToken }) {
   const [speaking, setSpeaking] = useState(false)
   const [paused, setPaused] = useState(false)
@@ -397,6 +409,7 @@ function SpeakButton({ text, shareToken }) {
     }
     // A different message's audio is active (or paused): stop it first.
     _stopActiveAudio()
+    if (_activeMusic) { try { _activeMusic.pause() } catch {}; _activeMusic = null }
     const reqId = ++reqRef.current
     setPaused(false)
     setLoading(true)
@@ -802,7 +815,10 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
       )}
       {musicUrl && (
         <div className="music-wrap">
-          <audio controls preload="metadata" src={musicUrl} />
+          <audio controls preload="metadata" src={musicUrl}
+            onPlay={(e) => _registerMusic(e.currentTarget)}
+            onPause={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }}
+            onEnded={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }} />
           <div className="img-actions">
             <button type="button" className="img-download-btn" onClick={() => downloadFile(musicUrl, 'music.wav')}>
               Download
