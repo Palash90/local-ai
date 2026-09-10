@@ -13,6 +13,13 @@ import requests
 from server.features.state import M
 from server.features.websearch import vector_store as page_cache
 
+# Document-parse bounds (were referenced but never defined — NameError on
+# PDF/CSV/XLSX paths before this). Tunables, not env yet by design.
+PDF_PAGE_IMAGE_LIMIT = 10
+PDF_PAGE_IMAGE_ZOOM = 2.0
+PARSE_PDF_CHARS = 100000
+PARSE_ROW_LIMIT = 2000
+
 _TEXTISH_TYPES = (
     "text/html",
     "text/plain",

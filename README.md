@@ -28,12 +28,12 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 |---|---|---|---|
 | 3001 | chat-webui (core API + SPA) | `python chat-webui.py` | binds `127.0.0.1` (`CHAT_HOST`) — expose only via nginx |
 | 3002 | markdown hosting (stories) | `restart_services.sh` (uvicorn) | FastAPI app, role-gated collections |
-| 8000 | MCP gateway | in-process thread of chat-webui | FastMCP + OAuth; `MCP_USER` token auth |
+| 8000 | MCP gateway | in-process thread of chat-webui | FastMCP + OAuth; `MCP_USER` token auth (plus an outbound `start_mcp_client` thread for external MCP servers) |
 | 8079 | llama-server (CPU) | lazy / `restart_servers` | self-chat agents, 32K ctx, RAM-backed |
 | 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI, 24K ctx, VRAM-backed |
 | 8083 | llama-server (guardrail) | lazy by MCP gateway / judge | small verify model, idle-unloads after 300s |
 | 8084 | llama-server (embed) | lazy by chat-webui / `restart_servers` | serves `/embedding` (nomic); vector layer of `page_cache` |
-| 8080 | SearXNG | docker / systemd | web search backend |
+| 8080 | SearXNG | docker / systemd | web search backend; `setup.sh` binds `127.0.0.1:8080`, `docker-compose.yaml` binds `8080:8080` (all interfaces) — bind to localhost if you don't need LAN-wide search |
 | 8188 | ComfyUI | lazy on image request | image generation; recycled after every render to return its RAM (`COMFYUI_RECYCLE_AFTER_RENDER=0` to disable) |
 | 9000 | code host | `restart_services.sh` | `code_host.py` (lives outside this repo) |
 | 9010 | Authentik proxy outpost | docker | nginx `auth_request` upstream |
@@ -62,13 +62,22 @@ bash setup.sh
 cd ~/git/local-ai && python chat-webui.py
 ```
 
+> chat-webui exits(1) on boot when SearXNG is unreachable on :8080, and
+> `:3002` story hosting requires `STORIES_PREMIUM_DIR`/`STORIES_ADMIN_DIR`.
+> `setup.sh` builds only — it never starts services; start them with
+> `restart_services.sh` (rebuilds `dist/`, brings up WireGuard, restarts
+> cloud-app + files scan) or the individual commands below.
+
 Access at `http://chat.local` or `http://localhost:3001`.
 
 Authentication is unified SSO via Authentik — see "Authentication (SSO)" below.
 
 Self-chat agents (editor/moderator/registered agents) default to the CPU
 llama-server (port 8079) so they never compete with interactive UI users for
-VRAM. Switch lanes with `SELF_CHAT_MODE` (env var or `server/config.py`):
+VRAM. Lane selection has three independent controls (later wins per request):
+`SELF_CHAT_MODE` env (default `cpu`), the `--gpu` CLI flag (pins agents to the
+GPU lane, overrides the env), and the `FORCE_GPU_LANE=true` test flag (pins
+*everything* to GPU unless a request sets `mode` or the UI research+CPU toggle):
 
 ```bash
 SELF_CHAT_MODE=gpu python chat-webui.py
@@ -80,8 +89,9 @@ SELF_CHAT_MODE=gpu python chat-webui.py
 > *everything* (including agents) to the GPU lane unless a request explicitly
 > sets `mode` or the UI's research+CPU toggle. Leave it off for production.
 
-`chat-webui.py` auto-starts the GPU llama-server on boot if it's down (CPU and
-guardrail servers lazy-start on first use) and starts ComfyUI on demand. If you
+`chat-webui.py` auto-starts the GPU llama-server on boot if it's down (boot
+`restart_servers` only ensures GPU; CPU/guardrail lazy-start on first use, the
+embed server starts on its own eager thread) and starts ComfyUI on demand. If you
 prefer to run the services manually:
 
 ```bash
@@ -170,8 +180,8 @@ local-ai/
 │   ├── auth.py              Authentik identity: X-Authentik-* headers, JWT/JWKS, OIDC grant
 │   ├── config.py            Constants, model ids, tool catalogs (TOOLS/TOOLS_DETAILED/
 │   │                        TOOLS_HUMAN), llama-server arg sets, prompt builder
-│   ├── db.py                Unified SQLite layer (~/local-ai-files/local_ai.db), LOCAL_AI_DB env
-│   ├── tasks/…              (see features/) — batches_db.py, mcp_tasks_db.py: MCP queue tables
+ │   ├── db.py                Unified SQLite layer (~/local-ai-files/local_ai.db), LOCAL_AI_DB env
+ │   ├── batches_db.py / mcp_tasks_db.py   MCP queue tables (PENDING→WORKING→COMPLETED|ERROR, boot requeue, prune keep=50)
 │   ├── input_guard.py       Pattern-based moderation: jailbreak/harmful input, strict output blocks
 │   ├── openai_api.py        OpenAI-compatible /v1/* handlers (auth, models, SSE streaming)
 │   ├── mcp_client.py        Outbound MCP client (mcp_config.json servers → extra chat tools)
@@ -184,9 +194,14 @@ local-ai/
 │       │                    sampling router, KV slot checkpoints, _llm_worker (SSE parse),
 │       │                    tool-call reassembly
 │       ├── orchestration.py Queues, event loop, finalize (critic pass + L3 judge), reminders glue
-│       ├── tools.py         Tool dispatch: web_search, fetch_page (SSRF-guarded), read_file/image,
-│       │                    update_user_context, manage_tasks, track_theme, tool_details,
-│       │                    memory_read (Pensieve recall)
+ │   ├── tools.py         Tool dispatch: web_search, fetch_page (SSRF-guarded, 15s
+ │   │                    timeout, `max_chars=24000` default with chunk paging; HTML
+ │   │                    stripped, PDF/CSV/XLSX parsed, legacy `.xls`/binaries refused;
+ │   │                    DNS-resolved IPs checked, SearXNG URLs rewritten), read_file/image,
+ │   │                    update_user_context, manage_tasks, track_theme (agent-only),
+ │   │                    tool_details (agent-filtered), memory_read (Pensieve recall,
+ │   │                    limit 5); `generate_image` limited to 1 per task,
+ │   │                    `get_user_location` waits up to 60s for the browser
 │       ├── images.py        ComfyUI generate/edit workflows, VRAM choreography, image worker
 │       ├── sessions.py      Per-user session files, prompt injection, auto-rename, compaction glue
 │       ├── context.py       Token estimation, trim/compact, sanitize, effective-context reports,
@@ -202,7 +217,10 @@ local-ai/
 │       │                    (reasoning-aware judge calls, 2048/4096 token budget)
 │       ├── monitoring.py    Thermal/RAM/idle loops, server lifecycle, embed/cpu/guardrail
 │       │                    ensure-* lazy starts + idle unload
-│       ├── page_cache.py    SQLite page cache + nomic vector layer (posts to :8084)
+ │   ├── page_cache.py    SQLite page cache + nomic vector layer (posts to :8084);
+ │   │                    TTLs 300s fresh / 30d stale (LLM TTL 60s–30d), embed budget
+ │   │                    3000 chars with 2s timeout, `~/local-ai-files/page_cache.db`
+ │   │                    (`LOCAL_AI_PAGE_CACHE` override), keyed-only degrade offline
 │       ├── pensieve/        Archival context compaction (deterministic; see ARCHITECTURE.md §10.5)
 │       ├── websearch/       search.py, fetch.py, relevance.py, vector_store.py (embed-scored hits)
 │       ├── toolstrip.py / urlclassify.py   tool shaping + URL classification helpers
@@ -223,7 +241,10 @@ local-ai/
 │                            (codebase-search = codebase-memory-mcp graph)
 ├── docker-compose.yaml      Containerized stack + SearXNG
 ├── authentik-compose.yaml   Authentik identity provider
-├── local_cloud.sh / gcp_nginx.conf   nginx front-ends (auth_request SSO gate, TLS)
+├── local_cloud.sh / gcp_nginx.conf   nginx front-ends: `local_cloud.sh` is the
+│                                TLS-terminating home front-end with the `auth_request`
+│                                SSO gate; `gcp_nginx.conf` is an unauthenticated
+│                                WireGuard pass-through to 10.66.66.3 (offline page on 502/503/504)
 ├── setup.sh / restart_services.sh / stop_services.sh / local_cloud.sh
 ├── ARCHITECTURE.md          System design deep-dive (diagrams: lanes, FSMs, event loop…)
 └── TEST_STEPS.md            Manual interface test plan (curl-level, run before trusting a deploy)
@@ -232,8 +253,11 @@ local-ai/
 The data dir (`~/local-ai-files/`, shared into the container) holds: `model.json`,
 `models.json`, `sys_prompt.txt`, `sessions/`, `shares.json`, `contexts/<user>.txt`,
 `my-models/` (GGUFs), `ComfyUI/{input,output}`, `uploads/`, `kv-slots/`,
-`stories/`, `pensieve.db` (archived conversation blocks), `local_ai.db` (tasks
-+ theme log + MCP batches + per-user `user_judges` assignments).
+`stories/`, `pensieve.db` (archived conversation blocks), `local_ai.db` (unified
+SQLite: `tasks`, `theme_log`, `mcp_batches` + `mcp_batch_items`, `mcp_tasks`,
+`user_judges`, `_db_meta`; WAL mode; one-time migration renames legacy
+`tasks.db`/`themes.db`/`mcp_batches.db` to `*.migrated`) and the separate
+`page_cache.db` (persistent search/page cache).
 
 ## Authentication (SSO)
 
@@ -259,6 +283,18 @@ Resolved identity is always a dict — `username`, `email`, `name`, `groups`, `r
 `AUTH_ROLE_GROUPS`; highest wins) and the Authentik `uid`. Roles decide Story
 collection access (`markdown_hosting`) and the "overwrite user context" admin action.
 
+Exact header contract (nginx must forward — and strip inbound — all of these):
+`X-Authentik-Username` (fallback `X-Authentik-User`), `X-Authentik-Groups`
+(fallback `X-Authentik-Group`, split on `|`, comma or whitespace),
+`X-Authentik-Email`, `X-Authentik-Name`, `X-Authentik-UID`. Group→role mapping
+is case-insensitive with default role `free`.
+Agent JWT claims resolve `preferred_username` → `username` → `email` → `sub`
+for the username and `groups` (fallback `ak_groups`) for groups, with `sub` as
+uid; the issuer (`AUTH_AGENTS_ISSUER`) is enforced while `aud` is not verified.
+JWKS is cached 300s; if Authentik's JWKS is unreachable the request fails
+(`RuntimeError`, fail-closed). The password grant uses scope
+`openid profile email groups`.
+
 **Enabling steps** (one-time):
 
 1. Fill the `AUTHENTIK_*` / `POSTGRES_*` secrets in `.env` (see `authentik-compose.yaml`).
@@ -268,8 +304,15 @@ collection access (`markdown_hosting`) and the "overwrite user context" admin ac
    outpost: `python3 scripts/authentik_bootstrap.py`.
 5. Deploy the proxy outpost (`ghcr.io/goauthentik/proxy`) with the outpost token the
    bootstrap script prints, on `127.0.0.1:9010` (nginx's `ak_outpost` upstream).
-6. Ensure the apps are only reachable through the nginx front-end in `local_cloud.sh`
-   (the `auth_request` gate on `/ai/`, `/api/`, `/stories/`, `/story/`), then reload nginx.
+ 6. Ensure the apps are only reachable through the nginx front-end in `local_cloud.sh`
+    (the `auth_request` gate on `/ai/`, `/api/` except `/api/public/`, `/stories/`,
+    `/story/<free|premium|admin>`, `/media/<col>` and `/search/`; `/cloud/`,
+    `/code/`, `/v1/`, `/s/`, `/mcp` have no `auth_request`), then reload nginx.
+
+> The machine-agent path additionally needs the `AUTH_AGENTS_ISSUER`,
+> `AUTH_AGENTS_JWKS_URL`, `AUTH_AGENTS_TOKEN_URL`, `AUTH_AGENTS_CLIENT_ID`
+> (which doubles as the app slug) and `AUTH_AGENTS_CLIENT_SECRET` envs so
+> backends can verify agent JWTs — browser SSO alone is not enough for agents.
 
 ## Architecture
 
@@ -299,9 +342,14 @@ A FastMCP (streamable HTTP) server **in-process with chat-webui** (started by th
 `get_batch_status`, `get_batch_results`, `submit_batch_results`, `get_image`.
 
 Batches queue into SQLite (`batches_db.py` + `mcp_tasks_db.py`), drain through
-`_batch_worker` → the guardrail lane, and run **LEVEL 2 (input) / LEVEL 3
+`_batch_worker` → the gpu/cpu lane (flagged `_mcp`), and run **LEVEL 2 (input) / LEVEL 3
 (output)** LLM verification on the dedicated guardrail llama-server (:8083,
-lazy-start, 300s idle-unload). `MCP_USER` owns the acting identity.
+lazy-start, 300s idle-unload). `MCP_USER` owns the acting identity. Batch limits:
+max 50 items, 2400s per item, 15s poll cadence, keep last 50, 3 retries;
+`wait_hint` is 60s (research) / 30s (tools) / 20s (plain), re-poll no faster than
+every 15–20s. Note the gateway exposes chat/batch tools only — `web_search` /
+`fetch_page` exist solely on the chat lane. Token refresh uses a 60s margin;
+upstream timeouts are 30s (60s for images).
 
 `server/mcp_client.py` is the *outbound* side: external MCP servers declared in
 `mcp_config.json` are connected at startup and their tools are merged into the
@@ -309,15 +357,18 @@ chat tool list (per-session cache, version-invalidated via
 `mcp_manager._tools_version`). The model sees them under namespaced ids
 (`<server>__<tool>`); dispatch routes through `MCPClientManager.is_mcp_tool()`
 → `dispatch_mcp_tool()` (asyncio bridge to the client loop, results truncated
-to 8k chars). The OpenAI lane never receives MCP tools (`no_tools: true` in
+to 8k chars with a truncation footer, `MCP_TOOL_TIMEOUT=300s`, env-overridable).
+Servers with `enabled: false` are skipped and raw (non-namespaced) tool names
+still route. The OpenAI lane never receives MCP tools (`no_tools: true` in
 `openai_api.py`).
 
 Shipped servers:
 
 - **`codebase-search`** (`codebase-memory-mcp@latest`, stdio,
-  `CBM_ALLOWED_ROOT=/home/palash/git`) — a code **knowledge graph** (15 tools:
+  `CBM_ALLOWED_ROOT=/home/palash/git`) — a code **knowledge graph** (e.g.
   `search_graph`, `query_graph` Cypher, `trace_path`, `get_architecture`,
-  `detect_changes`, …), exposed to chat as `codebase-search__*`. A repo returns
+  `detect_changes`, … — the exact tool set is defined by the external MCP
+  server, not this repo), exposed to chat as `codebase-search__*`. A repo returns
   **zero results until indexed**: run `index_repository(repo_path=…)` once per
   repo and re-index after significant changes (`index_status` /
   `detect_changes` report coverage and blast radius). Graph state lives under
@@ -327,11 +378,15 @@ Shipped servers:
 ### Markdown Hosting (`markdown_hosting.py`, :3002)
 
 FastAPI site publishing the self-chat stories with role-gated collections
-(`free` → `premium` → `admin`, resolved from Authentik groups). Routes:
-collection index `GET /`, `GET /story/<col>/<id>` (rendered HTML + KaTeX, images
+(`free` → `premium` → `admin`, resolved from Authentik groups; guests see only
+`free`). Routes: collection index `GET /`, `GET /story/<col>/<id>` (rendered HTML + KaTeX, images
 rewritten to auth-gated `/media/…`), `GET /story/…/content` (live incremental
-poll while a story is being written), admin `DELETE /story/…`. Requires
-`STORIES_PREMIUM_DIR` / `STORIES_ADMIN_DIR` env vars. External links in the
+poll while a story is being written), `GET /media/<col>/<id>/<file>`, admin
+`DELETE /story/…`, plus the read-aloud player (`/prose-segments`,
+`/audio/{idx}`, `/words`, proxied to the chat-webui TTS engine — see Voice
+below). Requires `STORIES_PREMIUM_DIR` / `STORIES_ADMIN_DIR` env vars (fail-fast
+at startup); role resolution falls back to a hardcoded map (`palash`→admin,
+`totan`→premium) when headers are absent. External links in the
 rendered stories open in a new tab (`render_story_html` adds
 `target="_blank" rel="noopener noreferrer"` to `http(s)` hrefs; in-page
 `#anchors` stay in-tab).
@@ -341,9 +396,12 @@ rendered stories open in a new tab (`render_story_html` adds
 Offline multi-agent story production: persona agents (kolpo/kaya…) hold
 cross-critique rounds, then editor/moderator review and a moderation gate
 (GREEN/RED, auto-RED on duplicate/citation-drop/empty-body/wrong-script/name-leak) writes
-stories + moderation JSON to `~/local-ai-files/stories/`. CLI flags:
+stories + moderation JSON to tiered output dirs (`STORIES_FREE_DIR` /
+`STORIES_PREMIUM_DIR` / `STORIES_ADMIN_DIR` by role; readers prefer
+`<story>.edited.md` when present) under `~/local-ai-files/stories/`. CLI flags:
 `--config <tasks.json>`, `--defaults`, `--dry-run` (validate + print plan, no
-LLM calls), `--gpu` (pin agents to the GPU lane). Agents log in via the
+LLM calls), `--gpu` (pin agents to the GPU lane, overrides `SELF_CHAT_MODE`).
+Agents log in via the
 Authentik machine-client password grant and use the normal `/api/chat` API;
 theme dedup goes through `track_theme`.
 
@@ -373,17 +431,36 @@ resolve per-agent judge models from the `user_judges` table.
 ## Frontend SPA (`src/` → `dist/`)
 
 React 19 + Vite, no router/state library — chat UI served by chat-webui from
-`dist/`. `App.jsx` owns auth check, session CRUD, the `/api/status/:id` polling
-loop, location prompts and share routing (`/s/<token>`); `api.js` wraps the
-`/api/*` endpoints and dispatches `auth:unauthorized` on 401. Components:
-`Sidebar`, `ChatArea`, `Message` (markdown + KaTeX + DOMPurify, external links
-open in a new tab via a sanitize hook, search popups,
-reasoning block, TTS/copy/share buttons), `InputBar` (file upload with
-extension whitelist), `ModelBar` (live temp/tps), `StatusBox`, `TaskPanel`,
-`ImageLightbox`, `LocationPrompt`, `OverloadWarning`, `PublicShareView`.
+`dist/`. `App.jsx` owns auth check, session CRUD, background polling (other
+sessions' tasks every 2s, `model-status` every 2s), location prompts and
+hand-rolled `/s/<token>` share routing (plus `sessionStorage:opencode_pending`
+resume and `localStorage last_sid` restore); `api.js` wraps the
+`/api/*` endpoints and dispatches `auth:unauthorized` on 401 (which wipes app
+state; an interstitial blocks direct port-3001 use without sign-in, and logout
+redirects to Authentik `sign_out?rd=/`). Components:
+`Sidebar` (Chats/Shares tabs, rename prompt, delete confirm, share rows with
+preview/copy/revoke incl. purge confirm), `ChatArea` (smart autoscroll,
+select-aware scroll suppress, `msgIndex` for shares), `Message` (markdown +
+KaTeX + DOMPurify, external links forced `_blank`, search hover popups + fetch
+page modal, tool badges, elapsed `⏱`/confidence `⚖` chips, artifact file chips,
+per-code-block Copy, OCR `<details>` collapse, hidden system/tool/tool-call-only
+filtering, empty-response fallback, reasoning block, TTS/copy/share buttons),
+`InputBar` (image downscale to 1920px JPEG 0.8 → `/api/upload-image`, other files
+→ `/api/extract-file` as `[FILE:]` prefix; 10 MB cap, 100 MB for PDFs; unknown
+types prompt-to-confirm rather than hard-reject; Research toggle = 50 rounds and
+gates the CPU toggle; Send↔Queue/Stop swap; Enter-to-send desktop-only; 120px
+autogrow), `ModelBar` (status labels, red `<5` t/s warning, context donut
+green/yellow/red at 60/80% with compressed `(raw)` tokens, Tasks + reminder-count
+badge in the user menu), `StatusBox` (search/image/edit/thinking states),
+`TaskPanel` (CRUD with priorities/dates), `ImageLightbox` (wheel zoom 0.25–10x,
+drag/pan, pinch, Esc/back-button close via history trap), `LocationPrompt`
+(Allow/Deny/blocked-permission path, 10s geolocation timeout), `OverloadWarning`
+(distinct RAM-evacuation vs GPU-thermal text), `PublicShareView` (copy-link
+topbar, `Shared by` line, metadata hidden).
 
-Build with `npm install && npm run build` (Vite → `dist/`); `npm run dev`
-proxies to the backend for development.
+Build with `npm install && npm run build` (Vite → `dist/`, `base: './'`); `npm run dev`
+proxies only `/api` and `/output` to `http://localhost:3000` (stale: backend is
+:3001), `npm run preview` serves the build locally.
 
 ## Voice / read-aloud (TTS)
 
@@ -408,7 +485,8 @@ Piper voices are cached process-wide and synthesis is lock-serialized;
 audio is stored in a two-tier content-addressed disk cache (`~/local-ai-files/tts_cache/`,
 plus optional read-only secondary archive via `TTS_CACHE_SECONDARY_DIR` in `.env`),
 pruned to 1 GB by default. Long messages are synthesized in sentence-bounded
-chunks (up to 8,000 chars authenticated, 2,000 chars on public shares).
+chunks (≤1800 chars each, up to 8,000 chars on both authenticated and public
+routes) and concatenated into one blob.
 Deleting a chat session or revoking a share with purge removes its orphaned
 audio files from both primary and secondary cache directories.
 Piper `.onnx` files live in `~/.piper_voices/` (downloaded, not in the repo).
@@ -416,6 +494,36 @@ Known limit: Bengali SSML `<phoneme>` overrides were tried and reverted —
 the `edge-tts` library escapes markup into literal speech and the service
 rejects `<phoneme>` for Bengali voices, so Bengali অ-nuances (দেখলো/যেন-type
 words) follow whatever the neural voice produces.
+
+**Word-level sync + seeking.** Both engines emit word timestamps (Piper
+phoneme alignments via the `onnx` package; edge-tts `WordBoundary` stream),
+stored as `<key>.words.json` beside each cached blob (atomic writes; corrupt
+files are dropped on read). `POST /api/tts-words` returns them for chat text;
+multi-chunk offsets advance by true decoded audio duration (WAV header /
+MP3 frame walk), not last-word end, so highlight never drifts down a story.
+The story player highlights the speaking word and seeks on word click, aligning
+DOM tokens to timestamps with lookahead (page markup the synthesis never saw
+is skipped, not misassigned).
+
+**Story pages** (`markdown_hosting` `/stories/`) get a 🔊 player in the sticky
+topbar: prose segments from `/story/{c}/{id}/prose-segments`, audio per segment
+from `/story/{c}/{id}/audio/{idx}`, words from `/story/{c}/{id}/words` — all
+RBAC-enforced (guests: free stories only), chained with pause/resume/stop, and
+a "▶ Tap to play" recovery when the browser blocks autoplay after a long fetch.
+Story text uses `story_markdown_to_speech_text` (metadata header, round markers,
+verdict blocks stripped — prose only).
+
+**Public shares** expose a scoped, unauthenticated `POST
+/api/public/share/<token>/tts` that synthesizes only the stored snapshot text
+(client text ignored); the share page shows a copy-link button and hides
+generation metadata (elapsed/confidence/tool badges).
+
+**TTS env knobs** (all in `.env`, see `server/config.py`): `TTS_CACHE_DIR`
+(default `~/local-ai-files/tts_cache`), `TTS_CACHE_SECONDARY_DIR` (unset =
+secondary tier skipped), `TTS_CACHE_MAX_BYTES` (default 1 GB),
+`TTS_MAX_CHARS` / `TTS_MAX_CHARS_PUBLIC` (default 8000/8000),
+`TTS_CHUNK_CHARS` (default 1800), `TTS_INTERNAL_TOKEN` (loopback secret for
+markdown_hosting → chat-webui; blank disables story audio).
 
 ## Security & Deployment Notes
 
@@ -434,11 +542,15 @@ words) follow whatever the neural voice produces.
 - **Bypass on bare `chat-webui.py`.** It binds `127.0.0.1` by default (`CHAT_HOST`),
   so it is only reachable through the nginx front-end or from the box itself. Setting
   `CHAT_HOST=0.0.0.0` re-exposes every endpoint without the SSO gate — don't.
-- **Header trust.** `X-Authentik-*` headers are trusted upstream; any path that lets a
+- **Header trust.** The trusted upstream set is exactly `X-Authentik-Username`
+  (fallback `X-Authentik-User`), `X-Authentik-Groups` (fallback
+  `X-Authentik-Group`), `X-Authentik-Email`, `X-Authentik-Name` and
+  `X-Authentik-UID`; any path that lets a
   client reach :3001/:3002 directly (or a proxy that forgets to strip inbound
-  `X-Authentik-*`) spoofs identity. Keep the nginx rules from `local_cloud.sh`.
+  `X-Authentik-*`, *including the singular fallbacks*) spoofs identity. Keep the nginx rules from `local_cloud.sh`.
 - **Moderation is best-effort.** `input_guard` (pattern lists under
-  `prompts/surface_attacks/`), the L3 judge and the critic citation pass catch the
+  `prompts/surface_attacks/`), the L2 input judge (fail-closed on MCP/gateway
+  traffic), L3 judge and the critic citation pass catch the
   common cases — MCP/guardrail traffic is screened fail-closed, but the interactive
   UI lane is deliberately **fail-open** (a judge outage must never drop a reply).
   The small L2 judge model can also **false-positive on benign technical phrasing**
@@ -452,7 +564,8 @@ words) follow whatever the neural voice produces.
 - **Judge calls pause during image renders.** Every judge POST
   (`judge.wait_until_render_safe`) holds while ComfyUI is generating, so a judge
   model load can never collide with a render and trigger an emergency RAM
-  evacuation (600s cap, then proceed; 30s cooldown after the render).
+  evacuation (600s cap, then proceed; 30s cooldown after the render; judge LLM
+  calls have a 240s timeout floor, 90s minimum).
 - **RAM evacuation resumes tasks instead of failing them.** When
   `_evacuate_ram` fires, each lane's in-flight task is requeued to the front of
   its queue with the non-terminal `requeued` status (the UI pending bubble keeps

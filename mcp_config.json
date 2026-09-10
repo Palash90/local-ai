@@ -8,7 +8,7 @@
       },
       "enabled": true
     },
-    "dumm-http-mcp-server": {
+    "dummy-http-mcp-server": {
       "url": "http://loc/mcp",
       "transport": "http",
       "enabled": false,

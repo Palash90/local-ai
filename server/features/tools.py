@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import threading
 from datetime import datetime
 from urllib.parse import urlparse
