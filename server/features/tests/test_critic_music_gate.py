@@ -228,3 +228,27 @@ def test_self_artifact_citation_filter():
               "and (Doe, Science, 2024) [https://ex.org/a]")
     urls = [c["url"] for c in extract_citations(answer)]
     assert urls == ["https://ex.org/a"]
+
+
+def test_score_errors_budget_two_then_giveup(stub_state):
+    from server.features.critic import _retry_decision
+
+    def decide(done):
+        import threading, types
+        stub_state._Registry.entrypoint = types.SimpleNamespace(
+            _data_lock=threading.RLock(),
+            tasks={"t": {"_mismatch_done": done, "_verify_done": 0}},
+            sessions={},
+        )
+        return _retry_decision("t", None, "score_errors")
+
+    assert decide(0) == ("retry", "score_errors")
+    assert decide(1) == ("retry", "score_errors")
+    assert decide(2) == ("finalize", "score_errors_giveup")
+
+
+def test_ka_tabla_alias_parses():
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score("[RHYTHM tabla]\nDHA q GHE q NA q TIN q | NA q KA q DHIN q NA q |", 120)
+    assert not errs, errs
+    assert [e["midi"] for e in secs[0]["events"]] == [36, 45, 38, 50, 38, 40, 47, 38]

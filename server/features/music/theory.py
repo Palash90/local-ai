@@ -3,6 +3,7 @@
 NOTE_OFFSETS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 CHORD_INTERVALS = {
     "maj": (0, 4, 7), "min": (0, 3, 7), "7": (0, 4, 7, 10),
+    "5": (0, 7), "56": (0, 7, 10),
     "maj7": (0, 4, 7, 11), "min7": (0, 3, 7, 10), "dim7": (0, 3, 6, 9),
     "m7b5": (0, 3, 6, 10),
     "dim": (0, 3, 6), "aug": (0, 4, 8), "sus4": (0, 5, 7), "sus2": (0, 2, 7),
@@ -23,20 +24,24 @@ PROGRAMS = {
     # Shamisen, Koto, Kalimba, Bagpipe, Fiddle, Shanai and Dulcimer(=Santoor).
     # Non-GM instruments map to their nearest GM colour (GeneralUser GS has no
     # dedicated guzheng/veena/ektara sample), so they read convincingly.
-    "SITAR": 104, "TAMBRA": 104, "VEENA": 104, "SAROD": 104, "EKTARA": 104,
+    "SITAR": 104, "TAMBRA": 104, "TANPURA": 104, "TAMBURA": 104,
+    "VEENA": 104, "SAROD": 104, "EKTARA": 104,
     "IKTARA": 104, "DILRUBA": 105,
     "BANJO": 105, "UKULELE": 105, "SHAMISEN": 106,
     "KOTO": 107, "GUZHENG": 107, "KOTO13": 107, "YANGQIN": 107, "CITHARA": 107,
     "KALIMBA": 108, "MBIRA": 108,
     "BAGPIPE": 109, "FIDDL": 110,
     "SHANAI": 111, "SHEHNAI": 111, "SARANGI": 111,
-    "SANTOOR": 15, "DULCIMER": 15, "YANGQIN2": 15,
+    "SANTOOR": 15, "SANTUR": 15, "SANTOOR1": 15, "DULCIMER": 15, "YANGQIN2": 15,
     "SHAKUHACHI": 77, "OCARINA": 79, "PANFLUTE": 75, "SURN": 111,
     "STEELDRUM": 114, "MARIMBA2": 12,
     "DIZI": 73, "FIDDL": 110, "CLAV": 7, "SLAP": 36, "FRETLESS": 35,
     "SYNTHSTRINGS": 50, "TUBULAR": 14, "VIBES": 11, "MARIMBA": 12,
 }
 DEFAULT_PROGRAM = 0
+# Named drum kits usable as the instrument word in a percussion lane
+# ([RHYTHM tabla vol=85]). "kit" is the standard kit of the base SF2.
+DRUM_STYLES = {"KIT", "TABLA", "DHOLAK", "DARBUKA"}
 # Sensible per-instrument mix levels (0-100) so a multi-lane piece balances
 # without the user hand-tuning: sustained/loud voices sit lower, delicate ones
 # higher. Overridable per lane with [NAME vol=NN].

@@ -1063,17 +1063,27 @@ _MUSIC_DSL_STATE = {"mtime": None, "text": None}
 
 def get_music_dsl():
     """The DSL doc text: prompts/music_dsl.txt (deployed as a symlink, mtime
-    hot-reload), falling back to the built-in copy when absent/unreadable."""
+    hot-reload), falling back to the built-in copy when absent/unreadable.
+    ``%instruments%`` is substituted from the live PROGRAMS enum so the doc
+    can never drift from what the parser accepts."""
     try:
         mt = os.stat(MUSIC_DSL_PATH).st_mtime_ns
     except OSError:
-        return DEFAULT_MUSIC_DSL
+        mt = None
     if _MUSIC_DSL_STATE["text"] is None or mt != _MUSIC_DSL_STATE["mtime"]:
+        text = DEFAULT_MUSIC_DSL
+        if mt is not None:
+            try:
+                with open(MUSIC_DSL_PATH, "r") as f:
+                    text = f.read().rstrip("\n")
+            except OSError:
+                text = DEFAULT_MUSIC_DSL
         try:
-            with open(MUSIC_DSL_PATH, "r") as f:
-                _MUSIC_DSL_STATE["text"] = f.read().rstrip("\n")
-        except OSError:
-            _MUSIC_DSL_STATE["text"] = DEFAULT_MUSIC_DSL
+            from server.features.music.theory import PROGRAMS
+            enum = " ".join(sorted(PROGRAMS))
+        except Exception:
+            enum = ""
+        _MUSIC_DSL_STATE["text"] = text.replace("%instruments%", enum)
         _MUSIC_DSL_STATE["mtime"] = mt
     return _MUSIC_DSL_STATE["text"]
 

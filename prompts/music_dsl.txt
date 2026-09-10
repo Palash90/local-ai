@@ -2,7 +2,8 @@ Score DSL. A score has THREE axes: GENRE (sound world), song FORM (@section), an
 
 DIRECTIVES (whole-score, one per line, before lanes):
   @tempo <bpm>     20-300 (default 120)
-  @genre <name>    see GENRES below; sets scale/instruments AND the drum groove — copy that genre's bar from GENRE GROOVES below
+  @genre <name>    SPACE after the name — never @genre=value (bad directives
+                   are silently ignored!). Sets scale/instruments AND the drum groove — copy that genre's bar from GENRE GROOVES below
   @mood <name>     joyful|moody|inspiring|dreamy|tense|epic|calm|playful
   @section <name> bars=N energy=0.0-1.0 [repeat=N]
                    song form on a shared bar grid that tiles from bar 1 across ALL lanes; energy auto-scales velocity+expression so a chorus lifts the band without editing notes. Use intro/verse/prechorus/chorus/bridge/outro. LOOP SEMANTICS: if a lane's written material is shorter than the section grid it is automatically repeated (bar-aligned) across the whole form — write your best 2-4 bar vamp and let the sections loop it with their energy lifts; the piece lasts as long as the grid says.
@@ -26,8 +27,9 @@ EVENTS (space-separated; '|' = bar line). Each lane plays ONE voice at a time (a
   drum:  BD KC SN RIM CLAP HH OH PEDAL CR CHIN RD RIDE LT MT HT LFT HFT CONG BONG TBL CAB MAR CLV COWB TAM TRIG + dur (kick snare rimshot clap hats cymbals toms congas timbales cabasa maracas claves cowbell tambourine triangle). TABLA SYLLABLES for indian/bollywood grooves: DHA (bass-open) DHIN (ringing mid) NA (crisp slap) TIN (high ring) GHE (low closed) TA (sharp closed).
   dynamic suffix on duration (or '!' on the pitch): ! accent, f forte, m mezzo, p soft -> C4 q! / C4! q / E4ep
 
-GENRE GROOVES — the default [RHYTHM] bar per genre (every bar must total
-exactly 4 beats; copy it, then vary the 4th bar of a phrase). NEVER put a
+GENRE GROOVES — the default [RHYTHM] bar per genre (a bar holds 4 beats;
+'|' closes a bar: short bars rest-pad, long bars spill as fills). Copy a
+bar, then vary every 4th bar. NEVER put a
 rock backbeat under raga/bossa/taiko; for fusion, groove of the PRIMARY
 genre.
   indian_classical / bollywood — tabla theka (Keherwa):
@@ -67,6 +69,48 @@ genre asks; block chords stay right for bossa comping and brass hits):
   indian / bollywood   sargam-like run: C3:min7 au h D3:min7 au h |
   walking bass (funk/jazz/blues):
     C2:7 ar w | A1:min7 ar w | D2:min7 ar w | G1:7 ar w |
+
+BAR RULES — '|' closes a bar. Short bar ⇒ rest-padded (lanes stay aligned);
+long bar ⇒ spills into the next (that IS a fill). Write absolute pitch names
+only (C4, F#5) — Sa/Re/Ga syllables are NOT tokens (convert first, below).
+
+TALAS (Hindustani cycles; write the bols with q = one matra, and put '|' only
+every LCM(4, matras) beats so the cycle stays aligned across bars):
+  Keherwa (8, 4+4 — bhajan/bollywood/pop-indian):  '|' every 8 beats
+    DHA q GHE q NA q TIN q NA q KA q DHIN q NA q |
+  Teentaal (16, 4-4-4-4 — the default classical cycle):  '|' every 16 beats
+    DHA q DHIN q DHIN q DHA q DHA q DHIN q DHIN q DHA q DHA q TIN q TIN q TA q TA q DHIN q DHIN q DHA q |
+  Dadra (6, 3+3 — thumri/ghazal/tender):  '|' every 12 beats (2 cycles)
+    DHA q TIN q TIN q TA q DHIN q DHIN q |
+  Rupak (7, 3-2-2 — starts light, khali first):  '|' every 28 beats (4 cycles)
+    TIN q TIN q NA q DHIN q NA q DHIN q NA q |
+  Jhaptal (10, 2-3-2-3):  '|' every 20 beats (2 cycles)
+    DHIN q NA q DHIN q DHIN q NA q TIN q NA q DHIN q DHIN q NA q |
+For @genre indian_classical/bollywood, the RHYTHM lane should be a tala above
+(or Keherwa by default); Western genres use the GENRE GROOVES kit bars.
+
+SARGAM — convert to pitches BEFORE writing (the model knows sargam; the
+parser does not). Reference Bilawal on C: S=C R=D G=E M=F P=G D=A N=B;
+komal (flat) Re Ga Dha Ni => Db Eb Ab Bb; teevara Ma => F#. Tonic X means
+start the set at X (Bhupali on D: D E F# A B). Put S at C4-ish (D4 for tonic
+D) and S' one octave up.
+RAGA QUICK-REFERENCE (seed only — VERIFY any raga with web_search
+"<raga> raga Wikipedia aarohi avarohi pakad samay" before composing;
+Wikipedia's raga articles are authoritative and this table is a memory aid):
+  Bhupali/Bhopali (evening, serene, pentatonic, NO Ma/Ni): S R G P D => C D E G A
+  Yaman (evening, devotional, uses teevara Ma): S R G M# P D N
+  (add more via web search — quote the found aarohi/avarohi in your draft)
+
+VARIATION & FILL — never repeat one groove bar more than 4 times; write a
+fill bar every 4th-8th bar and immediately before every section change
+(kit genres: LT e MT e HT e CR q |  ; tabla: DHA e TIN e NA e DHIN q TA e GHE q |).
+A piece over 16 bars needs a contrasting section (bridge/break): different
+energy AND at least one lane's pattern. Drone/tanpura lanes hold the tonic
+and fifth as whole notes for the WHOLE piece (e.g. D2:5 w | A2:5 w |) —
+a drone lane of rests (R w) is silence, not tanpura.
+LENGTH — the grid is the promise: total @section bars ≈ seconds × BPM ÷ 240
+(2 min at 90 BPM = 45 bars). If you write less material than the grid, it
+loops automatically — declare the full bar count, vamp what you need.
 
 MUSIC THEORY (write music, not random notes):
   - Melody dances on the harmony: chord tones on strong beats (favour the 3rd/7th), stepwise passing tones on weak beats, neighbour tones, and suspensions that resolve by step across chord changes.

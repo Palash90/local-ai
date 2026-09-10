@@ -17,6 +17,7 @@ Note/chord/drum syntax::
     @tempo 96                   global tempo directive
 """
 
+import difflib
 import re
 
 DUR_BEATS = {"w": 4.0, "h": 2.0, "q": 1.0, "e": 0.5, "s": 0.25}
@@ -29,7 +30,7 @@ DYN_SUFFIX_RE = re.compile(r"(?<=[whqes.])([fmp!])$")
 # accent marker.
 LEAD_ACCENT_RE = re.compile(r"!$")
 TOKEN_RE = re.compile(r"^([A-G][#b]?-?\d+|R)([whqes]\.?)$", re.IGNORECASE)
-CHORD_QUAL = "maj7|min7|m7b5|dim7|maj|min|dim|aug|sus4|sus2|7"
+CHORD_QUAL = "maj7|min7|m7b5|dim7|maj|min|dim|aug|sus4|sus2|56|5|7"
 ARP_FLAGS = {"ar": "up", "ad": "down", "au": "updown"}
 CHORD_RE = re.compile(
     r"^([A-G][#b]?)(-?\d+)?(?::(" + CHORD_QUAL + r"))?(ar|ad|au)?([whqes]\.?)$",
@@ -61,7 +62,7 @@ DRUM_MAP = {
     "RIDE": 51, "RD": 51, "RDC": 59,
     "CB": 56, "COWB": 56, "TAM": 54, "VB": 58, "AG": 67, "AGH": 67,
     "CONG": 63, "CGA": 63, "CGH": 62, "CGO": 64,
-    "BOG": 60, "BOGL": 61, "TBL": 65, "TBLL": 66,
+    "BOG": 60, "BOGL": 61, "TBL": 65, "TBLL": 66, "KA": 40, "KE": 40,
     "MAR": 70, "CAB": 69, "CLV": 75, "WBH": 76, "WBL": 77, "GUI": 73,
     "GUIR": 74, "CUIC": 79, "TRIG": 81, "WHIS": 71, "TRI": 81,
     # Tabla syllables (theka voices) -> the kit colours the engine's tabla
@@ -163,7 +164,8 @@ def parse_score(text, tempo=120):
     structure = the @section timeline (song form) shared across all lanes.
     """
     from server.features.music.theory import (
-        note_to_midi, chord_pitches, PROGRAMS, DEFAULT_PROGRAM, DEFAULT_VOL)
+        note_to_midi, chord_pitches, PROGRAMS, DEFAULT_PROGRAM, DEFAULT_VOL,
+        DRUM_STYLES)
     errors, sections = [], []
     cur = None
     structure, bar_energy = _parse_sections(text)
@@ -174,24 +176,44 @@ def parse_score(text, tempo=120):
         m = BRACKET_RE.match(line)
         if m:
             name, attrs = _parse_header(m.group(1).strip())
+            pval = str(attrs.get("prog", "") or "").upper()
             drum = (name in DRUM_SECTION_NAMES
                     or any(name.startswith(p) for p in DRUM_NAME_PREFIXES)
-                    or str(attrs.get("prog", "")).lower() in ("drums", "drum"))
-            if attrs.get("prog") is not None:
-                pval = attrs["prog"]
+                    or pval in ("DRUMS", "DRUM") or pval in DRUM_STYLES)
+            kit = None
+            if drum:
+                kit = pval if pval in DRUM_STYLES and pval != "KIT" else None
+                program = 0
+            elif attrs.get("prog") is not None:
                 try:
-                    program = int(pval)
+                    program = int(attrs["prog"])
                 except ValueError:
-                    program = PROGRAMS.get(str(pval).upper(), DEFAULT_PROGRAM)
+                    if pval in PROGRAMS:
+                        program = PROGRAMS[pval]
+                    else:
+                        near = difflib.get_close_matches(pval, sorted(PROGRAMS), 1)
+                        errors.append(
+                            f"line {lineno}: unknown instrument {attrs['prog']!r}"
+                            + (f" (did you mean {near[0].title()}?)" if near
+                               else " — see the INSTRUMENTS list"))
+                        program = PROGRAMS.get(pval, DEFAULT_PROGRAM)
             else:
-                program = PROGRAMS.get(name, DEFAULT_PROGRAM)
+                if name in PROGRAMS:
+                    program = PROGRAMS[name]
+                else:
+                    near = difflib.get_close_matches(name, sorted(PROGRAMS), 1)
+                    errors.append(
+                        f"line {lineno}: lane '{name}' has no instrument"
+                        + (f" (did you mean {near[0].title()}?)" if near
+                           else " — e.g. [MELODY santoor vol=90]"))
+                    program = DEFAULT_PROGRAM
             try:
                 default_v = 80 if drum else DEFAULT_VOL.get(program, 100)
                 vol = max(0, min(100, int(attrs.get("vol", default_v))))
             except ValueError:
                 vol = 80 if drum else DEFAULT_VOL.get(program, 100)
             cur = {"name": name, "program": 0 if drum else program, "vol": vol,
-                   "drum": drum, "events": [], "cursor": 0.0}
+                   "drum": drum, "kit": kit, "events": [], "cursor": 0.0}
             sections.append(cur)
             line = m.group(2).strip()
             if not line:
@@ -200,96 +222,113 @@ def parse_score(text, tempo=120):
             cur = {"name": "PIANO", "program": DEFAULT_PROGRAM, "vol": 100,
                    "drum": False, "events": [], "cursor": 0.0}
             sections.append(cur)
-        toks = re.split(r"\s*\|\s*|\s+", line)
-        i = 0
-        while i < len(toks):
-            tok = toks[i]
-            i += 1
-            if not tok:
+        _parts = line.split("|") if "|" in line else [line]
+        for _pi, _part in enumerate(_parts):
+            toks = [t for t in re.split(r"\s+", _part.strip()) if t]
+            if not toks:
+                if _pi == len(_parts) - 1:
+                    continue
+                cur["cursor"] = cur["cursor"] + 4.0
                 continue
-            # a dynamic may be attached to the pitch (accent "!") OR to the
-            # duration ("q!"); accept "C4! q", "C4 q!", "C4q!".
-            lead_dyn = None
-            if LEAD_ACCENT_RE.search(tok):
-                lead_dyn = DYN_MAP["!"]
-                tok = LEAD_ACCENT_RE.sub("", tok)
-            if (CHORD_SYM_RE.match(tok) and i < len(toks)
-                    and toks[i].lower() in ARP_FLAGS):
-                tok = tok + toks[i]
+            _bar_start = cur["cursor"]
+            i = 0
+            while i < len(toks):
+                tok = toks[i]
                 i += 1
-            if ((CHORD_SYM_RE.match(tok) or NOTE_SYM_RE.match(tok)
-                 or DRUM_SYM_RE.match(tok))
-                    and i < len(toks) and DUR_DYN_RE.match(toks[i])):
-                tok = tok + toks[i]
-                i += 1
-            try:
-                dyn = lead_dyn
-                ds = DYN_SUFFIX_RE.search(tok)
-                if ds and ds.group(1).lower() in DYN_MAP:
-                    dyn = DYN_MAP[ds.group(1).lower()]
-                    tok = tok[: ds.start()]
-                if cur["drum"]:
-                    dm = DRUM_RE.match(tok)
-                    if dm:
-                        beats = _beats(dm.group(2))
-                        hit = dm.group(1).upper()
-                        if hit == "R":
-                            cur["events"].append({"type": "rest",
-                                                  "start": cur["cursor"], "dur": beats})
+                if not tok:
+                    continue
+                # a dynamic may be attached to the pitch (accent "!") OR to the
+                # duration ("q!"); accept "C4! q", "C4 q!", "C4q!".
+                lead_dyn = None
+                if LEAD_ACCENT_RE.search(tok):
+                    lead_dyn = DYN_MAP["!"]
+                    tok = LEAD_ACCENT_RE.sub("", tok)
+                if (CHORD_SYM_RE.match(tok) and i < len(toks)
+                        and toks[i].lower() in ARP_FLAGS):
+                    tok = tok + toks[i]
+                    i += 1
+                if ((CHORD_SYM_RE.match(tok) or NOTE_SYM_RE.match(tok)
+                     or DRUM_SYM_RE.match(tok))
+                        and i < len(toks) and DUR_DYN_RE.match(toks[i])):
+                    tok = tok + toks[i]
+                    i += 1
+                try:
+                    dyn = lead_dyn
+                    ds = DYN_SUFFIX_RE.search(tok)
+                    if ds and ds.group(1).lower() in DYN_MAP:
+                        dyn = DYN_MAP[ds.group(1).lower()]
+                        tok = tok[: ds.start()]
+                    if cur["drum"]:
+                        dm = DRUM_RE.match(tok)
+                        if dm:
+                            beats = _beats(dm.group(2))
+                            hit = dm.group(1).upper()
+                            if hit == "R":
+                                cur["events"].append({"type": "rest",
+                                                      "start": cur["cursor"], "dur": beats})
+                            else:
+                                ev = {"type": "note", "midi": DRUM_MAP[hit],
+                                      "start": cur["cursor"], "dur": beats}
+                                if dyn is not None:
+                                    ev["vel"] = dyn
+                                cur["events"].append(ev)
+                            cur["cursor"] += beats
+                            continue
+                    cm = CHORD_RE.match(tok)
+                    tm = TOKEN_RE.match(tok)
+                    if cm and (":" in tok or cm.group(4)):
+                        root = _canon(cm.group(1))
+                        octv = int(cm.group(2)) if cm.group(2) else 4
+                        qual = (cm.group(3) or "maj").lower()
+                        beats = _beats(cm.group(5))
+                        pitches = chord_pitches(root, qual, octv)
+                        arp = (cm.group(4) or "").lower()
+                        if not arp:
+                            ev = {"type": "chord", "pitches": pitches,
+                                  "start": cur["cursor"], "dur": beats}
+                            if dyn is not None:
+                                ev["vel"] = dyn
+                            cur["events"].append(ev)
                         else:
-                            ev = {"type": "note", "midi": DRUM_MAP[hit],
+                            # arpeggio: play the chord tones in sequence across the
+                            # written duration — one token, a rolled figure.
+                            seq = (pitches if arp == "ar" else
+                                   list(reversed(pitches)) if arp == "ad" else
+                                   pitches + list(reversed(pitches))[1:-1])
+                            step = beats / len(seq)
+                            for pi, p in enumerate(seq):
+                                ev = {"type": "note", "midi": p,
+                                      "start": cur["cursor"] + pi * step,
+                                      "dur": step}
+                                if dyn is not None:
+                                    ev["vel"] = dyn
+                                cur["events"].append(ev)
+                        cur["cursor"] += beats
+                    elif tm:
+                        pitch, dur = tm.group(1), tm.group(2)
+                        beats = _beats(dur)
+                        if pitch.upper() == "R":
+                            cur["events"].append({"type": "rest", "start": cur["cursor"], "dur": beats})
+                        else:
+                            ev = {"type": "note", "midi": note_to_midi(pitch),
                                   "start": cur["cursor"], "dur": beats}
                             if dyn is not None:
                                 ev["vel"] = dyn
                             cur["events"].append(ev)
                         cur["cursor"] += beats
-                        continue
-                cm = CHORD_RE.match(tok)
-                tm = TOKEN_RE.match(tok)
-                if cm and (":" in tok or cm.group(4)):
-                    root = _canon(cm.group(1))
-                    octv = int(cm.group(2)) if cm.group(2) else 4
-                    qual = (cm.group(3) or "maj").lower()
-                    beats = _beats(cm.group(5))
-                    pitches = chord_pitches(root, qual, octv)
-                    arp = (cm.group(4) or "").lower()
-                    if not arp:
-                        ev = {"type": "chord", "pitches": pitches,
-                              "start": cur["cursor"], "dur": beats}
-                        if dyn is not None:
-                            ev["vel"] = dyn
-                        cur["events"].append(ev)
                     else:
-                        # arpeggio: play the chord tones in sequence across the
-                        # written duration — one token, a rolled figure.
-                        seq = (pitches if arp == "ar" else
-                               list(reversed(pitches)) if arp == "ad" else
-                               pitches + list(reversed(pitches))[1:-1])
-                        step = beats / len(seq)
-                        for pi, p in enumerate(seq):
-                            ev = {"type": "note", "midi": p,
-                                  "start": cur["cursor"] + pi * step,
-                                  "dur": step}
-                            if dyn is not None:
-                                ev["vel"] = dyn
-                            cur["events"].append(ev)
-                    cur["cursor"] += beats
-                elif tm:
-                    pitch, dur = tm.group(1), tm.group(2)
-                    beats = _beats(dur)
-                    if pitch.upper() == "R":
-                        cur["events"].append({"type": "rest", "start": cur["cursor"], "dur": beats})
-                    else:
-                        ev = {"type": "note", "midi": note_to_midi(pitch),
-                              "start": cur["cursor"], "dur": beats}
-                        if dyn is not None:
-                            ev["vel"] = dyn
-                        cur["events"].append(ev)
-                    cur["cursor"] += beats
-                else:
-                    errors.append(f"line {lineno}: bad token {tok!r}")
-            except ValueError as e:
-                errors.append(f"line {lineno}: {e}")
+                        errors.append(f"line {lineno}: bad token {tok!r}")
+                except ValueError as e:
+                    errors.append(f"line {lineno}: {e}")
+            _delta = cur["cursor"] - _bar_start
+            if "|" not in line:
+                continue
+            # '|' closes a bar: a short bar is rest-padded so lanes stay
+            # aligned; an overlong bar keeps flowing into the next (that IS
+            # how fills read — the engine's own grooves rely on it).
+            if _delta < 3.999:
+                cur["cursor"] = _bar_start + 4.0
+
     total = sum(len(s["events"]) for s in sections)
     if total > MAX_NOTES:
         errors.append(f"too many notes: {total} > {MAX_NOTES}")

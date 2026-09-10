@@ -259,13 +259,15 @@ def test_arpeggio_expansion():
     assert h[4]["type"] == "chord"                      # block form untouched
     d = [e["midi"] for e in secs[1]["events"]]
     assert d == sorted(d, reverse=True)                 # ad -> descending roll
-    secs2, errs2, _ = parse_score("[HARMONY]\nE4:min7arq |", 120)  # fused form
+    secs2, errs2, _ = parse_score("[HARMONY epiano]\nE4:min7arq |", 120)  # fused form
     assert not errs2 and len(secs2[0]["events"]) == 4
 
 
 def test_dsl_doc_sections_and_example_bars():
-    """The live DSL doc is hot-swapped by hand — guard its structure and every
-    GENRE GROOVES / ARPENING example bar against the real parser."""
+    """The live DSL doc is hot-swapped by hand — guard its structure, and
+    every bar-shaped example in it (grooves, talas, fills, arp figures)
+    against the real parser. Prose is skipped because only pitch+duration
+    PAIR runs match the extraction regex."""
     import pathlib
     import re
     from server.features.music.parse import parse_score
@@ -273,16 +275,19 @@ def test_dsl_doc_sections_and_example_bars():
            "music_dsl.txt").read_text()
     for sec in ("LANES:", "EVENTS", "GENRE GROOVES", "ARPENING",
                 "arpeggio:", "chord:", "drum:", "MUSIC THEORY",
-                "ANTI-EXAMPLE", "LOOP SEMANTICS"):
+                "ANTI-EXAMPLE", "LOOP SEMANTICS", "TALAS", "SARGAM"):
         assert sec in doc, sec
-    region = doc[doc.index("GENRE GROOVES —"):doc.index("MUSIC THEORY (write music")]
-    for line in region.splitlines():
-        line = line.strip()
-        if "|" not in line:
-            continue
-        bars = re.findall(r"([A-Z][A-Z0-9:! .]{1,60}?\|)", line)
-        if not bars:
-            continue
-        lane = "[RHYTHM]" if not re.search(r"\d+:", line) else "[HARMONY epiano]"
-        _, errs, _ = parse_score(lane + "\n" + " ".join(bars), 120)
-        assert not errs, (line, errs[:2])
+    PITCH = r"[A-Z][A-Z0-9#']*(?::[a-z0-9]+)?(?:ar|ad|au)?"
+    DUR = r"[qwhes]\.?"
+    pair_re = re.compile(rf"(?:{PITCH} {DUR} ?)+")
+    checked = 0
+    for line in doc.splitlines():
+        for spec in [s.strip() for s in line.split("|")]:
+            if not spec or not pair_re.fullmatch(spec):
+                continue
+            lane = ("[RHYTHM tabla]" if not re.search(r"\d+:", spec)
+                    else "[HARMONY epiano]")
+            _, errs, _ = parse_score(lane + "\n" + spec + " |", 120)
+            assert not errs, (spec[:60], errs[:2])
+            checked += 1
+    assert checked >= 12, f"guard barely checked anything: {checked}"

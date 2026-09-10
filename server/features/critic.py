@@ -1107,8 +1107,15 @@ def _retry_decision(task_id, judge_result, mismatch_reason):
             return "retry", "unsafe"
         return "decline", "unsafe"
     if mismatch_reason:
-        if mismatch_done < 1:
+        # score_errors (a malformed score) gets its own, larger budget — two
+        # fix-attempts are cheap and the retry hint is specific; on giveup the
+        # worker appends an honest ask so the user decides, instead of
+        # silently shipping a broken piece.
+        budget = 2 if mismatch_reason == "score_errors" else 1
+        if mismatch_done < budget:
             return "retry", mismatch_reason
+        if mismatch_reason == "score_errors":
+            return "finalize", "score_errors_giveup"
         return "finalize", mismatch_reason
     if no_cites:
         if mismatch_done < 1:
@@ -1276,6 +1283,17 @@ def run_verification_worker(task_id, sid, answer, body, mode):
                 ) + addendum
         except Exception as e:
             print(f"[critic] reasoning addendum skipped: {e}")
+        if reason == "score_errors_giveup":
+            with M._data_lock:
+                t_g = M.tasks.get(task_id) or {}
+            bad = "; ".join((t_g.get("music_errors") or [])[:3])
+            final += (
+                "\n\n⚠ I tried this arrangement three times but the score kept "
+                "containing unplayable parts"
+                + (f" ({bad})" if bad else "")
+                + ". The player above may be incomplete. Want me to try a "
+                "simpler instrument mix or a different genre?"
+            )
         M._finalize_task(task_id, sid, final, body)
     except Exception as e:
         print(f"[critic] verification pass failed for task {task_id}: {e}")
