@@ -116,7 +116,14 @@ VARIATION & FILL — never repeat one groove bar more than 4 times; write a
 fill bar every 4th-8th bar and immediately before every section change
 (kit genres: LT e MT e HT e CR q |  ; tabla: DHA e TIN e NA e DHIN q TA e GHE q |).
 A piece over 16 bars needs a contrasting section (bridge/break): different
-energy AND at least one lane's pattern. Drone/tanpura lanes hold the tonic
+energy AND at least one lane's pattern. Reprises ACROSS sections are song
+form and welcome — verse 1 and verse 2 may share the melody; the engine only
+varies repeats that loop WITHIN one section (even occurrences drop their
+beat-3 stab). INSTRUMENT-PER-SECTION: give each phase its own lead by
+resting lanes elsewhere — e.g. [MELODY flute] plays the verse bars and rests
+('R w |') through bridge/chorus while [MELODY2 trumpet] does the opposite; rest-
+padded lanes are never looped. (Use exact INSTRUMENT aliases above — bare
+'horn' is invalid; write 'trumpet', 'FRENCHHORN', etc.) Drone/tanpura lanes hold the tonic
 and fifth as whole notes for the WHOLE piece (e.g. D2:5 w | A2:5 w |) —
 a drone lane of rests (R w) is silence, not tanpura.
 LENGTH — the grid is the promise: total @section bars ≈ seconds × BPM ÷ 240

@@ -259,13 +259,18 @@ def _variation_pass(sections, structure, bar_energy, errors):
     if grid_bars < 2:
         return
     boundaries = {sg["start_bar"] - 1 for sg in structure if sg["start_bar"] > 0}
-    mel = next((x for x in sections if x.get("_tiled") and not x["drum"]
-                and x["name"].startswith("MELODY")), None)
+    mels = [x for x in sections if x.get("_tiled") and not x["drum"]
+            and x["name"].startswith("MELODY")]
     harms = [x for x in sections if x.get("_tiled") and not x["drum"]
              and x["name"].startswith(("HARMONY", "PAD", "CHORDS"))]
     rhy = [x for x in sections if x.get("_tiled") and x["drum"]]
-    if not (mel or harms or rhy):
+    if not (mels or harms or rhy):
         return
+    # bar -> section index, from the song form grid
+    bar_sec = {}
+    for si, seg in enumerate(structure):
+        for b in range(seg["start_bar"], seg["start_bar"] + seg["bars"]):
+            bar_sec[b] = si
     for x in rhy:
         for b in sorted(boundaries):
             if b + 1 > grid_bars or b < 1:
@@ -276,19 +281,63 @@ def _variation_pass(sections, structure, bar_energy, errors):
                              "start": b * 4 + pos, "dur": 1.0,
                              "vel": _stroke_vel(note, pos)})
             x["events"] = sorted(keep, key=lambda e: e["start"])
+    # Alternate-cycle call/response on repeated melody/harmony bars — but
+    # ONLY within the same section: a reprise across sections (verse 1 ->
+    # verse 2, bridge returns) is song form and stays whole, while the same
+    # figure looping inside one section is what sounds mechanical. Whether
+    # the repeat came from tiling or the model copy-pasting the same figure
+    # makes no audible difference. Odd occurrences within a section drop
+    # their beat-3 stab (if >=2 events remain). Removal only — harmony can
+    # never clash. First occurrences are untouched.
+    for s in mels + harms:
+        seen = {}
+        drop_ids = set()
+        for b in range(grid_bars):
+            bevs = [e for e in s["events"] if _in_bar(e, b)]
+            if not bevs:
+                continue
+            sig = tuple(
+                ("n", e["midi"], round(e["start"] - b * 4, 3), round(e["dur"], 3))
+                if e["type"] == "note" else
+                ("c", tuple(e["pitches"]), round(e["start"] - b * 4, 3),
+                 round(e["dur"], 3)) if e["type"] == "chord" else
+                ("r", round(e["start"] - b * 4, 3), round(e["dur"], 3))
+                for e in sorted(bevs, key=lambda e: e["start"])
+            )
+            key = (bar_sec.get(b, -1), sig)
+            seen.setdefault(key, []).append(b)
+            if len(seen[key]) % 2 == 0:
+                stabs = [e for e in bevs
+                         if e["type"] in ("note", "chord")
+                         and abs((e["start"] - b * 4)
+                                 - round(e["start"] - b * 4)) < 1e-6
+                         and round(e["start"] - b * 4) == 3]
+                if stabs and len(bevs) - len(stabs) >= 2:
+                    drop_ids.update(id(e) for e in stabs)
+        if drop_ids:
+            s["events"] = [e for e in s["events"] if id(e) not in drop_ids]
     for b in range(grid_bars):
         ebar = bar_energy[min(b, len(bar_energy) - 1)]
         if ebar >= 0.65:
-            if mel is not None:
+            for mel in mels:
                 strong = [e for e in list(mel["events"])
-                          if _in_bar(e, b) and e["type"] == "note"
+                          if _in_bar(e, b) and e["type"] in ("note", "chord")
                           and abs((e["start"] - b * 4)
                                   - round(e["start"] - b * 4)) < 1e-6]
                 for e in strong:
-                    g = dict(e)
-                    g["midi"] = e["midi"] + 12
+                    if e["type"] == "note":
+                        g = dict(e)
+                        g["midi"] = e["midi"] + 12
+                        g["dur"] = e["dur"] * 0.75
+                    else:  # chord: double only its top pitch
+                        if not e["pitches"]:
+                            continue
+                        g = {"type": "note",
+                             "midi": max(e["pitches"]) + 12,
+                             "start": e["start"],
+                             "dur": e["dur"] * 0.75,
+                             "_cycle": e.get("_cycle", 0)}
                     g["start"] = e["start"]
-                    g["dur"] = e["dur"] * 0.75
                     g["vel"] = 64
                     g["ghost"] = True
                     mel["events"].append(g)
@@ -308,8 +357,8 @@ def _variation_pass(sections, structure, bar_energy, errors):
                     r["events"].append({"type": "note", "midi": 40,
                                         "start": b * 4 + 3.5, "dur": 0.5,
                                         "vel": _stroke_vel(40, 3.5)})
-            if mel is not None:
-                mel["events"].sort(key=lambda e: e["start"])
+            for m in mels:
+                m["events"].sort(key=lambda e: e["start"])
         elif ebar <= 0.5:
             for r in rhy:
                 r["events"] = [
@@ -548,6 +597,7 @@ def parse_score(text, tempo=120):
                 s["_tiled"] = True
                 tiled = list(evs)
                 offset = span
+                cycle = 1
                 while offset < grid_beats:
                     for e in evs:
                         st = e["start"] + offset
@@ -555,12 +605,14 @@ def parse_score(text, tempo=120):
                             continue
                         dup = dict(e)
                         dup["start"] = st
+                        dup["_cycle"] = cycle
                         if st + dup["dur"] > grid_beats:
                             dup["dur"] = grid_beats - st
                             if dup["dur"] <= 0:
                                 continue
                         tiled.append(dup)
                     offset += span
+                    cycle += 1
                 s["events"] = tiled
             total = sum(len(s["events"]) for s in sections)
             if total > MAX_NOTES:
@@ -569,6 +621,8 @@ def parse_score(text, tempo=120):
     _humanize(sections, text)
     for s in sections:
         s.pop("_tiled", None)
+        for e in s["events"]:
+            e.pop("_cycle", None)
     # Assign each event the energy of the song-form bar it lands in, so lanes
     # play a section's dynamics even though the notes were written flat.
     def _energy_for(start):

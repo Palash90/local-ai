@@ -379,3 +379,71 @@ def test_full_length_lanes_never_transformed():
     assert sum(len(s["events"]) for s in secs) == 16
     assert not any(e.get("ghost") for s in secs for e in s["events"])
     assert all(e["midi"] != 49 for e in secs[0]["events"])     # no synthetic fills
+
+
+def test_chord_melody_gets_top_note_ghosts():
+    """Chord-type MELODY events must get octave ghost doubles in loud bars
+    (regression: ghosts previously only fired for single-note events, so a
+    block-chord lead got zero variation)."""
+    from server.features.music.parse import parse_score
+    score = (
+        "@tempo 100\n"
+        "@section chorus bars=4 energy=1.0\n"
+        "[MELODY Frenchhorn]\n"
+        "C4:maj7 q D4:maj7 q E4:min7 q F4:maj7 h |\n"
+        "C4:maj7 q D4:maj7 q E4:min7 q F4:maj7 h |\n"
+    )
+    secs, errs, _ = parse_score(score, 100)
+    assert not errs, errs
+    mel = next(s for s in secs if s["name"] == "MELODY")
+    ghosts = [e for e in mel["events"] if e.get("ghost")]
+    assert ghosts, "no ghosts on chord melody"
+    # top pitch of first chord C4:maj7 (60,64,67,71) doubled at 83
+    assert any(e["midi"] == 83 and e["vel"] == 64 for e in ghosts)
+
+
+def test_repeated_bars_thin_on_even_occurrences():
+    """Repeats looping WITHIN one section lose the beat-3 stab on even
+    occurrences; a reprise in a NEW section (verse 1 -> verse 2) stays
+    whole — that's song form, not monotony. Sparse bars untouched.
+    The lane is shorter than the grid so it tiles (the realistic vamp path);
+    tiling copies carry the same figure into both sections."""
+    from server.features.music.parse import parse_score
+    score = (
+        "@tempo 100\n"
+        "@section verse1 bars=3 energy=0.6\n"
+        "@section verse2 bars=3 energy=0.6\n"
+        "[MELODY piano]\n"
+        "C4 q D4 q E4 q F4 q |\n"   # written bar 0
+        "C4 q D4 q E4 q F4 q |\n"   # written bar 1
+        "G4 w |\n"                   # written bar 2
+    )
+    secs, errs, _ = parse_score(score, 100)
+    assert not errs, errs
+    mel = next(s for s in secs if s["name"] == "MELODY")
+    bybar = {}
+    for e in mel["events"]:
+        bybar.setdefault(int(e["start"] // 4), []).append(e)
+    assert len(bybar[0]) == 4
+    assert len(bybar[1]) == 3 and all(e["start"] - 4 < 3 for e in bybar[1])
+    assert len(bybar[2]) == 1
+    assert len(bybar[3]) == 4
+    assert len(bybar[4]) == 3
+    assert len(bybar[5]) == 1
+    # determinism: identical re-parse
+    secs2, _, _ = parse_score(score, 100)
+    mel2 = next(s for s in secs2 if s["name"] == "MELODY")
+    k = lambda e: (e["type"], e.get("midi"), tuple(e.get("pitches", [])),
+                   round(e["start"], 3), round(e["dur"], 3), e.get("vel"))
+    assert [k(e) for e in mel["events"]] == [k(e) for e in mel2["events"]]
+
+
+def test_no_internal_keys_leak_to_events():
+    """_cycle/_tiled markers must never reach midi_out."""
+    from server.features.music.parse import parse_score
+    score = open("/tmp/opencode/u_score.txt").read()
+    secs, errs, _ = parse_score(score, 100)
+    assert not errs, errs
+    assert not any("_cycle" in e or "_tiled" in e
+                   for s in secs for e in s["events"])
+    assert all("_tiled" not in s for s in secs)
