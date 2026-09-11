@@ -1,27 +1,5 @@
 # Polu's AI Assistant — Self-Hosted LLM, Image & Music Generation Stack
 
-## Highlights
-
-- **Chat with real tool use** — web search, page fetch, file reading, tasks and
-  reminders, user location, all inside the conversation.
-- **On-device image generation & editing** (ComfyUI `z_image`) with VRAM
-  choreography so the chat model survives renders.
-- **Original music composition** — the `generate_music` score DSL renders to
-  WAV on-device, with a public audition showcase ([Music generation](#music-generation)).
-- **OpenAI-compatible `/v1/*` API** plus an **MCP gateway** (`:8000`) with
-  batched agent jobs ([Companion Services](#companion-services)).
-- **Layered guardrails** — L1 patterns, L2 input judge, L3 output judge, critic
-  citation checks and deterministic requirement gates; fail-open on the UI,
-  fail-closed on MCP traffic.
-- **Multi-agent story pipeline** with editor/moderator gates, published to
-  role-gated story hosting (`:3002`).
-- **Multilingual read-aloud (TTS)** with word-level sync ([Voice](#voice--read-aloud-tts)).
-- **Authentik SSO** in front of everything ([Authentication](#authentication-sso)).
-- **Context engineering** — Pensieve archival compaction, warm tool-docs
-  cache, hot-reloadable prompts, KV slot checkpoints across unloads.
-- **Built for a 4 GB VRAM laptop** — idle unload, thermal/RAM guards, per-lane
-  queues ([Architecture](ARCHITECTURE.md)).
-
 A self-hosted AI stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM): a
 chat web UI with tool use (web search, page fetch, image generation/editing,
 on-device music composition, file reading, tasks, reminders), an OpenAI-compatible API, an MCP gateway with
@@ -43,6 +21,28 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 > kind and without liability. AI-generated content may contain errors: review
 > security-sensitive paths (auth, networking, file serving) yourself before
 > exposing this stack beyond localhost.
+
+## Highlights
+
+- **Chat with real tool use** — web search, page fetch, file reading, tasks and
+  reminders, user location, all inside the conversation.
+- **On-device image generation & editing** (ComfyUI `z_image`) with VRAM
+  choreography so the chat model survives renders.
+- **Original music composition** — the `generate_music` score DSL renders to
+  WAV on-device, with a public audition showcase ([Music generation](#music-generation)).
+- **OpenAI-compatible `/v1/*` API** plus an **MCP gateway** (`:8000`) with
+  batched agent jobs ([Companion Services](#companion-services)).
+- **Layered guardrails** — L1 patterns, L2 input judge, L3 output judge, critic
+  citation checks and deterministic requirement gates; fail-open on the UI,
+  fail-closed on MCP traffic.
+- **Multi-agent story pipeline** with editor/moderator gates, published to
+  role-gated story hosting (`:3002`).
+- **Multilingual read-aloud (TTS)** with word-level sync ([Voice](#voice--read-aloud-tts)).
+- **Authentik SSO** in front of everything ([Authentication](#authentication-sso)).
+- **Context engineering** — Pensieve archival compaction, warm tool-docs
+  cache, hot-reloadable prompts, KV slot checkpoints across unloads.
+- **Built for a 4 GB VRAM laptop** — idle unload, thermal/RAM guards, per-lane
+  queues ([Architecture](ARCHITECTURE.md)).
 
 ## Requirements
 
@@ -526,7 +526,9 @@ and per instrument timbre — lives at `/api/public/music/showcase` (:3001).
   `MUSIC_OPUS_BITRATE`, ~22× smaller than WAV, encoded with stdlib ctypes
   against system libopus — no ffmpeg/pip deps); the player falls back to WAV
   if the sidecar is missing, and Download keeps the full WAV.
-- Scores must stay compact (~700 chars; the DSL doc enforces this): longer
+- Scores must stay compact (~1100 chars; the DSL doc enforces this and asks
+  for 2-3 short vamps per phase — never one vamp looped for 20 bars, and
+  melody duets must trade the lead, not sprinkle a second voice): longer
   scores get cut off by the generation token budget, which makes llama.cpp
   reject the tool call. The server retries malformed tool calls twice with a
   shorten-and-re-emit steer before failing the task.
