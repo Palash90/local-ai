@@ -17,7 +17,7 @@
 | 8079 | CPU llama | **DOWN** (lazy-start) |
 | 8083 | guardrail llama | **DOWN** (lazy-start) |
 
-**2. Restart baseline.** The running chat-webui (PID 887506, up 8h+) predates some committed fixes (`openai_api.py`, `orchestration.py`). For conclusive results:
+**2. Restart baseline.** The running chat-webui may predate committed fixes (`openai_api.py`, `orchestration.py`). For conclusive results:
 ```bash
 ./restart_services.sh          # stops/restarts chat-webui, markdown, code-host; or
 pkill -f chat-webui.py && sleep 2 && bash -c 'nohup python3 ./chat-webui.py >>logs/chat-webui.log 2>&1 &'
@@ -355,11 +355,11 @@ With a browser (or headed test) authenticated via SSO:
 - **Existence probe** (`_citation_exists`): cite a real deep link that research never fetched (e.g. a `pmc.ncbi.nlm.nih.gov/articles/PMC…/` page) → the verification block must NOT flag it "likely fabricated"; the log shows the direct fetch succeeding (or `bot-blocked … treating as existing` for 403 hosts like tuftsmedicine.org) instead of a search-only miss
 - **Search-only probe regression**: a genuinely fake URL (404 + no search hits) must still be flagged "likely fabricated" — the probe's last-resort search path remains authoritative
 
-**I4. L2 judge false-positive sanity (benign code prompts)**
+**I5. L2 judge false-positive sanity (benign code prompts)**
 - Submit "Debug this Rust program …" and "This Rust code fails to compile … identify the exact bug" variants via MCP batch → both must pass L2 (the imperative "Debug …" phrasing has been classified HARMFUL by the small judge model — if it recurs, tighten `judge_input.txt` rather than the pipeline)
 - A blocked item shows `verification_level: LEVEL 2 LLM VERIFICATION FAILED` with the judge's raw verdict in `logs/chat-webui.log` (`[guardrail][L2] raw verdict:`) — use that line to separate judge false positives from genuinely harmful inputs
 
-**I5. Agent peer review (cpu lane, Kaya/Kolpo replies)**
+**I6. Agent peer review (cpu lane, Kaya/Kolpo replies)**
 - Requires the cpu lane (`FORCE_GPU_LANE=False` or explicit `mode:"cpu"`) — gpu-lane agent replies take the UI quality-judge branch instead
 - Chat as kaya (JWT) on the cpu lane → after the final answer, status shows `Peer review...` and logs show `[peer-review] kolpo verdict=PASS|FLAG confidence=NN notes=…`; the reply's message carries the ⚖ confidence chip from the peer verdict
 - The peer round (300s timeout) runs **directly on the cpu llama-server** (`:8079/v1/chat/completions`) — assert no second `/api/chat` task is created (recursion guard) and the original task finalizes even if the peer round fails
@@ -410,19 +410,9 @@ With a browser (or headed test) authenticated via SSO:
 
 ---
 
-## K. Android client (Capacitor wrapper, `android/`)
-
-Smoke only — the scaffold is currently untracked/minimal:
-- `cd android && ./gradlew assembleDebug` → APK builds
-- Install, point WebView at `https://<host>/ai/` (or the LAN origin), complete SSO login in the WebView
-- Send a chat, receive streamed reply; app kill + reopen → session list persisted (localStorage)
-- Back button: from chat → sidebar → exits app (no WebView history trap)
-
----
-
 ## Suggested execution order
 1. Pre-flight restart (§0, incl. FORCE_GPU_LANE check)
 2. A (OpenAI — validates the VS Code work; fail fast here)
 3. B3 chat e2e + C tools (exercises engine under real conditions)
 4. B remaining (incl. B6–B9) + I (moderation) + D + E (read/API surfaces)
-5. F offline pipeline, G browser, H infra, J resource management (slow loops last), K android (optional)
+5. F offline pipeline, G browser, H infra, J resource management (slow loops last)

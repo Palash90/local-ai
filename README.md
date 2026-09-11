@@ -181,7 +181,7 @@ Access at `http://localhost:3001` (published from the container). Notes:
 ```
 local-ai/
 ├── chat-webui.py            Entrypoint: owns ALL shared state, re-exports config +
-│                            features, registers the M proxy, starts 12 daemon threads,
+│                            features, registers the M proxy, starts 13 daemon threads,
 │                            serves server/api.Handler on :3001
 ├── server/                  Core backend
 │   ├── api.py               HTTP layer (routes, Handler, app-state injection)
@@ -239,7 +239,8 @@ local-ai/
 │   └── surface_attacks/     Guardrail pattern/judge files (optionally .enc via SURFACE_ATTACKS_KEY)
 ├── scripts/                 authentik_bootstrap.py, encrypt_surface.py,
 │                            gcp_heartbeat_server.py, connection_manager.py
-│                            (+ gcp-heartbeat.service, connection-manager.service)
+│                            (+ gcp-heartbeat.service, connection-manager.service,
+│                            ufw.conf)
 ├── searxng/                 SearXNG settings volume
 ├── markdown_hosting.py      Story hosting service on :3002 (FastAPI, free/premium/admin RBAC)
 ├── self-chat.py             Offline multi-agent story pipeline (CLI; editor gate
@@ -629,10 +630,16 @@ markdown_hosting → chat-webui; blank disables story audio).
 
 ## Testing
 
-There is **no automated test suite yet** (no `tests/`, no pytest/vitest config, no CI).
-The current regression gate is the manual interface plan in **[TEST_STEPS.md](TEST_STEPS.md)** —
-curl-level checks across the OpenAI API (§A), chat API + shares/tasks/presence (§B),
-tools + SSRF (§C), MCP gateway (§D), story RBAC (§E), self-chat pipeline (§F),
-SPA (§G), infra (§H), moderation & verification (§I), resource management (§J)
-and the Android client (§K). Run it (especially §Pre-flight + §A)
-after every deploy or llama-server restart before trusting results.
+Unit tests live beside the code (`server/features/tests/`,
+`server/features/music/tests/`, `server/features/pensieve/tests/` — 74 tests
+at last count); run them with `python -m pytest server/features/tests
+server/features/music/tests server/features/pensieve/tests -q
+--import-mode=importlib` (the import mode matters: without it the local
+`server/dotenv.py` shadows the real `dotenv` package during collection).
+The manual interface plan in **[TEST_STEPS.md](TEST_STEPS.md)** covers what
+unit tests can't — curl-level checks across the OpenAI API (§A), chat API +
+shares/tasks/presence (§B), tools + SSRF (§C), MCP gateway (§D), story RBAC
+(§E), self-chat pipeline (§F), SPA (§G), infra (§H), moderation & verification
+(§I) and resource management (§J). Run it (especially
+§Pre-flight + §A) after every deploy or llama-server restart before trusting
+results.

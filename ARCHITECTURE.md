@@ -505,7 +505,7 @@ playable WAV), plus a non-LLM `make music` chat shortcut
 **showcase** (`python -m server.features.music --showcase`).
 
 - **DSL & arrangement.** `parse.py` compiles `@tempo/@genre/@mood/@section`
-  directives and lane blocks (`[MELODY piano vol=90]`, note/chord/drug-hit
+  directives and lane blocks (`[MELODY piano vol=90]`, note/chord/drum-hit
   tokens) via `theory.py` (pitch↔MIDI, GM program map incl. world-instrument
   aliases mapped to nearest GM colour). `random_arrange.py` composes full
   pieces from `genres.py`/`moods.py`/`harmony.py`/`rhythm.py`/`world_scales.py`
@@ -526,10 +526,11 @@ playable WAV), plus a non-LLM `make music` chat shortcut
 - **Named drum kits.** A percussion lane may name a kit (`[RHYTHM tabla]`);
   kits in `fluid.KIT_SOUNDFONTS` render from their own soundfont as a melodic
   group (regular channel, prog 0, GM-kit→file key `note_map`), mixed via the
-  multi-pass machinery. Missing registered kit ⇒ render refuses
-  ("not installed") — no rock-kit faking of tabla (provenance of
-  `Tabla.sf2` in `soundfonts/PROVENANCE-Tabla.md`; syllable key map pending
-  ear-audition under `music/local/tabla-audition/`).
+   multi-pass machinery. Missing registered kit ⇒ render refuses
+   ("not installed") — no rock-kit faking of tabla (provenance of
+   `Tabla.sf2` in `soundfonts/PROVENANCE-Tabla.md`; the syllable→key map was
+   settled by spectral analysis of one-shot renders, keys sound at K−12
+   semitones over 60–82 — see `music/local/tabla-audition/`).
 - **Outputs & meta.** WAV/MIDI land in `music/<user>/gen_<id>.*`; the task
   carries `music_file/music_score/music_url/music_levels/music_duration`,
   which `_finalize_task` attaches to the assistant message as

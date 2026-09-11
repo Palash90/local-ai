@@ -90,12 +90,9 @@ python comfy_main.py --lowvram --input-directory ~/local-ai-files/ComfyUI/input 
 > CPU `--ctx-size 32768` (`CPU_CTX_SIZE`); guardrail ctx 16384. All servers
 > bind `127.0.0.1` (`CHAT_HOST`), not `0.0.0.0`. CPU (:8079), guardrail
 > (:8083) and embed (:8084) lanes are covered by `restart_services.sh` /
-> lazy-start, not by hand commands.
-
-```shell
- ~/local-ai/llama.cpp/build/bin/llama-server --host 0.0.0.0 --port 8081 --models-dir ~/local-ai-files/my-models/ --n-gpu-layers 99 --no-kv-offload --ctx-size 24576 --reasoning-budget 2048
-
-```
+> lazy-start, not by hand commands. (An old example block with `--host 0.0.0.0`
+> used to live here — removed: never bind llama-server off localhost, and see
+> README "Quick Start" for the current flags.)
 
 ### chat-server
 

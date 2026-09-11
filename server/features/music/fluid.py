@@ -39,7 +39,8 @@ _KNOWN_OVERRIDES = [
 
 # Named drum kits rendered from their own soundfont (melodic preset, so the
 # lane goes out on a normal channel with a note map from GM-kit numbers).
-# note_map is interim until the ear-check on music/local/tabla-audition/ lands.
+# note_map settled by spectral analysis of one-shot renders (see
+# music/local/tabla-audition/): keys sound at K-12 semitones over 60-82.
 KIT_SOUNDFONTS = {
     # Tabla.sf2 is a chromatic single-hit set: measured by spectrum, key K
     # sounds at K-12 semitones (60 -> C3 ~133 Hz ... 82 -> A#4 ~467 Hz);
