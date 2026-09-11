@@ -270,7 +270,10 @@ _STEERING_HINTS = {
         "tokens: chords as D3:min7 or G3:7 (never Dm4), no prose or stage "
         "directions, every lane bar-complete with '|' at each bar end, and "
         "keep at least MELODY + HARMONY lanes (plus BASS + RHYTHM if rhythm "
-        "was part of the request)."
+        "was part of the request). Lane headers take role + instrument words "
+        "in any order — extra role words are fine, descriptive words like "
+        "'soft' are ignored (put dynamics in vol=) — and unknown words must "
+        "go; follow any did-you-mean hint verbatim."
     ),
     "length_mismatch": (
         "The rendered piece is far from the length the user asked for. "

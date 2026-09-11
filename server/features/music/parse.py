@@ -134,6 +134,10 @@ ROLE_WORDS = {"MELODY", "HARMONY", "BASS", "PAD", "DRONE", "LEAD",
 ROLE_PREFIXES = ("MELODY", "HARMONY", "BASS", "RHYTHM", "PERC", "DRUM",
                  "TEXTURE", "PAD")
 
+# Descriptive adjectives carry no structural meaning (dynamics live in
+# vol=NN) — ignore silently instead of erroring, e.g. [PERC soft drum].
+IGNORED_HEADER_WORDS = {"SOFT", "LOUD", "QUIET", "SOLO"}
+
 
 def _is_role(u):
     return u in ROLE_WORDS or any(u.startswith(p) for p in ROLE_PREFIXES)
@@ -398,8 +402,15 @@ def parse_score(text, tempo=120):
                     if u != "KIT":
                         kit = u
                     continue
-                if role is None and _is_role(u):
-                    role = u
+                if _is_role(u) and (role is None or u not in PROGRAMS):
+                    # extra pure-role words are harmless ([PERC soft drum]):
+                    # first one names the lane, the rest are ignored. But a
+                    # word that is ALSO an instrument ([MELODY2 LEAD]) must
+                    # still fall through to instrument resolution below.
+                    if role is None:
+                        role = u
+                    continue
+                if u in IGNORED_HEADER_WORDS:
                     continue
                 if u.isdigit():
                     number = int(u)
@@ -434,7 +445,7 @@ def parse_score(text, tempo=120):
             for w in leftovers:
                 u = w.upper()
                 near = difflib.get_close_matches(
-                    u, sorted(set(PROGRAMS) | DRUM_STYLES), 1)
+                    u, sorted(set(PROGRAMS) | DRUM_STYLES | ROLE_WORDS), 1)
                 errors.append(
                     f"line {lineno}: unknown lane word {w!r}"
                     + (f" (did you mean {near[0].title()}?)" if near

@@ -447,3 +447,35 @@ def test_no_internal_keys_leak_to_events():
     assert not any("_cycle" in e or "_tiled" in e
                    for s in secs for e in s["events"])
     assert all("_tiled" not in s for s in secs)
+
+
+def test_header_extra_role_words_ignored():
+    """Regression: [PERC soft drum vol=70] (the failed live score) must parse
+    clean — extra role words are harmless, adjectives are ignored."""
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score("[PERC soft drum vol=70]\nBD q SN q BD q SN q |", 120)
+    assert not errs, errs
+    assert secs[0]["drum"] is True
+    assert secs[0]["vol"] == 70
+    assert len(secs[0]["events"]) == 4
+
+
+def test_header_adjective_ignored_melody_kept():
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score("[MELODY soft piano vol=85]\nC4 q D4 q E4 q F4 q |", 120)
+    assert not errs, errs
+    assert secs[0]["name"] == "MELODY"
+    assert secs[0]["program"] == 0  # PIANO
+    assert len(secs[0]["events"]) == 4
+
+
+def test_header_typo_suggests_sensibly():
+    from server.features.music.parse import parse_score
+    _, errs, _ = parse_score("[MELODY SANTOR]\nC4 w |", 120)
+    assert errs and "SANTOR" in errs[0] and "SANTOOR" in errs[0]
+    _, errs, _ = parse_score("[MELOD piano]\nC4 w |", 120)
+    assert errs and "MELODY" in errs[0]
+    # existing priority unchanged: first role word names the lane
+    secs, errs, _ = parse_score("[BASS ebass]\nC2 w |", 120)
+    assert not errs, errs
+    assert secs[0]["name"] == "BASS" and secs[0]["program"] == 33
