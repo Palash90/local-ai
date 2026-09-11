@@ -14,6 +14,14 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 [TEST_STEPS.md](TEST_STEPS.md) — manual regression plan ·
 [server_startup_commands.md](server_startup_commands.md) · [sso-debugging.md](sso-debugging.md)
 
+> **AI collaboration disclosure.** This repository is developed with AI coding
+> assistants working alongside the human maintainer — including code, tests,
+> docs, and commit messages. All changes are reviewed before merge and the
+> maintainer remains responsible for correctness, security, and licensing.
+> AI-generated content may contain errors: verify security-sensitive paths
+> (auth, networking, file serving) independently before exposing this stack
+> beyond localhost.
+
 ## Requirements
 
 - NVIDIA GPU with the driver working — check with `nvidia-smi`.
