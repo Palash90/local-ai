@@ -22,6 +22,28 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 > security-sensitive paths (auth, networking, file serving) yourself before
 > exposing this stack beyond localhost.
 
+## Highlights
+
+- **Chat with real tool use** — web search, page fetch, file reading, tasks and
+  reminders, user location, all inside the conversation.
+- **On-device image generation & editing** (ComfyUI `z_image`) with VRAM
+  choreography so the chat model survives renders.
+- **Original music composition** — the `generate_music` score DSL renders to
+  WAV on-device, with a public audition showcase ([Music generation](#music-generation)).
+- **OpenAI-compatible `/v1/*` API** plus an **MCP gateway** (`:8000`) with
+  batched agent jobs ([Companion Services](#companion-services)).
+- **Layered guardrails** — L1 patterns, L2 input judge, L3 output judge, critic
+  citation checks and deterministic requirement gates; fail-open on the UI,
+  fail-closed on MCP traffic.
+- **Multi-agent story pipeline** with editor/moderator gates, published to
+  role-gated story hosting (`:3002`).
+- **Multilingual read-aloud (TTS)** with word-level sync ([Voice](#voice--read-aloud-tts)).
+- **Authentik SSO** in front of everything ([Authentication](#authentication-sso)).
+- **Context engineering** — Pensieve archival compaction, warm tool-docs
+  cache, hot-reloadable prompts, KV slot checkpoints across unloads.
+- **Built for a 4 GB VRAM laptop** — idle unload, thermal/RAM guards, per-lane
+  queues ([Architecture](ARCHITECTURE.md)).
+
 ## Requirements
 
 - NVIDIA GPU with the driver working — check with `nvidia-smi`.
