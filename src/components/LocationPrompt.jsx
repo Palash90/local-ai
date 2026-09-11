@@ -5,7 +5,7 @@ export default function LocationPrompt({ onAllow, onDeny, error }) {
         <div id="location-icon">📍</div>
         <div id="location-title">Share your location?</div>
         <div id="location-desc">
-          {error || 'Local AI can use your location to provide location-aware responses and search results. You can change this anytime in your browser settings.'}
+            {error || "Polu's AI Assistant can use your location to provide location-aware responses and search results. You can change this anytime in your browser settings."}
         </div>
         <div id="location-actions">
           <button id="location-deny-btn" onClick={onDeny}>Deny</button>

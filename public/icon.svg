@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Polu's AI Assistant: chat bubble + spark over waveform ticks -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#1a1a2e"/>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="#8b7cff" stroke-width="2.5"/>
+  <!-- chat bubble -->
+  <path d="M14 18 h36 a6 6 0 0 1 6 6 v14 a6 6 0 0 1 -6 6 H28 l-9 8 v-8 h-5 a6 6 0 0 1 -6 -6 V24 a6 6 0 0 1 6 -6 z" fill="#8b7cff"/>
+  <!-- waveform ticks -->
+  <rect x="21" y="32" width="4" height="6" rx="2" fill="#1a1a2e"/>
+  <rect x="28" y="29" width="4" height="12" rx="2" fill="#1a1a2e"/>
+  <!-- spark -->
+  <path d="M44 22 l2.2 5.8 5.8 2.2 -5.8 2.2 -2.2 5.8 -2.2 -5.8 -5.8 -2.2 5.8 -2.2 z" fill="#e8f1ff"/>
+  <circle cx="35" cy="27" r="2.4" fill="#60a5fa"/>
+</svg>

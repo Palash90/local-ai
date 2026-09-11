@@ -142,7 +142,7 @@ def build_page(showcase_dir, site_origin="", seed=7):
  <meta property="og:title" content="AI Music Showcase — every genre & instrument">
  <meta property="og:description" content="{n_genre} genres + {n_inst} instruments, composed and rendered entirely on-device. Tap to listen.">
  <meta property="og:url" content="{html.escape(share_url)}">
- <meta property="og:site_name" content="Local AI">
+ <meta property="og:site_name" content="Polu's AI Assistant">
  <meta name="twitter:card" content="summary_large_image">
  <meta name="twitter:title" content="AI Music Showcase">
  <meta name="twitter:description" content="{n_genre} genres + {n_inst} instruments generated on-device. Tap to listen.">"""

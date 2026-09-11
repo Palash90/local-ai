@@ -29,7 +29,7 @@ cat << 'EOF' | sudo tee /var/www/dashboard/index.html > /dev/null
     <div class="grid">
         <a href="/ai/" class="card">
             <div class="icon">🤖</div>
-            <div class="title">Local AI</div>
+            <div class="title">Polu's AI Assistant</div>
             <div class="desc">/ai/</div>
         </a>
         <a href="/stories/" class="card">
@@ -385,7 +385,7 @@ server {
         proxy_set_header X-Forwarded-Host $host;
     }
 
-    # 1. Local AI App
+    # 1. Polu's AI Assistant
     location /ai/ {
         auth_request /ak-auth-ai;
         auth_request_set $authentik_username $upstream_http_x_authentik_username;
