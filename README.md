@@ -12,7 +12,7 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 
 **Docs:** [ARCHITECTURE.md](ARCHITECTURE.md) — runtime design & diagrams ·
 [TEST_STEPS.md](TEST_STEPS.md) — manual regression plan ·
-[server_startup_commands.md](server_startup_commands.md) · [sso-debugging.md](sso-debugging.md)
+[server_startup_commands.md](server_startup_commands.md)
 
 > **AI collaboration disclosure.** This repository is developed with AI coding
 > assistants working alongside the human maintainer — including code, tests,
