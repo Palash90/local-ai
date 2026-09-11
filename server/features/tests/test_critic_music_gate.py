@@ -98,6 +98,62 @@ def test_image_link_no_false_positives(stub_state):
     assert R.search("![result](/output/palash/gen_x.png)")
 
 
+def test_image_label_link_https_without_tool_retries(stub_state):
+    # link-form presenting as an image also fires (no bang in the real failure)
+    from server.features.critic import _MD_IMG_LABEL_LINK_RE as R2
+    assert R2.search("[Image](https://storage.googleapis.com/x/gen_c15e672f.png)")
+    assert not R2.search("[source article](https://example.com/a)")
+    assert not R2.search("See the [documentation](https://example.com/docs) here")
+    # bang-form https embed fires through the gate too
+    reason = _run(stub_state, {"t": {"_tools_used": ["generate_music"],
+                                     "music_file": "palash/gen_x.wav",
+                                     "music_url": "/music/palash/gen_x.wav"}},
+                  "Make a bollywood track of about 2 minutes",
+                  "Here: ![pic](https://example.com/a.png)")
+    assert reason == "image_claimed"
+
+
+def test_image_embed_https_without_tool_retries(stub_state):
+    # model pastes an https image URL having never called generate_image
+    # (music was produced, so the music gates pass through to the image check)
+    reason = _run(stub_state, {"t": {"_tools_used": ["generate_music"],
+                                     "music_file": "palash/gen_x.wav",
+                                     "music_url": "/music/palash/gen_x.wav"}},
+                  "Make a bollywood track of about 2 minutes",
+                  "[Image](https://storage.googleapis.com/x/output/gen_c15e672f.png)")
+    assert reason == "image_claimed"
+
+
+def test_image_embed_with_tool_attached_passes(stub_state):
+    tasks = {"t": {"image_file": "palash/gen_x.png",
+                   "_tools_used": ["generate_image"]}}
+    reason = _run(stub_state, tasks, "Draw a piano",
+                  "Here: ![result](https://example.com/a.png)")
+    assert reason is None
+
+
+def test_finalize_decline_attaches_music_not_image(stub_state):
+    import server.features.state as st
+    from server.features import orchestration as orch
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_score": "s", "music_levels": [],
+                   "image_file": "palash/img.png",
+                   "_original_message": "make music"}}
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks,
+        sessions={"s1": []}, sessions_meta={},
+        task_mode=lambda tid: "gpu",
+        save_sessions=lambda: None,
+        context_token_report=lambda sid, msgs: {},
+    )
+    orch._finalize_task("t", "s1", "caption", {"timings": {}},
+                        attach_image=False)
+    m = st._Registry.entrypoint.sessions["s1"][-1]
+    assert m["_music_url"] == "/music/palash/gen_x.wav"
+    assert m["_image_url"] is None
+    assert m["content"] == "caption"
+
+
 def test_image_anaphora_satisfied_by_session(stub_state):
     # turn 2 of the piano session: music re-generated, image referenced
     tasks = {"t": {"music_file": "palash/gen_2.wav", "music_url": "/music/x.wav",

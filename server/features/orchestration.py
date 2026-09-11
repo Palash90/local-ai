@@ -235,7 +235,11 @@ def _strip_pasted_artifact_paths(text, image_attached, music_attached):
     return out.strip()
 
 
-def _finalize_task(task_id, sid, msg_content, body):
+def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
+    """Append the finalized assistant message. With attach_image=False (used
+    by the safety-decline path), image fields are withheld: unlike deterministic
+    audio renders, model-prompted imagery is never attached to a turn whose
+    text failed verification."""
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
@@ -252,7 +256,9 @@ def _finalize_task(task_id, sid, msg_content, body):
         verification = t.get("_verification")
         verification_duration = t.get("_verification_duration")
         judge_result = t.get("_judge_result")
-    image_url = f"/output/{image_filename}" if image_filename else None
+    image_url = f"/output/{image_filename}" if image_filename and attach_image else None
+    gen_prompt = gen_prompt if attach_image else None
+    image_model = image_model if attach_image else None
     music_url = f"/music/{music_rel}" if music_rel else None
     # Anaphoric reuse ("with the same image", "play that track again"): re-show
     # the earlier artifact on THIS message so the UI re-attaches its card/player

@@ -151,6 +151,22 @@ _IMG_LINK_CLAIM_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+# Any markdown image embed `![alt](target)` (any scheme): the UI renders it
+# as an image, so without a produced image it's always a claim. Used with a
+# tools_used check at the call site, not here, since the regex alone can't
+# see tool history.
+_MD_IMG_LINK_RE = re.compile(
+    r"!\[(?P<alt>[^\]\n]*)\]\(\s*(?P<url>[^)\s]+)\s*\)",
+    re.IGNORECASE,
+)
+# Link-form presenting itself as an image ("[Image](https://...)"): same lie
+# without the bang. Alt text must be image-like so citation-style links
+# ("[source](https://...)") never fire.
+_MD_IMG_LABEL_LINK_RE = re.compile(
+    r"\[(?P<alt>(?:images?|pictures?|photos?|pics?|screenshots?|diagrams?|figures?))\]"
+    r"\(\s*(?P<url>[^)\s]+)\s*\)",
+    re.IGNORECASE,
+)
 # "produce/create a X" proximity — a bare word like "music" discussing the
 # topic must not demand a tool call; that precision matters less than the
 # claim gate (which catches the actual lie) but keeps retries targeted.
@@ -1061,6 +1077,22 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
         return "image_needed"
     if _IMG_CLAIM_RE.search(answer or "") and not has_image:
         return "image_claimed"
+    if not has_image and "generate_image" not in tools_used:
+        # Markdown image embeds `![alt](target)` render as images in the UI,
+        # so an embed with no produced image is a claim regardless of scheme
+        # (models hallucinate https URLs as readily as local paths). Uploads
+        # are user-provided content and may be legitimately referenced.
+        for _m in _MD_IMG_LINK_RE.finditer(answer or ""):
+            _tgt = (_m.group("url") or "").strip()
+            if _tgt.startswith("/uploads/"):
+                continue
+            return "image_claimed"
+        # Link-form presenting itself as an image ("[Image](https://...)").
+        for _m in _MD_IMG_LABEL_LINK_RE.finditer(answer or ""):
+            _tgt = (_m.group("url") or "").strip()
+            if _tgt.startswith("/uploads/"):
+                continue
+            return "image_claimed"
     if _IMG_LINK_CLAIM_RE.search(answer or "") and not has_image:
         return "image_claimed"
     if _MUSIC_CLAIM_RE.search(answer or "") and not has_music:
@@ -1282,6 +1314,27 @@ def run_verification_worker(task_id, sid, answer, body, mode):
                 f"[critic] declining unsafe answer for task {task_id} after "
                 "retry budget exhausted"
             )
+            # Never leave the turn silent: deliver what was verifiably
+            # produced with a fixed neutral caption (never the flagged model
+            # text). Deterministic audio renders ride along; model-prompted
+            # imagery stays withheld on a failed-verification turn.
+            with M._data_lock:
+                t_d = M.tasks.get(task_id) or {}
+                _declined_has_music = bool(t_d.get("music_file"))
+            if _declined_has_music:
+                _decline_caption = (
+                    "I generated audio for your request, but I couldn't "
+                    "verify a description for it — playing it here without "
+                    "commentary."
+                )
+            else:
+                _decline_caption = (
+                    "I couldn't complete this response: my drafts didn't pass "
+                    "verification after retries. Please try rephrasing your "
+                    "request."
+                )
+            M._finalize_task(task_id, sid, _decline_caption, body,
+                             attach_image=False)
             M._set_task_error(
                 task_id,
                 "I can't deliver this answer: the safety judge flagged it as "
