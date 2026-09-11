@@ -195,6 +195,13 @@ _ART_LABEL_LINE_RE = re.compile(
     r"(?im)^[ \t]*(?:\*\*)?\s*(?:audio|image|music|track|song)(?:\s+link)?\s*:?\s*"
     r"(?:\*\*)?[ \t]*\n+",
 )
+# "z_image/..." is an image-model config key, never a served route — a model
+# mashing it into a markdown link always 404s. Neutralize regardless of
+# attached state (the attached card/player, if any, still renders).
+_BOGUS_IMG_LINK_RE = re.compile(
+    r"!?\[(?P<alt>[^\]\n]*)\]\(\s*z_image/[^)\s]*\s*\)",
+    re.IGNORECASE,
+)
 
 
 def _strip_pasted_artifact_paths(text, image_attached, music_attached):
@@ -215,8 +222,17 @@ def _strip_pasted_artifact_paths(text, image_attached, music_attached):
 
     out = _ART_LINK_LINE_RE.sub(_drop, text)
     out = _ART_LABEL_LINE_RE.sub("", out)
+    # Drop link-only lines that are just a bogus z_image link; unwrap inline
+    # ones to their alt text. A message left with nothing real says so via
+    # the caller's "(No response content generated)" fallback.
+    lines = []
+    for line in out.split("\n"):
+        if line.strip() and _BOGUS_IMG_LINK_RE.fullmatch(line.strip()):
+            continue
+        lines.append(_BOGUS_IMG_LINK_RE.sub(lambda m: m.group("alt"), line))
+    out = "\n".join(lines)
     out = re.sub(r"\n{3,}", "\n\n", out)
-    return out.strip() if out.strip() else text
+    return out.strip()
 
 
 def _finalize_task(task_id, sid, msg_content, body):

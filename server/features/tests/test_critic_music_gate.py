@@ -71,6 +71,33 @@ def test_claim_regex_no_false_positive(stub_state):
     assert _MUSIC_CLAIM_RE.search("Your song is ready, press play")
 
 
+def test_image_markdown_link_without_image_retries(stub_state):
+    # the exact failure: model emits only "[Image](z_image/output/...)"
+    # having never called generate_image.
+    reason = _run(stub_state, {"t": {"_tools_used": ["generate_music"]}},
+                  "Make a bossa nova style jazz of about 2 minutes",
+                  "[Image](z_image/output/palash/gen_9d8a9731.wav)")
+    assert reason == "image_claimed"
+
+
+def test_image_markdown_link_with_image_attached_passes(stub_state):
+    tasks = {"t": {"image_file": "palash/gen_x.png"}}
+    reason = _run(stub_state, tasks,
+                  "Draw a piano",
+                  "Here it is: ![result](/output/palash/gen_x.png)")
+    assert reason is None
+
+
+def test_image_link_no_false_positives(stub_state):
+    from server.features.critic import _IMG_LINK_CLAIM_RE as R
+    # external images and upload references are left alone
+    assert not R.search("See ![chart](https://example.com/a.png) for context")
+    assert not R.search("I read [your file](/uploads/doc.pdf) carefully")
+    assert not R.search("The image model is z_image and it is great")
+    assert R.search("[Image](z_image/output/palash/gen_9d8a9731.wav)")
+    assert R.search("![result](/output/palash/gen_x.png)")
+
+
 def test_image_anaphora_satisfied_by_session(stub_state):
     # turn 2 of the piano session: music re-generated, image referenced
     tasks = {"t": {"music_file": "palash/gen_2.wav", "music_url": "/music/x.wav",
@@ -160,6 +187,26 @@ def test_strip_pasted_artifact_paths():
     partial = _strip_pasted_artifact_paths(text, False, True)
     assert "/output/palash/gen_56b.png" in partial
     assert "/music/" not in partial
+
+
+def test_strip_bogus_z_image_links():
+    from server.features.orchestration import _strip_pasted_artifact_paths
+    # link-only message with music attached: dead link dropped, player remains
+    out = _strip_pasted_artifact_paths(
+        "[Image](z_image/output/palash/gen_9d8a9731.wav)", False, True)
+    assert "z_image" not in out
+    # inline bogus link unwraps to alt text, real sentence preserved
+    out = _strip_pasted_artifact_paths(
+        "Here is your bossa piece.\n[Image](z_image/output/palash/x.wav)",
+        False, True)
+    assert "z_image" not in out
+    assert "Here is your bossa piece." in out
+    # legit attached restatement still stripped as before; a bare working
+    # /music/ link is kept (the /music/ route serves it)
+    out = _strip_pasted_artifact_paths(
+        "**Music:**\n[Play](/music/palash/gen_1a.wav)", False, True)
+    assert "/music/palash/gen_1a.wav" in out
+    assert "**Music:**" not in out
 
 
 def test_verification_addendum_formatting():

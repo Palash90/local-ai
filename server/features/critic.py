@@ -137,6 +137,20 @@ _IMG_CLAIM_RE = re.compile(
     r"infographic)\b",
     re.IGNORECASE,
 )
+# A bare markdown image/link pointing at a locally-generated artifact path
+# ("[Image](z_image/output/...)", "![...](/output/...)") with no image
+# attached is the same lie in link form — models mash up tool/model names
+# into dead relative URLs instead of calling generate_image. External
+# (http/data/api) targets and /uploads/ file references are left alone.
+_IMG_LINK_CLAIM_RE = re.compile(
+    r"(?:"
+    r"!\[[^\]\n]*\]\(\s*(?!https?://|data:|/api/)[^)\s]*\s*\)"
+    r"|"
+    r"\[(?:images?|pictures?|photos?|pics?|screenshots?|diagrams?|figures?)\]"
+    r"\(\s*(?!https?://|data:|/api/)[^)\s]*\s*\)"
+    r")",
+    re.IGNORECASE,
+)
 # "produce/create a X" proximity — a bare word like "music" discussing the
 # topic must not demand a tool call; that precision matters less than the
 # claim gate (which catches the actual lie) but keeps retries targeted.
@@ -1046,6 +1060,8 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
     if _IMG_ASK_RE.search(user_input) and not has_image:
         return "image_needed"
     if _IMG_CLAIM_RE.search(answer or "") and not has_image:
+        return "image_claimed"
+    if _IMG_LINK_CLAIM_RE.search(answer or "") and not has_image:
         return "image_claimed"
     if _MUSIC_CLAIM_RE.search(answer or "") and not has_music:
         return "music_claimed"
