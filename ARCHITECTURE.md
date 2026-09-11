@@ -1,4 +1,4 @@
-# Architecture — Local AI
+# Architecture — Polu's AI Assistant
 
 Deep-dive into the runtime design of the chat engine and its companion
 services. For setup, SSO enablement and a module map, see the
@@ -531,12 +531,20 @@ playable WAV), plus a non-LLM `make music` chat shortcut
    `Tabla.sf2` in `soundfonts/PROVENANCE-Tabla.md`; the syllable→key map was
    settled by spectral analysis of one-shot renders, keys sound at K−12
    semitones over 60–82 — see `music/local/tabla-audition/`).
-- **Outputs & meta.** WAV/MIDI land in `music/<user>/gen_<id>.*`; the task
-  carries `music_file/music_score/music_url/music_levels/music_duration`,
+- **Outputs & meta.** WAV/MIDI land in `music/<user>/gen_<id>.*` plus a
+  best-effort Ogg Opus sidecar (`opus.py`: ctypes libopus + numpy resample,
+  64 kbps via `MUSIC_OPUS_BITRATE`); the task
+  carries `music_file/music_score/music_url/music_stream_url/music_levels/music_duration`,
   which `_finalize_task` attaches to the assistant message as
-  `_music_url/_music_score/_music_levels` (UI player + lane meters + score
+  `_music_url/_music_stream_url/_music_score/_music_levels` (UI player streams
+  Opus with WAV fallback + lane meters + score
   fold-out). `duration_s` also feeds the critic's duration-claim gate (§13).
-  Music files are share-protected and cleaned on chat deletion like images.
+  Music files (.wav/.mid/.opus) are share-protected and cleaned on chat deletion like images.
+  ctypes pitfall (banked 2026-09-11): `opus_encoder_ctl` is C-variadic — its
+  two fixed params MUST keep declared `argtypes=[c_void_p, c_int]`; leaving
+  `argtypes` unset truncates the 64-bit encoder pointer to `c_int` and
+  segfaults inside libopus (killed chat-webui 3× before the guard test
+  `test_opus_ctl_keeps_pointer_argtypes` was added).
 - **Showcase.** `showcase.py` renders every genre + instrument timbre once
   into the PUBLIC `music/showcase/` dir with `index.json`; served
   unauthenticated at `/api/public/music[/showcase]` (`api.py`) as a

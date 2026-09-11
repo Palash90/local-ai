@@ -1,4 +1,4 @@
-# Comprehensive Interface Test Plan — local-ai
+# Comprehensive Interface Test Plan — Polu's AI Assistant
 
 ## Pre-flight (do this first)
 
@@ -215,6 +215,19 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   at the tail (`n_sys=2`); editing `prompts/sys_prompt.txt` changes
   `system0_chars` on the NEXT turn without any restart (hot reload), and music
   tests must keep passing after the edit.
+- Opus streaming: fresh render result JSON carries `music_stream_url`
+  (`gen_<tag>.opus`, `OggS` magic, ~22× smaller than WAV); chat player uses it
+  with WAV fallback (`onError` swaps to `_music_url`); missing libopus →
+  key absent and WAV plays. No new dependency: system libopus0, degrades to
+  WAV-only if absent.
+- Score budget + malformed-call retry: scores over ~700 chars get cut by the
+  generation token budget and llama.cpp 500s the tool call (`Failed to parse
+  tool call arguments`); the server steers (shorten + valid JSON) and retries
+  the round max 2× (`[llm_err] ... malformed tool-call JSON — re-scheduling`).
+  Encode path regression: `test_opus_ctl_keeps_pointer_argtypes` +
+  60 s stereo encode must pass — the server must survive music renders
+  (a prior ctypes `argtypes` bug segfaulted chat-webui 3×; check
+  `grep -i segfault /var/log/kern.log` is clean after render tests).
 
 And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; assert the model unloads → ComfyUI runs → model reloads (see logs `[llama]`/`[image]`), CPU agents keep running throughout.
 

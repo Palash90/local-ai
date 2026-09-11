@@ -16,7 +16,7 @@
 ## Challenge
 
 NVIDIA RTX 3050 Laptop GPU 4 GB VRAM, 16 GB RAM
-No extra device to spare, same dev machine is used to host local AI
+No extra device to spare, same dev machine is used to host Polu's AI Assistant
 
 ## Setup
 
@@ -98,8 +98,12 @@ python comfy_main.py --lowvram --input-directory ~/local-ai-files/ComfyUI/input 
 
 ```shell
 cd ~/git/local-ai
-python chat-webui.py    
+python3 -X faulthandler -u ./chat-webui.py >>logs/chat-webui.log 2>&1 &
 ```
+
+> `-X faulthandler -u` (strongly recommended): a native crash (e.g. inside
+> libopus via ctypes) then dumps a C-level traceback to the log instead of
+> dying silently with no evidence.
 
 ### Music stack (one-time setup, under ~/local-ai-files/music/)
 
@@ -113,6 +117,10 @@ python chat-webui.py
 - Bulk audition after any change:
   `PYTHONPATH=. python3 -m server.features.music --showcase`
   (writes the public showcase served at `/api/public/music/showcase`).
+- Opus stream sidecars: rendered from the system's `libopus.so.0` via ctypes
+  (`server/features/music/opus.py`) — no ffmpeg, no pip packages. Env
+  `MUSIC_OPUS_BITRATE` (default 64000). libopus absent → no `.opus`, player
+  falls back to WAV.
 
 # Configuration Files
 
@@ -124,8 +132,10 @@ List of files - read setup.sh. Runtime knobs live in `.env` (loaded by
 sizes, `REASONING_BUDGET` / `MAX_OUTPUT_TOKENS` (llama-server thinking/output caps —
 note llama-server processes must be bounced for budget changes to land, they
 survive chat-webui restarts), music stack (`FLUID_SOUNDFONT`,
-`FLUID_SOUNDFONT_MAP`, `FLUIDSYNTH_BIN`/`FLUIDSYNTH_LIB`, `MUSIC_SHOWCASE_DIR`,
-`TOOL_DOCS_CACHE_DIR`) — see README Voice section and ARCHITECTURE §3 for the
+  `FLUID_SOUNDFONT_MAP`, `FLUIDSYNTH_BIN`/`FLUIDSYNTH_LIB`, `MUSIC_SHOWCASE_DIR`,
+  `MUSIC_OPUS_BITRATE` (Opus stream bitrate, default 64000; no new dependency —
+  system libopus, WAV-only fallback),
+  `TOOL_DOCS_CACHE_DIR`) — see README Voice section and ARCHITECTURE §3 for the
 full table. `prompts/sys_prompt.txt` hot-reloads by mtime (edit live, no restart);
 `server/features/tool_docs.py` docs cache self-invalidates on tool-doc edits.
 

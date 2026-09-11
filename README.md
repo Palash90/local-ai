@@ -1,4 +1,4 @@
-# Local AI — Self-Hosted LLM + Image Generation Stack
+# Polu's AI Assistant — Self-Hosted LLM, Image & Music Generation Stack
 
 ## Highlights
 
@@ -522,6 +522,14 @@ and per instrument timbre — lives at `/api/public/music/showcase` (:3001).
   (`Tabla.sf2` is wired via `KIT_SOUNDFONTS`; if it's missing the render
   refuses rather than faking tabla on a rock kit).
 - Missing fluidsynth/soundfonts degrade gracefully to the numpy synth.
+- Playback streams a small Ogg Opus sidecar (`music_stream_url`, 64 kbps via
+  `MUSIC_OPUS_BITRATE`, ~22× smaller than WAV, encoded with stdlib ctypes
+  against system libopus — no ffmpeg/pip deps); the player falls back to WAV
+  if the sidecar is missing, and Download keeps the full WAV.
+- Scores must stay compact (~700 chars; the DSL doc enforces this): longer
+  scores get cut off by the generation token budget, which makes llama.cpp
+  reject the tool call. The server retries malformed tool calls twice with a
+  shorten-and-re-emit steer before failing the task.
 
 ## Voice / read-aloud (TTS)
 

@@ -20,6 +20,89 @@ def test_demo_renders_wav(tmp_path=None):
     assert res["duration_s"] > 1.0
 
 
+def test_render_emits_opus_sidecar_or_degrades():
+    import json
+    from server.features.music import opus as opus_enc
+    from server.features.music.render import render_score
+    score = "[PIANO]\nC4 q E4 q G4 q C5 h |"
+    res = json.loads(render_score(score, 120))
+    assert res["ok"] is True, res
+    if opus_enc.libopus_available():
+        assert res.get("music_stream_url", "").endswith(".opus"), res
+        opus_path = res["wav_path"][:-4] + ".opus"
+        assert os.path.exists(opus_path)
+        with open(opus_path, "rb") as f:
+            assert f.read(4) == b"OggS"
+    else:
+        assert not res.get("music_stream_url")
+
+
+def test_opus_encode_roundtrip(tmp_path=None):
+    import tempfile
+    import wave
+    import numpy as np
+    from server.features.music import opus as opus_enc
+    if not opus_enc.libopus_available():
+        return
+    d = tempfile.mkdtemp()
+    wav = os.path.join(d, "t.wav")
+    sr = 44100
+    t = np.arange(sr, dtype=np.float64) / sr
+    pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype("<i2")
+    with wave.open(wav, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm.tobytes())
+    out = opus_enc.encode_wav_to_opus(wav)
+    assert os.path.exists(out)
+    with open(out, "rb") as f:
+        assert f.read(4) == b"OggS"
+
+
+def test_opus_ctl_keeps_pointer_argtypes():
+    # Regression: opus_encoder_ctl is variadic, but the two fixed params
+    # MUST stay declared — without them ctypes truncates the 64-bit encoder
+    # pointer to c_int and segfaults inside libopus (3 server deaths).
+    import ctypes
+    from server.features.music import opus as opus_enc
+    if not opus_enc.libopus_available():
+        return
+    lib = opus_enc._load_lib()
+    assert lib.opus_encoder_ctl.argtypes == [ctypes.c_void_p, ctypes.c_int]
+
+
+def test_opus_encode_long_stereo():
+    # Production renders are stereo 25-70 s; the 1 s mono test masked the
+    # ctl pointer-truncation segfault. Encode 60 s stereo end to end.
+    import tempfile
+    import wave
+    import numpy as np
+    from server.features.music import opus as opus_enc
+    if not opus_enc.libopus_available():
+        return
+    d = tempfile.mkdtemp()
+    wav = os.path.join(d, "long.wav")
+    sr = 44100
+    n = sr * 60
+    t = np.arange(n, dtype=np.float64) / sr
+    left = (np.sin(2 * np.pi * 440 * t) * 8000).astype("<i2")
+    right = (np.sin(2 * np.pi * 554 * t) * 8000).astype("<i2")
+    stereo = np.empty((n, 2), dtype="<i2")
+    stereo[:, 0] = left
+    stereo[:, 1] = right
+    with wave.open(wav, "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(stereo.tobytes())
+    out = opus_enc.encode_wav_to_opus(wav)
+    assert os.path.exists(out)
+    assert os.path.getsize(out) < os.path.getsize(wav) // 10
+    with open(out, "rb") as f:
+        assert f.read(4) == b"OggS"
+
+
 def test_bad_token_reports_error():
     from server.features.music.parse import parse_score
     _, errors, _structure = parse_score("[PIANO]\nZZZ q")

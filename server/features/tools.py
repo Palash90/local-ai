@@ -248,6 +248,7 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                     t["music_file"] = rel
                     t["music_score"] = res.get("score", args.get("score", ""))
                     t["music_url"] = music_url
+                    t["music_stream_url"] = res.get("music_stream_url")
                     t["music_levels"] = res.get("levels", [])
                     t["music_duration"] = res.get("duration_s")
         M._event_post(

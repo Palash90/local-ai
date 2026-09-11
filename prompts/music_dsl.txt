@@ -1,5 +1,12 @@
 Score DSL. A score has THREE axes: GENRE (sound world), song FORM (@section), and instrument LANES ([ROLE instr]); plus TEXTURE (how many voices play together over time).
 
+HARD BUDGET: the complete score MUST fit in ~700 characters. Scores longer
+than this are cut off mid-string and the render FAILS — a short score that
+renders beats a long one that dies. Achieve length with LOOP SEMANTICS
+(write one 2-4 bar vamp per lane; sections loop it), NEVER by writing out
+every bar. 4-6 lanes max. If a render is rejected for length, halve the
+material and re-emit.
+
 DIRECTIVES (whole-score, one per line, before lanes):
   @tempo <bpm>     20-300 (default 120)
   @genre <name>    SPACE after the name — never @genre=value (bad directives

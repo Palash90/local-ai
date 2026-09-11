@@ -177,6 +177,7 @@ def _delete_task_music(task_id):
     for fpath in (
         os.path.join(M.MUSIC_DIR, rel),
         os.path.splitext(os.path.join(M.MUSIC_DIR, rel))[0] + ".mid",
+        os.path.splitext(os.path.join(M.MUSIC_DIR, rel))[0] + ".opus",
     ):
         try:
             if os.path.exists(fpath):
@@ -253,6 +254,7 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         music_rel = t.get("music_file")
         music_score = t.get("music_score")
         music_levels = t.get("music_levels")
+        music_stream_url = t.get("music_stream_url")
         verification = t.get("_verification")
         verification_duration = t.get("_verification_duration")
         judge_result = t.get("_judge_result")
@@ -271,6 +273,8 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
             image_url = _prior_artifact(sid, "_image_url")
         if not music_url and "music" in referenced:
             music_url = _prior_artifact(sid, "_music_url")
+        if not music_stream_url and "music" in referenced:
+            music_stream_url = _prior_artifact(sid, "_music_stream_url")
     except Exception as e:
         print(f"[finalize] artifact carry-over skipped: {e}")
     msg_content = _strip_pasted_artifact_paths(
@@ -320,6 +324,7 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         "_gen_prompt": gen_prompt,
         "_image_model": image_model,
         "_music_url": music_url,
+        "_music_stream_url": music_stream_url,
         "_music_score": music_score,
         "_music_levels": music_levels,
         "_search_details": search_details,
@@ -734,6 +739,42 @@ def _event_loop():
         elif ev_type == "llm_err":
             if t.get("_state") != "llm_waiting":
                 continue
+            # llama.cpp 500s the whole request when the model emits
+            # malformed tool-call arguments (e.g. an unterminated score
+            # string in generate_music). The model usually succeeds on a
+            # re-try, so steer it toward compact valid JSON and re-run the
+            # same round, bounded.
+            err_text = data.get("error", "") or ""
+            if "Failed to parse tool call arguments" in err_text:
+                retries = t.get("_tool_json_retries", 0)
+                if retries < 2:
+                    with M._data_lock:
+                        tt = M.tasks.get(task_id)
+                        if tt:
+                            tt["_tool_json_retries"] = retries + 1
+                        if sid in M.sessions:
+                            M.sessions[sid].append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "[SYSTEM NOTE — internal revision. Your last tool call "
+                                        "was rejected: its arguments were not valid JSON "
+                                        "(likely an unterminated string: your score "
+                                        "was cut off for length). Re-emit the call "
+                                        "with strictly valid JSON: escape newlines as \\n, "
+                                        "never emit raw control characters, and emit "
+                                        "a MUCH shorter score (one 2-4 bar vamp per "
+                                        "lane, ~700 chars total — sections loop it).]"
+                                    ),
+                                    "_steering": True,
+                                }
+                            )
+                            M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
+                    M.save_sessions()
+                    M.set_status(task_id, "Retrying (malformed tool call)...")
+                    print(f"[llm_err] task {task_id} malformed tool-call JSON — re-scheduling round (retry {retries + 1}/2)")
+                    M._start_llm_round(task_id, sid, data.get("round", 0))
+                    continue
             # A cpu round killed by an image render's eviction (server killed
             # mid-flight) must resume, not die permanently. Requeue it like the
             # RAM-evacuation path so the lane picks it back up once the render

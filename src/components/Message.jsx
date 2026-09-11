@@ -721,6 +721,7 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
   const genPrompt = msg._gen_prompt
   const imageUrl = toApiImage(msg._image_url, shareToken)
   const musicUrl = toApiMusic(msg._music_url, shareToken)
+  const musicStreamUrl = toApiMusic(msg._music_stream_url, shareToken)
   const musicScore = msg._music_score
   const musicLevels = msg._music_levels
   const imageModel = msg._image_model
@@ -837,7 +838,8 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
       )}
       {musicUrl && (
         <div className="music-wrap">
-          <audio controls preload="metadata" src={musicUrl}
+          <audio controls preload="metadata" src={musicStreamUrl || musicUrl}
+            onError={(e) => { if (musicStreamUrl && e.currentTarget.src !== musicUrl) e.currentTarget.src = musicUrl }}
             onPlay={(e) => _registerMusic(e.currentTarget)}
             onPause={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }}
             onEnded={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }} />

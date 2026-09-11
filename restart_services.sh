@@ -50,7 +50,7 @@ npm run build
 sudo wg-quick up wg0
 
 echo "== Starting =="
-start_one "chat web ui"     "$LOG_DIR/chat-webui.log"       "$REPO_DIR" python3 ./chat-webui.py
+start_one "chat web ui"     "$LOG_DIR/chat-webui.log"       "$REPO_DIR" python3 -X faulthandler -u ./chat-webui.py
 start_one "markdown hosting" "$LOG_DIR/markdown-hosting.log" "$REPO_DIR" python3 -m uvicorn markdown_hosting:app --host 127.0.0.1 --port 3002
 start_one "code hosting"    "$LOG_DIR/code-host.log"        "$GIT_DIR"  python3 code_host.py .
 

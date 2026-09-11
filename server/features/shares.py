@@ -110,6 +110,7 @@ _SNAPSHOT_KEYS = (
     "_image_url",
     "_image_model",
     "_music_url",
+    "_music_stream_url",
     "_music_score",
     "_music_levels",
     "_gen_prompt",

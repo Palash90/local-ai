@@ -80,6 +80,16 @@ def render_score(score_text, tempo=120, title="music", user="local"):
         except Exception:
             with wave.open(base + ".wav", "rb") as w:
                 dur = w.getnframes() / float(w.getframerate())
+        # Best-effort Opus sidecar for streaming playback (~22x smaller than
+        # the WAV). Absence simply means "play the WAV" downstream.
+        stream_url = None
+        try:
+            from server.features.music import opus as opus_enc
+            opus_path = os.path.splitext(base + ".wav")[0] + ".opus"
+            opus_enc.encode_wav_to_opus(base + ".wav", opus_path)
+            stream_url = f"/music/{safe_user}/gen_{tag}.opus"
+        except Exception as e:
+            print(f"[opus] stream encode skipped: {e}")
     except Exception as e:
         return json.dumps({"ok": False, "error": str(e), "errors": errors})
     rel = f"{safe_user}/gen_{tag}.wav"
@@ -90,6 +100,7 @@ def render_score(score_text, tempo=120, title="music", user="local"):
         for s in sections
     ]
     return json.dumps({"ok": True, "music_url": f"/music/{rel}",
+                       "music_stream_url": stream_url,
                        "mid_path": base + ".mid", "wav_path": base + ".wav",
                        "duration_s": round(dur, 2), "notes": n, "engine": engine,
                        "soundfonts": soundfonts,

@@ -170,7 +170,7 @@ def resolve_music_file(url, user=None):
         raw = raw[len("music/"):]
     if user and not raw.startswith(_safe_username(user) + "/"):
         return None
-    if os.path.splitext(raw)[1].lower() not in (".wav",):
+    if os.path.splitext(raw)[1].lower() not in (".wav", ".opus"):
         return None
     root = os.path.realpath(MUSIC_DIR)
     fpath = os.path.realpath(os.path.join(root, raw))
@@ -179,6 +179,13 @@ def resolve_music_file(url, user=None):
     if not os.path.isfile(fpath):
         return None
     return fpath
+
+
+def _audio_content_type(fpath):
+    """audio/ogg for Opus sidecars, audio/wav otherwise."""
+    if str(fpath).lower().endswith(".opus"):
+        return "audio/ogg"
+    return "audio/wav"
 
 # ---------------------------------------------------------------------------
 # Shared application state — injected by chat-webui.py via set_app_state().
@@ -791,7 +798,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         if mrel in protected_music:
                             print(f"[delete] Kept shared music: {fpath}")
                         else:
-                            for p in (fpath, os.path.splitext(fpath)[0] + ".mid"):
+                            for p in (fpath, os.path.splitext(fpath)[0] + ".mid",
+                                      os.path.splitext(fpath)[0] + ".opus"):
                                 if os.path.exists(p):
                                     print(f"[delete] Removed music: {p}")
                                     try:
