@@ -220,7 +220,7 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   with WAV fallback (`onError` swaps to `_music_url`); missing libopus →
   key absent and WAV plays. No new dependency: system libopus0, degrades to
   WAV-only if absent.
-- Score budget + malformed-call retry: scores over ~700 chars get cut by the
+- Score budget + malformed-call retry: scores over ~1100 chars get cut by the
   generation token budget and llama.cpp 500s the tool call (`Failed to parse
   tool call arguments`); the server steers (shorten + valid JSON) and retries
   the round max 2× (`[llm_err] ... malformed tool-call JSON — re-scheduling`).
@@ -228,6 +228,10 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   60 s stereo encode must pass — the server must survive music renders
   (a prior ctypes `argtypes` bug segfaulted chat-webui 3×; check
   `grep -i segfault /var/log/kern.log` is clean after render tests).
+- Claim gate: a music answer with **no player attached** that says "Listen to
+  the …", "audio should appear below", "piece has been updated/refined",
+  "play me the song" must trigger `music_claimed` re-run (gate also watches
+  the fake-delivery phrasings models use after repeated tool failures).
 
 And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; assert the model unloads → ComfyUI runs → model reloads (see logs `[llama]`/`[image]`), CPU agents keep running throughout.
 

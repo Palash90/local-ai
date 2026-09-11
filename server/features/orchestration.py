@@ -763,8 +763,9 @@ def _event_loop():
                                         "was cut off for length). Re-emit the call "
                                         "with strictly valid JSON: escape newlines as \\n, "
                                         "never emit raw control characters, and emit "
-                                        "a MUCH shorter score (one 2-4 bar vamp per "
-                                        "lane, ~700 chars total — sections loop it).]"
+                                        "a MUCH shorter score (2-3 short vamps — "
+                                        "verse, chorus, bridge — that sections loop, "
+                                        "~1100 chars total).]"
                                     ),
                                     "_steering": True,
                                 }

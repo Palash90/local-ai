@@ -185,12 +185,17 @@ _MUSIC_CLAIM_RE = re.compile(
     r"\b(?:i|we)\s+(?:have\s+|has\s+)?(?:just\s+|also\s+)?"
     r"(?:generated|created|produced|made|composed|written|prepared|rendered|finished)\s+"
     r"(?:the\s+|a\s+|an\s+|your\s+|one\s+)?(?:music|audio|song|piece|track|tune|"
-    r"jingle|melody|composition|instrumental|recording)\b"
+    r"jingle|melody|composition|instrumental|recording|lullaby|symphony|anthem)\b"
     r"|\b(?:the\s+|your\s+)?(?:music|audio|song|piece|track|composition|jingle|"
     r"melody|instrumental)\s+(?:has\s+been|is\s+been|has\s+now\s+been|was)\s+"
-    r"(?:generated|created|produced|composed|made|rendered|prepared|finished)\b"
+    r"(?:generated|created|produced|composed|made|rendered|prepared|finished|"
+    r"updated|refined)\b"
     r"|\b(?:the\s+)?(?:music|audio|song|piece|track)\s+(?:is\s+ready|is\s+done|"
-    r"is\s+attached|is\s+below|is\s+playing)\b",
+    r"is\s+attached|is\s+below|is\s+playing|should\s+(?:be\s+)?(?:directly\s+)?"
+    r"(?:appear|play)\w*|appears?\s+below|is\s+(?:right\s+|directly\s+)?below)\b"
+    r"|\b(?:play|listen\s+to)\s+(?:me\s+)?(?:the\s+|your\s+|that\s+)?"
+    r"(?:[\w'-]+\s+){0,3}?(?:music|audio|song|piece|track|tune|melody|"
+    r"composition|lullaby)\b",
     re.IGNORECASE,
 )
 _CITE_ASK_RE = re.compile(
