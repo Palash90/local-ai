@@ -44,6 +44,13 @@ NOTE_SYM_RE = re.compile(r"^([A-G][#b]?-?\d+|R)$", re.IGNORECASE)
 BRACKET_RE = re.compile(r"^\[([^\]]*)\]\s*(.*)$")
 ATTR_RE = re.compile(r"([A-Za-z]+)=(\S+)")
 TEMPO_RE = re.compile(r"^@tempo\s+(\d+)\b", re.IGNORECASE)
+# Trailing "#" comments ("C4 q |  # motif repeat"). The hash must be preceded
+# by whitespace, so sharps in note names (F#4) never match.
+_COMMENT_RE = re.compile(r"\s+#.*$")
+
+
+def _strip_comment(raw):
+    return _COMMENT_RE.sub("", raw)
 # @section <name> [bars=N] [energy=0..1] [repeat=N]  -> a named block on the
 # shared song-form timeline. Segments tile sequentially from bar 1 across every
 # lane, so a chorus can lift the whole band's dynamics without touching notes.
@@ -106,7 +113,7 @@ MAX_NOTES = 6000
 def parse_tempo(text, default=120):
     """Return the tempo set by an '@tempo N' directive, or default."""
     for raw in (text or "").splitlines():
-        m = TEMPO_RE.match(raw.strip())
+        m = TEMPO_RE.match(_strip_comment(raw).strip())
         if m:
             try:
                 t = int(m.group(1))
@@ -169,7 +176,7 @@ def _parse_sections(text):
     """
     structure, bar = [], 0
     for raw in (text or "").splitlines():
-        m = SECTION_DEF_RE.match(raw.strip())
+        m = SECTION_DEF_RE.match(_strip_comment(raw).strip())
         if not m:
             continue
         name = m.group(1).lower()
@@ -385,7 +392,7 @@ def parse_score(text, tempo=120):
     cur = None
     structure, bar_energy = _parse_sections(text)
     for lineno, raw in enumerate((text or "").splitlines(), 1):
-        line = raw.strip()
+        line = _strip_comment(raw).strip()
         if not line or line.startswith("#") or line.startswith("@"):
             continue
         m = BRACKET_RE.match(line)

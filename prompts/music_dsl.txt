@@ -13,7 +13,8 @@ chorus register-widening (ghosts above the melody, never replacing it),
 outro thinning, and stroke-level dynamics with tiny timing drift are
 applied automatically to looped material — write a vamp you would
 repeat on stage.
-  '#' starts a comment.
+  '#' starts a comment anywhere on the line — trailing comments after music
+  are fine and never parsed (sharps like F#4 are unaffected).
 
 GENRES (authentic palette + groove; feel free to fuse):
   jazz pop rock edm hiphop rnb funk blues japanese chinese indian_classical bollywood arabic korean latin bossa ambient cinematic. e.g. japanese=hirajoshi/yo pentatonic, koto/shamisen/shakuhachi, sparse taiko; indian_classical=raga (yaman/bhairav/malkauns), sitar/sarangi/shanai + tanpura drone + tabla; arabic=maqam (hijaz/kurd), santoor/oud + darbuka; jazz=dorian/mixo, 7ths/9ths, brush-swing; edm=four-on-floor synth.

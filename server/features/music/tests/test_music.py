@@ -479,3 +479,23 @@ def test_header_typo_suggests_sensibly():
     secs, errs, _ = parse_score("[BASS ebass]\nC2 w |", 120)
     assert not errs, errs
     assert secs[0]["name"] == "BASS" and secs[0]["program"] == 33
+
+
+def test_inline_hash_comments_stripped():
+    """Trailing '# ...' comments must not produce bad tokens (the model's
+    dominant error class); sharps in note names must survive."""
+    from server.features.music.parse import parse_score, parse_tempo
+    score = (
+        "@tempo 84  # calm raga pace\n"
+        "@section verse bars=2 energy=0.6  # main section\n"
+        "[MELODY santoor vol=85]\n"
+        "C4 q E4 q G4 q F#4 h |  # motif with a sharp, must keep F#4\n"
+        "C4 q E4 q G4 q A4 h |  # second bar\n"
+    )
+    assert parse_tempo(score, 120) == 84
+    secs, errs, _ = parse_score(score, 120)
+    assert not errs, errs
+    mel = next(s for s in secs if s["name"] == "MELODY")
+    midis = [e["midi"] for e in mel["events"] if e["type"] == "note"]
+    assert 66 in midis  # F#4 survived the '#' strip
+    assert len(mel["events"]) == 8
