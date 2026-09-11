@@ -1,27 +1,5 @@
 # Local AI — Self-Hosted LLM + Image Generation Stack
 
-A self-hosted AI stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM): a
-chat web UI with tool use (web search, page fetch, image generation/editing,
-on-device music composition, file reading, tasks, reminders), an OpenAI-compatible API, an MCP gateway with
-batched agent jobs, a multi-agent story-writing pipeline, tiered story hosting,
-and Authentik SSO in front of everything.
-
-The interactive chat engine (`chat-webui.py` + `server/`) is the core; the
-other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
-`scripts/`) build on top of it.
-
-**Docs:** [ARCHITECTURE.md](ARCHITECTURE.md) — runtime design & diagrams ·
-[TEST_STEPS.md](TEST_STEPS.md) — manual regression plan ·
-[server_startup_commands.md](server_startup_commands.md)
-
-> **AI collaboration disclosure.** This repository is developed with AI coding
-> assistants working alongside the human maintainer — including code, tests,
-> docs, and commit messages. As with all open-source software here, everything
-> is provided as-is under the [MIT License](LICENSE), without warranty of any
-> kind and without liability. AI-generated content may contain errors: review
-> security-sensitive paths (auth, networking, file serving) yourself before
-> exposing this stack beyond localhost.
-
 ## Highlights
 
 - **Chat with real tool use** — web search, page fetch, file reading, tasks and
@@ -43,6 +21,28 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
   cache, hot-reloadable prompts, KV slot checkpoints across unloads.
 - **Built for a 4 GB VRAM laptop** — idle unload, thermal/RAM guards, per-lane
   queues ([Architecture](ARCHITECTURE.md)).
+
+A self-hosted AI stack on a single laptop (RTX 3050, 4 GB VRAM, 16 GB RAM): a
+chat web UI with tool use (web search, page fetch, image generation/editing,
+on-device music composition, file reading, tasks, reminders), an OpenAI-compatible API, an MCP gateway with
+batched agent jobs, a multi-agent story-writing pipeline, tiered story hosting,
+and Authentik SSO in front of everything.
+
+The interactive chat engine (`chat-webui.py` + `server/`) is the core; the
+other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
+`scripts/`) build on top of it.
+
+**Docs:** [ARCHITECTURE.md](ARCHITECTURE.md) — runtime design & diagrams ·
+[TEST_STEPS.md](TEST_STEPS.md) — manual regression plan ·
+[server_startup_commands.md](server_startup_commands.md)
+
+> **AI collaboration disclosure.** This repository is developed with AI coding
+> assistants working alongside the human maintainer — including code, tests,
+> docs, and commit messages. As with all open-source software here, everything
+> is provided as-is under the [MIT License](LICENSE), without warranty of any
+> kind and without liability. AI-generated content may contain errors: review
+> security-sensitive paths (auth, networking, file serving) yourself before
+> exposing this stack beyond localhost.
 
 ## Requirements
 
