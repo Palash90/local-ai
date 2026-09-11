@@ -28,6 +28,16 @@ applied automatically to looped material — write a vamp you would
 repeat on stage.
   '#' starts a comment anywhere on the line — trailing comments after music
   are fine and never parsed (sharps like F#4 are unaffected).
+  LANE NAMING — one ROLE word (MELODY, HARMONY, BASS, RHYTHM, or a custom
+  name like PADS) + ONE single-word instrument from the ALIAS list below.
+  NEVER blend two aliases into one token (PIANO_PAD, SITAR_FLUTE are invalid)
+  — if you want two colours layered, emit TWO lanes with separate headers.
+  An 'unknown lane word' error in a tool result means: replace the flagged
+  word with the suggested alias, or split it into two lanes. Never re-emit
+  the same invented word and hope. 'bad token w'/'bad token q' on a note
+  line means that lane was read as DRUMS (rhythm-ish role or unknown word
+  in the header) — note durations are not drum syllables; give the lane a
+  clear melodic role (MELODY/HARMONY/BASS) with a real alias.
 
 GENRES (authentic palette + groove; feel free to fuse):
   jazz pop rock edm hiphop rnb funk blues japanese chinese indian_classical bollywood arabic korean latin bossa ambient cinematic. e.g. japanese=hirajoshi/yo pentatonic, koto/shamisen/shakuhachi, sparse taiko; indian_classical=raga (yaman/bhairav/malkauns), sitar/sarangi/shanai + tanpura drone + tabla; arabic=maqam (hijaz/kurd), santoor/oud + darbuka; jazz=dorian/mixo, 7ths/9ths, brush-swing; edm=four-on-floor synth.
