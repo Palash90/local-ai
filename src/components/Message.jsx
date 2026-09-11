@@ -383,6 +383,76 @@ function _stopActiveAudio() {
 // whichever native <audio> element was last playing.
 let _activeMusic = null
 
+// Opus streams are small enough to hold whole: fetch once (the browser's
+// HTTP cache serves page reloads instantly thanks to immutable) and play
+// from a blob URL, so replays/seeking never re-buffer over the network.
+// WAV stays direct (it must not pre-download whole); Download is always WAV.
+const _musicBlobs = new Map()
+const _musicBlobPending = new Map()
+
+function _musicBlobUrl(url) {
+  if (!url) return Promise.resolve(null)
+  if (_musicBlobs.has(url)) return Promise.resolve(_musicBlobs.get(url))
+  if (!_musicBlobPending.has(url)) {
+    const p = fetch(url, { credentials: 'same-origin' })
+      .then((r) => { if (!r.ok) throw new Error('http ' + r.status); return r.blob() })
+      .then((b) => { const u = URL.createObjectURL(b); _musicBlobs.set(url, u); return u })
+      .catch(() => null)
+    _musicBlobPending.set(url, p)
+    p.finally(() => { _musicBlobPending.delete(url) })
+  }
+  return _musicBlobPending.get(url)
+}
+
+function MusicPlayer({ musicUrl, musicStreamUrl, musicScore, musicLevels }) {
+  const [src, setSrc] = useState(musicStreamUrl || musicUrl)
+  const [usedFallback, setUsedFallback] = useState(false)
+  useEffect(() => {
+    let alive = true
+    setSrc(musicStreamUrl || musicUrl)
+    setUsedFallback(false)
+    if (!musicStreamUrl || musicStreamUrl.startsWith('blob:')) return
+    _musicBlobUrl(musicStreamUrl).then((b) => { if (alive && b) setSrc(b) })
+    return () => { alive = false }
+  }, [musicUrl, musicStreamUrl])
+  return (
+    <div className="music-wrap">
+      <audio controls preload="metadata" src={src}
+        onError={(e) => {
+          if (musicStreamUrl && !usedFallback && src !== musicUrl) {
+            setUsedFallback(true)
+            setSrc(musicUrl)
+          }
+        }}
+        onPlay={(e) => _registerMusic(e.currentTarget)}
+        onPause={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }}
+        onEnded={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }} />
+      <div className="img-actions">
+        <button type="button" className="img-download-btn" onClick={() => downloadFile(musicUrl, 'music.wav')}>
+          Download
+        </button>
+      </div>
+      {Array.isArray(musicLevels) && musicLevels.length > 0 && (
+        <div className="music-levels">
+          {musicLevels.map((lv, i) => (
+            <div className="music-level-row" key={i} title={`${lv.name} · ${lv.drum ? 'drums' : 'program ' + lv.program} · ${lv.notes} notes`}>
+              <span className="music-level-name">{lv.drum ? '🥁 ' : ''}{lv.name}</span>
+              <span className="music-level-bar"><span style={{ width: (lv.vol || 0) + '%' }} /></span>
+              <span className="music-level-num">{lv.vol}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {musicScore && (
+        <details className="music-score">
+          <summary>Score</summary>
+          <pre>{musicScore}</pre>
+        </details>
+      )}
+    </div>
+  )
+}
+
 function _registerMusic(el) {
   if (_activeMusic && _activeMusic !== el) {
     try { _activeMusic.pause() } catch {}
@@ -837,35 +907,8 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
         </div>
       )}
       {musicUrl && (
-        <div className="music-wrap">
-          <audio controls preload="metadata" src={musicStreamUrl || musicUrl}
-            onError={(e) => { if (musicStreamUrl && e.currentTarget.src !== musicUrl) e.currentTarget.src = musicUrl }}
-            onPlay={(e) => _registerMusic(e.currentTarget)}
-            onPause={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }}
-            onEnded={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }} />
-          <div className="img-actions">
-            <button type="button" className="img-download-btn" onClick={() => downloadFile(musicUrl, 'music.wav')}>
-              Download
-            </button>
-          </div>
-          {Array.isArray(musicLevels) && musicLevels.length > 0 && (
-            <div className="music-levels">
-              {musicLevels.map((lv, i) => (
-                <div className="music-level-row" key={i} title={`${lv.name} · ${lv.drum ? 'drums' : 'program ' + lv.program} · ${lv.notes} notes`}>
-                  <span className="music-level-name">{lv.drum ? '🥁 ' : ''}{lv.name}</span>
-                  <span className="music-level-bar"><span style={{ width: (lv.vol || 0) + '%' }} /></span>
-                  <span className="music-level-num">{lv.vol}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          {musicScore && (
-            <details className="music-score">
-              <summary>Score</summary>
-              <pre>{musicScore}</pre>
-            </details>
-          )}
-        </div>
+        <MusicPlayer musicUrl={musicUrl} musicStreamUrl={musicStreamUrl}
+          musicScore={musicScore} musicLevels={musicLevels} />
       )}
       {userImgSrc && (
         <img

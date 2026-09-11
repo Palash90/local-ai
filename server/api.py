@@ -487,7 +487,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if not fpath:
                     self.send_error(404)
                     return
-                self._serve_file_range(fpath, "audio/wav", cache="private, max-age=3600")
+                self._serve_file_range(fpath, _audio_content_type(fpath), cache="private, max-age=3600")
                 return
             token = os.path.basename(self.path)
             rec = get_share(token)
@@ -537,7 +537,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
             fpath = resolve_music_file(self.path, user=user)
             if fpath:
-                self._serve_file_range(fpath, "audio/wav")
+                self._serve_file_range(fpath, _audio_content_type(fpath))
                 return
             self.send_error(404)
         elif self.path.startswith("/api/music/"):
@@ -548,7 +548,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             music_id = self.path[len("/api/music/"):]
             fpath = resolve_music_file("music/" + music_id, user=user)
             if fpath:
-                self._serve_file_range(fpath, "audio/wav")
+                self._serve_file_range(fpath, _audio_content_type(fpath))
                 return
             self.send_error(404)
         elif self.path.startswith("/api/image/"):

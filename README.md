@@ -524,8 +524,10 @@ and per instrument timbre — lives at `/api/public/music/showcase` (:3001).
 - Missing fluidsynth/soundfonts degrade gracefully to the numpy synth.
 - Playback streams a small Ogg Opus sidecar (`music_stream_url`, 64 kbps via
   `MUSIC_OPUS_BITRATE`, ~22× smaller than WAV, encoded with stdlib ctypes
-  against system libopus — no ffmpeg/pip deps); the player falls back to WAV
-  if the sidecar is missing, and Download keeps the full WAV.
+  against system libopus — no ffmpeg/pip deps; served as `audio/ogg`); the UI
+  fetches it once into a blob (HTTP `immutable` cache covers reloads), so
+  replay/seek never re-buffers. Missing sidecar or failed fetch falls back to
+  the WAV; Download keeps the full WAV.
 - Scores must stay compact (~1100 chars; the DSL doc enforces this and asks
   for 2-3 short vamps per phase — never one vamp looped for 20 bars, and
   melody duets must trade the lead, not sprinkle a second voice): longer
