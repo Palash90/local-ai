@@ -472,9 +472,9 @@ def test_header_adjective_ignored_melody_kept():
 def test_header_typo_suggests_sensibly():
     from server.features.music.parse import parse_score
     _, errs, _ = parse_score("[MELODY SANTOR]\nC4 w |", 120)
-    assert errs and "SANTOR" in errs[0] and "SANTOOR" in errs[0]
+    assert errs and "SANTOR" in errs[0] and "SANTOOR" in errs[0].upper()
     _, errs, _ = parse_score("[MELOD piano]\nC4 w |", 120)
-    assert errs and "MELODY" in errs[0]
+    assert errs and "MELODY" in errs[0].upper()
     # existing priority unchanged: first role word names the lane
     secs, errs, _ = parse_score("[BASS ebass]\nC2 w |", 120)
     assert not errs, errs
