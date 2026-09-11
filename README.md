@@ -16,11 +16,11 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 
 > **AI collaboration disclosure.** This repository is developed with AI coding
 > assistants working alongside the human maintainer — including code, tests,
-> docs, and commit messages. All changes are reviewed before merge and the
-> maintainer remains responsible for correctness, security, and licensing.
-> AI-generated content may contain errors: verify security-sensitive paths
-> (auth, networking, file serving) independently before exposing this stack
-> beyond localhost.
+> docs, and commit messages. As with all open-source software here, everything
+> is provided as-is under the [MIT License](LICENSE), without warranty of any
+> kind and without liability. AI-generated content may contain errors: review
+> security-sensitive paths (auth, networking, file serving) yourself before
+> exposing this stack beyond localhost.
 
 ## Requirements
 
