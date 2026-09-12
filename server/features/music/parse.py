@@ -30,19 +30,19 @@ DYN_SUFFIX_RE = re.compile(r"(?<=[whqes.])([fmp!])$")
 # accent marker.
 LEAD_ACCENT_RE = re.compile(r"!$")
 TOKEN_RE = re.compile(r"^([A-G][#b]?-?\d+|R)([whqes]\.?)$", re.IGNORECASE)
-CHORD_QUAL = "maj7|min7|m7b5|dim7|maj|min|dim|aug|sus4|sus2|56|5|7|m7|m"
+CHORD_QUAL = "maj9|min9|add9|maj7|min7|m7b5|dim7|maj6|min6|aug7|maj|min|dim|aug|sus4|sus2|56|5|7|9|m9|m7|m"
 ARP_FLAGS = {"ar": "up", "ad": "down", "au": "updown"}
 # Guitar-style chord roots — "Am3:min7", "Am7", "Amin7", "Asus4" — are what
 # small models naturally write. Normalized to the canonical "A3:min7" form
 # before matching, so the ar/w merge cascade (one bad root -> three errors)
 # disappears. "A7" stays a NOTE (bare letter+digit never meant chord).
 _GUITAR_CHORD_RE = re.compile(
-    r"^([A-G][#b]?)(maj|min|m|dim|aug|sus2|sus4|sus)([2-7])?"
-    r"(?::(maj7|min7|m7b5|dim7|maj|min|dim|aug|sus4|sus2|56|5|7|m7|m))?"
-    r"(ar|ad|au)?$",
+    r"^([A-G][#b]?)(maj|min|m|dim|aug|add|sus2|sus4|sus)([2-9])?"
+    r"(?::(maj9|min9|add9|maj7|min7|m7b5|dim7|maj|min|dim|aug|sus4|sus2|56|5|7|9|m9|m7|m))?"
+    r"(ar|ad|au)?([whqes]\.?)?$",
     re.IGNORECASE)
 _GUITAR_QUAL_BASE = {"m": "min", "min": "min", "maj": "maj", "dim": "dim",
-                     "aug": "aug", "sus": "sus4", "sus2": "sus2",
+                     "aug": "aug", "add": "add9", "sus": "sus4", "sus2": "sus2",
                      "sus4": "sus4"}
 
 
@@ -50,27 +50,32 @@ def _norm_chord(tok):
     m = _GUITAR_CHORD_RE.match(tok)
     if not m:
         return tok
-    root, emb, num, qual, arp = m.groups()
+    root, emb, num, qual, arp, dur = m.groups()
     base = _GUITAR_QUAL_BASE[emb.lower()]
     arp = arp or ""
+    dur = dur or ""
     if qual:
-        q = {"m7": "min7", "m": "min"}.get(qual.lower(), qual.lower())
+        q = {"m7": "min7", "m": "min", "m9": "min9"}.get(qual.lower(),
+                                                         qual.lower())
         if base == "min" and q in ("7", "5", "56"):
             q = "min" + q
-        return f"{root}{num or ''}:{q}{arp}"
-    if num and num in "67":
-        # Am7 / Amaj7 / Adim7 — the digit is a quality, not an octave.
-        q = {"m": "min", "min": "min", "maj": "maj", "dim": "dim"}.get(
-            emb.lower())
+        return f"{root}{num or ''}:{q}{arp}{dur}"
+    if num and num in "679":
+        # Am7 / Amaj7 / Adim7 / Am9 — the digit is a quality, not an octave.
+        if emb.lower() == "add":
+            if num != "9":
+                return tok
+            return f"{root}:add9{arp}{dur}"
+        q = {"m": "min", "min": "min", "maj": "maj", "dim": "dim",
+             "aug": "aug"}.get(emb.lower())
         if q is None:
             return tok
         want = q + num
-        if want not in ("min6", "min7", "maj6", "maj7", "dim7"):
+        if want not in ("min6", "min7", "min9", "maj6", "maj7", "maj9",
+                        "dim7", "aug7"):
             return tok
-        if want == "min6" or want == "maj6":
-            return tok  # no 6th-chord voicings in CHORD_INTERVALS
-        return f"{root}:{want}{arp}"
-    return f"{root}{num or ''}:{base}{arp}"
+        return f"{root}:{want}{arp}{dur}"
+    return f"{root}{num or ''}:{base}{arp}{dur}"
 CHORD_RE = re.compile(
     r"^([A-G][#b]?)(-?\d+)?(?::(" + CHORD_QUAL + r"))?(ar|ad|au)?([whqes]\.?)$",
     re.IGNORECASE)
@@ -182,7 +187,14 @@ ROLE_PREFIXES = ("MELODY", "HARMONY", "BASS", "RHYTHM", "PERC", "DRUM",
 
 # Descriptive adjectives carry no structural meaning (dynamics live in
 # vol=NN) — ignore silently instead of erroring, e.g. [PERC soft drum].
-IGNORED_HEADER_WORDS = {"SOFT", "LOUD", "QUIET", "SOLO"}
+IGNORED_HEADER_WORDS = {"SOFT", "LOUD", "QUIET", "SOLO",
+                        # UI display vocabulary (former use/style labels):
+                        # descriptive, never instruments — skip instead of
+                        # erroring so old poisoned histories degrade to the
+                        # actionable "has no instrument" message.
+                        "COMPING", "SUSTAINED", "GROOVE", "WALKING",
+                        "SPACE", "RESTS", "PATTERN", "FIGURES", "ROLLED",
+                        "LINES", "RUNNING"}
 
 
 def _is_role(u):
@@ -617,16 +629,42 @@ def parse_score(text, tempo=120):
                         cur["cursor"] += beats
                     else:
                         if cur["drum"] and NOTE_SYM_RE.match(tok):
+                            if tok.upper() == "R":
+                                errors.append(
+                                    f"line {lineno}: 'R' needs a duration "
+                                    "too ('R q' rests a quarter)")
+                            else:
+                                errors.append(
+                                    f"line {lineno}: {tok!r} is a pitch but lane "
+                                    f"'{cur.get('name')}' is DRUMS — rhythm lanes "
+                                    "take hit syllables (BD SN HH DHA TIN ...); "
+                                    "move pitches to a MELODY/HARMONY lane")
+                        elif cur["drum"] and re.match(
+                                rf"^({_DUM_ALT})[fmp!]$", tok, re.IGNORECASE):
+                            # 'DHAf' — dynamic but no duration: name the real
+                            # gap instead of a generic bad token.
                             errors.append(
-                                f"line {lineno}: {tok!r} is a pitch but lane "
-                                f"'{cur.get('name')}' is DRUMS — rhythm lanes "
-                                "take hit syllables (BD SN HH DHA TIN ...); "
-                                "move pitches to a MELODY/HARMONY lane")
+                                f"line {lineno}: drum hit {tok!r} missing a "
+                                "duration — every bol needs w/h/q/e/s "
+                                f"('{tok[:-1].upper()} q')")
+                        elif cur["drum"] and DRUM_SYM_RE.match(tok):
+                            # Bare bol without a duration ('Dha Dhin') — the
+                            # most common tabla failure; durations are NOT
+                            # optional on drum hits either.
+                            errors.append(
+                                f"line {lineno}: drum hit {tok!r} missing a "
+                                "duration — every bol needs w/h/q/e/s "
+                                f"('{tok.upper()} q')")
                         elif NOTE_SYM_RE.match(tok):
-                            errors.append(
-                                f"line {lineno}: {tok!r} missing a duration — "
-                                "every pitch needs w/h/q/e/s (e.g. "
-                                f"'{tok} q')")
+                            if tok.upper() == "R":
+                                errors.append(
+                                    f"line {lineno}: 'R' needs a duration "
+                                    "too ('R q' rests a quarter)")
+                            else:
+                                errors.append(
+                                    f"line {lineno}: {tok!r} missing a duration — "
+                                    "every pitch needs w/h/q/e/s (e.g. "
+                                    f"'{tok} q')")
                         elif re.match(r"^([SGMPDN])(\d+!?)$",
                                       tok, re.IGNORECASE):
                             # Swar syllable with an octave but no pitch
@@ -664,6 +702,22 @@ def parse_score(text, tempo=120):
                                 "syllable, not a pitch — convert first "
                                 "(S=C R=D G=E M=F P=G D=A N=B at the tonic) "
                                 f"and give it an octave+duration, e.g. 'G4 q'")
+                        elif re.match(r"^([A-G][#b]?-?\d+):([whqes]\.?)$",
+                                      tok, re.IGNORECASE):
+                            # Colon-duration confusion ('D2:h'): the colon
+                            # is only for chord qualities (':min7').
+                            _m = re.match(r"^([A-G][#b]?-?\d+):([whqes]\.?)$",
+                                          tok, re.IGNORECASE)
+                            errors.append(
+                                f"line {lineno}: {tok!r} has the duration "
+                                "glued on with a colon — write it separated "
+                                f"('{_m.group(1).upper()} {_m.group(2)}')")
+                        elif re.match(r"^R\d+!?$", tok, re.IGNORECASE):
+                            # Octave on a rest ('R4'): rests take no octave.
+                            errors.append(
+                                f"line {lineno}: {tok!r} puts an octave on a "
+                                "rest — rests take no octave, just a duration "
+                                "('R q')")
                         else:
                             errors.append(f"line {lineno}: bad token {tok!r}")
                 except ValueError as e:

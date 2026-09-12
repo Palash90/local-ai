@@ -6,6 +6,10 @@ CHORD_INTERVALS = {
     "5": (0, 7), "56": (0, 7, 10),
     "maj7": (0, 4, 7, 11), "min7": (0, 3, 7, 10), "dim7": (0, 3, 6, 9),
     "m7b5": (0, 3, 6, 10),
+    "maj9": (0, 4, 7, 11, 14), "min9": (0, 3, 7, 10, 14),
+    "m9": (0, 3, 7, 10, 14), "add9": (0, 4, 7, 14),
+    "9": (0, 4, 7, 10, 14),
+    "maj6": (0, 4, 7, 9), "min6": (0, 3, 7, 9), "aug7": (0, 4, 8, 10),
     # Guitar-style aliases (regex accepts them; must resolve, never fall
     # back to the major default).
     "m7": (0, 3, 7, 10), "m": (0, 3, 7),
@@ -13,7 +17,7 @@ CHORD_INTERVALS = {
 }
 # Lane-name -> GM program. Many aliases so a score can name real instruments.
 PROGRAMS = {
-    "PIANO": 0, "EPIANO": 4, "CELESTA": 8, "GLCKENSPIEL": 9, "MUSICBOX": 10,
+    "PIANO": 0, "EPIANO": 4, "RHODES": 4, "CELESTA": 8, "GLCKENSPIEL": 9, "MUSICBOX": 10,
     "VIBES": 11, "MARIMBA": 12, "ORGAN": 16, "ACCORDEON": 21,
     "GUITAR": 25, "NYLON": 24, "STEEL": 25, "EGUITAR": 27, "JAZZGUITAR": 26,
     "BASS": 32, "EBASS": 33, "CONTRABASS": 32, "BASSGUITAR": 33,
@@ -38,6 +42,7 @@ PROGRAMS = {
     "SHANAI": 111, "SHEHNAI": 111, "SARANGI": 111,
     "SANTOOR": 15, "SANTUR": 15, "SANTOOR1": 15, "DULCIMER": 15, "YANGQIN2": 15,
     "SHAKUHACHI": 77, "OCARINA": 79, "PANFLUTE": 75, "SURN": 111,
+    "BANSURI": 77, "BANSHI": 77, "OUD": 24,
     "STEELDRUM": 114, "MARIMBA2": 12,
     "DIZI": 73, "FIDDL": 110, "CLAV": 7, "SLAP": 36, "FRETLESS": 35,
     "SYNTHSTRINGS": 50, "TUBULAR": 14, "VIBES": 11, "MARIMBA": 12,
@@ -55,15 +60,16 @@ INSTRUMENT_FAMILIES = {
     "indian": {
         "SITAR", "TAMBRA", "TANPURA", "TAMBURA", "VEENA", "SAROD",
         "EKTARA", "IKTARA", "DILRUBA", "SHANAI", "SHEHNAI", "SARANGI",
-        "SURN", "SANTOOR", "SANTUR", "SANTOOR1", "TABLA", "DHOLAK",
+        "SURN", "SANTOOR", "SANTUR", "SANTOOR1", "BANSURI", "BANSHI",
+        "TABLA", "DHOLAK",
     },
-    "arabic": {"DARBUKA"},
+    "arabic": {"DARBUKA", "OUD"},
     "japanese": {"KOTO", "KOTO13", "SHAMISEN", "SHAKUHACHI"},
     "chinese": {"GUZHENG", "YANGQIN", "YANGQIN2", "DIZI", "CITHARA"},
     "jazz": {
         "SAX", "TRUMPET", "TROMBONE", "CLARINET", "PIANO", "EPIANO",
         "GUITAR", "NYLON", "STEEL", "EGUITAR", "JAZZGUITAR", "BASS",
-        "EBASS", "BASSGUITAR", "PICKBASS", "SYNTHBASS", "KIT", "DRUM KIT",
+        "EBASS", "BASSGUITAR", "PICKBASS", "SYNTHBASS", "RHODES", "KIT", "DRUM KIT",
     },
     "western": {
         "VIOLIN", "VIOLA", "CELLO", "CONTRABASS", "STRINGS", "TREMOLO",

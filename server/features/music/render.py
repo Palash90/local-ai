@@ -2,68 +2,28 @@
 
 import json
 import os
-import uuid
 
 MUSIC_DIR_DEFAULT = os.path.expanduser("~/local-ai-files/music")
 
 
 def _lane_view(s):
-    """Human-facing label + style for a rendered lane, derived from what it
-    ACTUALLY contains — instrument name, its role in the song, and a style
-    inferred from the events (drones hold, harmony chords, fast figures
-    move). Falls back to the bare lane name when the header was ambiguous."""
-    ev = s.get("events") or []
-    role = (s.get("role") or "").upper()
+    """Human-facing instrument label for a rendered lane. Intentionally
+    instrument-name only: richer display words (use/style) leaked into
+    model-visible tool results, and the model copied them back as lane
+    headers ('unknown lane word comping' loops). Falls back to the bare
+    lane name when the header was ambiguous."""
     instr = s.get("instr")
     kit = (s.get("kit") or "").lower()
     if s.get("drum"):
-        return {"instrument": kit or "drum kit",
-                "use": "percussion", "style": "groove" if kit else "drums"}
+        return {"instrument": kit or "drum kit"}
     if instr:
-        instrument = instr.replace("_", " ").lower()
-    elif s.get("program") is not None and not s.get("drum"):
+        return {"instrument": instr.replace("_", " ").lower()}
+    if s.get("program") is not None:
         from server.features.music.theory import PROGRAMS
-        instrument = next((k.lower() for k, v in PROGRAMS.items()
-                           if v == s["program"]), s.get("name", "").lower())
-    else:
-        instrument = s.get("name", "").lower()
-    sounding = [e for e in ev if e.get("type") != "rest"]
-    n = len(sounding)
-    chords = sum(1 for e in sounding if e.get("type") == "chord")
-    if not sounding:
-        style, use = "rests", "space"
-    else:
-        avg_dur = sum(e.get("dur", 1) for e in sounding) / n
-        long_low = all(e.get("dur", 1) >= 3.0 for e in sounding)
-        midis = [(e.get("midi") if e.get("midi") is not None
-                  else min(e.get("pitches") or [60])) for e in sounding]
-        avg_midi = sum(midis) / len(midis)
-        if role.startswith("DRONE") or (long_low and chords and n <= 6):
-            style, use = "drone", "holds the tonic"
-        elif role.startswith("HARMONY") or role.startswith("PAD"):
-            style = "chords" if avg_dur >= 1.5 else "comping"
-            if n and max(e.get("dur", 0) for e in sounding) < 1.0:
-                style = "rolled figures"
-            use = "harmony"
-        elif role.startswith("BASS"):
-            style = "walking" if avg_dur <= 1.0 else "sustained"
-            use = "bassline"
-        elif role.startswith("RHYTHM") or role.startswith("PERC"):
-            style, use = "pattern", "percussion"
-        else:  # melody & friends
-            fast = sum(1 for e in sounding if e.get("dur", 1) <= 0.75)
-            if n and fast / n > 0.5:
-                style = "running figures"
-            elif avg_dur >= 2.5:
-                style = "sustained lines"
-            else:
-                style = "melody"
-            use = "lead" if not role or role.endswith("Y") else role.lower()
-            if role and role[-1].isdigit() and len(role) > 6:
-                use = "answer voice"
-        if avg_midi < 48 and use == "harmony":
-            style += ", low register"
-    return {"instrument": instrument, "use": use, "style": style}
+        return {"instrument": next(
+            (k.lower() for k, v in PROGRAMS.items()
+             if v == s["program"]), s.get("name", "").lower())}
+    return {"instrument": s.get("name", "").lower()}
 
 
 def _music_dir():
@@ -111,7 +71,26 @@ def render_score(score_text, tempo=120, title="music", user="local"):
         pass
     outdir = os.path.join(_music_dir(), safe_user)
     os.makedirs(outdir, exist_ok=True)
-    tag = uuid.uuid4().hex[:8]
+    # Content-addressed renders: an identical score+tempo reuses the existing
+    # files (with a .json sidecar carrying the full result) instead of paying
+    # fluidsynth+opus again — retries and "play it again" asks are instant.
+    import hashlib
+    _key = hashlib.sha256(f"{tempo}\n{score_text}".encode("utf-8")).hexdigest()[:12]
+    _meta_path = os.path.join(outdir, f"gen_{_key}.json")
+    if os.path.exists(_meta_path):
+        try:
+            _cached = json.load(open(_meta_path))
+            _op = os.path.splitext(_cached.get("wav_path") or "")[0] + ".opus"
+            if not os.path.exists(_op):
+                _cached["music_stream_url"] = None
+            if (os.path.getsize(_cached["wav_path"]) > 100
+                    and os.path.exists(_cached.get("mid_path") or "")):
+                _cached["dedup_hit"] = True
+                print(f"[music] render cache hit: {_cached.get('music_url')}")
+                return json.dumps(_cached)
+        except Exception as e:
+            print(f"[music] stale cache entry ignored: {e}")
+    tag = _key
     base = os.path.join(outdir, f"gen_{tag}")
     try:
         with open(base + ".mid", "wb") as f:
@@ -158,10 +137,16 @@ def render_score(score_text, tempo=120, title="music", user="local"):
          "notes": len(s["events"]), **_lane_view(s)}
         for s in sections
     ]
-    return json.dumps({"ok": True, "music_url": f"/music/{rel}",
-                       "music_stream_url": stream_url,
-                       "mid_path": base + ".mid", "wav_path": base + ".wav",
-                       "duration_s": round(dur, 2), "notes": n, "engine": engine,
-                       "soundfonts": soundfonts,
-                       "tempo": tempo, "levels": levels, "structure": structure,
-                       "score": score_text, "errors": errors})
+    _res = {"ok": True, "music_url": f"/music/{rel}",
+            "music_stream_url": stream_url,
+            "mid_path": base + ".mid", "wav_path": base + ".wav",
+            "duration_s": round(dur, 2), "notes": n, "engine": engine,
+            "soundfonts": soundfonts,
+            "tempo": tempo, "levels": levels, "structure": structure,
+            "score": score_text, "errors": errors}
+    try:
+        with open(_meta_path, "w") as _mf:
+            json.dump(_res, _mf)
+    except Exception as e:
+        print(f"[music] cache write skipped: {e}")
+    return json.dumps(_res)

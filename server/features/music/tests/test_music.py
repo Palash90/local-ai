@@ -189,6 +189,21 @@ def test_guitar_chord_notation_accepted():
         assert errs, bad
 
 
+def test_drum_bol_without_duration_gets_actionable_error():
+    # Tabla thekas written as bare bols ('Dha Dhin') failed 3x with generic
+    # "bad token"s; the error must name the missing duration, any case.
+    from server.features.music.parse import parse_score
+    _, errs, _ = parse_score("[TABLA tabla vol=92]\nDha Dhin Dhin Dha |")
+    assert errs and any("missing a duration" in e for e in errs), errs
+    _, errs, _ = parse_score("[RHYTHM]\nBD SN HH |")
+    assert errs and any("'BD q'" in e for e in errs), errs
+    for ok_line in ("[RHYTHM tabla]\nDHA q GHE q NA q TIN q |",
+                    "[RHYTHM tabla]\nDha q Ghe q |",
+                    "[RHYTHM]\nBD q SN q HH q |"):
+        _, errs, _ = parse_score(ok_line)
+        assert not errs, (ok_line, errs)
+
+
 def test_swar_octave_and_bare_letters_get_actionable_errors():
     # Follow-ups to the Swar leak: 'P4' (syllable+octave) and bare 'e'
     # each got cryptic "bad token"s three rounds running. The messages must
@@ -720,3 +735,171 @@ def test_bass_guitar_aliases_resolve():
         assert secs[0]["program"] == prog, (alias, secs[0]["program"])
         assert DEFAULT_VOL[prog] <= 82
         assert lane_families(alias) == {"jazz"}
+
+
+def test_attached_duration_guitar_chords():
+    from server.features.music.parse import parse_score
+    for tok in ("Am7q", "Am7q!", "Amaj7h", "Dm3:min7arw"):
+        _, errs, _ = parse_score(f"[PIANO]\n{tok} |")
+        assert not errs, (tok, errs)
+
+
+def test_sixth_and_augmented_seventh_chords():
+    from server.features.music.parse import parse_score
+    from server.features.music.theory import chord_pitches
+    assert chord_pitches("A", "maj6", 4) == [69, 73, 76, 78]
+    assert chord_pitches("A", "min6", 4) == [69, 72, 76, 78]
+    assert chord_pitches("A", "aug7", 4) == [69, 73, 77, 79]
+    for tok in ("Am6", "Amaj6", "Aaug7", "C3:maj6", "D3:min6", "G3:aug7"):
+        _, errs, _ = parse_score(f"[PIANO]\n{tok} q |")
+        assert not errs, (tok, errs)
+
+
+def test_drum_dyn_without_duration_names_duration():
+    from server.features.music.parse import parse_score
+    _, errs, _ = parse_score("[RHYTHM tabla]\nDHAf |")
+    assert errs and any("missing a duration" in e and "DHA" in e for e in errs), errs
+
+
+def test_bare_rest_message_not_pitch():
+    from server.features.music.parse import parse_score
+    _, errs, _ = parse_score("[PIANO]\nR |")
+    assert errs and any("'R' needs a duration" in e for e in errs), errs
+    _, errs, _ = parse_score("[RHYTHM]\nR |")
+    assert errs and any("'R' needs a duration" in e for e in errs), errs
+    _, errs, _ = parse_score("[RHYTHM]\nR q |")
+    assert not errs, errs
+
+
+def test_ninth_chords_accepted_and_sound_right():
+    from server.features.music.parse import parse_score
+    from server.features.music.theory import chord_pitches
+    assert chord_pitches("C", "maj9", 4) == [60, 64, 67, 71, 74]
+    assert chord_pitches("D", "min9", 4) == [62, 65, 69, 72, 76]
+    assert chord_pitches("A", "m9", 3) == chord_pitches("A", "min9", 3)
+    assert chord_pitches("C", "add9", 4) == [60, 64, 67, 74]
+    assert chord_pitches("G", "9", 3) == [55, 59, 62, 65, 69]
+    for tok in ("C3:maj9 w", "D3:min9 w", "Am9 w", "Amin9 w", "Cadd9 w",
+                "G3:9 w", "C3:maj9 ar w", "D3:min9 ar q"):
+        _, errs, _ = parse_score(f"[PIANO]\n{tok} |")
+        assert not errs, (tok, errs)
+
+
+def test_rhodes_alias_resolves_to_epiano():
+    from server.features.music.parse import parse_score
+    from server.features.music.theory import (
+        PROGRAMS, DEFAULT_VOL, lane_families)
+    assert PROGRAMS["RHODES"] == 4
+    secs, errs, _ = parse_score("[HARMONY rhodes vol=72]\nD3:min7 w |")
+    assert not errs, errs
+    assert secs[0]["program"] == 4
+    assert DEFAULT_VOL[4] == 85
+    assert lane_families("rhodes") == {"jazz"}
+
+
+def test_colon_duration_and_rest_octave_errors():
+    from server.features.music.parse import parse_score
+    _, errs, _ = parse_score("[BASS ebass]\nD2:h |")
+    assert errs and any("colon" in e for e in errs), errs
+    _, errs, _ = parse_score("[PIANO]\nR4 q |")
+    assert errs and any("no octave" in e for e in errs), errs
+    for ok_line in ("[BASS ebass]\nD2 h |", "[PIANO]\nR q |",
+                    "[RHYTHM]\nR q |"):
+        _, errs, _ = parse_score(ok_line)
+        assert not errs, (ok_line, errs)
+
+
+def test_identical_score_reuses_render(tmp_path=None):
+    import hashlib as _hl
+    import json as _json
+    import os as _os
+    from server.features.music.render import _music_dir, render_score
+    from server.features.users import _safe_username
+    score = "[VIOLIN]\nA4 h G4 q F4 q | E4 w |"
+    outdir = _os.path.join(_music_dir(), _safe_username("local"))
+    tag = _hl.sha256(f"120\n{score}".encode("utf-8")).hexdigest()[:12]
+    for ext in (".json", ".wav", ".mid", ".opus"):
+        try:
+            _os.remove(_os.path.join(outdir, f"gen_{tag}{ext}"))
+        except OSError:
+            pass
+    r1 = _json.loads(render_score(score, 120, title="t", user="local"))
+    assert r1["ok"] is True, r1
+    assert not r1.get("dedup_hit")
+    r2 = _json.loads(render_score(score, 120, title="t", user="local"))
+    assert r2["ok"] is True, r2
+    assert r2.get("dedup_hit") is True
+    assert r2["music_url"] == r1["music_url"]
+    assert r2["wav_path"] == r1["wav_path"]
+    assert _os.path.exists(r1["wav_path"][:-4] + ".json")
+
+
+def test_arranged_same_seed_reproducible():
+    from server.features.music.random_arrange import random_score
+    a = random_score(seed=42, genre="jazz")
+    b = random_score(seed=42, genre="jazz")
+    assert a[0] == b[0] and a[1] == b[1]
+    c = random_score(seed=43, genre="jazz")
+    assert c[0] != a[0]
+
+
+def test_arranged_fusion_partner_audible():
+    from server.features.music.random_arrange import random_score
+    from server.features.music.parse import parse_score
+    from server.features.music.theory import lane_families
+    score, tempo, info = random_score(seed=11, genre="indian_classical",
+                                      fusion="jazz")
+    assert info["fusion"] == ["jazz"]
+    secs, errs, _ = parse_score(score, tempo)
+    assert not errs, errs
+    fams = set()
+    for s in secs:
+        fams |= lane_families((s.get("instr") or ""))
+    assert "jazz" in fams, fams
+    assert "indian" in fams, fams
+
+
+def test_arranged_invalid_names_error_cleanly():
+    from server.features.music.random_arrange import random_score
+    import pytest
+    with pytest.raises(ValueError, match="unknown genre"):
+        random_score(seed=1, genre="zydeco")
+    with pytest.raises(ValueError, match="unknown fusion genre"):
+        random_score(seed=1, genre="jazz", fusion="martian")
+    with pytest.raises(ValueError, match="at most 2 fusion"):
+        random_score(seed=1, genre="jazz", fusion=["latin", "funk", "pop"])
+    with pytest.raises(ValueError, match="unknown lead instrument"):
+        random_score(seed=1, genre="jazz", lead="THEREMINX")
+
+
+def test_levels_carry_instrument_only():
+    # Display vocabulary (use/style) leaked into model-visible results and
+    # the model copied it back as lane headers. Levels must carry the
+    # instrument name and base keys — nothing else.
+    import json
+    from server.features.music.render import render_score
+    res = json.loads(render_score(
+        "[MELODY sitar vol=85]\nD4 q E4 q G4 q A4 q |\n"
+        "[RHYTHM tabla]\nDHA q GHE q NA q TIN q |",
+        120, title="levels-clean", user="local"))
+    assert res["ok"], res
+    for lv in res["levels"]:
+        assert "use" not in lv and "style" not in lv, lv
+        assert lv.get("instrument"), lv
+    by_name = {lv["name"]: lv["instrument"] for lv in res["levels"]}
+    assert by_name["MELODY"] == "sitar"
+    assert by_name["RHYTHM"] == "tabla"
+
+
+def test_display_words_ignored_in_headers():
+    # Poisoned-history safety net: former display words degrade to the
+    # actionable "has no instrument" message, never "unknown lane word".
+    from server.features.music.parse import parse_score
+    _, errs, _ = parse_score("[HARMONY comping vol=70]\nC3:maj7 w |", 120)
+    assert errs and not any("unknown lane word" in e for e in errs), errs
+    assert any("no instrument" in e for e in errs), errs
+    _, errs, _ = parse_score("[BASS sustained vol=70]\nD2 w |", 120)
+    assert not any("unknown lane word" in e for e in errs), errs
+    _, errs, _ = parse_score("[MELODY2 walking vol=80]\nD4 q E4 q |", 120)
+    assert errs and not any("unknown lane word" in e for e in errs), errs
+    assert any("no instrument" in e for e in errs), errs

@@ -4,8 +4,9 @@
     PYTHONPATH=. python3 -m server.features.music --random        # random piece
     PYTHONPATH=. python3 -m server.features.music --genre jazz    # by genre
     PYTHONPATH=. python3 -m server.features.music --mood epic     # by mood
-    PYTHONPATH=. python3 -m server.features.music --seed 7 --genre jazz
-    PYTHONPATH=. python3 -m server.features.music --showcase      # audition ALL
+     PYTHONPATH=. python3 -m server.features.music --seed 7 --genre jazz
+     PYTHONPATH=. python3 -m server.features.music --genre indian_classical --fusion jazz
+     PYTHONPATH=. python3 -m server.features.music --showcase      # audition ALL
 """
 import json
 import sys
@@ -51,11 +52,13 @@ def main():
         return
     mood = _arg("--mood")
     genre = _arg("--genre")
+    fusion = _arg("--fusion")
     seed = _arg("--seed")
-    if "--random" in sys.argv or mood or genre or seed:
+    if "--random" in sys.argv or mood or genre or seed or fusion:
         from server.features.music.random_arrange import random_score
         text, tempo, info = random_score(seed=int(seed) if seed else None,
-                                         mood=mood, genre=genre)
+                                         mood=mood, genre=genre,
+                                         fusion=fusion)
         tag = info.get("genre") or info.get("mood") or "random"
         print(f"--- {tag} arrangement: {info['key']} "
               f"{info['tempo']}bpm {info['bars']}bars [{info['structure']}] ---")

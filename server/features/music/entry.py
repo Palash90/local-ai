@@ -35,9 +35,15 @@ def _render_make_music(task_id, sid, user_message, user):
         t["music_duration"] = res.get("duration_s")
         t.setdefault("_tools_used", []).append("generate_music")
     lanes = ", ".join(info.get("lanes", []))
+    _glabel = info.get("genre") or info.get("mood") or "arrangement"
+    _fusion = info.get("fusion")
+    if isinstance(_fusion, list):
+        _fusion = "+".join(_fusion) if _fusion else None
+    _flabel = f" + {_fusion}" if _fusion else ""
     reply = (
-        f"Here's a **{info.get('mood', '')}** piece in "
-        f"**{info.get('key', '')}** ({info.get('tempo', 0)} BPM) — "
+        f"Here's a **{_glabel}{_flabel}** piece in "
+        f"**{info.get('key', '')}** ({info.get('tempo', 0)} BPM, "
+        f"seed {info.get('seed')}) — "
         f"{info.get('structure', '')} · {res.get('duration_s', 0)}s across {lanes}. "
         f"Press play below!"
     )

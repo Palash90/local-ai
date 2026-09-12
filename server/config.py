@@ -935,7 +935,10 @@ TOOLS_DETAILED = [
                             "once; hybridize the groove instead of layering "
                             "two. Vary the arrangement per section: stack "
                             "(interlocked together), complement (split roles "
-                            "across families), alternate (trade phrases).\n\n"
+                            "across families), alternate (trade phrases). "
+                            "LEAD STAYS HOME: the MELODY lane plays an "
+                            "instrument of the primary tradition; borrowing "
+                            "is for second voices only.\n\n"
                             "LANES: '[ROLE INSTRUMENT vol=NN]' header then note "
                             "tokens. ROLE any name (MELODY, HARMONY, BASS, RHYTHM/"
                             "PERC). Any lane may be a melody — PIANO/EPIANO can "
@@ -981,15 +984,19 @@ TOOLS_DETAILED = [
                             "write 'G5 q'.\n"
                             "  note:  C4 q, F#5 e, Bb3 h, A0 w (scientific pitch)\n"
                             "  chord: C:maj A3:min G:7 D:maj7 E:min7 A:sus4 B:dim "
-                            "— qualities maj|min(m)|7|maj7|min7(m7)|dim|dim7|"
-                            "m7b5|aug|sus2|sus4|5|56. Guitar forms normalize "
+                            "— qualities maj|min(m)|7|maj7|min7(m7)|maj6|min6|"
+                            "dim|dim7|m7b5|aug|aug7|sus2|sus4|5|56|maj9|min9"
+                            "(m9)|add9|9. Guitar forms normalize "
                             "to canonical: Am7/Am3:min7/A3:m7 all work. Bare "
                             "letter+digit with no quality ('A7','E5') is a "
                             "NOTE, never a chord.\n"
                             "  rest:  R q   (or R w for a silent bar)\n"
                             "  drum:  BD KC SN RIM CLAP HH OH PEDAL CR CHIN RD RIDE"
                             " LT MT HT LFT HFT CONG BONG TBL CAB MAR CLV COWB TAM "
-                            "TRIG + dur (kick snare rimshot clap hats cymbals toms "
+                            "TRIG + dur — every hit takes its own duration "
+                            "('BD q SN q', never bare 'BD SN'; tabla "
+                            "'DHA q GHE q', never 'Dha Dhin') (kick snare "
+                            "rimshot clap hats cymbals toms "
                             "congas timbales cabasa maracas claves cowbell "
                             "tambourine triangle)\n"
                             "  dynamic suffix on duration (or '!' on the pitch): "
@@ -1073,7 +1080,10 @@ TOOLS_DETAILED = [
                             "for 20 bars (monotony); the same melody under "
                             "all four section labels (a motif, not a song); "
                             "a 'duet' where MELODY2 "
-                            "appears twice (lane hogging)."
+                            "appears twice (lane hogging); bare R used as a "
+                            "separator between chords ('G2:7 R q' is still "
+                            "broken — chord AND rest each need durations: "
+                            "'G2:7 w R q')."
                         ),
                     },
                     "tempo": {
@@ -1086,6 +1096,71 @@ TOOLS_DETAILED = [
                     },
                 },
                 "required": ["score"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_music_arranged",
+            "description": (
+                "Compose music WITHOUT writing notation: pick genre/mood "
+                "(optionally fusion partner, tempo, scale, lead voice, bar "
+                "count) and the server-side arranger composes a full "
+                "multi-voice arrangement from genre catalogs and renders it "
+                "to playable WAV. Prefer this over generate_music unless "
+                "you need note-level control. Omit what you don't care "
+                "about — catalog defaults fill in, and every call without "
+                "an explicit seed is a fresh take."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "genre": {
+                        "type": "string",
+                        "enum": ["ambient", "arabic", "blues", "bollywood",
+                                 "bossa", "chinese", "cinematic", "edm",
+                                 "funk", "hiphop", "indian_classical",
+                                 "japanese", "jazz", "korean", "latin",
+                                 "pop", "rnb", "rock"],
+                        "description": "Primary tradition/style. Omit for mood-only.",
+                    },
+                    "mood": {
+                        "type": "string",
+                        "enum": ["joyful", "moody", "inspiring", "dreamy",
+                                 "tense", "epic", "calm", "playful"],
+                        "description": "Emotional colour. Omit for genre-only.",
+                    },
+                    "fusion": {
+                        "type": "string",
+                        "description": "Second tradition, one genre name (or two comma-separated, max 2). The partner always gets an audible lane.",
+                    },
+                    "tempo": {
+                        "type": "integer",
+                        "description": "Beats per minute, 40-220. Omit for the genre default.",
+                    },
+                    "scale": {
+                        "type": "string",
+                        "description": "Scale/mode override (e.g. dorian, yaman, hijaz, hirajoshi). Omit for the genre default.",
+                    },
+                    "lead": {
+                        "type": "string",
+                        "description": "Lead instrument alias (e.g. SAX, SITAR, KOTO). Omit for the genre default.",
+                    },
+                    "bars": {
+                        "type": "integer",
+                        "description": "Total-bar target, 4-64. Omit for the tempo-derived default (~30-75s).",
+                    },
+                    "seed": {
+                        "type": "integer",
+                        "description": "Omit for a fresh random take every call. Pass a previous reply's seed to replay it exactly.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional short title for the piece.",
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -1113,6 +1188,11 @@ _TOOL_SHORT_DESC = {
         "drums, multi-voice texture, dynamics) from a score DSL -> playable WAV. "
         "Call tool_details('generate_music') for the full language (genres, "
         "instruments, drums, cadence, fusion) before writing a score."
+    ),
+    "generate_music_arranged": (
+        "Compose music by parameters (no notation): genre/mood/fusion/tempo/"
+        "scale/lead/bars/seed -> arranged multi-voice WAV. Omit unknowns; "
+        "omit seed for a fresh take each call."
     ),
     "edit_image": (
         "Img2img editor: restyle/modify an existing or uploaded image via "
@@ -1144,6 +1224,14 @@ _TOOL_SHORT_DESC = {
 }
 
 
+# ── Arranger-parameter pipeline gate ────────────────────────────────────────
+# generate_music_arranged (enum-only params → random_score contract → same
+# render + gates as the freeform path) ships DISABLED by default: the current
+# freeform-DSL path stays the default until the arranged pipeline is evaluated
+# on bigger models. Flip to 1 and restart to try it; `make music` keeps using
+# the arranger with catalog defaults either way.
+MUSIC_ARRANGER_PARAMS = os.environ.get(
+    "MUSIC_ARRANGER_PARAMS", "0").strip().lower() in ("1", "true", "yes", "on")
 # ── Hot-swappable music DSL doc ─────────────────────────────────────────────
 # The generate_music score-DSL documentation is calibration surface: it must
 # be editable and picked up WITHOUT a restart while we tune it. The file is
@@ -1260,6 +1348,12 @@ TOOLS.append({
 # stripped from human UI requests (see TOOLS_HUMAN) to cut static prompt
 # tokens; the dispatch layer enforces the same split defensively.
 AGENT_ONLY_TOOLS = {"track_theme"}
+
+# Arranger-parameter tool visibility follows the MUSIC_ARRANGER_PARAMS gate so
+# token-cost accounting below reflects exactly what goes on the wire.
+if not MUSIC_ARRANGER_PARAMS:
+    _drop = "generate_music_arranged"
+    TOOLS = [t for t in TOOLS if t["function"]["name"] != _drop]
 
 TOOLS_TOKEN_COST = len(json.dumps(TOOLS)) // 4
 

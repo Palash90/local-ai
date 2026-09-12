@@ -544,3 +544,204 @@ def test_gcs_presented_image_links_scrubbed():
     assert 'storage.googleapis' not in clean
     assert '[a](/output/palash/a.png)' in clean
     assert '[docs](https://example.com/a)' in clean
+
+
+def _var_score():
+    return ("@tempo 120\n@genre jazz\n"
+            "@section verse bars=10 energy=0.6\n"
+            "@section chorus bars=10 energy=0.9\n"
+            "@section bridge bars=6 energy=0.8\n"
+            "@section outro bars=4 energy=0.4\n")
+
+
+def test_variation_catches_duplicate_leads():
+    from server.features.critic import _variation_problems
+    score = (_var_score()
+             + "[MELODY sax vol=86]\n"
+               "D4 q F4 e A4 e G4 h | D4 q C4 e D4 e R q | "
+               "D4 q F4 e A4 e G4 h | D4 q C4 e D4 e R q |\n"
+               "[MELODY2 trumpet vol=80]\n"
+               "D4 q F4 e A4 e G4 h | D4 q C4 e D4 e R q | "
+               "D4 q F4 e A4 e G4 h | D4 q C4 e D4 e R q |\n"
+               "[HARMONY epiano vol=70]\nD3:min7 w | G3:7 w |\n"
+               "[BASS ebass vol=78]\nD2 h D2 q A2 q | G2 h G2 q D2 q |\n"
+               "[RHYTHM]\nBD q SN q BD q SN q |\n")
+    notes = _variation_problems(score)
+    assert any("duplicates" in n for n in notes), notes
+
+
+def test_variation_allows_octave_doubling_and_handoff():
+    from server.features.critic import _variation_problems
+    score = (_var_score()
+             + "[MELODY sax vol=86]\n"
+               "D4! q F4 e A4 e G4 h | E4 q D4 e C4 e D4 h |\n"
+               "[MELODY2 epiano vol=78]\n"
+               "R w | R w | D5! q F5 e A5 e G5 h | E5 q D5 e C5 e D5 h |\n"
+               "[HARMONY epiano vol=70]\nD3:min7 w | G3:7 w |\n"
+               "[BASS ebass vol=78]\nD2 h D2 q A2 q | G2 h G2 q D2 q |\n"
+               "[RHYTHM]\nBD q SN q BD q SN q |\n"
+               "[DRONE tanpura vol=60]\nD2:5 w | D2:5 w |\n")
+    notes = _variation_problems(score)
+    assert not any("duplicates" in n for n in notes), notes
+
+
+def test_variation_single_vamp_and_no_dynamics():
+    from server.features.critic import _variation_problems
+    score = (_var_score()
+             + "[MELODY sax vol=86]\n"
+               "D4 q F4 e A4 e G4 h | G4 q F4 e D4 e C4 h |\n"
+               "[HARMONY epiano vol=70]\nD3:min7 w | G3:7 w |\n"
+               "[RHYTHM]\nBD q SN q BD q SN q |\n")
+    notes = _variation_problems(score)
+    assert any("covers" in n for n in notes), notes
+    assert any("dynamics" in n for n in notes), notes
+
+
+def test_variation_gate_wires_through_mismatch(stub_state):
+    from server.features.critic import _requirement_mismatch
+    score = (_var_score()
+             + "[MELODY sax vol=86]\n"
+               "D4 q F4 e A4 e G4 h | D4 q C4 e D4 e R q |\n"
+               "[HARMONY epiano vol=70]\nD3:min7 w | G3:7 w |\n"
+               "[RHYTHM]\nBD q SN q BD q SN q |\n")
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_url": "/music/palash/gen_x.wav",
+                   "music_duration": 60.0,
+                   "music_score": score,
+                   "music_levels": [
+                       {"name": "X", "program": 0, "drum": False,
+                        "vol": 80, "notes": 10, "instrument": "sax",
+                        "use": "lead", "style": "melody"}]}}
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    reason = _requirement_mismatch(
+        "t", "s1", "a jazz piece please", "Here is your piece!")
+    assert reason == "variation"
+    assert tasks["t"]["_variation_notes"]
+
+
+def test_cadence_gate():
+    from server.features.critic import _cadence_problems
+    good = ("@section verse bars=2 energy=0.6\n"
+            "[MELODY sax vol=80]\nD4 q E4 q G4 q A4 q |\n"
+            "[BASS ebass vol=75]\nD2 h A2 q D2 q |\n"
+            "[HARMONY epiano vol=70]\nD3:min7 w |\n")
+    assert _cadence_problems(good) == []
+    bad_bass = ("@section verse bars=2 energy=0.6\n"
+                "[MELODY sax vol=80]\nD4 q E4 q G4 q A4 q |\n"
+                "[BASS ebass vol=75]\nD2 w | G2 w |\n")
+    assert any("bass" in n for n in _cadence_problems(bad_bass))
+    bad_melody = ("@section verse bars=2 energy=0.6\n"
+                  "[MELODY sax vol=80]\nD4 q E4 q G4 q E4 q |\n"
+                  "[BASS ebass vol=75]\nD2 w | D2 w |\n")
+    assert any("melody" in n for n in _cadence_problems(bad_melody))
+    assert _cadence_problems("[MELODY sax vol=80]\nD4 q |") == []
+
+
+def test_lead_home_gate():
+    from server.features.critic import _lead_home_problems
+    sax_lead = "[MELODY sax vol=80]\nD4 q E4 q G4 q A4 q |\n"
+    sitar_lead = "[MELODY sitar vol=85]\nD4 q E4 q G4 q A4 q |\n"
+    assert _lead_home_problems("jazz fusion with sitar", sax_lead) == []
+    bad = _lead_home_problems("jazz fusion with sitar", sitar_lead)
+    assert bad and "Sitar" in bad[0] and "jazz" in bad[0].lower()
+    # explicitly assigned lead is the user's call
+    assert _lead_home_problems("sitar-led jazz fusion", sitar_lead) == []
+    # single tradition: no gate
+    assert _lead_home_problems("indian classical piece", sitar_lead) == []
+    # unresolvable genre: no gate
+    assert _lead_home_problems("zydeco funk fusion party", sitar_lead) == []
+
+
+def test_cadence_wires_through_mismatch(stub_state):
+    from server.features.critic import _requirement_mismatch
+    score = ("@section verse bars=2 energy=0.6\n"
+             "[MELODY sax vol=80]\nD4 q E4 q G4 q E4 q |\n"
+             "[HARMONY epiano vol=70]\nD3:min7 w |\n"
+             "[BASS ebass vol=75]\nD2 w | D2 w |\n")
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_url": "/music/palash/gen_x.wav",
+                   "music_duration": 30.0,
+                   "music_score": score,
+                   "music_levels": [
+                       {"name": "X", "program": 0, "drum": False,
+                        "vol": 80, "notes": 10, "instrument": "sax",
+                        "use": "lead", "style": "melody"}]}}
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    assert _requirement_mismatch(
+        "t", "s1", "a short jazz piece", "Here is your piece!") == "cadence"
+
+
+def test_raga_names_imply_indian_family(stub_state):
+    from server.features.critic import _requirement_mismatch
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_url": "/music/palash/gen_x.wav",
+                   "music_duration": 60.0,
+                   "music_levels": [
+                       {"name": "X", "program": 0, "drum": False,
+                        "vol": 80, "notes": 10, "instrument": "sax",
+                        "use": "lead", "style": "melody"}]}}
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    reason = _requirement_mismatch(
+        "t", "s1", "Compose a Raga Durga - Dorian fusion",
+        "Here is your fusion piece!")
+    assert reason == "fusion_imbalance"
+    assert tasks["t"]["_fusion_missing"] == ["indian"]
+
+
+def test_korean_joins_eastasia_bucket(stub_state):
+    from server.features.critic import _requirement_mismatch
+    koto = [{"name": "X", "program": 0, "drum": False, "vol": 80,
+             "notes": 10, "instrument": "koto",
+             "use": "lead", "style": "melody"}]
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_url": "/music/palash/gen_x.wav",
+                   "music_duration": 60.0, "music_levels": koto}}
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    # koto satisfies a korean ask via the shared eastasia bucket
+    assert _requirement_mismatch(
+        "t", "s1", "compose a korean music piece",
+        "Here is your piece!") is None
+    tasks2 = {"t": {"music_file": "palash/gen_x.wav",
+                    "music_url": "/music/palash/gen_x.wav",
+                    "music_duration": 60.0,
+                    "music_levels": [
+                        {"name": "X", "program": 0, "drum": False,
+                         "vol": 80, "notes": 10, "instrument": "sax",
+                         "use": "lead", "style": "melody"}]}}
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks2, sessions={})
+    reason = _requirement_mismatch(
+        "t", "s1", "korean jazz fusion please", "Here is your fusion piece!")
+    assert reason == "fusion_imbalance"
+    assert tasks2["t"]["_fusion_missing"] == ["eastasian"]
+
+
+def test_systemic_note_fires_on_dominated_errors():
+    from server.features.critic import _systemic_error_note
+    many = [f"line {i}: 'C4' missing a duration" for i in range(19)]
+    note = _systemic_error_note(many)
+    assert "19 of your" in note and "lead-sheet" in note
+    assert _systemic_error_note(many[:3]) == ""
+    assert _systemic_error_note([]) == ""
+    assert _systemic_error_note(["line 2: bad token 'ZZZ'"] * 6) == ""
+
+
+def test_systemic_note_counts_mixed_missing_duration_phrasing():
+    # Real failure shape: chord messages say "missing a duration" while
+    # R messages say "needs a duration" — the cluster must count both,
+    # or the loud warning never fires and retries fly blind.
+    from server.features.critic import _systemic_error_note
+    mixed = [
+        "line 15: chord 'G2:7' missing a duration (e.g. 'G2:7 w')",
+        "line 15: 'R' needs a duration too ('R q' rests a quarter)",
+        "line 16: 'R' needs a duration too ('R q' rests a quarter)",
+        "line 16: 'R' needs a duration too ('R q' rests a quarter)",
+        "line 16: chord 'G2:7' missing a duration (e.g. 'G2:7 w')",
+    ]
+    note = _systemic_error_note(mixed)
+    assert "5 of your" in note and "lead-sheet" in note
+    assert _systemic_error_note(mixed[:3]) == ""

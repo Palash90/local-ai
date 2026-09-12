@@ -219,7 +219,8 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   (`gen_<tag>.opus`, `OggS` magic, ~22× smaller than WAV); chat player uses it
   with WAV fallback (`onError` swaps to `_music_url`); missing libopus →
   key absent and WAV plays. No new dependency: system libopus0, degrades to
-  WAV-only if absent.
+  WAV-only if absent. Identical score+tempo reuses existing files
+  (`dedup_hit`, content hash) instead of re-rendering.
 - Score budget + malformed-call retry: scores over ~1100 chars get cut by the
   generation token budget and llama.cpp 500s the tool call (`Failed to parse
   tool call arguments`); the server steers (shorten + valid JSON) and retries
@@ -259,6 +260,18 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   fusion must vary arrangement per section (stack/complement/alternate).
   Mismatch budgets are per-reason (score_errors 2, others 1, 4 total) so one
   gate can't starve another — fusion is evaluated before length.
+  Arranger fusion (`random_score(genre, fusion=[...])`): partner lane
+  (MELODY2 from partner palette) + partner `perc` groove on PERC2 must be
+  present and parse-clean; lead stays home; same seed reproduces the score.
+- Variation gate: a render whose melody lanes duplicate note-for-note, whose
+  lane covers 12+ grid bars with ≤2 distinct bars, or with zero dynamics
+  must trigger `variation` (findings name lanes/bar counts); octave doubling,
+  drones/sustained parts, drums and short forms are exempt.
+- Ending + lead gates: a render whose final bass note misses the tonic or
+  whose final melody note leaves the tonic triad must trigger `cadence`
+  (read from written bars — tiling/loops don't count); a fusion MELODY lane
+  outside the primary genre's palette (unless explicitly assigned) must
+  trigger `lead_home`.
 
 And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; assert the model unloads → ComfyUI runs → model reloads (see logs `[llama]`/`[image]`), CPU agents keep running throughout.
 

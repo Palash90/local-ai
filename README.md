@@ -250,7 +250,8 @@ local-ai/
 │       ├── monitoring.py    Thermal/RAM/idle loops, server lifecycle, embed/cpu/guardrail
 │       │                    ensure-* lazy starts + idle unload
  │   ├── page_cache.py    SQLite page cache + nomic vector layer (posts to :8084);
- │   │                    TTLs 300s fresh / 30d stale (LLM TTL 60s–30d), embed budget
+ │   │                    TTLs 300s fresh / 30d stale / 365d timeless music-theory
+ │   │                    (LLM TTL 60s–30d), embed budget
  │   │                    3000 chars with 2s timeout, `~/local-ai-files/page_cache.db`
  │   │                    (`LOCAL_AI_PAGE_CACHE` override), keyed-only degrade offline
 │       ├── pensieve/        Archival context compaction (deterministic; see ARCHITECTURE.md §10.5)

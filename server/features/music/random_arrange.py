@@ -12,9 +12,12 @@ energy), this models real TEXTURE over time:
 Every produced bar is normalised to exactly 4 beats so lanes stay aligned.
 """
 
+import difflib
 import random
+import re
 
 from server.features.music import harmony, form, moods, genres, world_scales, rhythm
+from server.features.music.theory import PROGRAMS
 
 PIANO_LIKE = ["PIANO", "EPIANO", "CELESTA", "MUSICBOX"]
 MOTIFS = [
@@ -152,6 +155,38 @@ def _harmony_layer(notes_chords, scale, energy):
     return f"{root}{octv}:{q} w |"
 
 
+def _suggest(name, valid):
+    near = difflib.get_close_matches(str(name), list(valid), 1)
+    hint = f" (did you mean {near[0]}?)" if near else ""
+    return hint
+
+
+def _norm_fusion(fusion):
+    """Normalize the fusion argument to a validated list of genre dicts.
+
+    Accepts a single name, a comma string, or a list (cap 2 — budget
+    reality). Unknown names raise ValueError naming valid genres.
+    Returns (partner_dicts, explicit_bool)."""
+    if fusion is None:
+        return [], [], False
+    names = fusion if isinstance(fusion, list) else str(fusion).split(",")
+    names = [n.strip() for n in names if n and n.strip()]
+    if len(names) > 2:
+        raise ValueError("at most 2 fusion partners fit an 8-lane budget")
+    partners = []
+    partner_names = []
+    for n in names:
+        g = genres.resolve(n)
+        if g is None:
+            raise ValueError(
+                f"unknown fusion genre {n!r}{_suggest(n, genres.genre_names())}. "
+                f"Valid: {', '.join(genres.genre_names())}")
+        partners.append(g)
+        partner_names.append(next(
+            (k for k, v in genres.GENRES.items() if v is g), n))
+    return partners, partner_names, True
+
+
 def _plan_voice(rnd, energy, functional, is_end):
     """Choose the melody texture for a bar."""
     r = rnd.random()
@@ -166,42 +201,112 @@ def _plan_voice(rnd, energy, functional, is_end):
     return rnd.choices(["solo", "response", "solo"], [6, 2, 2])[0]
 
 
-def random_score(seed=None, mood=None, genre=None, fusion=None):
+def _check_alias(name, kind="instrument"):
+    """Validate a lane instrument against PROGRAMS; raise with suggestions."""
+    if name is None:
+        return None
+    u = str(name).upper()
+    if u not in PROGRAMS:
+        raise ValueError(
+            f"unknown {kind} {name!r}{_suggest(u, PROGRAMS)}.")
+    return u
+
+
+def random_score(seed=None, mood=None, genre=None, fusion=None,
+                 scale_name=None, tonic=None, tempo=None, bars=None,
+                 lead=None, bass=None, groove=None, density=None,
+                 energy_lift=None):
+    """Compose a genre-aware multi-voice score. All params optional:
+
+    seed/mood/genre/fusion (fusion: name, comma list, or list, max 2),
+    scale_name (world_scales key), tonic (e.g. 'D'), tempo (40-220),
+    bars (total-bar cap 4-64), lead/bass (PROGRAMS aliases), groove
+    (rhythm.py groove key), density 0-1, energy_lift -0.3-0.3.
+    Invalid values raise ValueError naming the valid choices.
+    Omitted params fall back to genre/mood catalog defaults; omitted seed
+    means fresh randomness every call."""
     rng = random.Random(seed)
+    if mood is not None and mood not in moods.MOODS:
+        raise ValueError(
+            f"unknown mood {mood!r}{_suggest(mood, moods.MOODS)}. "
+            f"Valid: {', '.join(sorted(moods.MOODS))}")
+    if genre is not None and genres.resolve(genre) is None:
+        raise ValueError(
+            f"unknown genre {genre!r}{_suggest(genre, genres.genre_names())}. "
+            f"Valid: {', '.join(genres.genre_names())}")
     g = genres.resolve(genre)
+    partners, partner_names, explicit_fusion = _norm_fusion(fusion)
+    if scale_name is not None and not world_scales.scale_exists(scale_name):
+        raise ValueError(
+            f"unknown scale {scale_name!r}"
+            f"{_suggest(scale_name, world_scales.SCALES)}. "
+            f"Valid: {', '.join(sorted(world_scales.SCALES))}")
+    if tonic is not None and not re.match(
+            r"^[A-G][#b]?$", str(tonic)):
+        raise ValueError(
+            f"unknown tonic {tonic!r}. Use a pitch class like 'D', 'F#', 'Bb'.")
+    if tempo is not None and not (40 <= int(tempo) <= 220):
+        raise ValueError(f"tempo {tempo!r} out of range 40-220.")
+    if bars is not None and not (4 <= int(bars) <= 64):
+        raise ValueError(f"bars {bars!r} out of range 4-64.")
+    lead = _check_alias(lead, "lead instrument") if lead is not None else None
+    bass = _check_alias(bass, "bass instrument") if bass is not None else None
+    if groove is not None and groove not in rhythm.GROOVES:
+        raise ValueError(
+            f"unknown groove {groove!r}{_suggest(groove, rhythm.GROOVES)}. "
+            f"Valid: {', '.join(sorted(rhythm.GROOVES))}")
+    if density is not None and not (0.0 <= float(density) <= 1.0):
+        raise ValueError(f"density {density!r} out of range 0-1.")
+    if energy_lift is not None and not (-0.3 <= float(energy_lift) <= 0.3):
+        raise ValueError(f"energy_lift {energy_lift!r} out of range -0.3-0.3.")
     moodp = moods.params(mood) if mood else None
 
     if g:
-        scale_name = rng.choice(g["scales"])
-        tonic = rng.choice(g["tonics"])
+        scale_name = scale_name or rng.choice(g["scales"])
+        tonic = tonic or rng.choice(g["tonics"])
         lo, hi = g["tempo"]
-        tempo = rng.randrange(lo, hi + 1, 4)
+        tempo = int(tempo) if tempo is not None else rng.randrange(lo, hi + 1, 4)
         seventh = g.get("seventh", False)
-        groove_name = g.get("perc", "backbeat")
+        groove_name = groove or g.get("perc", "backbeat")
         cadence = g.get("cadence", "authentic")
         base_oct = 4
-        fusion_partner = genres.resolve(fusion) if fusion else (
-            genres.resolve(rng.choice(g.get("fusion", []))) if rng.random() < 0.35 else None)
-        mel_a = _borrow(rng, g["melody"], fusion_partner, 0)
-        mel_b = _borrow(rng, g["melody"], fusion_partner, 1)
+        if explicit_fusion:
+            fusion_partner = partners[0] if partners else None
+        else:
+            fusion_partner = (
+                genres.resolve(rng.choice(g.get("fusion", [])))
+                if rng.random() < 0.35 else None)
+        # Lead stays home on explicit fusion: the primary voice is always
+        # genre-authentic (no partner mixing into pick=0); borrowing is for
+        # second voices only.
+        mel_a = lead or _borrow(
+            rng, g["melody"], None if explicit_fusion else fusion_partner, 0)
+        mel_b = _borrow(rng, g["melody"],
+                        fusion_partner if not lead else None, 1)
         harm_instr = _borrow(rng, g["harmony"], fusion_partner, 0)
         pad_instr = _borrow(rng, g["harmony"], fusion_partner, 1)
-        bass_instr = _borrow(rng, g["bass"], fusion_partner, 0)
+        bass_instr = bass or _borrow(rng, g["bass"], fusion_partner, 0)
+        if explicit_fusion and partners:
+            # Audibility guarantee: the partner family gets a pitched lane
+            # deterministically (MELODY2), not on a 35% dice roll.
+            _ppick = rng.choice(partners[0].get("melody", []))
+            if _ppick:
+                mel_b = _ppick
     else:
         moodp = moodp or moods.params(moods.pick_mood(rng))
-        scale_name = rng.choice(moodp["modes"])
-        tonic = rng.choice(["C", "G", "D", "A", "E", "F", "Bb"])
-        tempo = moods.choose_tempo(rng, moodp)
+        scale_name = scale_name or rng.choice(moodp["modes"])
+        tonic = tonic or rng.choice(["C", "G", "D", "A", "E", "F", "Bb"])
+        tempo = int(tempo) if tempo is not None else moods.choose_tempo(rng, moodp)
         seventh = rng.random() < moodp["colour"][1]
-        groove_name = "backbeat"
+        groove_name = groove or "backbeat"
         cadence = moodp["cadence"]
         base_oct = moodp["base_oct"]
         pop = genres.GENRES["pop"]
-        mel_a = rng.choice(pop["melody"] + ["FLUTE", "VIOLIN"])
+        mel_a = lead or rng.choice(pop["melody"] + ["FLUTE", "VIOLIN"])
         mel_b = rng.choice(pop["melody"] + ["SAX", "CELLO"])
         harm_instr = rng.choice(pop["harmony"])
         pad_instr = rng.choice(["STRINGS", "PAD"])
-        bass_instr = rng.choice(pop["bass"])
+        bass_instr = bass or rng.choice(pop["bass"])
         fusion_partner = None
 
     functional = world_scales.heptatonic(scale_name)
@@ -209,13 +314,15 @@ def random_score(seed=None, mood=None, genre=None, fusion=None):
     L = len(scale)
     tonic_pc = scale[0][1]
     scale_info = (scale, base_oct, L)
-    density = moodp["density"] if moodp else 0.6
+    density = (float(density) if density is not None
+               else (moodp["density"] if moodp else 0.6))
 
     song_form = form.choose_form(rng)
-    lift = moodp["energy_lift"] if moodp else 0.0
+    lift = (moodp["energy_lift"] if moodp else 0.0) + (
+        float(energy_lift) if energy_lift is not None else 0.0)
     for s in song_form:
         s["energy"] = max(0.0, min(1.0, s["energy"] + lift))
-    cap = max(12, min(28, int(60 * tempo / 240)))
+    cap = int(bars) if bars is not None else max(12, min(28, int(60 * tempo / 240)))
     total = sum(s["bars"] for s in song_form)
     while total > cap and len(song_form) > 2:
         total -= song_form.pop()["bars"]
@@ -239,7 +346,12 @@ def random_score(seed=None, mood=None, genre=None, fusion=None):
     vzA = _Voiced(scale, base_oct, rng)
     vzB = _Voiced(scale, base_oct, rng)
     groove = rhythm.make(groove_name)
-    aux_groove = rhythm.make("clave" if groove_name in ("none",) else "backbeat")
+    # Partner groove rides the PERC2 aux lane so a fusion's second tradition
+    # is rhythmically audible; primary groove stays on the main drum lane.
+    _aux_name = (partners[0].get("perc", "backbeat")
+                 if explicit_fusion and partners else None)
+    aux_groove = rhythm.make(
+        _aux_name or ("clave" if groove_name in ("none",) else "backbeat"))
 
     lane_A, lane_B, harm_a, harm_pad, bass_a, bass_b, drum_a, drum_b = [], [], [], [], [], [], [], []
     prev_deg = None
@@ -324,9 +436,19 @@ def random_score(seed=None, mood=None, genre=None, fusion=None):
             lanes.append(("PERC2", None, " ".join(drum_b)))
 
     label = genre or mood or "arrangement"
+    _fusion_label = None
+    if explicit_fusion and partners:
+        _fusion_label = "+".join(
+            (genres.genre_names()[genres.genre_names().index(
+                next(k for k, v in genres.GENRES.items() if v is p))]
+             if p in genres.GENRES.values() else "?") for p in partners)
+    elif fusion_partner is not None:
+        _fusion_label = next(
+            (k for k, v in genres.GENRES.items() if v is fusion_partner),
+            None)
     parts = [f"@tempo {tempo}"]
     if genre:
-        parts.append(f"@genre {genre}" + (f" x {fusion}" if fusion else ""))
+        parts.append(f"@genre {genre}" + (f" x {_fusion_label}" if _fusion_label else ""))
     if mood:
         parts.append(f"@mood {mood}")
     parts.append(f"# {tonic} {scale_name} ({label}) | " + " ".join(
@@ -340,7 +462,9 @@ def random_score(seed=None, mood=None, genre=None, fusion=None):
     structure = ", ".join(f"{s['name']}({s['bars']}b)" for s in song_form)
     info = {"key": f"{tonic} {scale_name}", "tonic_pc": tonic_pc, "bars": total,
             "tempo": tempo, "seed": seed, "mood": mood, "genre": genre,
-            "fusion": fusion, "structure": structure, "functional": functional,
+            "fusion": partner_names if explicit_fusion else (
+                _fusion_label if _fusion_label else None),
+            "structure": structure, "functional": functional,
             "lanes": [f"{n}/{i}" if i else n for n, i, _ in lanes]}
     return score, tempo, info
 

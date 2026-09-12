@@ -53,6 +53,33 @@ EMBED_BUDGET_CHARS = 3000
 SEARCH_FRESH_TTL = 300
 SEARCH_STALE_TTL = 30 * 24 * 3600
 PAGE_TTL = 30 * 24 * 3600
+# Timeless reference knowledge (music theory, tradition vocab): raga scales
+# don't change — cache for a year instead of a month so accumulated research
+# persists across sessions. Checked AFTER the fresh patterns (an explicitly
+# time-bound query stays short even when it names a raga).
+TIMELESS_TTL = 365 * 24 * 3600
+
+_TIMELESS_QUERY_RE = re.compile(
+    r"\b(?:raag?a|tala|taal|maqam|thaat|sargam|swara|gharana|theka|"
+    r"aarohi|avarohi|pakad|samay|mridangam|bansuri|santoor|thumri)\b|"
+    r"(?:groove pattern|scale degrees|solfege|drum pattern|instrument tuning|"
+    r"raga wikipedia|taal theka)",
+    re.IGNORECASE,
+)
+
+
+def regex_ttl(query):
+    """Regex-only TTL estimate (seconds): short for time-sensitive queries,
+    year-long for timeless reference knowledge, month-long default.
+
+    Serves as the default/fallback when the LLM TTL classifier is unavailable.
+    """
+    q = query or ""
+    if _FRESH_QUERY_RE.search(q):
+        return SEARCH_FRESH_TTL
+    if _TIMELESS_QUERY_RE.search(q):
+        return TIMELESS_TTL
+    return SEARCH_STALE_TTL
 
 _FRESH_QUERY_RE = re.compile(
     r"\b(?:today|tonight|yesterday|now|current(?:ly)?|latest|breaking|"
@@ -61,13 +88,6 @@ _FRESH_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
-
-def regex_ttl(query):
-    """Regex-only TTL estimate (seconds): short for time-sensitive queries.
-
-    Serves as the default/fallback when the LLM TTL classifier is unavailable.
-    """
-    return SEARCH_FRESH_TTL if _FRESH_QUERY_RE.search(query or "") else SEARCH_STALE_TTL
 
 _EMBED_BUDGET_URL = EMBED_URL + "/embedding"
 _lock = threading.RLock()
@@ -215,7 +235,16 @@ def _purge_expired(conn, now):
     conn.execute("DELETE FROM searches WHERE expires_at <= ?", (now,))
 
 
-def page_put(url, final_url, title, text, doc_type="web", page_images=None, ttl=PAGE_TTL):
+def page_put(url, final_url, title, text, doc_type="web", page_images=None, ttl=None):
+    """Store a successfully fetched page under its canonical request URL.
+
+    ``ttl`` defaults to the timeless class when the title/URL names timeless
+    reference material, else the standard page TTL.
+    """
+    if ttl is None:
+        ttl = (TIMELESS_TTL
+               if _TIMELESS_QUERY_RE.search(f"{title or ''} {url or ''}")
+               else PAGE_TTL)
     """Store a successfully fetched page under its canonical request URL."""
     key = _canon(url)
     if not key:

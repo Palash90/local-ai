@@ -261,6 +261,62 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             tool_index=tool_index,
         )
 
+    elif tool_name == "generate_music_arranged":
+        from server.config import MUSIC_ARRANGER_PARAMS
+        M.set_status(task_id, "Composing music...")
+        with M._data_lock:
+            t_user = M.tasks.get(task_id, {}).get("_user", "")
+        try:
+            if not MUSIC_ARRANGER_PARAMS:
+                raise ValueError(
+                    "The arranged pipeline is disabled on this server "
+                    "(MUSIC_ARRANGER_PARAMS=0); write a score with "
+                    "generate_music instead.")
+            from server.features.music.random_arrange import random_score
+            _seed = args.get("seed")
+            score_text, tempo, info = random_score(
+                seed=None if _seed in (None, "") else _seed,
+                mood=args.get("mood"), genre=args.get("genre"),
+                fusion=args.get("fusion"), tempo=args.get("tempo"),
+                scale_name=args.get("scale"), lead=args.get("lead"),
+                bars=args.get("bars"))
+            result = M.render_music_score(
+                score_text, tempo=tempo,
+                title=args.get("title", "music"), user=t_user,
+            )
+        except Exception as e:
+            print(f"[generate_music_arranged] Unhandled exception for task {task_id}: {e}")
+            result = json.dumps({"ok": False, "error": str(e)})
+        try:
+            res = json.loads(result)
+        except Exception:
+            res = {"ok": False, "error": "bad render result"}
+        with M._data_lock:
+            te = M.tasks.get(task_id)
+            if te:
+                te["music_errors"] = [str(x) for x in (res.get("errors") or [])][:20]
+        if res.get("ok"):
+            music_url = res.get("music_url", "")
+            rel = music_url[len("/music/"):] if music_url.startswith("/music/") else None
+            with M._data_lock:
+                t = M.tasks.get(task_id)
+                if t:
+                    t.setdefault("_tools_used", []).append(tool_name)
+                    t["music_file"] = rel
+                    t["music_score"] = res.get("score") or score_text
+                    t["music_url"] = music_url
+                    t["music_stream_url"] = res.get("music_stream_url")
+                    t["music_levels"] = res.get("levels", [])
+                    t["music_duration"] = res.get("duration_s")
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=result,
+            sid=sid,
+            round_num=round_num,
+        )
+
     elif tool_name == "edit_image":
         M._enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index)
         return

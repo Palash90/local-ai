@@ -80,6 +80,44 @@ def render_genres(outdir=None, user="palash", seed=7, verbose=True):
     return outdir, manifest
 
 
+# Fixed-seed cross-tradition combos: the fusion-audibility contract
+# (partner lane + partner groove, lead stays home) pinned as files.
+FUSION_COMBOS = [
+    ("indian_classical", "jazz", 11),
+    ("japanese", "ambient", 22),
+    ("arabic", "cinematic", 33),
+]
+
+
+def render_fusions(outdir=None, user="palash", verbose=True):
+    outdir = outdir or _outdir()
+    manifest = []
+    for primary, partner, seed in FUSION_COMBOS:
+        tag = f"{primary}_x_{partner}"
+        try:
+            score, tempo, info = random_score(
+                seed=seed, genre=primary, fusion=partner)
+            res = _render_to(score, tempo, outdir, f"fusion_{tag}")
+            if res.get("ok"):
+                rec = {"kind": "fusion", "id": tag,
+                       "title": f"{primary.replace('_', ' ').title()} x "
+                                f"{partner.replace('_', ' ').title()}",
+                       "file": f"fusion_{tag}.wav", "key": info["key"],
+                       "tempo": info["tempo"], "bars": info["bars"],
+                       "duration_s": res["duration_s"],
+                       "structure": info["structure"],
+                       "lanes": info["lanes"]}
+                manifest.append(rec)
+                if verbose:
+                    print(f"[fusion:{tag:28}] {res['duration_s']:6.1f}s {info['key']:14} "
+                          f"{info['tempo']}bpm  lanes={info['lanes']}")
+            else:
+                print(f"[fusion:{tag}] FAILED {res.get('error')} {res.get('errors')}")
+        except Exception as e:
+            print(f"[fusion:{tag}] EXC {e!r}")
+    return outdir, manifest
+
+
 def render_instruments(outdir=None, user="palash", verbose=True):
     outdir = outdir or _outdir()
     manifest = []
@@ -142,8 +180,9 @@ def run_all(user="palash", seed=7):
     outdir = _outdir()
     _, gm = render_genres(outdir, seed=seed)
     _, im = render_instruments(outdir)
-    idx = write_index(outdir, gm + im)
-    print(f"\nDONE. {len(gm)} genre clips + {len(im)} instrument clips.")
+    _, fm = render_fusions(outdir)
+    idx = write_index(outdir, gm + im + fm)
+    print(f"\nDONE. {len(gm)} genre clips + {len(im)} instrument clips + {len(fm)} fusion clips.")
     print("OUTPUT :", outdir)
     print("INDEX  :", idx)
     print("PUBLIC : /api/public/music/showcase  (served unauthenticated)")

@@ -90,7 +90,7 @@ graph TD
         DF10["kv-slots/ — llama KV slot checkpoints"]
         DF11["stories/ — self-chat output (free/premium/admin trees)"]
         DF12["local_ai.db — SQLite (WAL): tasks, theme_log,\nMCP batches + items, mcp_tasks, user_judges\n(LOCAL_AI_DB override; legacy *.migrated)"]
-        DF13["page_cache.db — persistent search/page cache\n(LOCAL_AI_PAGE_CACHE override)"]
+        DF13["page_cache.db — persistent search/page cache\n(LOCAL_AI_PAGE_CACHE override; TTLs 300s fresh /\n30d stale / 365d timeless music-theory)"]
         DF14["tts_cache/ — TTS audio + words cache\n(TTS_CACHE_* envs; optional secondary archive)"]
         DF15["music/ — generated WAV/MIDI per user,\nshowcase/ (public audition clips),\nsoundfonts/ + vendor/ (fluidsynth)"]
         DF16["tool_docs_cache/<user>.json — warm\ntool_details docs (hash-keyed,\nself-invalidating)"]
@@ -519,7 +519,15 @@ playable WAV), plus a non-LLM `make music` chat shortcut
   aliases mapped to nearest GM colour). `random_arrange.py` composes full
   pieces from `genres.py`/`moods.py`/`harmony.py`/`rhythm.py`/`world_scales.py`
   (genre-authentic leads, tonic-cadence endings, song-form energy curves) —
-  used by the shortcut, `--genre`, and the showcase.
+  used by the shortcut, `--genre`, and the showcase. `random_score()` also
+  takes validated overrides (`scale_name/tonic/tempo/bars/lead/bass/groove/`
+  `density/energy_lift`, each checked against its catalog with did-you-mean
+  errors) and a `fusion` list (cap 2, validated genre names): explicit fusion
+  keeps the MELODY lane genre-authentic (lead stays home — no partner mixing
+  into pick=0), assigns MELODY2 deterministically from the partner's melody
+  palette, and rides the partner's `perc` groove on the PERC2 aux lane, so a
+  requested fusion is always audible (never a 35% dice roll); auto-partner
+  (35%) only fires when `fusion` is omitted. Seeded calls are deterministic.
 - **Render.** `render.py` → `midi_out.py` (stdlib Type-0 writer: per-lane
   channels, drums→ch9, CC7 lane volumes, energy→CC11, legato articulation,
   release tail) → `fluid.py` renders with the vendored FluidSynth
@@ -632,7 +640,12 @@ parse-failed lies like "The Santoor piece has been generated"), and
 (the DSL compiled but the parser dropped tokens, so the track is broken —
 the retry embeds the rejected tokens verbatim), `fusion_imbalance` (a 2+
 tradition request whose rendered levels lack a whole family — one retry
-naming the missing side, then deliver), and `length_mismatch` (an
+naming the missing side, then deliver), `variation` (melody lanes doubled
+note-for-note, one vamp tiled over 12+ bars, or zero dynamics — the retry
+names lanes and bar counts), `cadence` (final bass note off the tonic or
+final melody outside the tonic triad — endings read from written bars, not
+tiled loops), `lead_home` (fusion whose MELODY lane sits outside the primary
+genre's palette without an explicit lead assignment), and `length_mismatch` (an
 explicit user duration — digits or spelled-out "about a minute" — vs a
 rendered `duration_s` outside 0.6×–1.8× of the target). The music DSL docs
 enforce the same contract upstream: minimum texture (MELODY+HARMONY always,

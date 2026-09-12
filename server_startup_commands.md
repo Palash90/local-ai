@@ -133,8 +133,11 @@ sizes, `REASONING_BUDGET` / `MAX_OUTPUT_TOKENS` (llama-server thinking/output ca
 note llama-server processes must be bounced for budget changes to land, they
 survive chat-webui restarts), music stack (`FLUID_SOUNDFONT`,
   `FLUID_SOUNDFONT_MAP`, `FLUIDSYNTH_BIN`/`FLUIDSYNTH_LIB`, `MUSIC_SHOWCASE_DIR`,
-  `MUSIC_OPUS_BITRATE` (Opus stream bitrate, default 64000; no new dependency —
+   `MUSIC_OPUS_BITRATE` (Opus stream bitrate, default 64000; no new dependency —
   system libopus, WAV-only fallback),
+  `MUSIC_ARRANGER_PARAMS` (0 = default freeform-DSL path; 1 = expose the
+  enum-only `generate_music_arranged` tool evaluated against the arranger
+  contract — flip to try on bigger models, then restart chat-webui),
   `TOOL_DOCS_CACHE_DIR`) — see README Voice section and ARCHITECTURE §3 for the
 full table. `prompts/sys_prompt.txt` hot-reloads by mtime (edit live, no restart);
 `server/features/tool_docs.py` docs cache self-invalidates on tool-doc edits.

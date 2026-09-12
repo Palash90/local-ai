@@ -764,12 +764,6 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.music-level-style {
-  text-transform: lowercase;
-  letter-spacing: 0;
-  color: #6b7280;
-  font-style: italic;
-}
 .music-level-bar {
   height: 4px;
   border-radius: 2px;

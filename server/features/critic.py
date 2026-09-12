@@ -218,13 +218,17 @@ _FUSION_FAMILY_RX = {
     "indian": re.compile(
         r"indian|hindustani|carnatic|rag?a\b|raag|sitars?|tablas?|tanpuras?|"
         r"santoors?|sarod|veena|bollywood|tala|taal|sargam|thumri|bhajan|"
-        r"kirtan|dholak", re.IGNORECASE),
+        r"kirtan|dholak|bhupali|bhopali|yaman|bhairav|malkauns|hamsadhwani|"
+        r"durga|bageshree|khamaj|kafi|todi|darbari", re.IGNORECASE),
     "arabic": re.compile(r"arabic|maqam|\bouds?\b|darbuka", re.IGNORECASE),
-    "japanese": re.compile(
-        r"japanese|koto|shamisen|shakuhachi|taiko|hirajoshi|enka",
+    # East Asia is one bucket for balance purposes (mirrors the single
+    # WORLD-EASTASIA doc appendix): japanese, chinese and korean requests
+    # are satisfied by any east-asian lane.
+    "eastasian": re.compile(
+        r"japanese|koto|shamisen|shakuhachi|taiko|hirajoshi|enka|"
+        r"chinese|guzheng|yangqin|dizi|erhu|pipa|"
+        r"korean|gugak|gayageum|daegeum|janggu|samulnori|pansori|arirang",
         re.IGNORECASE),
-    "chinese": re.compile(
-        r"chinese|guzheng|yangqin|dizi|erhu|pipa", re.IGNORECASE),
     "jazz": re.compile(
         r"jazz|swing|bebop|sax|walking[-\s]?bass|brush|dorian|mixolydian",
         re.IGNORECASE),
@@ -239,14 +243,166 @@ def _fusion_missing_families(user_input, levels):
     ``levels`` (instrument/kit labels). Empty unless 2+ families were asked
     for — a single-tradition piece is balanced by definition."""
     from server.features.music.theory import lane_families
-    requested = {fam for fam, rx in _FUSION_FAMILY_RX.items()
-                 if rx.search(user_input or "")}
+    requested = _fusion_families_requested(user_input)
     if len(requested) < 2:
         return set()
     present = set()
     for lv in levels or []:
-        present |= lane_families((lv or {}).get("instrument", ""))
+        fams = lane_families((lv or {}).get("instrument", ""))
+        # theory keeps japanese/chinese split; the balance gate treats all
+        # of East Asia as one bucket (same doc appendix, same check).
+        if fams & {"japanese", "chinese"}:
+            fams = (fams - {"japanese", "chinese"}) | {"eastasian"}
+        present |= fams
     return requested - present
+
+
+def _fusion_families_requested(user_input):
+    return {fam for fam, rx in _FUSION_FAMILY_RX.items()
+            if rx.search(user_input or "")}
+
+
+def _lane_chunks(score_text):
+    """Split a score into per-lane chunks (header + its own bars), dropping
+    @ directives. Parsing a chunk alone yields WRITTEN material only — no
+    grid tiling, so endings are the model's endings, not engine loops."""
+    from server.features.music.parse import BRACKET_RE
+    chunks, cur = [], []
+    for raw in (score_text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("@"):
+            continue
+        if BRACKET_RE.match(line):
+            if cur:
+                chunks.append("\n".join(cur))
+            cur = [line]
+        elif cur:
+            cur.append(line)
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
+
+
+def _written_endings(score_text):
+    """{role: last sounding midi} from written material. First BASS and
+    first MELODY lanes only — later same-role lanes are variations."""
+    from server.features.music.parse import parse_score
+    out = {}
+    for ch in _lane_chunks(score_text):
+        try:
+            secs, _, _ = parse_score(ch, 120)
+        except Exception:
+            continue
+        if not secs:
+            continue
+        s = secs[0]
+        role = (s.get("role") or "")
+        if role not in ("BASS", "MELODY") or role in out:
+            continue
+        ev = [e.get("midi") for e in (s.get("events") or [])
+              if e.get("midi") is not None]
+        if ev:
+            out[role] = ev[-1]
+    return out
+
+
+def _tonic_pc(score_text):
+    """Working tonic = most common bass pitch class. None without a bass."""
+    from server.features.music.parse import parse_score
+    try:
+        sections, _, _ = parse_score(score_text or "", 120)
+    except Exception:
+        return None
+    counts = {}
+    for s in sections or []:
+        if ((s or {}).get("role") or "") != "BASS":
+            continue
+        for e in ((s or {}).get("events") or []):
+            if e.get("midi") is not None:
+                pc = e["midi"] % 12
+                counts[pc] = counts.get(pc, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=lambda k: (counts[k], -k))
+
+
+def _cadence_problems(score_text):
+    """Ending must cadence: final bass note on the tonic, final melody note
+    on a tonic-triad tone (major or minor third accepted — no mode policing,
+    and no scale policing at all)."""
+    tonic = _tonic_pc(score_text)
+    if tonic is None:
+        return []
+    ends = _written_endings(score_text)
+    bass_last = ends.get("BASS")
+    melody_last = ends.get("MELODY")
+    notes = []
+    if bass_last is not None and bass_last % 12 != tonic:
+        notes.append(
+            f"no cadence: final bass note (pitch class {bass_last % 12}) is "
+            f"not the tonic ({tonic}) — end V→I onto the tonic")
+    if melody_last is not None and melody_last % 12 not in {
+            (tonic + i) % 12 for i in (0, 3, 4, 7)}:
+        notes.append(
+            "final melody note falls outside the tonic triad — resolve the "
+            "last melodic note onto tonic, third or fifth")
+    return notes
+
+
+def _lead_home_problems(user_input, score_text):
+    """In fusion, the MELODY lane must belong to the primary (first-named)
+    genre's palette — unless the request explicitly assigns the lead
+    elsewhere. Skips when no genre resolves."""
+    from server.features.music import genres as _g
+    from server.features.music.parse import parse_score
+    text = user_input or ""
+    if len(_fusion_families_requested(text)) < 2:
+        return []
+    try:
+        names = _g.genre_names()
+    except Exception:
+        return []
+    norm = re.sub(r"[_]", " ", text.lower())
+    primary, pos = None, None
+    for name in names:
+        pat = re.compile(r"(?<![\w])" + re.escape(
+            name.replace("_", " ")).replace(r"\ ", r"[\s_]")
+            + r"(?![\w])")
+        m = pat.search(norm)
+        if m and (pos is None or m.start() < pos):
+            primary, pos = name, m.start()
+    if primary is None:
+        return []
+    try:
+        palette = {a.upper() for a in
+                   (_g.resolve(primary) or {}).get("melody", [])}
+    except Exception:
+        return []
+    if not palette:
+        return []
+    try:
+        sections, _, _ = parse_score(score_text or "", 120)
+    except Exception:
+        return []
+    lead_instr = None
+    for s in sections or []:
+        if ((s or {}).get("role") or "") == "MELODY":
+            lead_instr = ((s or {}).get("instr") or "").upper()
+            break
+    if not lead_instr or lead_instr in palette:
+        return []
+    # Explicit lead assignment ("sitar-led", "sitar takes the melody") is the
+    # user's call — but merely naming the instrument ("with sitar") is not.
+    _alias = re.escape(lead_instr.lower())
+    _assign = (r"\b" + _alias + r"\b[^.?!]{0,40}?\b(?:led|leading|lead|leads|"
+               r"melody|front|solo)\b|\b(?:led|leading|lead|melody|solo|"
+               r"front)\b[^.?!]{0,40}?\b" + _alias + r"\b")
+    if re.search(_assign, text, re.IGNORECASE):
+        return []
+    return [f"lead plays {lead_instr.title()} but the primary genre "
+            f"{primary} calls for {', '.join(sorted(p.title() for p in palette))} "
+            f"— move {lead_instr.title()} to a second voice and give MELODY "
+            f"a {primary} lead"]
 
 
 # Instrument names the presence gate understands: every PROGRAMS alias and
@@ -293,6 +449,125 @@ def _rendered_instruments(levels):
         out.add(_INSTRUMENT_ALIASES.get(u, u))
     out.discard("")
     return out
+
+
+def _bar_windows(events):
+    """Group a lane's sounding events into 4-beat windows from its start;
+    each window fingerprints as its note/chord content."""
+    wins = {}
+    for e in events or []:
+        if e.get("type") == "rest":
+            continue
+        b = int((e.get("start") or 0) // 4)
+        if e.get("midi") is not None:
+            key = ("n", e.get("midi"), round(e.get("dur") or 0, 2))
+        else:
+            key = ("c", tuple(sorted(e.get("pitches") or [])),
+                   round(e.get("dur") or 0, 2))
+        wins.setdefault(b, []).append(key)
+    return [tuple(w) for _, w in sorted(wins.items())]
+
+
+def _variation_problems(score_text):
+    """Monotony the prompt rules forbid but small models emit anyway:
+    re-declared lane headers, note-for-note duplicated leads, one vamp tiled
+    over a long grid, and zero dynamics. Returns human-readable findings
+    (empty = varied enough). Sustained (drone-like), rest-only and drum
+    lanes are exempt from the content checks; exact-octave doubling is
+    orchestration, not duplication."""
+    from server.features.music.parse import parse_score
+    notes = []
+    try:
+        sections, errs, structure = parse_score(score_text or "", 120)
+    except Exception:
+        return []
+    # NOTE: no early return on errs — a score can be both erroneous AND
+    # monotonous, and the per-reason budgets let each gate fire in turn.
+    # Sections that failed to parse simply contribute no windows.
+    grid = sum((s or {}).get("bars", 0) for s in (structure or []))
+    # Repeated [HEADER]s for the same voice: each declaration becomes its own
+    # lane, so the parts stack and loop over each other instead of handing off.
+    seen = {}
+    for s in sections or []:
+        key = (str((s or {}).get("role") or (s or {}).get("name") or "").upper(),
+               str((s or {}).get("instr") or "").upper(),
+               str((s or {}).get("kit") or "").upper())
+        seen[key] = seen.get(key, 0) + 1
+    for (role, instr, kit), n in sorted(seen.items()):
+        if n >= 2:
+            who = " ".join(p for p in (role.title(), instr.lower()) if p)
+            notes.append(
+                f"lane [{who}] declared {n}× — merge into ONE lane spanning "
+                "the whole piece with 'R w |' bars where it is silent; "
+                "repeated headers stack ghost lanes over each other")
+    melodic = []
+    for s in sections or []:
+        if (s or {}).get("drum"):
+            continue
+        role = ((s or {}).get("role") or (s or {}).get("name") or "").upper()
+        ev = [e for e in ((s or {}).get("events") or [])
+              if e.get("type") != "rest"]
+        if not ev:
+            continue
+        avg_dur = sum(e.get("dur", 1) for e in ev) / len(ev)
+        if role == "DRONE" or avg_dur >= 3.0:
+            continue
+        label = (role + " " + str((s or {}).get("instr") or "")).strip().lower()
+        melodic.append({
+            "lane": label or "melody",
+            "wins": _bar_windows(ev),
+            "midis": [e.get("midi") for e in ev if e.get("midi") is not None],
+            "dyn": sum(1 for e in ev if "vel" in e),
+        })
+    import difflib
+    for i in range(len(melodic)):
+        for j in range(i + 1, len(melodic)):
+            # Compare OPENINGS only: the engine tiles short vamps across the
+            # grid and mutates repeats (fills, ghosts, stab drops), so tails
+            # legitimately diverge — identical openings mean identical writing.
+            a, b = melodic[i]["midis"][:24], melodic[j]["midis"][:24]
+            if len(a) >= 8 and len(b) >= 8 and difflib.SequenceMatcher(
+                    None, a, b).ratio() >= 0.8:
+                notes.append(
+                    f"{melodic[i]['lane']} duplicates {melodic[j]['lane']} "
+                    "note-for-note — rewrite as call-response or handoff")
+    if grid >= 12:
+        # NOTE: parse_score tiles short lanes across the whole grid and the
+        # engine mutates repeats (fills, ghosts), so only the OPENING windows
+        # represent written material — tails always look "varied". A lane
+        # with real sounding presence (>=4 windows total) whose first 8
+        # windows hold <=2 distinct bars is a looped vamp, whatever follows.
+        # Rhythm skeletons catch the subtler loop: same note values every
+        # bar with only pitch wiggles (q-e-e-h × N) still sounds sequenced.
+        for m in melodic:
+            head = m["wins"][:8]
+            if len(m["wins"]) >= 4 and len(head) >= 2 and len(set(head)) <= 2:
+                notes.append(
+                    f"{m['lane']} covers ~{grid} bars with "
+                    f"{len(set(head))} distinct bar(s) — write "
+                    "per-phase vamps instead of one looped vamp")
+                continue
+            skel = [tuple(d for _, _, d in w) for w in head]
+            # BASS exempt: walking/pedal repetition is the idiom (coverage
+            # and dynamics still apply to it).
+            if (len(m["wins"]) >= 4 and len(skel) >= 2 and len(set(skel)) <= 1
+                    and m["lane"].split()[0] != "bass"):
+                notes.append(
+                    f"{m['lane']} repeats one rhythmic skeleton "
+                    f"({'-'.join(str(d).rstrip('0').rstrip('.') or '0' for d in skel[0])}) "
+                    f"across ~{grid} bars — vary note values: holds, rests, "
+                    "syncopation, double-time runs")
+    # Writer-supplied dynamics only: scan note lines, not directives/headers
+    # ("@tempo" itself contains "em"; engine ghost notes carry vel keys).
+    _note_text = "\n".join(
+        l for l in (score_text or "").splitlines()
+        if l.strip() and not l.strip().startswith(("@", "[", "#")))
+    if (melodic and sum(len(m["midis"]) for m in melodic) >= 8
+            and not re.search(r"!|[whqes]\.?[fmp]", _note_text,
+                              re.IGNORECASE)):
+        notes.append("no dynamics (!/f/m/p) anywhere in the melodic lanes — "
+                     "shape each 4-bar block loud/soft, high/low")
+    return notes
 
 
 def _missing_instruments(user_input, levels):
@@ -481,6 +756,26 @@ _STEERING_HINTS = {
         "as the RHYTHM lane). Do not drop existing lanes, keep the score "
         "≤1100 characters, and never answer that an instrument is present "
         "when it has no lane."
+    ),
+    "cadence": (
+        "The piece does not end with a cadence. Re-render (or minimally "
+        "rewrite the last two bars) so the final bass note lands on the "
+        "tonic and the final melody note resolves onto a tonic-triad tone "
+        "(V→I). Keep everything else, keep the score ≤1100 characters."
+    ),
+    "lead_home": (
+        "In this fusion the lead voice belongs to the wrong tradition. "
+        "Re-render giving the MELODY lane an instrument of the primary "
+        "genre and moving the current lead to a second voice (counter-line "
+        "or handoff). Keep the score ≤1100 characters."
+    ),
+    "variation": (
+        "The rendered piece is monotonous: lanes repeat instead of developing. "
+        "Re-render with REAL variety — no two melody lanes may share the same "
+        "line (trade the lead: call-response or per-section handoff), every "
+        "section needs its own vamp (never one 2-bar loop tiled over the whole "
+        "grid), and shape dynamics inside each 4-bar block (f lean in, p pull "
+        "back, one ! peak accent). Keep the score ≤1100 characters."
     ),
     "music_claimed": (
         "Your previous draft claimed music/audio was generated but none was "
@@ -1333,6 +1628,36 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
                     if _tt is not None:
                         _tt["_missing_instruments"] = _mi
                 return "missing_instruments"
+        # Variation before length too: a re-render for monotony changes
+        # everything downstream anyway. Compares what the lanes ACTUALLY
+        # play — duplicated leads, one vamp tiled over a long grid, and
+        # zero dynamics — which no prompt rule alone has stopped.
+        if music_ok and (t.get("music_score") or "").strip():
+            _var = _variation_problems(t.get("music_score") or "")
+            if _var:
+                with M._data_lock:
+                    _tt = M.tasks.get(task_id)
+                    if _tt is not None:
+                        _tt["_variation_notes"] = _var[:4]
+                return "variation"
+            # Coded-composer rules the prompt alone can't enforce: the ending
+            # must cadence, and in fusion the lead must belong to the primary
+            # genre's palette (borrowing is for second voices).
+            _score = t.get("music_score") or ""
+            _cad = _cadence_problems(_score)
+            if _cad:
+                with M._data_lock:
+                    _tt = M.tasks.get(task_id)
+                    if _tt is not None:
+                        _tt["_cadence_notes"] = _cad[:2]
+                return "cadence"
+            _lh = _lead_home_problems(user_input, _score)
+            if _lh:
+                with M._data_lock:
+                    _tt = M.tasks.get(task_id)
+                    if _tt is not None:
+                        _tt["_lead_home_note"] = _lh[0]
+                return "lead_home"
         # Explicit user length vs real rendered length: tolerate the model's
         # counting (0.6×–1.8×) but catch the "minute that came out at 32s".
         target = _claimed_duration_seconds(user_input)
@@ -1461,6 +1786,27 @@ def _verification_addendum(verification, t):
     return "\n\n### Guardrail verification\n" + "\n".join(lines) + "\n"
 
 
+def _systemic_error_note(music_errors):
+    """One loud paragraph when a single failure class dominates the parser
+    errors (e.g. 19 bare tokens with no durations) — quoting six identical
+    lines never conveyed that the whole score shares one broken shape."""
+    errs = music_errors or []
+    dur = sum(1 for e in errs
+              if "missing a duration" in e or "needs a duration" in e)
+    if dur >= 5:
+        return (
+            f"\n\n[SYSTEMIC FAILURE — {dur} of your "
+            f"{len(errs)} errors are the SAME mistake: pitched "
+            "tokens with no duration. Your score is written lead-sheet "
+            "style and the parser accepts none of it. Rewrite EVERY "
+            "note line so EACH pitch/chord carries w/h/q/e/s: 'C4' → "
+            "'C4 q', 'D2' → 'D2 h', 'C3:maj7' → 'C3:maj7 w', "
+            "'DHA' → 'DHA q'. Do not fix one line and resubmit the rest "
+            "unchanged — auditor will reject the same class again.]"
+        )
+    return ""
+
+
 def _reschedule(task_id, sid, round_num, reason, judge_result):
     """Re-generate the final answer through the generation model.
 
@@ -1505,6 +1851,9 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
                 "\n\n[Tokens the parser rejected — rewrite without them: "
                 + "; ".join(errs) + "]"
             )
+        # Systemic failure, not typos: when missing-duration errors dominate,
+        # the whole score is written lead-sheet style (see helper).
+        steering += _systemic_error_note(t.get("music_errors"))
     if reason == "fusion_imbalance":
         missing = t.get("_fusion_missing") or []
         rendered = t.get("_fusion_rendered") or []
@@ -1521,6 +1870,21 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
             steering += (
                 "\n\n[Named instruments with no lane in the render: "
                 + ", ".join(missing) + ". Add one lane each.]"
+            )
+    if reason == "cadence":
+        notes = t.get("_cadence_notes") or []
+        if notes:
+            steering += "\n\n[" + "; ".join(notes) + "]"
+    if reason == "lead_home":
+        note = t.get("_lead_home_note") or ""
+        if note:
+            steering += "\n\n[" + note + "]"
+    if reason == "variation":
+        notes = t.get("_variation_notes") or []
+        if notes:
+            steering += (
+                "\n\n[Monotony in the render — fix each item: "
+                + "; ".join(notes) + "]"
             )
     qual = (judge_result or {}).get("quality", 0)
     if reason == "quality" and isinstance(qual, int):

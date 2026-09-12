@@ -447,8 +447,8 @@ function MusicPlayer({ musicUrl, musicStreamUrl, musicScore, musicLevels }) {
       {Array.isArray(musicLevels) && musicLevels.length > 0 && (
         <div className="music-levels">
           {musicLevels.map((lv, i) => (
-            <div className="music-level-row" key={i} title={`${lv.instrument || lv.name} · ${lv.use || (lv.drum ? 'percussion' : 'lane')} · ${lv.notes} notes · vol ${lv.vol}`}>
-              <span className="music-level-name">{lv.drum ? '🥁 ' : ''}{(lv.instrument || lv.name || '?').toString().replace(/\b\w/g, (c) => c.toUpperCase())}{lv.style ? <span className="music-level-style"> · {lv.style}</span> : null}</span>
+            <div className="music-level-row" key={i} title={`${lv.instrument || lv.name} · ${lv.notes} notes · vol ${lv.vol}`}>
+              <span className="music-level-name">{lv.drum ? '🥁 ' : ''}{(lv.instrument || lv.name || '?').toString().replace(/\b\w/g, (c) => c.toUpperCase())}</span>
               <span className="music-level-bar"><span style={{ width: (lv.vol || 0) + '%' }} /></span>
               <span className="music-level-num">{lv.vol}</span>
             </div>
