@@ -1004,11 +1004,14 @@ def _append_turn_context(messages, task_id, user, tool_free):
         try:
             from server.features import tool_docs
             text = f"{_last_user_text(messages)}\n{orig}".lower()
-            block = tool_docs.docs_block(user, text, messages)
+            # A delivered music artifact this task means the model no longer
+            # needs the ~15 KB DSL language riding every round.
+            delivered = bool(t.get("music_file") or t.get("music_url"))
+            skip_live = {"generate_music"} if delivered else set()
+            block = tool_docs.docs_block(user, text, messages, skip_live=skip_live)
             if block:
                 parts.append(block)
                 print(f"[tool_docs] warm docs injected for user '{user}'")
-            delivered = bool(t.get("music_file") or t.get("music_url"))
             directive = tool_docs.music_directive(
                 f"{_last_user_text(messages)}\n{orig}", delivered
             )
@@ -1045,6 +1048,22 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             task_no_tools = M.tasks.get(task_id, {}).get("no_tools", False)
         tool_free = task_user in M.TOOL_FREE_AGENTS or task_no_tools
         messages = _append_turn_context(messages, task_id, task_user, tool_free)
+        # The turn-context block (docs + directives) is appended AFTER the
+        # history trim, so it never counted toward the budget — a 15 KB music
+        # DSL doc could push the real prompt past ctx and earn a 400 from
+        # llama-server. Re-check with the block included and trim again.
+        try:
+            budget = M.prompt_token_budget(mode)
+            if M.estimate_tokens(messages, include_tools=True) > budget:
+                n_before = len(messages)
+                messages = M.trim_messages_for_context(messages, mode)
+                print(
+                    f"[context] post-docs trim: {n_before} -> {len(messages)} msgs "
+                    f"(est over budget {budget} on {mode})",
+                    flush=True,
+                )
+        except Exception as e:
+            print(f"[context] post-docs trim skipped: {e}", flush=True)
         # Agents (Kaya/Kolpo pipeline) get the full tool set; humans never see
         # AGENT_ONLY_TOOLS (track_theme), saving its tokens on every turn.
         if task_user in M._agent_users:
@@ -1129,6 +1148,12 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         r = None
         try:
             r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
+            if r.status_code == 400 and "exceed_context_size" in (r.text or ""):
+                print(f"[llm_round] task {task_id} hit exceed_context_size — emergency trim + one retry", flush=True)
+                r.close()
+                messages = _emergency_context_trim(messages)
+                payload["messages"] = messages
+                r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
             if r.status_code != 200:
                 err_body = r.text[:500] if r.text else f"HTTP {r.status_code}"
                 raise RuntimeError(f"LLM server returned {r.status_code}: {err_body}")
@@ -1244,6 +1269,43 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         if "image" in err_text.lower() or "vision" in err_text.lower():
             err_text = "The current model does not support image input. Please use a vision-capable model or send text-only messages."
         M._event_post("llm_err", task_id, error=err_text, round=round_num, sid=sid)
+
+
+def _emergency_context_trim(messages):
+    """Not-estimator-trusting last resort for a 400 exceed_context_size:
+    elide middle tool results, then halve the largest strings until the
+    raw char budget fits llama.cpp at the worst observed density (~1.5
+    chars/token for score text)."""
+    msgs = list(messages)
+    head = msgs[:1]
+    tail = msgs[-6:]
+    mid = [dict(m) for m in msgs[1:-6]]
+    for m in mid:
+        if m.get("role") == "tool":
+            m["content"] = "[elided — context overflow]"
+    out = head + mid + tail
+
+    def _chars():
+        return sum(
+            len(m.get("content") or "") if isinstance(m.get("content"), str) else 0
+            for m in out
+        )
+
+    cap = 50000
+    for _ in range(20):
+        if _chars() <= cap:
+            break
+        idx, biggest = None, 0
+        for i, m in enumerate(out):
+            c = m.get("content")
+            if isinstance(c, str) and len(c) > biggest:
+                idx, biggest = i, len(c)
+        if idx is None or biggest < 2000:
+            break
+        keep = biggest // 4
+        body = out[idx]["content"]
+        out[idx] = {**out[idx], "content": body[:keep] + "\n…[truncated]…\n" + body[-keep:]}
+    return out
 
 
 def _start_llm_round(task_id, sid, round_num):

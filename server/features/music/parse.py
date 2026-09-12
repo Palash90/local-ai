@@ -30,8 +30,47 @@ DYN_SUFFIX_RE = re.compile(r"(?<=[whqes.])([fmp!])$")
 # accent marker.
 LEAD_ACCENT_RE = re.compile(r"!$")
 TOKEN_RE = re.compile(r"^([A-G][#b]?-?\d+|R)([whqes]\.?)$", re.IGNORECASE)
-CHORD_QUAL = "maj7|min7|m7b5|dim7|maj|min|dim|aug|sus4|sus2|56|5|7"
+CHORD_QUAL = "maj7|min7|m7b5|dim7|maj|min|dim|aug|sus4|sus2|56|5|7|m7|m"
 ARP_FLAGS = {"ar": "up", "ad": "down", "au": "updown"}
+# Guitar-style chord roots — "Am3:min7", "Am7", "Amin7", "Asus4" — are what
+# small models naturally write. Normalized to the canonical "A3:min7" form
+# before matching, so the ar/w merge cascade (one bad root -> three errors)
+# disappears. "A7" stays a NOTE (bare letter+digit never meant chord).
+_GUITAR_CHORD_RE = re.compile(
+    r"^([A-G][#b]?)(maj|min|m|dim|aug|sus2|sus4|sus)([2-7])?"
+    r"(?::(maj7|min7|m7b5|dim7|maj|min|dim|aug|sus4|sus2|56|5|7|m7|m))?"
+    r"(ar|ad|au)?$",
+    re.IGNORECASE)
+_GUITAR_QUAL_BASE = {"m": "min", "min": "min", "maj": "maj", "dim": "dim",
+                     "aug": "aug", "sus": "sus4", "sus2": "sus2",
+                     "sus4": "sus4"}
+
+
+def _norm_chord(tok):
+    m = _GUITAR_CHORD_RE.match(tok)
+    if not m:
+        return tok
+    root, emb, num, qual, arp = m.groups()
+    base = _GUITAR_QUAL_BASE[emb.lower()]
+    arp = arp or ""
+    if qual:
+        q = {"m7": "min7", "m": "min"}.get(qual.lower(), qual.lower())
+        if base == "min" and q in ("7", "5", "56"):
+            q = "min" + q
+        return f"{root}{num or ''}:{q}{arp}"
+    if num and num in "67":
+        # Am7 / Amaj7 / Adim7 — the digit is a quality, not an octave.
+        q = {"m": "min", "min": "min", "maj": "maj", "dim": "dim"}.get(
+            emb.lower())
+        if q is None:
+            return tok
+        want = q + num
+        if want not in ("min6", "min7", "maj6", "maj7", "dim7"):
+            return tok
+        if want == "min6" or want == "maj6":
+            return tok  # no 6th-chord voicings in CHORD_INTERVALS
+        return f"{root}:{want}{arp}"
+    return f"{root}{num or ''}:{base}{arp}"
 CHORD_RE = re.compile(
     r"^([A-G][#b]?)(-?\d+)?(?::(" + CHORD_QUAL + r"))?(ar|ad|au)?([whqes]\.?)$",
     re.IGNORECASE)
@@ -468,7 +507,8 @@ def parse_score(text, tempo=120):
             except ValueError:
                 vol = 80 if drum else DEFAULT_VOL.get(program, 100)
             cur = {"name": name, "program": 0 if drum else program, "vol": vol,
-                   "drum": drum, "kit": kit, "events": [], "cursor": 0.0}
+                   "drum": drum, "kit": kit, "role": role, "instr": instr,
+                   "events": [], "cursor": 0.0}
             sections.append(cur)
             line = m.group(2).strip()
             if not line:
@@ -498,6 +538,7 @@ def parse_score(text, tempo=120):
                 if LEAD_ACCENT_RE.search(tok):
                     lead_dyn = DYN_MAP["!"]
                     tok = LEAD_ACCENT_RE.sub("", tok)
+                tok = _norm_chord(tok)
                 if (CHORD_SYM_RE.match(tok) and i < len(toks)
                         and toks[i].lower() in ARP_FLAGS):
                     tok = tok + toks[i]
@@ -575,7 +616,23 @@ def parse_score(text, tempo=120):
                             cur["events"].append(ev)
                         cur["cursor"] += beats
                     else:
-                        errors.append(f"line {lineno}: bad token {tok!r}")
+                        if cur["drum"] and NOTE_SYM_RE.match(tok):
+                            errors.append(
+                                f"line {lineno}: {tok!r} is a pitch but lane "
+                                f"'{cur.get('name')}' is DRUMS — rhythm lanes "
+                                "take hit syllables (BD SN HH DHA TIN ...); "
+                                "move pitches to a MELODY/HARMONY lane")
+                        elif NOTE_SYM_RE.match(tok):
+                            errors.append(
+                                f"line {lineno}: {tok!r} missing a duration — "
+                                "every pitch needs w/h/q/e/s (e.g. "
+                                f"'{tok} q')")
+                        elif CHORD_SYM_RE.match(tok):
+                            errors.append(
+                                f"line {lineno}: chord {tok!r} missing a "
+                                "duration (e.g. '" + tok + " w')")
+                        else:
+                            errors.append(f"line {lineno}: bad token {tok!r}")
                 except ValueError as e:
                     errors.append(f"line {lineno}: {e}")
             _delta = cur["cursor"] - _bar_start

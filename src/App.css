@@ -740,9 +740,18 @@ html, body {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.03);
 }
+.music-loading {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  color: #6b7280;
+  font-size: 12px;
+  font-style: italic;
+}
+
 .music-level-row {
   display: grid;
-  grid-template-columns: 74px 1fr 28px;
+  grid-template-columns: 160px 1fr 28px;
   align-items: center;
   gap: 8px;
   font-size: 10px;
@@ -754,6 +763,12 @@ html, body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.music-level-style {
+  text-transform: lowercase;
+  letter-spacing: 0;
+  color: #6b7280;
+  font-style: italic;
 }
 .music-level-bar {
   height: 4px;

@@ -6,6 +6,9 @@ CHORD_INTERVALS = {
     "5": (0, 7), "56": (0, 7, 10),
     "maj7": (0, 4, 7, 11), "min7": (0, 3, 7, 10), "dim7": (0, 3, 6, 9),
     "m7b5": (0, 3, 6, 10),
+    # Guitar-style aliases (regex accepts them; must resolve, never fall
+    # back to the major default).
+    "m7": (0, 3, 7, 10), "m": (0, 3, 7),
     "dim": (0, 3, 6), "aug": (0, 4, 8), "sus4": (0, 5, 7), "sus2": (0, 2, 7),
 }
 # Lane-name -> GM program. Many aliases so a score can name real instruments.

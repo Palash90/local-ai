@@ -190,14 +190,35 @@ _MUSIC_CLAIM_RE = re.compile(
     r"melody|instrumental)\s+(?:has\s+been|is\s+been|has\s+now\s+been|was)\s+"
     r"(?:generated|created|produced|composed|made|rendered|prepared|finished|"
     r"updated|refined)\b"
-    r"|\b(?:the\s+)?(?:music|audio|song|piece|track)\s+(?:is\s+ready|is\s+done|"
-    r"is\s+attached|is\s+below|is\s+playing|should\s+(?:be\s+)?(?:directly\s+)?"
+    r"|\b(?:the\s+)?(?:music|audio|song|piece|track)(?:\s+player)?\s+"
+    r"(?:is\s+ready|is\s+done|is\s+attached|is\s+below|is\s+playing|"
+    r"will\s+(?:appear|play|be\s+playing)|should\s+(?:be\s+)?(?:directly\s+)?"
     r"(?:appear|play)\w*|appears?\s+below|is\s+(?:right\s+|directly\s+)?below)\b"
     r"|\b(?:play|listen\s+to)\s+(?:me\s+)?(?:the\s+|your\s+|that\s+)?"
     r"(?:[\w'-]+\s+){0,3}?(?:music|audio|song|piece|track|tune|melody|"
-    r"composition|lullaby)\b",
+    r"composition|lullaby)\b"
+    r"|\bhere(?:'s|’s| is| are|\s+is|\s+are)\s+the\s+(?:generated|corrected|"
+    r"final|revised|complete|finished|updated)\s+(?:music|audio|song|piece|"
+    r"track|tune|melody|composition|score|lullaby)\b"
+    r"|\b(?:newly|freshly)\s+generated\s+(?:[\w'-]+\s+){0,3}?"
+    r"(?:music|audio|song|piece|track|fusion audio|composition)\b",
     re.IGNORECASE,
 )
+
+
+def answer_claims_artifact(text):
+    """True when an answer asserts a music/image artifact — used to force the
+    verification gates even on otherwise-short 'simple' turns (a one-word
+    'Retry' whose answer claims 'the player will appear below' must not get a
+    free pass)."""
+    if not text:
+        return False
+    return bool(
+        _MUSIC_CLAIM_RE.search(text)
+        or _IMG_CLAIM_RE.search(text)
+        or _MD_IMG_LINK_RE.search(text)
+        or _MD_IMG_LABEL_LINK_RE.search(text)
+    )
 _CITE_ASK_RE = re.compile(
     r"\b(citations?|cite\b|sources?\b|references?\b|bibliography|"
     r"source\s+(?:links?|urls?|material)|with\s+(?:links?|urls?)\b|"
@@ -278,7 +299,11 @@ _STEERING_HINTS = {
         "was part of the request). Lane headers take role + instrument words "
         "in any order — extra role words are fine, descriptive words like "
         "'soft' are ignored (put dynamics in vol=) — and unknown words must "
-        "go; follow any did-you-mean hint verbatim."
+        "go; follow any did-you-mean hint verbatim. ALSO keep the whole "
+        "score ≤1100 characters: ≤6 lanes and at most 2 bars of material "
+        "per lane — sections loop those bars to the declared length. "
+        "Writing out every bar blows the output budget and fails the "
+        "tool call mid-string."
     ),
     "length_mismatch": (
         "The rendered piece is far from the length the user asked for. "

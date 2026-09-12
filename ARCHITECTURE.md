@@ -418,9 +418,18 @@ needed for prompt edits); `read_user_context` memoizes per user keyed on
 in `tool_docs_cache/<user>.json` keyed by a content hash of the live
 `TOOLS_DETAILED` entry — later sessions whose request matches the tool's
 keyword gate (`WARM_TRIGGERS`) get the docs injected without an LLM round,
-and stale hashes silently re-fetch. A `[music-directive]` line rides the same
+and stale hashes silently re-fetch. The `generate_music` DSL doc rides this
+tail live from file (bypassing the cache) but is budgeted like the rest:
+world-genre appendices (TALAS/SARGAM/RAGA, marker-bracketed in the file) are
+pruned unless the request triggers them, the whole block is skipped once the
+task has a delivered music artifact, and a post-append re-trim keeps the
+block inside `prompt_token_budget`. A `[music-directive]` line rides the same
 tail when the current request asks for music and none has been rendered,
 keeping the small chat model's `generate_music` calling deterministic.
+Score-DSL-like text (word-length heuristic) is estimated at 2 chars/token —
+the plain-ASCII /4 rule under-counted music sessions ~2.6x, and a 400
+`exceed_context_size` from llama-server triggers one emergency char-budget
+trim-and-retry before the task errors.
 
 ### 10.5 Archival Compaction (Pensieve — `features/pensieve/`)
 

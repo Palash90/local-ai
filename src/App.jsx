@@ -27,6 +27,7 @@ export default function App() {
   const [tokenEstimate, setTokenEstimate] = useState(0)
   const [contextCompressed, setContextCompressed] = useState(false)
   const [rawTokenEstimate, setRawTokenEstimate] = useState(0)
+  const [compactions, setCompactions] = useState(0)
   const [maxContext, setMaxContext] = useState(24576)
   const [modelStatus, setModelStatus] = useState('unloaded')
   const [modelTps, setModelTps] = useState(null)
@@ -128,12 +129,14 @@ export default function App() {
       setTokenEstimate(data.token_estimate || 0)
       setContextCompressed(!!data.context_compressed)
       setRawTokenEstimate(data.raw_token_estimate || 0)
+      setCompactions(data.compactions || 0)
     }).catch(() => {
       if (sessionRef.current !== sid) return
       setMessages([])
       setTokenEstimate(0)
       setContextCompressed(false)
       setRawTokenEstimate(0)
+      setCompactions(0)
     })
   }
 
@@ -152,6 +155,7 @@ export default function App() {
     setTokenEstimate(0)
     setContextCompressed(false)
     setRawTokenEstimate(0)
+    setCompactions(0)
     const list = await loadSessions()
     setSessions(list)
     closeSidebar()
@@ -273,6 +277,7 @@ export default function App() {
       if (st.token_estimate != null) setTokenEstimate(st.token_estimate)
       setContextCompressed(!!st.context_compressed)
       if (st.raw_token_estimate != null) setRawTokenEstimate(st.raw_token_estimate)
+      if (st.compactions != null) setCompactions(st.compactions)
       if (st.predicted_per_second != null) setModelTps(st.predicted_per_second)
       if (st.session_name != null && st.session_id) {
         setSessions(prev => prev.map(s => s.session_id === st.session_id ? { ...s, name: st.session_name } : s))
@@ -434,6 +439,7 @@ export default function App() {
           tokenEstimate={tokenEstimate}
           contextCompressed={contextCompressed}
           rawTokenEstimate={rawTokenEstimate}
+          compactions={compactions}
           maxContext={maxContext}
           onToggleSidebar={() => setSidebarOpen(o => !o)}
           username={username}

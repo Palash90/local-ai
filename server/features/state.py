@@ -15,6 +15,7 @@ may bind a shared name at import time.
 
 import queue as _queue
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -100,6 +101,16 @@ MAX_QUEUE_SIZE = 15
 # and it carries no research flag and no image/audio input.
 SIMPLE_TASK_MAX_CHARS = 40
 
+# A short message that asks for an artifact is NOT low-stakes: skipping the
+# verification pass for "make music"-type tasks let the model answer a failed
+# tool loop with a fake score + fabricated [Image](/[Image: ...]) link.
+_ARTIFACT_ASK_RE = re.compile(
+    r"\b(music|musical|song|songs|melody|tune|jingle|beat|compose|composition|"
+    r"track|audio|soundtrack|lullaby|image|picture|photo|draw|paint|logo|"
+    r"poster|wallpaper|illustration|portrait|render)\b",
+    re.IGNORECASE,
+)
+
 
 def is_simple_round_task(task):
     """True when ``task`` (a dict) is a short, low-stakes chat turn.
@@ -118,6 +129,8 @@ def is_simple_round_task(task):
         return False
     msg = (task.get("_original_message") or "").strip()
     if not msg:
+        return False
+    if _ARTIFACT_ASK_RE.search(msg):
         return False
     return len(msg) <= SIMPLE_TASK_MAX_CHARS
 

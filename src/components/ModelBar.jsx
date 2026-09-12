@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 
-export default function ModelBar({ modelStatus, modelTps, tokenEstimate, contextCompressed, rawTokenEstimate, maxContext, onToggleSidebar, username, onLogout, reminderCount, onToggleTasks }) {
+export default function ModelBar({ modelStatus, modelTps, tokenEstimate, contextCompressed, rawTokenEstimate, compactions, maxContext, onToggleSidebar, username, onLogout, reminderCount, onToggleTasks }) {
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const dropdownRef = useRef(null)
 
@@ -49,11 +49,16 @@ export default function ModelBar({ modelStatus, modelTps, tokenEstimate, context
           />
         </svg>
         {tokenEstimate > 0 && (
-          <span className="token-text">
+          <span className="token-text" style={tokenEstimate > maxContext ? { color: '#f87171' } : undefined}>
             {tokenEstimate > 1000 ? (tokenEstimate / 1000).toFixed(1) + 'k' : tokenEstimate} / {maxContext > 1000 ? (maxContext / 1000).toFixed(0) + 'k' : maxContext}
             {contextCompressed && rawTokenEstimate > 0 && (
-              <span className="token-compressed" title="Context compressed — older messages summarized">
+              <span className="token-compressed" title={`Context compressed — older messages summarized (full history ${rawTokenEstimate} tokens)`}>
                 ({rawTokenEstimate > 1000 ? (rawTokenEstimate / 1000).toFixed(1) + 'k' : rawTokenEstimate})
+              </span>
+            )}
+            {compactions > 0 && (
+              <span className="token-compressed" title={`Compaction has run ${compactions}× for this session; shown value is the compacted context`}>
+                {' · '}{compactions}×
               </span>
             )}
           </span>

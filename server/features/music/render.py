@@ -7,6 +7,65 @@ import uuid
 MUSIC_DIR_DEFAULT = os.path.expanduser("~/local-ai-files/music")
 
 
+def _lane_view(s):
+    """Human-facing label + style for a rendered lane, derived from what it
+    ACTUALLY contains — instrument name, its role in the song, and a style
+    inferred from the events (drones hold, harmony chords, fast figures
+    move). Falls back to the bare lane name when the header was ambiguous."""
+    ev = s.get("events") or []
+    role = (s.get("role") or "").upper()
+    instr = s.get("instr")
+    kit = (s.get("kit") or "").lower()
+    if s.get("drum"):
+        return {"instrument": kit or "drum kit",
+                "use": "percussion", "style": "groove" if kit else "drums"}
+    if instr:
+        instrument = instr.replace("_", " ").lower()
+    elif s.get("program") is not None and not s.get("drum"):
+        from server.features.music.theory import PROGRAMS
+        instrument = next((k.lower() for k, v in PROGRAMS.items()
+                           if v == s["program"]), s.get("name", "").lower())
+    else:
+        instrument = s.get("name", "").lower()
+    sounding = [e for e in ev if e.get("type") != "rest"]
+    n = len(sounding)
+    chords = sum(1 for e in sounding if e.get("type") == "chord")
+    if not sounding:
+        style, use = "rests", "space"
+    else:
+        avg_dur = sum(e.get("dur", 1) for e in sounding) / n
+        long_low = all(e.get("dur", 1) >= 3.0 for e in sounding)
+        midis = [(e.get("midi") if e.get("midi") is not None
+                  else min(e.get("pitches") or [60])) for e in sounding]
+        avg_midi = sum(midis) / len(midis)
+        if role.startswith("DRONE") or (long_low and chords and n <= 6):
+            style, use = "drone", "holds the tonic"
+        elif role.startswith("HARMONY") or role.startswith("PAD"):
+            style = "chords" if avg_dur >= 1.5 else "comping"
+            if n and max(e.get("dur", 0) for e in sounding) < 1.0:
+                style = "rolled figures"
+            use = "harmony"
+        elif role.startswith("BASS"):
+            style = "walking" if avg_dur <= 1.0 else "sustained"
+            use = "bassline"
+        elif role.startswith("RHYTHM") or role.startswith("PERC"):
+            style, use = "pattern", "percussion"
+        else:  # melody & friends
+            fast = sum(1 for e in sounding if e.get("dur", 1) <= 0.75)
+            if n and fast / n > 0.5:
+                style = "running figures"
+            elif avg_dur >= 2.5:
+                style = "sustained lines"
+            else:
+                style = "melody"
+            use = "lead" if not role or role.endswith("Y") else role.lower()
+            if role and role[-1].isdigit() and len(role) > 6:
+                use = "answer voice"
+        if avg_midi < 48 and use == "harmony":
+            style += ", low register"
+    return {"instrument": instrument, "use": use, "style": style}
+
+
 def _music_dir():
     try:
         from server.features.state import M
@@ -96,7 +155,7 @@ def render_score(score_text, tempo=120, title="music", user="local"):
     levels = [
         {"name": s.get("name"), "program": s.get("program"),
          "drum": bool(s.get("drum")), "vol": s.get("vol", 100),
-         "notes": len(s["events"])}
+         "notes": len(s["events"]), **_lane_view(s)}
         for s in sections
     ]
     return json.dumps({"ok": True, "music_url": f"/music/{rel}",

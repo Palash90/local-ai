@@ -103,10 +103,101 @@ def test_opus_encode_long_stereo():
         assert f.read(4) == b"OggS"
 
 
+def test_opus_page_structure():
+    # Browsers rejected the first muxed files (duration 0/0, no play):
+    # Ogg CRC is the FORWARD 0x04C11DB7 polynomial (not zlib's reflected
+    # PKZIP), and pages of COMPLETE packets need cumulative granule
+    # positions — -1 is only legal when the last packet continues.
+    import struct
+    import tempfile
+    import wave
+    import numpy as np
+    from server.features.music import opus as opus_enc
+    if not opus_enc.libopus_available():
+        return
+    d = tempfile.mkdtemp()
+    wav = os.path.join(d, "t.wav")
+    sr = 44100
+    n = sr * 6
+    t = np.arange(n, dtype=np.float64) / sr
+    pcm = (np.sin(2 * np.pi * 440 * t) * 9000).astype("<i2")
+    with wave.open(wav, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm.tobytes())
+    out = opus_enc.encode_wav_to_opus(wav)
+    data = open(out, "rb").read()
+    pos = 0
+    seq = 0
+    prev_gran = -2
+    audio_pages = 0
+    while pos < len(data):
+        assert data[pos:pos + 4] == b"OggS"
+        granule, serial, sq, crc = struct.unpack_from("<qIII", data, pos + 6)
+        nsegs = data[pos + 26]
+        segs = data[pos + 27:pos + 27 + nsegs]
+        body = pos + 27 + nsegs
+        page = bytearray(data[pos:body + sum(segs)])
+        struct.pack_into("<I", page, 22, 0)
+        assert opus_enc._ogg_crc32(bytes(page)) == crc, f"bad crc page {seq}"
+        assert sq == seq
+        if seq > 1:
+            audio_pages += 1
+            assert granule > prev_gran, "granule not strictly increasing"
+            prev_gran = granule
+        eos = data[pos + 5] & 0x04
+        pos = body + sum(segs)
+        seq += 1
+        if eos:
+            break
+    assert audio_pages >= 5
+    # final granule = preskip + total 48k samples
+    total48 = int(round(n * 48000 / sr))
+    assert prev_gran >= total48, (prev_gran, total48)
+    assert prev_gran <= total48 + 2880, (prev_gran, total48)  # <= 60ms preskip slack
+
+
 def test_bad_token_reports_error():
     from server.features.music.parse import parse_score
     _, errors, _structure = parse_score("[PIANO]\nZZZ q")
     assert errors
+
+
+def test_guitar_chord_notation_accepted():
+    # The model writes guitar-style roots; rejecting them cascaded into three
+    # bogus errors (bad root -> unmerged 'ar' -> unmerged 'w'). All accepted
+    # now, and 'm7' must resolve MINOR, never the major-triad default.
+    from server.features.music.parse import parse_score
+    from server.features.music.theory import chord_pitches
+    assert chord_pitches("A", "m7", 3) == chord_pitches("A", "min7", 3)
+    assert chord_pitches("A", "m", 3) == chord_pitches("A", "min", 3)
+    for tok in ("Am3:min7", "Am3:m7", "A3:m7", "Am7", "Amin7", "Asus4",
+                "Am3", "Dm4", "Bb3:m7", "Am3:7", "A3:m7b5"):
+        evs, errs, _ = parse_score(f"[PIANO]\n{tok} w |")
+        assert not errs, (tok, errs)
+    _, errs, _ = parse_score("[HARMONY piano]\nAm3:min7 ar w | D3:m7 ar q |")
+    assert not errs, errs
+    # bare letter+digit stays a pitch, not a chord
+    from server.features.music.theory import note_to_midi
+    evs, errs, _ = parse_score("[PIANO]\nA7 q |")
+    assert not errs
+    evs, _, _ = parse_score("[PIANO]\nA7 q | C4 w |")
+    assert evs[0]["events"][0]["midi"] == note_to_midi("A7")
+    for bad in ("ZZZ", "D minor"):
+        _, errs, _ = parse_score(f"[PIANO]\n{bad} q |")
+        assert errs, bad
+
+
+def test_missing_duration_error_is_actionable():
+    # The model repeated "bad token 'G5'" three times without self-fixing;
+    # the message must now name the real problem (missing duration) and,
+    # for pitches in a drum lane, the lane mistake.
+    from server.features.music.parse import parse_score
+    _, errors, _ = parse_score("[PIANO]\nC4 q E4 q G5 |")
+    assert any("missing a duration" in e and "G5" in e for e in errors), errors
+    _, errors, _ = parse_score("[RHYTHM]\nBD q G5 |")
+    assert any("DRUMS" in e for e in errors), errors
 
 
 def test_section_energy_timeline():

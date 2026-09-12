@@ -224,10 +224,22 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   generation token budget and llama.cpp 500s the tool call (`Failed to parse
   tool call arguments`); the server steers (shorten + valid JSON) and retries
   the round max 2× (`[llm_err] ... malformed tool-call JSON — re-scheduling`).
+- Song form: the DSL doc mandates INTRO → VERSE → BRIDGE → OUTRO with each
+  phase doing its job (sparse tease / motif / contrast with second-voice
+  lead / cadence+thinning); a fresh render's `@section` grid must contain all
+  four phases, and the melody must audibly change at the bridge, not repeat
+  the verse vamp.
   Encode path regression: `test_opus_ctl_keeps_pointer_argtypes` +
   60 s stereo encode must pass — the server must survive music renders
   (a prior ctypes `argtypes` bug segfaulted chat-webui 3×; check
   `grep -i segfault /var/log/kern.log` is clean after render tests).
+- Context slimming + overflow net: live music DSL doc is pruned (world
+  appendices dropped unless the request says indian/raga/tabla/arabic/…),
+  skipped entirely once the task delivered a render, and re-trimmed after
+  the docs block is appended (it used to ride outside the budget → 400
+  `exceed_context_size`). A real 400 still gets one emergency trim-retry
+  (`[llm_round] ... emergency trim + one retry` in the log). Score-like text
+  estimates at ~2 chars/token (unit: `test_context_density.py`).
 - Claim gate: a music answer with **no player attached** that says "Listen to
   the …", "audio should appear below", "piece has been updated/refined",
   "play me the song" must trigger `music_claimed` re-run (gate also watches
@@ -365,7 +377,7 @@ With a browser (or headed test) authenticated via SSO:
 **I4. Deterministic requirement gates (`critic._requirement_mismatch`, no judge call)**
 - Two-turn reuse flow: turn 1 "Draw an image of a girl playing santoor. Also generate an audio to go with the image." → both cards on one message. Turn 2 "Now make a longer piece of about 1 minute, with the same image." → **no** `image_needed` re-run (anaphora satisfied), the OLD image card is re-attached to the new message (carry-over), only new audio is generated, and the text states the tool's real `duration_s`.
 - If the answer inflates the length (> 1.5×`duration_s`+10s), logs show `re-scheduling ... (reason=duration_claimed)` and the delivered answer carries the true number; the reasoning block ends with a `### Guardrail verification` trail (judge model, quality, re-runs).
-- Patch-1 music rules: the bossa brief above must return ≥3 lanes (MELODY+HARMONY+RHYTHM for "nice rhythm") in the Score fold-out. If the model emits invalid tokens (`Dm4`, prose) the log shows `re-scheduling ... (reason=score_errors)` with the rejected tokens quoted in the steering note; "about a minute" requests rendering <0.6× or >1.8× of 60s show `reason=length_mismatch`. Both re-runs are bounded (1) and end up in the `### Guardrail verification` trail.
+- Patch-1 music rules: the bossa brief above must return ≥3 lanes (MELODY+HARMONY+RHYTHM for "nice rhythm") in the Score fold-out. If the model emits invalid tokens (prose chords like `D minor q`, stage directions) the log shows `re-scheduling ... (reason=score_errors)` with the rejected tokens quoted in the steering note (guitar forms `Am7`/`Am3:min7`/`A3:m7` are now VALID and normalize to canonical chords — `A3:m7` must sound minor, unit-checked); "about a minute" requests rendering <0.6× or >1.8× of 60s show `reason=length_mismatch`. Both re-runs are bounded (1) and end up in the `### Guardrail verification` trail.
 - If the model writes scratch prose next to a tool call, that bubble must NOT render in the UI; its text appears folded into the final message's reasoning block instead.
 - Topic mentions must not fire media gates: "what sound does a santoor make?" and "benefits of LLMs" → no `[critic] re-scheduling` lines.
 - The lie-detection regexes + gates are unit-covered: `python -m pytest server/features/tests -q --import-mode=importlib` (music/image claim gates, anaphora, duration parser, path stripper, warm-docs cache, sys-prompt hot reload).

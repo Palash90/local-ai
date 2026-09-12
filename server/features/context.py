@@ -47,7 +47,18 @@ def _text_tokens(s):
             wide_chars += 1
         else:
             other_chars += 1
-    return int(ascii_chars / 4 + wide_chars + other_chars / 2) + 1
+    # Score-DSL text ("D4! q F4 e |") tokenizes at ~1.5 chars/token — the
+    # /4 assumption under-counted music sessions ~2.6x and let oversized
+    # prompts reach llama-server (400 exceed_context_size). Tell it apart
+    # from prose by word length: symbol-ish short-word runs → /2.
+    ascii_div = 4
+    if ascii_chars > 300:
+        words = [w for w in s.split() if w.isascii() and any(c.isalnum() for c in w)]
+        if len(words) >= 20:
+            short = sum(1 for w in words if len(w) <= 3)
+            if short / len(words) > 0.6:
+                ascii_div = 2
+    return int(ascii_chars / ascii_div + wide_chars + other_chars / 2) + 1
 
 
 def estimate_tokens(messages, include_tools=True):
@@ -359,8 +370,11 @@ def prepare_context_for_llm(sid, messages, mode="gpu"):
     total = estimate_tokens(messages)
     if total <= M.AUTO_COMPACT_THRESHOLD:
         context = trim_messages_for_context(messages, mode)
+        # Always expose the context that was actually SENT (after
+        # distillation/trim) so the UI's token gauge reports the real
+        # in-use size instead of the full stored history.
         with M._effective_contexts_lock:
-            M._effective_contexts.pop(sid, None)
+            M._effective_contexts[sid] = context
         return context
     # print(f"[context] Session {sid} estimate {total} tokens exceeds threshold {M.AUTO_COMPACT_THRESHOLD}; building compressed context for LLM")
     compacted = compact_messages_copy(messages, mode=mode)
@@ -376,6 +390,11 @@ def prepare_context_for_llm(sid, messages, mode="gpu"):
     # print(f"[context] Compressed context built; estimate after: {estimate_tokens(context)}")
     with M._effective_contexts_lock:
         M._effective_contexts[sid] = context
+    try:
+        meta = M.sessions_meta.setdefault(sid, {})
+        meta["compactions"] = int(meta.get("compactions", 0) or 0) + 1
+    except Exception:
+        pass
     return context
 
 
@@ -391,11 +410,18 @@ def effective_token_estimate(sid, messages):
 
 def context_token_report(sid, messages):
     """Token report for the UI: effective count sent to the LLM, the raw stored
-    count, and whether context compression is currently active."""
+    count, whether context compression is currently active, and how many
+    times compaction has run for this session."""
     effective = effective_token_estimate(sid, messages)
     raw = estimate_tokens(messages)
+    try:
+        compactions = int(
+            (M.sessions_meta.get(sid) or {}).get("compactions", 0) or 0)
+    except Exception:
+        compactions = 0
     return {
         "token_estimate": effective,
         "raw_token_estimate": raw,
         "context_compressed": raw > effective,
+        "compactions": compactions,
     }

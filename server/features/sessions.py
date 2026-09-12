@@ -123,6 +123,7 @@ def _session_meta_from(sdata):
         "user_id": sdata.get("user_id", ""),
         "system_prompts": sdata.get("system_prompts", []),
         "context_tokens": sdata.get("context_tokens", {}),
+        "compactions": sdata.get("compactions", 0),
         "system_prompt": sdata.get("system_prompt", ""),
     }
 
@@ -212,6 +213,7 @@ def save_sessions():
                 "user_id": meta.get("user_id", ""),
                 "system_prompts": meta.get("system_prompts", []),
                 "context_tokens": meta.get("context_tokens", {}),
+                "compactions": meta.get("compactions", 0),
                 "system_prompt": meta.get("system_prompt", ""),
                 "messages": M.sessions[sid],
             }

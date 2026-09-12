@@ -319,6 +319,7 @@ from server.features.orchestration import (  # noqa: E402
 )
 
 from server.features.critic import (  # noqa: E402
+    answer_claims_artifact,
     extract_citations,
     run_peer_review_worker,
     run_verification,

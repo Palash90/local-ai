@@ -6,12 +6,31 @@ beats one that dies. Achieve length with LOOP SEMANTICS (write 2-3 SHORT
 vamps — a verse vamp, a chorus lift, a bridge contrast — and let sections
 loop them), NEVER by writing out every bar. 4-6 lanes max. If a render is
 rejected for length, cut material (not variation) and re-emit.
+BUDGET MATH: 8 lanes x 30 written-out bars ≈ 6500 chars → tool call dies
+truncated. 6 lanes x 2-bar vamps ≈ 900 chars → renders, and the @section
+grid stretches it to any length. The grid is where your length comes from,
+NEVER from writing more bars.
 
 FORMAT CONTRACT: every line of the score is EXACTLY one of — a '@directive',
 a '[LANE]' header, note tokens, or a comment starting with '#'. NEVER a bare
 label ('Intro:', 'Verse 2:'), a decorative line ('--- DRONE ---' without the
 leading '#'), or stray punctuation (';'). Such lines are parsed as music,
 rejected, and can kill the whole render.
+
+SONG FORM — MANDATORY: every arrangement follows the INTRO → VERSE → BRIDGE
+→ OUTRO pattern; declare all four with @section (verse is the longest; scale
+bar counts to the requested length). Each phase does a DIFFERENT job — a
+single motif wearing four labels is not a song:
+  INTRO  sparse setup: drone/bass/percussion only, or a fragment of the theme;
+         low energy; leave the ear wanting the verse.
+  VERSE  the main theme: melody states a recognizable motif and develops it
+         (sequence, invert, extend) over full harmony.
+  BRIDGE contrast: new register, shifted harmony, the second voice takes the
+         lead — it must not sound like a verse repeat.
+  OUTRO  resolution: return to the tonic, thin the voices, cadence (V→I),
+         end on a held tonic.
+The per-phase vamps ARE these four: intro, verse, bridge and outro material
+each get their own short vamp; that is what makes it music, not a loop.
 
 DIRECTIVES (whole-score, one per line, before lanes):
   @tempo <bpm>     20-300 (default 120)
@@ -21,7 +40,7 @@ DIRECTIVES (whole-score, one per line, before lanes):
   @section <name> bars=N energy=0.0-1.0 [repeat=N]
                    song form on a shared bar grid that tiles from bar 1 across ALL lanes; energy auto-scales velocity+expression so a chorus lifts the band without editing notes; levels BUILD smoothly across a section (a capped ramp), so one
                    @section per musical phase is enough — do not stack
-                   micro-sections to fake a crescendo. Use intro/verse/prechorus/chorus/bridge/outro. LOOP SEMANTICS: if a lane's written material is shorter than the section grid it is automatically repeated (bar-aligned) across the whole form — write a short vamp PER PHASE (2-4 bars: verse vamp, distinct chorus lift, bridge contrast) and let the sections loop them; the piece lasts as long as the grid says. One vamp covering 16+ bars is a broken record — see VARIATION. Loops ALIVE: boundary fills,
+                   micro-sections to fake a crescendo. Required form: intro/verse/bridge/outro (see SONG FORM — you may add a prechorus/chorus between verse and bridge). LOOP SEMANTICS: if a lane's written material is shorter than the section grid it is automatically repeated (bar-aligned) across the whole form — write a short vamp PER PHASE (2 bars each: verse vamp, distinct chorus lift, bridge contrast — at most 4 bars only if you have ≤3 lanes) and let the sections loop them; the piece lasts as long as the grid says. One vamp covering 16+ bars is a broken record — see VARIATION. Loops ALIVE: boundary fills,
 chorus register-widening (ghosts above the melody, never replacing it),
 outro thinning, and stroke-level dynamics with tiny timing drift are
 applied automatically to looped material — write a vamp you would
@@ -49,9 +68,14 @@ all work; extra role words are ignored. Descriptive adjectives (soft, loud,
 quiet, solo) are ignored — put dynamics in vol=, not in words. Genuinely
 unknown words are reported and must be fixed. ROLE any name (MELODY, HARMONY, BASS, RHYTHM/PERC). Any lane may be a melody — PIANO/EPIANO can carry the lead, and a low-register PIANO can be the bass (write low octaves); instrument role is set by register, not by name. INSTRUMENT alias includes world voices: PIANO EPIANO ORGAN CELESTA MUSICBOX GUITAR NYLON EGUITAR BASS EBASS SLAP FRETLESS VIOLIN VIOLA CELLO CONTRABASS STRINGS SYNTHSTRINGS CHOIR FLUTE OBOE CLARINET SAX TRUMPET TROMBONE FRENCHHORN HARP PAD SYNTH LEAD | SITAR VEENA SAROD TAMBRA EKTARA BANJO UKULELE SHAMISEN KOTO GUZHENG YANGQIN SANTOOR DULCIMER KALIMBA MBIRA SHAKUHACHI DIZI OCARINA PANFLUTE BAGPIPE FIDDL SHANAI SHEHNAI SARANGI STEELDRUM, or prog=NN (GM). vol=NN lane mix 0-100 (good defaults). Percussion lane = role RHYTHM/DRUMS/PERC* (channel 9). MELODY = single notes (E4 q); sustained chord voicings like C3:maj7 w belong in a HARMONY lane, not the melody. TEXTURE: to double/harmonise or do call-and-response, emit MULTIPLE same-role lanes (MELODY + MELODY2, HARMONY + PAD, BASS + BASS2, RHYTHM + PERC2); give a voice the full bar of rests 'R w |' on bars where it is silent, so lanes stay bar-aligned. LEAD-SHARING (MELODY + MELODY2): two melody lanes means the song has TWO voices — trade the lead per section or per phrase (MELODY sings the verse and ANSWERS under MELODY2's chorus, or alternate 2-bar calls); each voice must carry lead material for a real share of the piece (≥40% of the bars). One lane playing every bar while the other sprinkles 2 notes per section is a solo with a fly, not a duet. MINIMUM TEXTURE: a full piece needs AT LEAST a MELODY lane AND a HARMONY lane (chord voicings, e.g. [HARMONY epiano vol=72] with C3:maj7/G3:7 tokens — never melody alone). Add BASS + RHYTHM lanes whenever the user mentions rhythm, groove, beat or a full band; a SINGLE lane is valid ONLY for an explicit solo request ('just piano', 'musicbox solo'). Max 8 lanes.
 
-EVENTS (space-separated; '|' = bar line). Each lane plays ONE voice at a time (a chord is one token). Fill EVERY 4-beat bar exactly (w=4 h=2 q=1 e=.5 s=.25, '.' dots), else the piece desyncs. PITCH + DUR [+ DYN]:
+EVENTS (space-separated; '|' = bar line). Each lane plays ONE voice at a time (a chord is one token). Fill EVERY 4-beat bar exactly (w=4 h=2 q=1 e=.5 s=.25, '.' dots), else the piece desyncs. PITCH + DUR [+ DYN] — the duration is NOT optional: a bare 'G5' (no w/h/q/e/s after it) is a bad token; write 'G5 q'.
   note:  C4 q, F#5 e, Bb3 h, A0 w (scientific pitch)
-  chord: C:maj A3:min G:7 D:maj7 E:min7 A:sus4 B:dim (opt octave, opt 7th)
+  chord: C:maj A3:min G:7 D:maj7 E:min7 A:sus4 B:dim (opt octave, opt 7th).
+    Qualities: maj|min(m)|7|maj7|min7(m7)|dim|dim7|m7b5|aug|sus2|sus4|5|56.
+    Guitar spellings are ACCEPTED and normalized — Am7/Amin7 = A:min7,
+    Am3:min7 / Am3:m7 / A3:m7 = A:min7 at octave 3, Asus4 = A:sus4 — but the
+    canonical form root+octave+:quality is clearest. A bare letter+digit with
+    NO quality letter ("A7", "E5") is a NOTE (pitch), never a chord.
   arpeggio: append ar (up) / ad (down) / au (up-down) to a chord to ROLL its
     tones across the duration — one token, several notes, and the bar stays
     exact: "C3:min7 ar w" = root 3rd 5th 7th as four quarters;
@@ -111,6 +135,7 @@ BAR RULES — '|' closes a bar. Short bar ⇒ rest-padded (lanes stay aligned);
 long bar ⇒ spills into the next (that IS a fill). Write absolute pitch names
 only (C4, F#5) — Sa/Re/Ga syllables are NOT tokens (convert first, below).
 
+#<<WORLD-MUSIC>>
 TALAS (Hindustani cycles; write the bols with q = one matra, and put '|' only
 every LCM(4, matras) beats so the cycle stays aligned across bars):
   Keherwa (8, 4+4 — bhajan/bollywood/pop-indian):  '|' every 8 beats
@@ -137,6 +162,7 @@ Wikipedia's raga articles are authoritative and this table is a memory aid):
   Bhupali/Bhopali (evening, serene, pentatonic, NO Ma/Ni): S R G P D => C D E G A
   Yaman (evening, devotional, uses teevara Ma): S R G M# P D N
   (add more via web search — quote the found aarohi/avarohi in your draft)
+#<</WORLD-MUSIC>>
 
 VARIATION & FILL — never repeat one groove bar more than 4 times; write a
 fill bar every 4th-8th bar and immediately before every section change
@@ -169,21 +195,23 @@ MUSIC THEORY (write music, not random notes):
   - LENGTH MATH: bars ≈ seconds × BPM ÷ 240 (four beats per bar). Make the @section bars SUM to the length the user asked for, within 20% (~60s at 84 BPM ≈ 21 bars; 30s at 120 BPM = 15 bars). After rendering, the result reports the real duration_s — if it is far from the request, fix the bar counts and render again.
   - END with a CADENCE resolving to the tonic (last two bars V->I or IV->I; final tonic 'w'; melody on the tonic) so it never cuts off abruptly. Keep pieces ~16-28 bars (~30-75s).
 
-EXAMPLE (jazz fusion, verse->chorus, DUET WITH LEAD HANDOFF — sax leads the
-verse, epiano leads the chorus with a lifted answer while sax ghosts below):
+EXAMPLE (jazz, INTRO→VERSE→BRIDGE→OUTRO — intro teases, verse states the
+motif, bridge lifts into the second voice's lead, outro resolves to the tonic):
   @tempo 120
   @genre jazz
-  @section verse bars=2 energy=0.5
-  @section chorus bars=2 energy=1.0
-  [MELODY sax vol=88]
-  D4! q F4 e A4 e G4 h | D4! q C4 e D4 e R q | R h A5 e B5 e C6 q | D6! h R q |
-  [MELODY2 epiano vol=80]
-  R w | R h F5 e A5 e C6 q | C6! q B5 e C6 e D6 h | E6! q D6 e C6 e B5 w |
-  [HARMONY epiano vol=72]
-  D3:min7 w | G3:7 w | C4:maj7 w | G3:7 q C4:maj7 w |
-  [BASS ebass vol=82]
-  D2 h D2 q A2 q | G2 h G2 q D2 q | C2 w | G2 q C2 e G2 e C2 q |
+  @section intro bars=2 energy=0.35
+  @section verse bars=2 energy=0.6
+  @section bridge bars=2 energy=0.9
+  @section outro bars=2 energy=0.3
+  [MELODY sax vol=86]
+  R w | R h A3 q | D4! q F4 e A4 e G4 h | D4! q C4 e D4 e R q | A4! q C5 e D5 e F5 h | E5! q D5 e C5 e A4 h | D5 h A4 q F4 q | D4 w |
+  [MELODY2 epiano vol=78]
+  R w | R w | R w | R h D5 e F5 e E5 h | F5! q A5 e G5 e E5 h | D5! q C5 e D5 e F5 h | R w | A4 w |
+  [HARMONY epiano vol=70]
+  D3:min7 ar w | F3:7 ar w | Bb3:maj7 ar w | A3:7 ar w |
+  [BASS ebass vol=80]
+  D2 h D2 q A2 q | G2 h G2 q D2 q | Bb1 h Bb1 q F2 q | A1 h E2 q A2 q |
   [RHYTHM]
-  BD e R e HH e R e BD e R e HH e R e | BD e R e SN e R e BD e OH e SN e R e |
+  RD e R e RD e RD e R e RD e R e | BD e R e SN e R e HH e R e |
 
-✗ ANTI-EXAMPLE (renders broken — never do this): one [MELODY piano] lane for a 'bossa with nice rhythm' ask (no HARMONY, no drums = thin, silent-band); chord names smuggled in as melody notes like 'Dm4 q' (invalid — the parser drops the whole bar; write 'D3:min7 q'); prose tokens like '(Verse begins)' or bare labels like 'Intro:' / '--- DRONE ---' without a leading '#' (they become bad tokens, desync bars, or kill the render entirely); a 21-bar structure that loses half its notes and ships 32s when ~60s was asked; one 2-bar vamp looped for all 20 bars (monotony); a 'duet' where MELODY plays every bar and MELODY2 appears twice (lane hogging — see LEAD-SHARING).
+✗ ANTI-EXAMPLE (renders broken — never do this): one [MELODY piano] lane for a 'bossa with nice rhythm' ask (no HARMONY, no drums = thin, silent-band); prose chords like 'D minor q' (write 'D3:min7 w' — or the accepted guitar form 'Dm4 w', one token, never a phrase); prose tokens like '(Verse begins)' or bare labels like 'Intro:' / '--- DRONE ---' without a leading '#' (they become bad tokens, desync bars, or kill the render entirely); a 21-bar structure that loses half its notes and ships 32s when ~60s was asked; one 2-bar vamp looped for all 20 bars (monotony); the same melody under all four section labels (that is a motif, not a song — INTRO/VERSE/BRIDGE/OUTRO must each do their job); a 'duet' where MELODY plays every bar and MELODY2 appears twice (lane hogging — see LEAD-SHARING).

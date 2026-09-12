@@ -240,6 +240,7 @@ write_user_context = None
 APP_STATE_NAMES = [
     "ACTIVE_WINDOW_SECONDS",
     "MAX_INPUT_TOKENS",
+    "prompt_token_budget",
     "MAX_QUEUE_SIZE",
     "SHARES_FILE",
     "_active_tokens",
@@ -404,7 +405,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "ram_evacuating": ram_evac,
                     "cpu_model_state": snap.get("cpu_model_state"),
                     "cpu_last_idle_freed_mb": snap.get("cpu_last_idle_freed_mb"),
-                    "max_context": MAX_INPUT_TOKENS,
+                    "max_context": prompt_token_budget("gpu"),
                     "reminder_count": reminder_count,
                 }
             )
@@ -473,6 +474,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             )
             if music_route:
                 token, music_id = music_route.group(1), music_route.group(2)
+                music_id = music_id.split("?", 1)[0]  # strip ?v= cache-buster
                 rec = get_share(token)
                 if not rec:
                     self.send_error(404)

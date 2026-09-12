@@ -117,3 +117,29 @@ def test_generate_music_warm_disabled_during_calibration(tmp_path):
                           cache_dir=str(tmp_path)) == ["web_search"]
     docs = tool_docs.fresh("cal", cache_dir=str(tmp_path))
     assert set(docs) == {"web_search"}
+
+
+def test_docs_block_skip_live(tmp_path):
+    # A delivered music artifact lets the caller drop the live DSL doc block
+    # (~4k real tokens) from every following round.
+    from server.features import tool_docs
+    b = tool_docs.docs_block("gina", "compose a calm ambient song", [],
+                             cache_dir=str(tmp_path))
+    assert "generate_music" in b
+    b2 = tool_docs.docs_block("gina", "compose a calm ambient song", [],
+                              cache_dir=str(tmp_path),
+                              skip_live={"generate_music"})
+    assert "generate_music" not in b2
+
+
+def test_world_music_pruning(tmp_path):
+    from server.features import tool_docs
+    full = tool_docs._detail("generate_music")
+    assert "TALAS" in full
+    assert "TALAS" not in tool_docs._detail("generate_music", prune_world=True)
+    b = tool_docs.docs_block("hal", "compose a bossa nova track", [],
+                             cache_dir=str(tmp_path))
+    assert "generate_music" in b and "TALAS" not in b
+    b2 = tool_docs.docs_block("hal", "compose an indian raga piece with tabla",
+                              [], cache_dir=str(tmp_path))
+    assert "TALAS" in b2

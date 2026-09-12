@@ -29,7 +29,9 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 - **On-device image generation & editing** (ComfyUI `z_image`) with VRAM
   choreography so the chat model survives renders.
 - **Original music composition** — the `generate_music` score DSL renders to
-  WAV on-device, with a public audition showcase ([Music generation](#music-generation)).
+  WAV on-device, in a mandatory song form (intro → verse → bridge → outro —
+  each phase plays a different musical role, not one looped motif), with a
+  public audition showcase ([Music generation](#music-generation)).
 - **OpenAI-compatible `/v1/*` API** plus an **MCP gateway** (`:8000`) with
   batched agent jobs ([Companion Services](#companion-services)).
 - **Layered guardrails** — L1 patterns, L2 input judge, L3 output judge, critic
@@ -533,7 +535,10 @@ and per instrument timbre — lives at `/api/public/music/showcase` (:3001).
   melody duets must trade the lead, not sprinkle a second voice): longer
   scores get cut off by the generation token budget, which makes llama.cpp
   reject the tool call. The server retries malformed tool calls twice with a
-  shorten-and-re-emit steer before failing the task.
+  shorten-and-re-emit steer before failing the task. The DSL doc itself only
+  rides prompts while needed (pruned appendices, dropped once a render
+  delivers, re-trimmed inside the token budget), so long music sessions
+  can't overflow the context.
 
 ## Voice / read-aloud (TTS)
 

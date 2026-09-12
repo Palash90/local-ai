@@ -405,28 +405,40 @@ function _musicBlobUrl(url) {
 }
 
 function MusicPlayer({ musicUrl, musicStreamUrl, musicScore, musicLevels }) {
-  const [src, setSrc] = useState(musicStreamUrl || musicUrl)
-  const [usedFallback, setUsedFallback] = useState(false)
+  // Mount the <audio> element exactly once, with the final src already
+  // resolved: swapping src after load tears down the element and re-parses
+  // metadata, which is the 0:00-then-pop delay the browser showed.
+  const [src, setSrc] = useState(() => (musicStreamUrl ? null : musicUrl))
+  const usedFallbackRef = useRef(false)
   useEffect(() => {
     let alive = true
-    setSrc(musicStreamUrl || musicUrl)
-    setUsedFallback(false)
-    if (!musicStreamUrl || musicStreamUrl.startsWith('blob:')) return
-    _musicBlobUrl(musicStreamUrl).then((b) => { if (alive && b) setSrc(b) })
+    usedFallbackRef.current = false
+    if (!musicStreamUrl) {
+      setSrc(musicUrl)
+      return undefined
+    }
+    setSrc(null)
+    _musicBlobUrl(musicStreamUrl).then((b) => {
+      if (alive) setSrc(b || musicStreamUrl)
+    })
     return () => { alive = false }
   }, [musicUrl, musicStreamUrl])
   return (
     <div className="music-wrap">
-      <audio controls preload="metadata" src={src}
-        onError={(e) => {
-          if (musicStreamUrl && !usedFallback && src !== musicUrl) {
-            setUsedFallback(true)
-            setSrc(musicUrl)
-          }
-        }}
-        onPlay={(e) => _registerMusic(e.currentTarget)}
-        onPause={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }}
-        onEnded={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }} />
+      {src ? (
+        <audio controls preload="metadata" src={src}
+          onError={() => {
+            if (musicStreamUrl && !usedFallbackRef.current && src !== musicUrl) {
+              usedFallbackRef.current = true
+              setSrc(musicUrl)
+            }
+          }}
+          onPlay={(e) => _registerMusic(e.currentTarget)}
+          onPause={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }}
+          onEnded={(e) => { if (_activeMusic === e.currentTarget) _activeMusic = null }} />
+      ) : (
+        <div className="music-loading">Loading audio…</div>
+      )}
       <div className="img-actions">
         <button type="button" className="img-download-btn" onClick={() => downloadFile(musicUrl, 'music.wav')}>
           Download
@@ -435,8 +447,8 @@ function MusicPlayer({ musicUrl, musicStreamUrl, musicScore, musicLevels }) {
       {Array.isArray(musicLevels) && musicLevels.length > 0 && (
         <div className="music-levels">
           {musicLevels.map((lv, i) => (
-            <div className="music-level-row" key={i} title={`${lv.name} · ${lv.drum ? 'drums' : 'program ' + lv.program} · ${lv.notes} notes`}>
-              <span className="music-level-name">{lv.drum ? '🥁 ' : ''}{lv.name}</span>
+            <div className="music-level-row" key={i} title={`${lv.instrument || lv.name} · ${lv.use || (lv.drum ? 'percussion' : 'lane')} · ${lv.notes} notes · vol ${lv.vol}`}>
+              <span className="music-level-name">{lv.drum ? '🥁 ' : ''}{(lv.instrument || lv.name || '?').toString().replace(/\b\w/g, (c) => c.toUpperCase())}{lv.style ? <span className="music-level-style"> · {lv.style}</span> : null}</span>
               <span className="music-level-bar"><span style={{ width: (lv.vol || 0) + '%' }} /></span>
               <span className="music-level-num">{lv.vol}</span>
             </div>

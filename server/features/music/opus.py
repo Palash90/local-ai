@@ -15,7 +15,6 @@ import ctypes
 import os
 import struct
 import wave
-import zlib
 
 TARGET_SR = 48000
 FRAME_SAMPLES = 960          # 20 ms @ 48 kHz
@@ -23,6 +22,30 @@ MAX_PACKET = 4000
 OPUS_APPLICATION_AUDIO = 2049
 OPUS_SET_BITRATE_REQUEST = 4002
 OPUS_GET_LOOKAHEAD_REQUEST = 4027
+
+# Ogg page checksum is CRC-32 with the forward 0x04C11DB7 polynomial (NOT
+# the reflected PKZIP variant zlib.crc32 implements — pages get rejected).
+_CRC_POLY = 0x04C11DB7
+
+
+def _crc_table():
+    tbl = []
+    for i in range(256):
+        r = i << 24
+        for _ in range(8):
+            r = ((r << 1) ^ _CRC_POLY) & 0xFFFFFFFF if r & 0x80000000 else (r << 1) & 0xFFFFFFFF
+        tbl.append(r)
+    return tbl
+
+
+_CRC_TABLE = _crc_table()
+
+
+def _ogg_crc32(data):
+    crc = 0
+    for b in data:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ _CRC_TABLE[((crc >> 24) & 0xFF) ^ b]
+    return crc
 
 _lib = None
 
@@ -114,7 +137,7 @@ def _ogg_page(packets, granule, serial, seq, bos=False, eos=False):
         0xFFFFFFFFFFFFFFFF if granule is None else granule,
         serial, seq, 0, len(table)) + bytes(table)
     page = bytearray(head) + body
-    crc = zlib.crc32(bytes(page)) & 0xFFFFFFFF
+    crc = _ogg_crc32(bytes(page))
     struct.pack_into("<I", page, 22, crc)
     return bytes(page)
 
@@ -215,8 +238,11 @@ def encode_wav_to_opus(in_path, out_path=None, bitrate=None):
         chunk = packets[i:i + CHUNK]
         done += len(chunk) * FRAME_SAMPLES
         last = (i + CHUNK) >= len(packets)
-        granule = preskip + min(done, total) if last else None
-        pages.append(_ogg_page(chunk, granule, serial, seq, eos=last))
+        # Cumulative 48k sample position after this page (RFC 7845): only
+        # pages whose LAST packet is continued may carry -1; ours hold
+        # complete packets, so -1 broke duration/seeking in browsers.
+        pages.append(_ogg_page(chunk, preskip + min(done, total),
+                               serial, seq, eos=last))
         seq += 1
     with open(out_path, "wb") as f:
         for pg in pages:

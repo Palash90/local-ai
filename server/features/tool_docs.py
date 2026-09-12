@@ -49,11 +49,24 @@ WARM_TRIGGERS = {
     "edit_image": _IMAGE_RX,
 }
 
+# Sections of the music DSL that only matter for world-music genres are
+# bracketed by markers in prompts/music_dsl.txt; the preloaded copy (every
+# music round) drops them unless the request touches one of those genres.
+# tool_details still serves the full document on demand.
+_WORLD_RE = re.compile(r"#<<WORLD-MUSIC>>.*?#<</WORLD-MUSIC>>\s*", re.DOTALL)
+_WORLD_TRIGGER_RE = re.compile(
+    r"indian|bollywood|raga|raag|tala|taal|sargam|hindustani|carnatic|"
+    r"tabla|arabic|maqam|japanese|koto|shamisen|taiko|korean|guzheng|chinese"
+)
 
-def _detail(name):
+
+def _detail(name, prune_world=False):
     for t in live_tools_detailed():
         if t.get("function", {}).get("name") == name:
-            return json.dumps(t, sort_keys=True)
+            payload = json.dumps(t, sort_keys=True)
+            if prune_world:
+                payload = _WORLD_RE.sub("", payload, count=1)
+            return payload
     return None
 
 
@@ -195,20 +208,27 @@ def music_directive(user_text, delivered=False):
     )
 
 
-def docs_block(user, text, messages, cache_dir=None):
+def docs_block(user, text, messages, cache_dir=None, skip_live=None):
     """Trailing-context block with the warm docs relevant to ``text``, or "".
 
     Skips tools whose docs are already in the sent history and tools the
-    current request text doesn't trigger.
+    current request text doesn't trigger. ``skip_live`` names live-preload
+    tools to omit this round (e.g. generate_music once a render succeeded —
+    the full language no longer needs to ride every round).
     """
     if not user:
         return ""
     text = (text or "").lower()
     already = docs_in_history(messages)
     stored = fresh(user, cache_dir)
+    skip_live = skip_live or set()
     for tool in LIVE_PRELOAD:
+        if tool in skip_live:
+            continue
         if tool in WARM_TRIGGERS and WARM_TRIGGERS.get(tool):
-            stored[tool] = _detail(tool)  # current file text, not the cache
+            prune = (tool == "generate_music"
+                     and not _WORLD_TRIGGER_RE.search(text))
+            stored[tool] = _detail(tool, prune_world=prune)
     parts, names = [], []
     for tool, payload in stored.items():
         rx = WARM_TRIGGERS.get(tool)

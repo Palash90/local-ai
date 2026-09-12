@@ -187,6 +187,13 @@ def _delete_task_music(task_id):
             pass
 
 
+# Fabricated artifact links the model pastes when its tool loop failed —
+# e.g. "[Image](/[Image: 9771012342.png])": markdown whose target is itself
+# a bracketed placeholder. No real artifact ever has such a path, so these
+# never survive into the stored answer.
+_FAKE_ARTIFACT_LINK_RE = re.compile(
+    r"!?\[[^\]\n]*\]\(\s*/\[[^\]\n]*\][^\)\n]*\)")
+
 _ART_LINK_LINE_RE = re.compile(
     r"(?im)^[ \t]*(?:[-*+][ \t]+)?(?:\*\*)?\s*"
     r"(?:audio|image|music|track|song)(?:\s+link)?\s*:?\s*(?:\*\*)?[ \t]*"
@@ -277,9 +284,19 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
             music_stream_url = _prior_artifact(sid, "_music_stream_url")
     except Exception as e:
         print(f"[finalize] artifact carry-over skipped: {e}")
+    if music_stream_url and music_rel and "?" not in music_stream_url:
+        # Content-addressed URLs are immutable-cached for a year; if a
+        # sidecar is ever re-encoded under the same name, a ?v=<mtime>
+        # busts the stale browser cache. Query is stripped server-side.
+        try:
+            _op = os.path.join(M.MUSIC_DIR, music_rel.rsplit(".", 1)[0] + ".opus")
+            music_stream_url = f"{music_stream_url}?v={int(os.path.getmtime(_op))}"
+        except OSError:
+            pass
     msg_content = _strip_pasted_artifact_paths(
         msg_content, bool(image_url), bool(music_url)
     )
+    msg_content = _FAKE_ARTIFACT_LINK_RE.sub("", msg_content or "")
     if image_url:
         print(f"[finalize] image_file='{image_filename}' → image_url='{image_url}' for task {task_id}")  # DEBUG
     timings = body.get("timings", {})
@@ -413,7 +430,9 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         # expensive, CPU-serialized) L3 LLM strict judge too, keeping only the
         # fast deterministic pattern scan. Non-simple / MCP / guardrail lanes
         # always run the LLM judge.
-        simple_lane_skip = (mode == "gpu" and not is_mcp_lane and M.is_simple_round_task(t))
+        simple_lane_skip = (mode == "gpu" and not is_mcp_lane
+                            and M.is_simple_round_task(t)
+                            and not M.answer_claims_artifact(reply_text))
         if not blocked and reply_text.strip() and not simple_lane_skip:
             # LLM strict judge. On the guardrail/MCP lane it is fail-closed
             # (self-heals by restarting the guardrail server and retrying);
@@ -684,7 +703,9 @@ def _event_loop():
                     # question) skip the extra quality-judge LLM inference and
                     # finalize immediately — the deterministic pattern blockers
                     # still run in _finalize_task.
-                    simple = M.is_simple_round_task(t)
+                    simple = (M.is_simple_round_task(t)
+                              and not M.answer_claims_artifact(
+                                  msg.get("content") or ""))
                     with M._data_lock:
                         tt = M.tasks.get(task_id)
                         if not tt or tt.get("status") in ("done", "error", "cancelled"):
@@ -758,14 +779,16 @@ def _event_loop():
                                     "role": "user",
                                     "content": (
                                         "[SYSTEM NOTE — internal revision. Your last tool call "
-                                        "was rejected: its arguments were not valid JSON "
-                                        "(likely an unterminated string: your score "
-                                        "was cut off for length). Re-emit the call "
-                                        "with strictly valid JSON: escape newlines as \\n, "
-                                        "never emit raw control characters, and emit "
-                                        "a MUCH shorter score (2-3 short vamps — "
-                                        "verse, chorus, bridge — that sections loop, "
-                                        "~1100 chars total).]"
+                                        "was rejected: your score ran past the "
+                                        "output limit and was cut off mid-string. "
+                                        "You wrote every bar of every lane — stop. "
+                                        "Re-emit ONE tool call with a score of at "
+                                        "most 1100 characters: max 6 lanes, at most "
+                                        "2 bars of material per lane (sections "
+                                        "LOOP those bars to the declared length), "
+                                        "no comments. Example budget: 6 lanes x 2 "
+                                        "bars x ~12 tokens ≈ 900 chars. Escape all "
+                                        "newlines as \\n and keep the JSON valid.]"
                                     ),
                                     "_steering": True,
                                 }
