@@ -355,3 +355,192 @@ def test_ka_tabla_alias_parses():
     secs, errs, _ = parse_score("[RHYTHM tabla]\nDHA q GHE q NA q TIN q | NA q KA q DHIN q NA q |", 120)
     assert not errs, errs
     assert [e["midi"] for e in secs[0]["events"]] == [36, 45, 38, 50, 38, 40, 47, 38]
+
+
+def _fusion_tasks(levels):
+    return {"t": {"music_file": "palash/gen_x.wav",
+                  "music_url": "/music/palash/gen_x.wav",
+                  "music_duration": 60.0,
+                  "music_levels": levels}}
+
+
+def _lv(instrument):
+    return {"name": "X", "program": 0, "drum": False, "vol": 80, "notes": 10,
+            "instrument": instrument, "use": "lead", "style": "melody"}
+
+
+def test_fusion_imbalance_fires_on_missing_family(stub_state):
+    from server.features.critic import _requirement_mismatch
+    jazz_only = [_lv("sax"), _lv("piano"), _lv("ebass")]
+    tasks = _fusion_tasks(jazz_only)
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    reason = _requirement_mismatch(
+        "t", "s1", "jazz fusion with sitar and tabla, please",
+        "Here is your fusion piece!")
+    assert reason == "fusion_imbalance"
+    assert tasks["t"]["_fusion_missing"] == ["indian"]
+
+
+def test_fusion_balanced_passes(stub_state):
+    from server.features.critic import _requirement_mismatch
+    mixed = [_lv("sax"), _lv("piano"), _lv("sitar"), _lv("tabla")]
+    tasks = _fusion_tasks(mixed)
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    assert _requirement_mismatch(
+        "t", "s1", "jazz fusion with sitar and tabla, please",
+        "Here is your fusion piece!") is None
+
+
+def test_fusion_single_tradition_untouched(stub_state):
+    from server.features.critic import _requirement_mismatch
+    tasks = _fusion_tasks([_lv("piano")])
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    assert _requirement_mismatch(
+        "t", "s1", "a calm piano piece", "Here is your piano piece!") is None
+
+
+def test_unsafe_demoted_for_clean_music_answer(stub_state):
+    from server.features.critic import _retry_decision
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(),
+        tasks={"t": {"_mismatch_done": 0, "_verify_done": 0}}, sessions={})
+    music_answer = ("The fusion piece is ready. Duration 60s. "
+                    "The audio player will appear below.")
+    assert _retry_decision(
+        "t", {"unsafe": True, "quality": 30}, None, music_answer) == (
+            "retry", "quality")
+
+
+def test_unsafe_kept_with_leak_markers(stub_state):
+    from server.features.critic import _retry_decision
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(),
+        tasks={"t": {"_mismatch_done": 0, "_verify_done": 0}}, sessions={})
+    leaked = "Here is the track. Debug: X-Authentik-Username was palash."
+    assert _retry_decision(
+        "t", {"unsafe": True, "quality": 30}, None, leaked) == (
+            "retry", "unsafe")
+
+
+def test_fake_bare_token_links_scrubbed():
+    from server.features.orchestration import _FAKE_ARTIFACT_LINK_RE as rx
+    assert rx.sub("", "Hear it: [Image](music_url) done") == "Hear it:  done"
+    assert rx.sub("", "x [a](/output/palash/a.png) y") == "x [a](/output/palash/a.png) y"
+    assert "9771012342" not in rx.sub(
+        "", "Play: [Image](/[Image: 9771012342.png])!")
+
+
+def test_lane_families_mapping():
+    from server.features.music.theory import lane_families
+    assert lane_families("santoor") == {"indian"}
+    assert lane_families("TABLA") == {"indian"}
+    assert lane_families("sax") == {"jazz"}
+    assert lane_families("drum kit") == {"jazz"}
+    assert lane_families("koto") == {"japanese"}
+    assert lane_families("mysterybox") == set()
+
+
+def test_mismatch_budgets_are_per_reason(stub_state):
+    from server.features.critic import _retry_decision
+
+    def decide(counts, total):
+        import threading, types
+        stub_state._Registry.entrypoint = types.SimpleNamespace(
+            _data_lock=threading.RLock(),
+            tasks={"t": {"_mismatch_done": total, "_verify_done": 0,
+                         "_mismatch_counts": counts}},
+            sessions={},
+        )
+        return _retry_decision("t", None, "fusion_imbalance")
+
+    # length_mismatch spent the only legacy slot — fusion still gets its own
+    assert decide({"length_mismatch": 1}, 1) == ("retry", "fusion_imbalance")
+    assert decide({"fusion_imbalance": 1}, 2) == ("finalize", "fusion_imbalance")
+    # global cap of 4 mismatch re-runs still holds
+    assert decide({"length_mismatch": 1, "citations": 1}, 4) == (
+        "finalize", "fusion_imbalance")
+
+
+def test_fusion_checked_before_length(stub_state):
+    from server.features.critic import _requirement_mismatch
+    # both off: 86s vs 120s target is FINE (0.6*120=72) — make it actually off:
+    # 40s vs 120s target trips length, but fusion must win (structural first)
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_url": "/music/palash/gen_x.wav",
+                   "music_duration": 40.0,
+                   "music_levels": [
+                       {"name": "X", "program": 0, "drum": False,
+                        "vol": 80, "notes": 10, "instrument": "sax",
+                        "use": "lead", "style": "melody"}]}}
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    reason = _requirement_mismatch(
+        "t", "s1", "a 2 minute jazz fusion with sitar please",
+        "Here is your 2 minute piece!")
+    assert reason == "fusion_imbalance"
+
+
+def _music_tasks(levels):
+    return {"t": {"music_file": "palash/gen_x.wav",
+                  "music_url": "/music/palash/gen_x.wav",
+                  "music_duration": 60.0,
+                  "music_levels": levels}}
+
+
+def test_missing_instruments_fires(stub_state):
+    from server.features.critic import _requirement_mismatch
+    tasks = _music_tasks([_lv("sax"), _lv("piano")])
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    reason = _requirement_mismatch(
+        "t", "s1", "fusion with sitar and tabla please",
+        "Here is your fusion piece!")
+    assert reason == "missing_instruments"
+    assert sorted(tasks["t"]["_missing_instruments"]) == ["SITAR", "TABLA"]
+
+
+def test_missing_instruments_passes_when_present(stub_state):
+    from server.features.critic import _requirement_mismatch
+    tasks = _music_tasks([_lv("sax"), _lv("sitar"), _lv("tabla")])
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    assert _requirement_mismatch(
+        "t", "s1", "fusion with sitar and tabla please",
+        "Here is your fusion piece!") is None
+
+
+def test_missing_instruments_respects_negation(stub_state):
+    from server.features.critic import _requirement_mismatch, _requested_instruments
+    assert _requested_instruments("no tabla, just piano") == {"PIANO"}
+    assert _requested_instruments("drop the sitar, keep sax") == {"SAX"}
+    tasks = _music_tasks([_lv("piano")])
+    stub_state._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    assert _requirement_mismatch(
+        "t", "s1", "something calm on piano, no tabla please",
+        "Here is your piano piece!") is None
+
+
+def test_delivery_claim_catches_duration_plus_link_lie():
+    from server.features.critic import _music_delivery_claim as dc
+    from server.features.critic import answer_claims_artifact as aca
+    lie = ('The audio piece is approximately 2 minutes and 05 seconds long.\n'
+           '[Image of a flute](https://storage.googleapis.com/x/y.png)\n'
+           '*(Imagine the image above is attached)*')
+    assert dc(lie) and aca(lie)
+    assert not dc('Stairway to Heaven is 8 minutes long and in A minor.')
+    assert not dc('Raga Bhupali is serene and played in the evening.')
+    assert not aca('Raga Bhupali is serene.')
+
+
+def test_gcs_presented_image_links_scrubbed():
+    from server.features.orchestration import _FAKE_ARTIFACT_LINK_RE as rx
+    dirty = ('Hear it: [Image of a flute](https://storage.googleapis.com/x/y.png) '
+             'and [a](/output/palash/a.png) plus [docs](https://example.com/a).')
+    clean = rx.sub("", dirty)
+    assert 'storage.googleapis' not in clean
+    assert '[a](/output/palash/a.png)' in clean
+    assert '[docs](https://example.com/a)' in clean

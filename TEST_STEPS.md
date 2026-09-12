@@ -244,6 +244,21 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   the …", "audio should appear below", "piece has been updated/refined",
   "play me the song" must trigger `music_claimed` re-run (gate also watches
   the fake-delivery phrasings models use after repeated tool failures).
+  Placeholder links (`[Image](music_url)`, empty targets, GCS-presented
+  imagery) are scrubbed from stored answers; UNSAFE verdicts without leak
+  markers on music-shaped answers demote to the quality path (never declined).
+  Delivery-shaped lies (duration specifics + player promise/confession/link,
+  e.g. "audio is ~2 minutes" with no render) trigger `music_claimed`, and the
+  deterministic gates run even on simple-skipped rounds.
+- Fusion balance: a 2-tradition ask (e.g. jazz+sitar/tabla) whose render has
+  no lane from one family must trigger `fusion_imbalance` (one re-run naming
+  the missing side, then deliver); single-tradition pieces are untouched.
+  Instruments named explicitly and missing earn `missing_instruments`
+  (negations like "no tabla" respected); family detail rides per-family doc
+  appendices (indian/eastasia/arabic/latin, pruned unless triggered), and
+  fusion must vary arrangement per section (stack/complement/alternate).
+  Mismatch budgets are per-reason (score_errors 2, others 1, 4 total) so one
+  gate can't starve another — fusion is evaluated before length.
 
 And **image-generation VRAM**: run `generate_image` while GPU chat is loaded; assert the model unloads → ComfyUI runs → model reloads (see logs `[llama]`/`[image]`), CPU agents keep running throughout.
 

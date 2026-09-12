@@ -135,11 +135,16 @@ def test_docs_block_skip_live(tmp_path):
 def test_world_music_pruning(tmp_path):
     from server.features import tool_docs
     full = tool_docs._detail("generate_music")
-    assert "TALAS" in full
-    assert "TALAS" not in tool_docs._detail("generate_music", prune_world=True)
+    assert "TALAS" in full and "hirajoshi" in full
+    assert "TALAS" not in tool_docs._detail("generate_music", keep_world=())
+    assert "TALAS" in tool_docs._detail("generate_music",
+                                        keep_world={"indian"})
     b = tool_docs.docs_block("hal", "compose a bossa nova track", [],
                              cache_dir=str(tmp_path))
     assert "generate_music" in b and "TALAS" not in b
     b2 = tool_docs.docs_block("hal", "compose an indian raga piece with tabla",
                               [], cache_dir=str(tmp_path))
-    assert "TALAS" in b2
+    assert "TALAS" in b2 and "INDIAN VOICES" in b2
+    b3 = tool_docs.docs_block("hal", "compose a jazz fusion track with koto",
+                              [], cache_dir=str(tmp_path))
+    assert "hirajoshi" in b3 and "TALAS" not in b3

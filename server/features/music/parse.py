@@ -627,10 +627,43 @@ def parse_score(text, tempo=120):
                                 f"line {lineno}: {tok!r} missing a duration — "
                                 "every pitch needs w/h/q/e/s (e.g. "
                                 f"'{tok} q')")
+                        elif re.match(r"^([SGMPDN])(\d+!?)$",
+                                      tok, re.IGNORECASE):
+                            # Swar syllable with an octave but no pitch
+                            # conversion: 'P4' means Pa, not a P pitch.
+                            errors.append(
+                                f"line {lineno}: {tok!r} looks like a Swar "
+                                "syllable with an octave — convert to a "
+                                "pitch first (S=C R=D G=E M=F P=G D=A N=B "
+                                "at the tonic, so P4 → G4) and add a "
+                                "duration ('G4 q')")
+                        elif re.match(r"^([A-Ga-g])([whqes]\.?)$", tok):
+                            errors.append(
+                                f"line {lineno}: {tok!r} is a pitch letter "
+                                "glued to a duration with no octave — write "
+                                "three parts: letter+octave+duration "
+                                f"('{tok[0].upper()}4 {tok[1:]}')")
+                        elif re.match(r"^[A-Ga-g]$", tok):
+                            errors.append(
+                                f"line {lineno}: bare {tok!r} is ambiguous — "
+                                "as a note it needs octave+duration "
+                                f"('{tok.upper()}4 q'), as a chord it needs "
+                                f"':quality' ('{tok.upper()}:min7'); it may "
+                                "also be an unconverted Swar syllable "
+                                "(convert S=C R=D G=E M=F P=G D=A N=B first)")
                         elif CHORD_SYM_RE.match(tok):
                             errors.append(
                                 f"line {lineno}: chord {tok!r} missing a "
                                 "duration (e.g. '" + tok + " w')")
+                        elif re.match(r"^([SGMPDN])([whqes]\.?)?$",
+                                      tok, re.IGNORECASE):
+                            # A raw Swar syllable (or syllable+bare duration
+                            # like 'Gq') — no octave, not a pitch.
+                            errors.append(
+                                f"line {lineno}: {tok!r} looks like a Swar "
+                                "syllable, not a pitch — convert first "
+                                "(S=C R=D G=E M=F P=G D=A N=B at the tonic) "
+                                f"and give it an octave+duration, e.g. 'G4 q'")
                         else:
                             errors.append(f"line {lineno}: bad token {tok!r}")
                 except ValueError as e:

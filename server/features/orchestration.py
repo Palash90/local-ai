@@ -188,11 +188,18 @@ def _delete_task_music(task_id):
 
 
 # Fabricated artifact links the model pastes when its tool loop failed —
-# e.g. "[Image](/[Image: 9771012342.png])": markdown whose target is itself
-# a bracketed placeholder. No real artifact ever has such a path, so these
-# never survive into the stored answer.
+# e.g. "[Image](/[Image: 9771012342.png])", or "[Image of a flute...](https://
+# storage.googleapis.com/...)". Our real images live under /output/ and
+# /uploads/, never GCS — a GCS link presented as generated imagery is
+# fabricated. Bare internal tokens (music_url, None, empty) as targets are
+# the same lie. None of these survive into the stored answer.
 _FAKE_ARTIFACT_LINK_RE = re.compile(
-    r"!?\[[^\]\n]*\]\(\s*/\[[^\]\n]*\][^\)\n]*\)")
+    r"!?\[[^\]\n]*\]\(\s*(?:/\[[^\]\n]*\][^\)\n]*"
+    r"|(?:music_url|music_file|image_url|_music_\w+|_image_\w+|None|none|"
+    r"undefined|null|))\s*\)"
+    r"|!?\[[^\]\n]*(?:image|picture|photo|figure|illustration)[^\]\n]*\]"
+    r"\(\s*https?://storage\.googleapis\.com/[^)\s]*\)",
+    re.IGNORECASE)
 
 _ART_LINK_LINE_RE = re.compile(
     r"(?im)^[ \t]*(?:[-*+][ \t]+)?(?:\*\*)?\s*"
@@ -710,6 +717,24 @@ def _event_loop():
                         tt = M.tasks.get(task_id)
                         if not tt or tt.get("status") in ("done", "error", "cancelled"):
                             continue
+                    if simple:
+                        # The deterministic requirement gates are free
+                        # (regex-only) — run them even on simple rounds so a
+                        # claim-shaped answer can never bypass verification.
+                        _mm = None
+                        try:
+                            _mm = M._requirement_mismatch(
+                                task_id, sid, t.get("_original_message", ""),
+                                msg.get("content") or "")
+                        except Exception as _e:
+                            print(f"[llm_ok] simple-round gate check skipped: {_e}")
+                        if _mm:
+                            print(
+                                f"[llm_ok] simple round BUT deterministic gate "
+                                f"fired ({_mm}) — routing to verification "
+                                f"for task {task_id}"
+                            )
+                            simple = False
                     if simple:
                         print(
                             f"[llm_ok] simple GPU round — skipping quality judge "

@@ -16,7 +16,8 @@ PROGRAMS = {
     "PIANO": 0, "EPIANO": 4, "CELESTA": 8, "GLCKENSPIEL": 9, "MUSICBOX": 10,
     "VIBES": 11, "MARIMBA": 12, "ORGAN": 16, "ACCORDEON": 21,
     "GUITAR": 25, "NYLON": 24, "STEEL": 25, "EGUITAR": 27, "JAZZGUITAR": 26,
-    "BASS": 32, "EBASS": 33, "CONTRABASS": 32,
+    "BASS": 32, "EBASS": 33, "CONTRABASS": 32, "BASSGUITAR": 33,
+    "PICKBASS": 34, "SYNTHBASS": 38,
     "VIOLIN": 40, "VIOLA": 41, "CELLO": 42, "STRINGS": 48, "TREMOLO": 48,
     "SYNTHSTRINGS": 50, "CHOIR": 52, "VOICES": 52,
     "HARP": 46, "TIMPANI": 47,
@@ -45,12 +46,47 @@ DEFAULT_PROGRAM = 0
 # Named drum kits usable as the instrument word in a percussion lane
 # ([RHYTHM tabla vol=85]). "kit" is the standard kit of the base SF2.
 DRUM_STYLES = {"KIT", "TABLA", "DHOLAK", "DARBUKA"}
+# Tradition families for the fusion-balance rule (doc CROSS-GENRE + the
+# critic's fusion_imbalance gate): which lane instruments count as evidence
+# that a named tradition is actually audible in the render. Only families
+# with detectable markers are verifiable — arabic is kit-only (no OUD key),
+# latin has no pitched keys at all, so the gate skips those.
+INSTRUMENT_FAMILIES = {
+    "indian": {
+        "SITAR", "TAMBRA", "TANPURA", "TAMBURA", "VEENA", "SAROD",
+        "EKTARA", "IKTARA", "DILRUBA", "SHANAI", "SHEHNAI", "SARANGI",
+        "SURN", "SANTOOR", "SANTUR", "SANTOOR1", "TABLA", "DHOLAK",
+    },
+    "arabic": {"DARBUKA"},
+    "japanese": {"KOTO", "KOTO13", "SHAMISEN", "SHAKUHACHI"},
+    "chinese": {"GUZHENG", "YANGQIN", "YANGQIN2", "DIZI", "CITHARA"},
+    "jazz": {
+        "SAX", "TRUMPET", "TROMBONE", "CLARINET", "PIANO", "EPIANO",
+        "GUITAR", "NYLON", "STEEL", "EGUITAR", "JAZZGUITAR", "BASS",
+        "EBASS", "BASSGUITAR", "PICKBASS", "SYNTHBASS", "KIT", "DRUM KIT",
+    },
+    "western": {
+        "VIOLIN", "VIOLA", "CELLO", "CONTRABASS", "STRINGS", "TREMOLO",
+        "SYNTHSTRINGS", "CHOIR", "VOICES", "FLUTE", "RECORDER", "OBOE",
+        "FRENCHHORN", "TUBA", "BRASS", "HARP", "TIMPANI", "ORGAN",
+        "CELESTA", "MUSICBOX",
+    },
+}
+
+
+def lane_families(instrument):
+    """Tradition families a rendered lane counts toward, from its instrument
+    label (alias, kit name or 'drum kit'). Unknown labels count as nothing —
+    the gate only fires on positive evidence of absence."""
+    u = (instrument or "").upper().replace("_", " ")
+    return {fam for fam, members in INSTRUMENT_FAMILIES.items() if u in members}
 # Sensible per-instrument mix levels (0-100) so a multi-lane piece balances
 # without the user hand-tuning: sustained/loud voices sit lower, delicate ones
 # higher. Overridable per lane with [NAME vol=NN].
 DEFAULT_VOL = {
     0: 92, 4: 85, 8: 88, 9: 85, 10: 85, 11: 85, 12: 85, 16: 78, 21: 80,
-    24: 82, 25: 82, 26: 82, 27: 80, 32: 85, 33: 82, 40: 80, 41: 80,
+    24: 82, 25: 82, 26: 82, 27: 80, 32: 85, 33: 82, 34: 82, 36: 82,
+    37: 82, 38: 80, 39: 80, 40: 80, 41: 80,
     42: 80, 46: 85, 47: 82, 48: 72, 50: 68, 52: 72, 56: 78, 57: 78,
     58: 78, 60: 76, 61: 76, 65: 78, 68: 78, 71: 78, 73: 82, 74: 80,
     80: 72, 89: 66,

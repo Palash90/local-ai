@@ -49,23 +49,38 @@ WARM_TRIGGERS = {
     "edit_image": _IMAGE_RX,
 }
 
-# Sections of the music DSL that only matter for world-music genres are
-# bracketed by markers in prompts/music_dsl.txt; the preloaded copy (every
-# music round) drops them unless the request touches one of those genres.
-# tool_details still serves the full document on demand.
-_WORLD_RE = re.compile(r"#<<WORLD-MUSIC>>.*?#<</WORLD-MUSIC>>\s*", re.DOTALL)
-_WORLD_TRIGGER_RE = re.compile(
-    r"indian|bollywood|raga|raag|tala|taal|sargam|hindustani|carnatic|"
-    r"tabla|arabic|maqam|japanese|koto|shamisen|taiko|korean|guzheng|chinese"
-)
+# Family characteristic appendices in prompts/music_dsl.txt are
+# marker-bracketed per family; the preloaded copy (every music round)
+# keeps only families the request touches. tool_details still serves the
+# full document on demand.
+_WORLD_FAMILIES = {
+    "indian": re.compile(
+        r"indian|bollywood|raga|raag|tala|taal|sargam|hindustani|carnatic|"
+        r"tabla|sitar|santoor|tanpura|sarod|veena|dholak|thumri|bhajan"),
+    "eastasia": re.compile(
+        r"japanese|koto|shamisen|shakuhachi|taiko|hirajoshi|korean|"
+        r"chinese|guzheng|yangqin|dizi|erhu|pipa"),
+    "arabic": re.compile(r"arabic|maqam|\bouds?\b|darbuka|qanun"),
+    "latin": re.compile(
+        r"\blatin\b|bossa|samba|salsa|conga|clave|tango|flamenco"),
+}
 
 
-def _detail(name, prune_world=False):
+def _detail(name, keep_world=None):
+    # keep_world=None (default) keeps every appendix: the full document for
+    # tool_details and the warm-cache hash check. docs_block passes an
+    # explicit set (possibly empty) for the per-round preloaded copy.
+    keep_world = set(_WORLD_FAMILIES) if keep_world is None else set(keep_world)
     for t in live_tools_detailed():
         if t.get("function", {}).get("name") == name:
             payload = json.dumps(t, sort_keys=True)
-            if prune_world:
-                payload = _WORLD_RE.sub("", payload, count=1)
+            if name == "generate_music":
+                for fam in _WORLD_FAMILIES:
+                    if fam not in keep_world:
+                        payload = re.sub(
+                            r"#<<WORLD-" + fam.upper() + r">>.*?#<</WORLD-"
+                            + fam.upper() + r">>\s*",
+                            "", payload, count=1, flags=re.DOTALL)
             return payload
     return None
 
@@ -226,9 +241,9 @@ def docs_block(user, text, messages, cache_dir=None, skip_live=None):
         if tool in skip_live:
             continue
         if tool in WARM_TRIGGERS and WARM_TRIGGERS.get(tool):
-            prune = (tool == "generate_music"
-                     and not _WORLD_TRIGGER_RE.search(text))
-            stored[tool] = _detail(tool, prune_world=prune)
+            keep = {fam for fam, rx in _WORLD_FAMILIES.items()
+                    if rx.search(text)} if tool == "generate_music" else set()
+            stored[tool] = _detail(tool, keep_world=keep)
     parts, names = [], []
     for tool, payload in stored.items():
         rx = WARM_TRIGGERS.get(tool)

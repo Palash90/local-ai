@@ -58,15 +58,58 @@ repeat on stage.
   in the header) — note durations are not drum syllables; give the lane a
   clear melodic role (MELODY/HARMONY/BASS) with a real alias.
 
+RESEARCH UNKNOWN TERMS FIRST — never compose from a name alone: if the
+request names a raga/tala/maqam/mode/groove/instrument/form you cannot
+define precisely (aarohi-avarohi, theka bols, scale degrees, signature
+motif, tuning), call web_search FIRST ("<term> raga Wikipedia aarohi
+avarohi pakad", "<term> groove pattern", "<term> instrument tuning range")
+and quote the findings in your draft. A guessed raga scale, tala, or groove
+renders as nonsense, not fusion — research is part of composing.
+
 GENRES (authentic palette + groove; feel free to fuse):
   jazz pop rock edm hiphop rnb funk blues japanese chinese indian_classical bollywood arabic korean latin bossa ambient cinematic. e.g. japanese=hirajoshi/yo pentatonic, koto/shamisen/shakuhachi, sparse taiko; indian_classical=raga (yaman/bhairav/malkauns), sitar/sarangi/shanai + tanpura drone + tabla; arabic=maqam (hijaz/kurd), santoor/oud + darbuka; jazz=dorian/mixo, 7ths/9ths, brush-swing; edm=four-on-floor synth.
-  CROSS-GENRE: you may set one lane's INSTRUMENT (or scale) from a different genre for fusion (koto over jazz, sitar in cinematic, etc.).
+  CROSS-GENRE (fusion means BOTH sides are heard): when the request names
+  traditions from 2+ families, the score MUST carry at least one pitched
+  lane AND one rhythmic/modal element from EACH family — e.g. jazz+sitar
+  needs sax-or-piano AND sitar-or-tanpura, plus brush-swing AND a tala or
+  raga-mode line. Families — indian: sitar sarod veena tanpura santoor tabla
+  dholak + raga/tala/sargam; arabic: oud darbuka + maqam; japanese: koto
+  shamisen shakuhachi taiko + hirajoshi/yo; chinese: guzheng yangqin dizi;
+  jazz: sax trumpet walking-bass brush-swing + dorian/mixo; latin/bossa:
+  conga clave bossa-clave. A fusion with every lane from one family is a
+   solo in costume, not a fusion — the gate rejects it.
+   FUSION METHOD (blend, don't stack): presence alone is a collage — make the
+   traditions play EACH OTHER. (1) One shared pulse: a single tempo/grid for
+   all lanes; hybridize the groove instead of layering two (tabla theka
+   phrased with swing lift, darbuka answered by brushes, clave kept intact
+   under everything). (2) One shared tonal home: pick a tonic both sides can
+   live on (raga Sa = jazz tonic; hijaz root = bass root) and let harmony
+   move between the two colours. (3) Voice exchange: each tradition's lead
+   instrument must play the OTHER side's motif at least once (sitar states
+   the jazz head in the bridge; sax answers a sargam phrase; koto takes the
+   verse over walking bass). (4) Ornament exchange: grace the foreign line
+   with the host's articulation (gamakas on the sax line, swung tabla fills,
+   bent guzheng-like slides on guitar). A fusion where each family only ever
+   plays its own clichés side by side has failed the method.
+   FUSION ARRANGEMENTS — vary HOW the traditions meet across the form; never
+   use one texture for the whole piece:
+   stacking: both families sound TOGETHER, interlocked on the shared pulse
+   (sitar states the motif while sax harmonizes it a third below; tabla and
+   brushes each take half the bar and dovetail, never doubling hits);
+   complementing: split the ROLES across families (sitar carries ALL the
+   melody while piano+ebass carry ALL the harmony; koto plucks the top notes
+   of the walking bass line; tanpura drone under a jazz ballad);
+   alternating: trade whole phrases/sections (verse = raga exposition on
+   sitar over sparse bass, chorus = full swing band answering it, bridge =
+   tabla solo break, outro = both fading in unison). Assign at least one
+   section to each arrangement — verse stacked, chorus alternating, bridge
+   complementing (or any rotation that fits the request).
 
 LANES: '[ROLE INSTRUMENT vol=NN]' header then note tokens. Header words
 may come in ANY order — [RHYTHM tabla], [tabla RHYTHM] and [RHYTHM kit=tabla]
 all work; extra role words are ignored. Descriptive adjectives (soft, loud,
 quiet, solo) are ignored — put dynamics in vol=, not in words. Genuinely
-unknown words are reported and must be fixed. ROLE any name (MELODY, HARMONY, BASS, RHYTHM/PERC). Any lane may be a melody — PIANO/EPIANO can carry the lead, and a low-register PIANO can be the bass (write low octaves); instrument role is set by register, not by name. INSTRUMENT alias includes world voices: PIANO EPIANO ORGAN CELESTA MUSICBOX GUITAR NYLON EGUITAR BASS EBASS SLAP FRETLESS VIOLIN VIOLA CELLO CONTRABASS STRINGS SYNTHSTRINGS CHOIR FLUTE OBOE CLARINET SAX TRUMPET TROMBONE FRENCHHORN HARP PAD SYNTH LEAD | SITAR VEENA SAROD TAMBRA EKTARA BANJO UKULELE SHAMISEN KOTO GUZHENG YANGQIN SANTOOR DULCIMER KALIMBA MBIRA SHAKUHACHI DIZI OCARINA PANFLUTE BAGPIPE FIDDL SHANAI SHEHNAI SARANGI STEELDRUM, or prog=NN (GM). vol=NN lane mix 0-100 (good defaults). Percussion lane = role RHYTHM/DRUMS/PERC* (channel 9). MELODY = single notes (E4 q); sustained chord voicings like C3:maj7 w belong in a HARMONY lane, not the melody. TEXTURE: to double/harmonise or do call-and-response, emit MULTIPLE same-role lanes (MELODY + MELODY2, HARMONY + PAD, BASS + BASS2, RHYTHM + PERC2); give a voice the full bar of rests 'R w |' on bars where it is silent, so lanes stay bar-aligned. LEAD-SHARING (MELODY + MELODY2): two melody lanes means the song has TWO voices — trade the lead per section or per phrase (MELODY sings the verse and ANSWERS under MELODY2's chorus, or alternate 2-bar calls); each voice must carry lead material for a real share of the piece (≥40% of the bars). One lane playing every bar while the other sprinkles 2 notes per section is a solo with a fly, not a duet. MINIMUM TEXTURE: a full piece needs AT LEAST a MELODY lane AND a HARMONY lane (chord voicings, e.g. [HARMONY epiano vol=72] with C3:maj7/G3:7 tokens — never melody alone). Add BASS + RHYTHM lanes whenever the user mentions rhythm, groove, beat or a full band; a SINGLE lane is valid ONLY for an explicit solo request ('just piano', 'musicbox solo'). Max 8 lanes.
+unknown words are reported and must be fixed. ROLE any name (MELODY, HARMONY, BASS, RHYTHM/PERC). Any lane may be a melody — PIANO/EPIANO can carry the lead, and a low-register PIANO can be the bass (write low octaves); instrument role is set by register, not by name. INSTRUMENT alias includes world voices: PIANO EPIANO ORGAN CELESTA MUSICBOX GUITAR NYLON EGUITAR BASS EBASS SLAP FRETLESS VIOLIN VIOLA CELLO CONTRABASS STRINGS SYNTHSTRINGS CHOIR FLUTE OBOE CLARINET SAX TRUMPET TROMBONE FRENCHHORN HARP PAD SYNTH LEAD | BASSGUITAR PICKBASS SYNTHBASS | SITAR VEENA SAROD TAMBRA EKTARA BANJO UKULELE SHAMISEN KOTO GUZHENG YANGQIN SANTOOR DULCIMER KALIMBA MBIRA SHAKUHACHI DIZI OCARINA PANFLUTE BAGPIPE FIDDL SHANAI SHEHNAI SARANGI STEELDRUM, or prog=NN (GM). vol=NN lane mix 0-100 (good defaults). Percussion lane = role RHYTHM/DRUMS/PERC* (channel 9). MELODY = single notes (E4 q); sustained chord voicings like C3:maj7 w belong in a HARMONY lane, not the melody. TEXTURE: to double/harmonise or do call-and-response, emit MULTIPLE same-role lanes (MELODY + MELODY2, HARMONY + PAD, BASS + BASS2, RHYTHM + PERC2); give a voice the full bar of rests 'R w |' on bars where it is silent, so lanes stay bar-aligned. LEAD-SHARING (MELODY + MELODY2): two melody lanes means the song has TWO voices — trade the lead per section or per phrase (MELODY sings the verse and ANSWERS under MELODY2's chorus, or alternate 2-bar calls); each voice must carry lead material for a real share of the piece (≥40% of the bars). One lane playing every bar while the other sprinkles 2 notes per section is a solo with a fly, not a duet. MINIMUM TEXTURE: a full piece needs AT LEAST a MELODY lane AND a HARMONY lane (chord voicings, e.g. [HARMONY epiano vol=72] with C3:maj7/G3:7 tokens — never melody alone). Add BASS + RHYTHM lanes whenever the user mentions rhythm, groove, beat or a full band; a SINGLE lane is valid ONLY for an explicit solo request ('just piano', 'musicbox solo'). Max 8 lanes.
 
 EVENTS (space-separated; '|' = bar line). Each lane plays ONE voice at a time (a chord is one token). Fill EVERY 4-beat bar exactly (w=4 h=2 q=1 e=.5 s=.25, '.' dots), else the piece desyncs. PITCH + DUR [+ DYN] — the duration is NOT optional: a bare 'G5' (no w/h/q/e/s after it) is a bad token; write 'G5 q'.
   note:  C4 q, F#5 e, Bb3 h, A0 w (scientific pitch)
@@ -131,11 +174,40 @@ genre asks; block chords stay right for bossa comping and brass hits):
   same for comping: alternate ar/ad/au so the figure breathes. A mechanical
   C-E-G-C every bar for 16 bars is the sound of a broken drum machine.
 
+BASS VOICE — felt, not featured: the bass sits 10-20 vol below the lead
+(lead 85 → bass 65-75), always audible, never solo-loud except a marked
+break. Its presence glues harmony to drums — a piece with no low end
+floats. Vary HOW it plays, per section (never one pattern all song):
+  fingerstyle (warm even pulse):        D2 h A1 q G1 q |
+  octave pump (disco/funk drive):       D2 q D3 q D2 q D3 q |
+  walking (scalar passing tones):       D2 q E2 q F2 q G2 q |
+  arpeggiated (chord tones rolling):    D2:7 ar w |
+  pedal point (held root, harmony moves above — great under a bridge):
+                                        D2 w | D2 w |
+  syncopated/slap pops (funk breaks):   D2 e R e D3! e R e D2 e R e D3! e R e |
+  fill into the next section (last bar): D2 q E2 q F2! q G2 q |
+Pick two per piece (e.g. fingerstyle verse, octave chorus, pedal bridge)
+and change with the section — the bassline is a second melody down low,
+not a metronome.
+
 BAR RULES — '|' closes a bar. Short bar ⇒ rest-padded (lanes stay aligned);
 long bar ⇒ spills into the next (that IS a fill). Write absolute pitch names
-only (C4, F#5) — Sa/Re/Ga syllables are NOT tokens (convert first, below).
+only (C4, F#5) — Sa/Re/Ga syllables alone are NOT tokens: convert first with
+this map (S=C R=D G=E M=F P=G D=A N=B at your tonic, komal flat = Xb,
+teevara Ma = F#), then attach durations exactly like notes ('G q', never
+bare 'G' or 'Gq' without an octave). Full raga/tala detail lives in the
+world appendix when the request triggers it.
 
-#<<WORLD-MUSIC>>
+#<<WORLD-INDIAN>>
+INDIAN VOICES — cast by role, not by habit: sitar/sarod/veena = plucked lead
+(gayaki slides approximated by stepwise runs, never big leaps); santoor =
+shimmering tremolo answers (fast repeated notes, high register); tanpura =
+DRONE lane holding tonic+fifth whole notes for the WHOLE piece (D2:5 w |
+A2:5 w |) — a drone of rests is silence, not tanpura; tabla = [RHYTHM tabla]
+playing a theka below (never a rock backbeat); bansuri/flute = breathy
+sustained lead (long notes, soft attacks). A "full indian band" ask needs
+lead + drone + tabla; a missing tanpura drone under a raga melody is the
+most audible inauthenticity there is.
 TALAS (Hindustani cycles; write the bols with q = one matra, and put '|' only
 every LCM(4, matras) beats so the cycle stays aligned across bars):
   Keherwa (8, 4+4 — bhajan/bollywood/pop-indian):  '|' every 8 beats
@@ -162,7 +234,31 @@ Wikipedia's raga articles are authoritative and this table is a memory aid):
   Bhupali/Bhopali (evening, serene, pentatonic, NO Ma/Ni): S R G P D => C D E G A
   Yaman (evening, devotional, uses teevara Ma): S R G M# P D N
   (add more via web search — quote the found aarohi/avarohi in your draft)
-#<</WORLD-MUSIC>>
+#<</WORLD-INDIAN>>
+
+#<<WORLD-EASTASIA>>
+EAST-ASIAN VOICES — space is the instrument: koto/guzheng = sparse pentatonic
+plucks with rests between phrases (never busy 16ths); shakuhachi/dizi =
+breathy sustained lead (long notes, phrase ends that trail off); erhu =
+legato lead with narrow, singing lines; taiko = rare thunderous hits
+(MT q! R q LT h |), NOT a backbeat; shamisen = crisp percussive plucks.
+Scales: hirajoshi/yo pentatonic (e.g. D E F A B / D F G A C) — diatonic
+major/minor runs sound Western, not Japanese/Chinese.
+#<</WORLD-EASTASIA>>
+
+#<<WORLD-ARABIC>>
+ARABIC VOICES — the maqam IS the piece: hijaz (E F G# A B C D) or kurd;
+write the characteristic augmented second, never smooth it into minor.
+oud = taqsim-like unmetered runs (16ths and ornaments over a drone);
+darbuka = maqsum/baladi patterns (BD e BD e SN e R e |), never four-on-floor.
+#<</WORLD-ARABIC>>
+
+#<<WORLD-LATIN>>
+LATIN VOICES — the clave is law: son/bossa clave (CLV e CLV e R e CLV e |)
+runs through the WHOLE piece unchanged; conga tumbao underpins (CONG patterns
+with space); bossa = fingerstyle-soft harmony (nylon/piano, no distortion),
+samba = driving 16th shaker (CAB e e e e |). Never put a rock backbeat here.
+#<</WORLD-LATIN>>
 
 VARIATION & FILL — never repeat one groove bar more than 4 times; write a
 fill bar every 4th-8th bar and immediately before every section change
@@ -172,6 +268,18 @@ the grid; every new @section must change at least one melody property —
 register (octave up in the chorus), rhythm (double/time the motif), an
 answer voice taking the lead, or the harmony underneath. A piece that loops
 one phrase unchanged for its whole length is the monotony the user hears.
+INTRA-SECTION CONTOUR — shape WITHIN every section, not just across them:
+each 4-bar block must rise and release. Write every section as statement →
+lift → peak → land: bars 1-2 state the motif low and sparse (p, longer
+notes, fewer voices); bars 3-4 answer higher and denser (sequence the motif
+up a step, halve a rhythm, add ! accents, bring the answer voice in); then
+land soft (p, a held note, or a beat of rest before the next section).
+The engine already ramps volume across sections — YOU draw the ups and downs
+inside them. Dynamics are the pen, not decoration: f = lean in, p = pull
+back, ! = the single peak accent of the phrase (one per 4 bars, never on
+every note); a rest before the peak bar hits harder than any note. Four
+flat bars at one level, one register, one dynamic is a sequencer demo —
+vary loud/soft, high/low, dense/sparse inside every section.
 A piece over 16 bars needs a contrasting section (bridge/break): different
 energy AND at least one lane's pattern. Reprises ACROSS sections are song
 form and welcome — verse 1 and verse 2 may share the melody; the engine only

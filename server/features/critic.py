@@ -181,6 +181,128 @@ _MUSIC_NEED_RE = re.compile(
     r"played|recorded)\b",
     re.IGNORECASE,
 )
+# True system-state leak markers. An UNSAFE verdict on an answer WITHOUT
+# any of these is treated as a small-judge misfire (music answers full of
+# player promises, DSL fragments and domain words kept tripping it) and is
+# demoted to the quality path — retried, then delivered, never declined.
+_LEAK_MARKER_RE = re.compile(
+    r"/home/|/root/|X-Authentik|Authorization:\s*Bearer|"
+    r"eyJ[A-Za-z0-9_-]{20,}|<system>|</system>|tool_details\s*\(|"
+    r"BEGIN (?:RSA |OPENSSH )?PRIVATE KEY|sk-[A-Za-z0-9]{8,}|"
+    r"AKIA[0-9A-Z]{16}|data:(?:audio|image)/[a-z+]+;base64,",
+    re.IGNORECASE)
+_MUSIC_SHAPED_RE = re.compile(
+    r"player|track|score|audio|melod|raga|tala|tabla|santoor|tanpura|"
+    r"\bBPM\b|bars?\b|DSL|vol=|kirtan|bhajan",
+    re.IGNORECASE)
+
+
+def _unsafe_demotable(answer):
+    if not answer:
+        return False
+    if _LEAK_MARKER_RE.search(answer):
+        return False
+    return bool(
+        _MUSIC_SHAPED_RE.search(answer)
+        or _MUSIC_CLAIM_RE.search(answer)
+        or _MD_IMG_LINK_RE.search(answer)
+        or _MD_IMG_LABEL_LINK_RE.search(answer)
+    )
+
+
+# Tradition keywords for the fusion-balance rule: when the request names
+# 2+ families, the render must carry audible evidence of each (see
+# theory.INSTRUMENT_FAMILIES). Western/jazz share one bucket — a piano
+# comp or sax line counts as the western side.
+_FUSION_FAMILY_RX = {
+    "indian": re.compile(
+        r"indian|hindustani|carnatic|rag?a\b|raag|sitars?|tablas?|tanpuras?|"
+        r"santoors?|sarod|veena|bollywood|tala|taal|sargam|thumri|bhajan|"
+        r"kirtan|dholak", re.IGNORECASE),
+    "arabic": re.compile(r"arabic|maqam|\bouds?\b|darbuka", re.IGNORECASE),
+    "japanese": re.compile(
+        r"japanese|koto|shamisen|shakuhachi|taiko|hirajoshi|enka",
+        re.IGNORECASE),
+    "chinese": re.compile(
+        r"chinese|guzheng|yangqin|dizi|erhu|pipa", re.IGNORECASE),
+    "jazz": re.compile(
+        r"jazz|swing|bebop|sax|walking[-\s]?bass|brush|dorian|mixolydian",
+        re.IGNORECASE),
+    "western": re.compile(
+        r"western|classical|orchestral|symphony|violin|cello|strings|choir",
+        re.IGNORECASE),
+}
+
+
+def _fusion_missing_families(user_input, levels):
+    """Requested tradition families with no audible evidence in the rendered
+    ``levels`` (instrument/kit labels). Empty unless 2+ families were asked
+    for — a single-tradition piece is balanced by definition."""
+    from server.features.music.theory import lane_families
+    requested = {fam for fam, rx in _FUSION_FAMILY_RX.items()
+                 if rx.search(user_input or "")}
+    if len(requested) < 2:
+        return set()
+    present = set()
+    for lv in levels or []:
+        present |= lane_families((lv or {}).get("instrument", ""))
+    return requested - present
+
+
+# Instrument names the presence gate understands: every PROGRAMS alias and
+# drum-kit word, minus prose collisions ("lead the verse" is not a LEAD
+# lane). "drums" maps to the KIT kit.
+_INSTRUMENT_VOCAB_SKIP = {"LEAD", "PAD"}
+_INSTRUMENT_ALIASES = {"DRUMS": "KIT", "DRUMKIT": "KIT", "DRUM KIT": "KIT"}
+_NEGATION_RE_TMPL = (
+    r"(?:\bno\b|\bwithout\b|\bexcept\b|\bremove\b|\bdrop\b|\bskip\b|"
+    r"\bavoid\b|\bminus\b|instead of|\bno more\b|\bless\b|\bditch\b)"
+    r"(?:(?!\bbut\b|\bjust\b|\bonly\b|\bexcept\b|\binstead\b)[^\n,;]){0,24}?"
+    r"\b%s\b"
+)
+
+
+def _requested_instruments(user_input):
+    """Instrument aliases explicitly named in the request, minus negated
+    ones ('no tabla', 'drop the sitar'). Empty set means no constraint."""
+    from server.features.music import theory as _th
+    text = user_input or ""
+    if not text.strip():
+        return set()
+    vocab = {k for k in _th.PROGRAMS if len(k) >= 3}
+    vocab |= set(_th.DRUM_STYLES)
+    vocab |= set(_INSTRUMENT_ALIASES)
+    vocab -= _INSTRUMENT_VOCAB_SKIP
+    found = set()
+    for alias in vocab:
+        canon = _INSTRUMENT_ALIASES.get(alias, alias)
+        if not re.search(r"\b" + re.escape(alias.lower()) + r"\b",
+                         text, re.IGNORECASE):
+            continue
+        if re.search(_NEGATION_RE_TMPL % re.escape(alias.lower()), text,
+                     re.IGNORECASE):
+            continue
+        found.add(canon)
+    return found
+
+
+def _rendered_instruments(levels):
+    out = set()
+    for lv in levels or []:
+        u = str((lv or {}).get("instrument") or "").upper().replace("_", " ")
+        out.add(_INSTRUMENT_ALIASES.get(u, u))
+    out.discard("")
+    return out
+
+
+def _missing_instruments(user_input, levels):
+    """Requested-by-name instruments with no lane in the render."""
+    want = _requested_instruments(user_input)
+    if not want:
+        return set()
+    return want - _rendered_instruments(levels)
+
+
 _MUSIC_CLAIM_RE = re.compile(
     r"\b(?:i|we)\s+(?:have\s+|has\s+)?(?:just\s+|also\s+)?"
     r"(?:generated|created|produced|made|composed|written|prepared|rendered|finished)\s+"
@@ -204,6 +326,37 @@ _MUSIC_CLAIM_RE = re.compile(
     r"(?:music|audio|song|piece|track|fusion audio|composition)\b",
     re.IGNORECASE,
 )
+# Specific audio-duration assertion ("The audio piece ... is approximately
+# 2 minutes ...") — the shape models use when narrating a render that never
+# happened. Alone it could be musicology, so it only counts combined with a
+# player promise, a fabrication confession, or a suspicious artifact link.
+_AUDIO_DURATION_RE = re.compile(
+    r"\b(?:audio|music|song|piece|track)\b[^.?!]{0,80}?"
+    r"\b(?:is|runs?|lasts?|approximately|about|around)\b[^.?!]{0,40}?"
+    r"\d+(?:\.\d+)?\s*(?:seconds?|secs?|minutes?|mins?)\b",
+    re.IGNORECASE)
+_PLAYER_PROMISE_RE = re.compile(
+    r"player will appear|playing (?:it|here|below)|listen .*below|"
+    r"\(?\b[Ii]magine\b[^.?!]{0,80}?\battached\b",
+    re.IGNORECASE)
+_SUSPICIOUS_LINK_RE = re.compile(
+    r"!?\[[^\]\n]*\]\(\s*https?://storage\.googleapis\.com/[^)\s]*\)|"
+    r"!?\[[^\]\n]*\]\(\s*/\[[^\]\n]*:[^)\n]*\)",
+    re.IGNORECASE)
+
+
+def _music_delivery_claim(answer):
+    """True when the answer presents audio as delivered: an explicit claim,
+    or a duration-specific assertion bundled with a player promise, a
+    fabrication confession, or a suspicious artifact link."""
+    if not answer:
+        return False
+    if _MUSIC_CLAIM_RE.search(answer):
+        return True
+    if not _AUDIO_DURATION_RE.search(answer):
+        return False
+    return bool(_PLAYER_PROMISE_RE.search(answer)
+                or _SUSPICIOUS_LINK_RE.search(answer))
 
 
 def answer_claims_artifact(text):
@@ -214,10 +367,11 @@ def answer_claims_artifact(text):
     if not text:
         return False
     return bool(
-        _MUSIC_CLAIM_RE.search(text)
+        _music_delivery_claim(text)
         or _IMG_CLAIM_RE.search(text)
         or _MD_IMG_LINK_RE.search(text)
         or _MD_IMG_LABEL_LINK_RE.search(text)
+        or _SUSPICIOUS_LINK_RE.search(text)
     )
 _CITE_ASK_RE = re.compile(
     r"\b(citations?|cite\b|sources?\b|references?\b|bibliography|"
@@ -293,7 +447,8 @@ _STEERING_HINTS = {
     "score_errors": (
         "The parser rejected tokens in your score, so whole bars were dropped "
         "and the rendered piece is broken. Rewrite it using ONLY valid "
-        "tokens: chords as D3:min7 or G3:7 (never Dm4), no prose or stage "
+        "tokens: chords as D3:min7 or G3:7 (Am7/Am3:min7 guitar forms are "
+        "fine too — never prose like 'D minor'), no prose or stage "
         "directions, every lane bar-complete with '|' at each bar end, and "
         "keep at least MELODY + HARMONY lanes (plus BASS + RHYTHM if rhythm "
         "was part of the request). Lane headers take role + instrument words "
@@ -309,6 +464,23 @@ _STEERING_HINTS = {
         "The rendered piece is far from the length the user asked for. "
         "Recount with bars ≈ seconds × BPM ÷ 240 and set the @section bars so "
         "they sum to the requested length within 20%, then render again."
+    ),
+    "fusion_imbalance": (
+        "The request asked for a fusion of multiple traditions but the "
+        "rendered piece is missing a whole side of it. Re-render KEEPING "
+        "every lane you already have and ADDING at least one pitched lane "
+        "from each missing tradition plus its rhythmic element (e.g. sitar "
+        "or santoor with a tabla groove/tala for indian; koto or shakuhachi "
+        "for japanese; oud or darbuka groove for arabic). Do not drop "
+        "existing lanes, and keep the score ≤1100 characters."
+    ),
+    "missing_instruments": (
+        "The request named specific instruments that never appeared in the "
+        "render. Re-render KEEPING every lane you already have and ADDING "
+        "one lane per missing instrument (pitched voice, or the named kit "
+        "as the RHYTHM lane). Do not drop existing lanes, keep the score "
+        "≤1100 characters, and never answer that an instrument is present "
+        "when it has no lane."
     ),
     "music_claimed": (
         "Your previous draft claimed music/audio was generated but none was "
@@ -1128,7 +1300,7 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
             return "image_claimed"
     if _IMG_LINK_CLAIM_RE.search(answer or "") and not has_image:
         return "image_claimed"
-    if _MUSIC_CLAIM_RE.search(answer or "") and not has_music:
+    if _music_delivery_claim(answer or "") and not has_music:
         return "music_claimed"
     if _MUSIC_NEED_RE.search(user_input) and not has_music:
         return "music_needed"
@@ -1138,6 +1310,29 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
         # the duration says. Fix-and-rerender once before anything else.
         if music_errors:
             return "score_errors"
+        # Fusion balance before length: a re-render for a missing tradition
+        # changes the duration anyway, so the structural fix goes first.
+        _levels = list(t.get("music_levels") or [])
+        if _levels:
+            _missing = _fusion_missing_families(user_input, _levels)
+            if _missing:
+                with M._data_lock:
+                    _tt = M.tasks.get(task_id)
+                    if _tt is not None:
+                        _tt["_fusion_missing"] = sorted(_missing)
+                        _tt["_fusion_rendered"] = sorted({
+                            str((lv or {}).get("instrument") or "?")
+                            for lv in _levels})
+                return "fusion_imbalance"
+            # Named instruments the user asked for by name that earned no
+            # lane (negated ones excluded): same re-render contract.
+            _mi = sorted(_missing_instruments(user_input, _levels))
+            if _mi:
+                with M._data_lock:
+                    _tt = M.tasks.get(task_id)
+                    if _tt is not None:
+                        _tt["_missing_instruments"] = _mi
+                return "missing_instruments"
         # Explicit user length vs real rendered length: tolerate the model's
         # counting (0.6×–1.8×) but catch the "minute that came out at 32s".
         target = _claimed_duration_seconds(user_input)
@@ -1159,15 +1354,20 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
     return None
 
 
-def _retry_decision(task_id, judge_result, mismatch_reason):
+def _retry_decision(task_id, judge_result, mismatch_reason, answer=None):
     """Decide what ``run_verification_worker`` must do with the judged answer.
 
     Returns ``(action, reason)`` with ``action`` ∈ {"finalize", "retry",
     "decline"}. Policy (fail-open, always bounded):
     - unsafe verdict → retry up to ``VERIFY_MAX_RETRIES`` (counting every prior
       judge/requirement retry), then decline — never deliver.
-    - requirement mismatch / judge NO_CITATIONS → one steering re-run, then
-      deliver regardless.
+    - an unsafe verdict with no leak markers on a music/image-shaped answer
+      is demoted to the quality path (small-judge misfire: retried, then
+      delivered — decline is reserved for true leaks).
+    - requirement mismatch → per-reason budget (score_errors: 2, others: 1)
+      with 4 mismatch re-runs max per task, then deliver regardless
+      (score_errors appends its honest giveup ask instead).
+    - judge NO_CITATIONS → one steering re-run, then deliver regardless.
     - quality below ``VERIFY_QUALITY_GATE`` → retry up to ``VERIFY_MAX_RETRIES``,
       then deliver the last answer.
     - judge unavailable or clear verdict → finalize.
@@ -1183,17 +1383,28 @@ def _retry_decision(task_id, judge_result, mismatch_reason):
     no_cites = bool(judge_result and judge_result.get("citations") is False)
     quality = (judge_result or {}).get("quality")
 
+    if unsafe and _unsafe_demotable(answer):
+        print(f"[critic] unsafe verdict demoted to quality path for task {task_id} "
+              f"(no leak markers; music-shaped answer)", flush=True)
+        unsafe = False
+
     if unsafe:
         if verify_done + mismatch_done < allow:
             return "retry", "unsafe"
         return "decline", "unsafe"
     if mismatch_reason:
-        # score_errors (a malformed score) gets its own, larger budget — two
-        # fix-attempts are cheap and the retry hint is specific; on giveup the
-        # worker appends an honest ask so the user decides, instead of
-        # silently shipping a broken piece.
-        budget = 2 if mismatch_reason == "score_errors" else 1
-        if mismatch_done < budget:
+        # Per-reason budgets with a global cap: one gate must not starve
+        # another (length_mismatch spending the single shared slot meant a
+        # later fusion_imbalance silently finalized). score_errors gets two
+        # fix-attempts; everything else one each; four mismatch re-runs max.
+        _counts = t.get("_mismatch_counts")
+        if isinstance(_counts, dict):
+            _done_here = _counts.get(mismatch_reason, 0)
+        else:
+            _done_here = mismatch_done
+        _per = 2 if mismatch_reason == "score_errors" else 1
+        _total = t.get("_mismatch_done", 0)
+        if _done_here < _per and _total < 4:
             return "retry", mismatch_reason
         if mismatch_reason == "score_errors":
             return "finalize", "score_errors_giveup"
@@ -1267,6 +1478,9 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
         else:
             t["_mismatch_done"] = t.get("_mismatch_done", 0) + 1
             t["_last_mismatch"] = reason
+            _mc = dict(t.get("_mismatch_counts") or {})
+            _mc[reason] = _mc.get(reason, 0) + 1
+            t["_mismatch_counts"] = _mc
 
     hint_key = reason
     if reason == "quality" and not t.get("research"):
@@ -1290,6 +1504,23 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
             steering += (
                 "\n\n[Tokens the parser rejected — rewrite without them: "
                 + "; ".join(errs) + "]"
+            )
+    if reason == "fusion_imbalance":
+        missing = t.get("_fusion_missing") or []
+        rendered = t.get("_fusion_rendered") or []
+        if missing:
+            steering += (
+                "\n\n[Rendered lanes so far: "
+                + (", ".join(rendered[:12]) if rendered else "none")
+                + ". Traditions still missing: "
+                + ", ".join(missing) + ".]"
+            )
+    if reason == "missing_instruments":
+        missing = t.get("_missing_instruments") or []
+        if missing:
+            steering += (
+                "\n\n[Named instruments with no lane in the render: "
+                + ", ".join(missing) + ". Add one lane each.]"
             )
     qual = (judge_result or {}).get("quality", 0)
     if reason == "quality" and isinstance(qual, int):
@@ -1337,7 +1568,8 @@ def run_verification_worker(task_id, sid, answer, body, mode):
             round_num = t.get("_round", 0)
             user_input = t.get("_original_message", "")
         mismatch_reason = _requirement_mismatch(task_id, sid, user_input, answer)
-        action, reason = _retry_decision(task_id, judge_result, mismatch_reason)
+        action, reason = _retry_decision(task_id, judge_result, mismatch_reason,
+                                         answer)
 
         if action == "retry":
             _reschedule(task_id, sid, round_num, reason, judge_result)

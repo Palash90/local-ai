@@ -189,6 +189,35 @@ def test_guitar_chord_notation_accepted():
         assert errs, bad
 
 
+def test_swar_octave_and_bare_letters_get_actionable_errors():
+    # Follow-ups to the Swar leak: 'P4' (syllable+octave) and bare 'e'
+    # each got cryptic "bad token"s three rounds running. The messages must
+    # name the fix, and valid neighbours must stay clean.
+    from server.features.music.parse import parse_score
+    _, errs, _ = parse_score("[PIANO]\nP4 q | S4 h |")
+    assert any("Swar syllable with an octave" in e for e in errs), errs
+    _, errs, _ = parse_score("[PIANO]\ne |")
+    assert any("bare 'e' is ambiguous" in e for e in errs), errs
+    for ok_tok in ("G4 q", "D4 h", "Am7 q", "R q"):
+        _, errs, _ = parse_score(f"[PIANO]\n{ok_tok} |")
+        assert not errs, (ok_tok, errs)
+
+
+def test_swar_tokens_get_actionable_error():
+    # Raw Swar syllables ('S', 'G4'-less 'Gq') are the model's most common
+    # indian-genre mistake — the error must name the cause (missing
+    # conversion + octave), not just "bad token", or retries repeat it.
+    from server.features.music.parse import parse_score
+    _, errs, _ = parse_score("[PIANO]\nS q | G q |")
+    assert errs and any("Swar" in e for e in errs), errs
+    _, errs, _ = parse_score("[PIANO]\nGq |")
+    assert errs and any("Swar" in e or "no octave" in e for e in errs), errs
+    # valid forms stay valid
+    for ok_tok in ("G4 q", "R q"):
+        _, errs, _ = parse_score(f"[PIANO]\n{ok_tok} |")
+        assert not errs, (ok_tok, errs)
+
+
 def test_missing_duration_error_is_actionable():
     # The model repeated "bad token 'G5'" three times without self-fixing;
     # the message must now name the real problem (missing duration) and,
@@ -673,3 +702,21 @@ def test_inline_hash_comments_stripped():
     midis = [e["midi"] for e in mel["events"] if e["type"] == "note"]
     assert 66 in midis  # F#4 survived the '#' strip
     assert len(mel["events"]) == 8
+
+
+def test_bass_guitar_aliases_resolve():
+    # BASSGUITAR (fingered electric), PICKBASS and SYNTHBASS must resolve to
+    # their GM programs with sensible mix defaults and jazz family mapping.
+    from server.features.music.parse import parse_score
+    from server.features.music.theory import (
+        PROGRAMS, DEFAULT_VOL, lane_families)
+    assert PROGRAMS["BASSGUITAR"] == 33
+    assert PROGRAMS["SYNTHBASS"] == 38
+    assert PROGRAMS["PICKBASS"] == 34
+    for alias, prog in (("bassguitar", 33), ("synthbass", 38),
+                        ("pickbass", 34)):
+        secs, errs, _ = parse_score(f"[BASS {alias} vol=70]\nD2 h D2 q A2 q |")
+        assert not errs, (alias, errs)
+        assert secs[0]["program"] == prog, (alias, secs[0]["program"])
+        assert DEFAULT_VOL[prog] <= 82
+        assert lane_families(alias) == {"jazz"}

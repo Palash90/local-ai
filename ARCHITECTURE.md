@@ -630,7 +630,9 @@ parse-failed lies like "The Santoor piece has been generated"), and
 `duration_claimed` (answer states a length > 1.5× the tool's real
 `duration_s` + 10s — catches "…about a minute if looped"), `score_errors`
 (the DSL compiled but the parser dropped tokens, so the track is broken —
-the retry embeds the rejected tokens verbatim), and `length_mismatch` (an
+the retry embeds the rejected tokens verbatim), `fusion_imbalance` (a 2+
+tradition request whose rendered levels lack a whole family — one retry
+naming the missing side, then deliver), and `length_mismatch` (an
 explicit user duration — digits or spelled-out "about a minute" — vs a
 rendered `duration_s` outside 0.6×–1.8× of the target). The music DSL docs
 enforce the same contract upstream: minimum texture (MELODY+HARMONY always,
