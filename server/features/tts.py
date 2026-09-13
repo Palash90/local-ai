@@ -305,7 +305,6 @@ def markdown_to_speech_text(text):
         t = _re.sub(r"[*_~]{1,3}", "", t)
     t = _re.sub(r"https?://\S+|www\.\S+", " ", t)
     t = _re.sub(r"<[^>]+>", " ", t)
-    t = _re.sub(r"\[NEXT TURN:[^\]]*\]", " ", t, flags=_re.IGNORECASE)
     t = _re.sub(r"\s*:\s*", ", ", t)
     t = _re.sub(r"[|*_~#>`]+", " ", t)
     t = _re.sub(r"([.!?]){2,}", r"\1", t)
