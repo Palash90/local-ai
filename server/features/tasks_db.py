@@ -5,12 +5,65 @@ lives alongside theme_log and the MCP batch tables in one file.
 """
 
 import json
+import re
 import uuid
 from datetime import datetime
 
 import server.db as db
 
 _MISSING = object()  # Sentinel: distinguish "not provided" from "explicitly None"
+
+
+_HUMAN_TIME_RE = re.compile(
+    r"^\s*(\d{1,2})(?::(\d{2}))?\s*([aApP]\.?[mM]\.?)?\s*$"
+)
+
+
+def normalize_reminder_at(value):
+    """Normalize a reminder time to canonical server-local ``YYYY-MM-DDTHH:MM:SS``.
+
+    Accepts ISO datetimes (with or without offset/``Z``) plus human phrases the
+    small chat model emits (``"12:35 pm"``, ``"12:35"`` — assumed today). Raises
+    ``ValueError`` with a retry-friendly message when unparseable, so callers
+    return an error instead of storing free text that string-compares as
+    always-due (e.g. ``"12:35 pm" < "2026-..."`` lexicographically).
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0).isoformat(timespec="seconds")
+    s = str(value).strip()
+    if not s:
+        raise ValueError("reminder_at must be future local time YYYY-MM-DDTHH:MM:SS")
+    # ISO first (allow Z suffix).
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
+        return dt.replace(microsecond=0).isoformat(timespec="seconds")
+    except ValueError:
+        pass
+    # Human "12:35 pm" / "12:35" — assume today server-local.
+    m = _HUMAN_TIME_RE.match(s)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        ampm = (m.group(3) or "").lower().replace(".", "")
+        if ampm:
+            if not 1 <= hour <= 12 or minute > 59:
+                raise ValueError("reminder_at must be future local time YYYY-MM-DDTHH:MM:SS")
+            if ampm.startswith("p") and hour != 12:
+                hour += 12
+            elif ampm.startswith("a") and hour == 12:
+                hour = 0
+        elif not (0 <= hour <= 23 and minute <= 59):
+            raise ValueError("reminder_at must be future local time YYYY-MM-DDTHH:MM:SS")
+        today = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return today.isoformat(timespec="seconds")
+    raise ValueError(
+        "reminder_at must be future local time YYYY-MM-DDTHH:MM:SS "
+        "(e.g. 2026-09-13T12:35:00), derived from [Current date]"
+    )
 
 
 def _init_tasks_db():
@@ -42,6 +95,7 @@ def task_create(
 ):
     tid = str(uuid.uuid4())
     now = datetime.now().isoformat()
+    reminder_at = normalize_reminder_at(reminder_at) if reminder_at is not None else None
     db.run(
         "INSERT INTO tasks (id, user_id, title, description, status, priority, due_date, session_id, created_at, updated_at, reminder_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (
@@ -65,6 +119,8 @@ def task_update(tid, user_id, **kwargs):
     fields = {k: v for k, v in kwargs.items() if v is not _MISSING}
     if not fields:
         return None
+    if "reminder_at" in fields and fields["reminder_at"] is not None:
+        fields["reminder_at"] = normalize_reminder_at(fields["reminder_at"])
     fields["updated_at"] = datetime.now().isoformat()
     set_clause = ", ".join(f"{k}=?" for k in fields)
     vals = list(fields.values()) + [tid, user_id]
@@ -108,15 +164,18 @@ def handle_task_tool(user_id, args):
     if op == "create":
         if not args.get("title"):
             return json.dumps({"ok": False, "error": "Missing required argument: title"})
-        t = task_create(
-            user_id,
-            args["title"],
-            args.get("description", ""),
-            args.get("priority", "medium"),
-            args.get("due_date"),
-            args.get("session_id"),
-            args.get("reminder_at"),
-        )
+        try:
+            t = task_create(
+                user_id,
+                args["title"],
+                args.get("description", ""),
+                args.get("priority", "medium"),
+                args.get("due_date"),
+                args.get("session_id"),
+                args.get("reminder_at"),
+            )
+        except ValueError as e:
+            return json.dumps({"ok": False, "error": str(e)})
         return json.dumps({"ok": True, "task": t})
     elif op in ("update", "complete", "delete", "get"):
         tid = args.get("task_id")
@@ -125,16 +184,19 @@ def handle_task_tool(user_id, args):
                 {"ok": False, "error": f"Missing required argument: task_id"}
             )
         if op == "update":
-            t = task_update(
-                tid,
-                user_id,
-                title=args.get("title", _MISSING),
-                description=args.get("description", _MISSING),
-                priority=args.get("priority", _MISSING),
-                status=args.get("status", _MISSING),
-                due_date=args.get("due_date", _MISSING),
-                reminder_at=args.get("reminder_at", _MISSING),
-            )
+            try:
+                t = task_update(
+                    tid,
+                    user_id,
+                    title=args.get("title", _MISSING),
+                    description=args.get("description", _MISSING),
+                    priority=args.get("priority", _MISSING),
+                    status=args.get("status", _MISSING),
+                    due_date=args.get("due_date", _MISSING),
+                    reminder_at=args.get("reminder_at", _MISSING),
+                )
+            except ValueError as e:
+                return json.dumps({"ok": False, "error": str(e)})
             if t:
                 return json.dumps({"ok": True, "task": t})
             return json.dumps({"ok": False, "error": "Task not found"})

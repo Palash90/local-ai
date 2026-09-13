@@ -133,7 +133,7 @@ Auth: X-Authentik-* headers (browser) or Bearer JWT (agent). Use a helper that s
 
 **B7. Tasks & themes & context (direct API)**
 - `POST /api/tasks` `{title, description, priority, status, due_date, reminder_at, session_id}` → id; `GET /api/tasks` lists it; `PUT`/`DELETE /api/tasks/:id` work; cross-user id → 404
-- Reminder: the reminder loop (`_reminder_loop`) scans every **12h** (sleeps 43200s), so a `reminder_at` in the future will not surface within a test. To test: create a task with `reminder_at` in the past → on the next scan `GET /api/model-status` shows `reminder_count` increment; the UI surfaces it only as the badge number in the user menu (no reminder text panel).
+- Reminder (per-user): `_reminder_loop` is log-only every 60s and never consumes — a due task (`reminder_at <= now`, `reminded=0`, not completed/cancelled) stays in `GET /api/model-status.reminder_count` **for that user only** until completed/deleted. `reminder_at` is normalized on write to server-local `YYYY-MM-DDTHH:MM:SS` (ISO plus `"12:35 pm"`/`"HH:MM"`-today accepted; anything else → 400 / `{"ok": False}` so the model retries instead of storing always-due free text).
 - `GET /api/themes` (admin) → theme log rows + stats after §F or an agent `track_theme` run
 - `POST /api/user-context` role matrix: `{action:"write"}` any user OK; `{action:"overwrite"}` **admin only** (free/premium → 403); `GET /api/user-context` → own file only
 

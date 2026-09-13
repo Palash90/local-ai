@@ -660,6 +660,10 @@ def _idle_unload_loop():
 
 
 def _reminder_loop():
+    # Poll frequently; this loop is log-only and never consumes reminders.
+    # A reminder stays due (reminded=0) until the user completes/deletes the
+    # task, so model-status.reminder_count (per-user) keeps the UI dot lit.
+    # Completing/cancelling excludes the row from the due query, which clears it.
     while True:
         try:
             now = datetime.now().isoformat()
@@ -669,10 +673,9 @@ def _reminder_loop():
             )
             for task in due:
                 print(f"[reminder] Task '{task['title']}'. User: {task['user_id']}")
-                M._db_run("UPDATE tasks SET reminded=1 WHERE id=?", (task["id"],))
         except Exception as e:
             print(f"[reminder] Error: {e}")
-        time.sleep(43200)
+        time.sleep(60)
 
 
 def _evacuate_ram():

@@ -40,6 +40,17 @@ export default function TaskPanel({ onClose }) {
 
   const priorityColors = { high: '#f87171', medium: '#fbbf24', low: '#4ade80' }
 
+  function isDue(t) {
+    if (!t.reminder_at || t.status === 'completed' || t.status === 'cancelled' || t.reminded === 1) return false
+    try {
+      return new Date(t.reminder_at).toISOString() <= new Date().toISOString()
+    } catch {
+      return false
+    }
+  }
+
+  const sortedTasks = [...tasks].sort((a, b) => (isDue(b) ? 1 : 0) - (isDue(a) ? 1 : 0))
+
   return (
     <div id="task-panel">
       <div id="task-panel-header">
@@ -59,10 +70,11 @@ export default function TaskPanel({ onClose }) {
         </form>
       )}
       <div id="task-list">
-        {tasks.map(t => (
-          <div key={t.id} className={`task-item ${t.status === 'completed' ? 'done' : ''}`}>
+        {sortedTasks.map(t => (
+          <div key={t.id} className={`task-item ${t.status === 'completed' ? 'done' : ''}${isDue(t) ? ' task-due' : ''}`}>
             <input type="checkbox" checked={t.status === 'completed'} onChange={() => handleToggle(t)} />
-            <span className="task-title" style={{ color: priorityColors[t.priority] || '#94a3b8' }}>{t.title}</span>
+            <span className="task-title" style={{ color: priorityColors[t.priority] || '#94a3b8' }}>{isDue(t) ? '⏰ ' : ''}{t.title}</span>
+            {isDue(t) && <span className="task-due-tag">reminder</span>}
             <span className="task-status">{t.status}</span>
             {t.due_date && <span className="task-due">{new Date(t.due_date).toLocaleDateString()}</span>}
             <button className="task-delete" onClick={() => handleDelete(t.id)}>&#128465;</button>

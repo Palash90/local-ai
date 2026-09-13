@@ -409,6 +409,7 @@ function MusicPlayer({ musicUrl, musicStreamUrl, musicScore, musicLevels }) {
   // resolved: swapping src after load tears down the element and re-parses
   // metadata, which is the 0:00-then-pop delay the browser showed.
   const [src, setSrc] = useState(() => (musicStreamUrl ? null : musicUrl))
+  const [copied, setCopied] = useState(false)
   const usedFallbackRef = useRef(false)
   useEffect(() => {
     let alive = true
@@ -423,6 +424,15 @@ function MusicPlayer({ musicUrl, musicStreamUrl, musicScore, musicLevels }) {
     })
     return () => { alive = false }
   }, [musicUrl, musicStreamUrl])
+
+  function handleScoreCopy(e) {
+    e.preventDefault()
+    e.stopPropagation()
+    writeClipboard(musicScore).then((ok) => {
+      setCopied(ok)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
   return (
     <div className="music-wrap">
       {src ? (
@@ -457,7 +467,12 @@ function MusicPlayer({ musicUrl, musicStreamUrl, musicScore, musicLevels }) {
       )}
       {musicScore && (
         <details className="music-score">
-          <summary>Score</summary>
+          <summary>
+            <span>Score</span>
+            <button type="button" className="reasoning-copy-btn" onClick={handleScoreCopy} title="Copy score">
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
+          </summary>
           <pre>{musicScore}</pre>
         </details>
       )}

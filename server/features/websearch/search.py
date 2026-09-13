@@ -313,6 +313,24 @@ def _region_language(query, location=""):
     return ""
 
 
+def _sanitize_query(query):
+    """Strip search-operator tokens that poison upstream backends.
+
+    Tokens like ``-X`` are exclusion operators for SearXNG/upstream engines,
+    which breaks code queries (``python3 -X faulthandler`` effectively searches
+    ``python3 faulthandler MINUS x``). Remove ``-``/em-dash + letter tokens
+    outside double-quoted phrases; quoted ``"-X"`` is preserved. Numbers and
+    ranges (``-5``, ``2020-2024``) are never stripped.
+    """
+    q = query or ""
+    # Split out double-quoted spans so quoted operators survive.
+    parts = q.split('"')
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r"(?:^|\s)[-\u2013\u2014](?=[A-Za-z])\S*", " ", parts[i])
+    cleaned = " ".join('"'.join(parts).split())
+    return cleaned or q
+
+
 def _rescoped_query(query):
     """Drop role-filler words so the backend/fallback searches real content.
 
@@ -359,8 +377,15 @@ def _google_custom_search(query):
         response.raise_for_status()
         items = response.json().get("items", [])
     except Exception as e:
-        # The exception URL can contain the GOOGLE_API_KEY query parameter.
-        print(f"[google_search] unavailable: {type(e).__name__}")
+        # The exception URL can contain the GOOGLE_API_KEY query parameter,
+        # so log only the type + status/body snippet, never the URL.
+        detail = ""
+        if hasattr(e, "response") and getattr(e, "response") is not None:
+            try:
+                detail = f" HTTP {e.response.status_code}: {e.response.text[:160]}"
+            except Exception:
+                pass
+        print(f"[google_search] unavailable: {type(e).__name__}{detail}")
         return None
     return [
         {
@@ -391,6 +416,10 @@ _PLACE_HINTS = [
 def web_search(query, current_time=None, current_location=None):
     ts = datetime.now()
     clean_query = (query or "").strip()
+    sanitized = _sanitize_query(clean_query)
+    if sanitized != clean_query:
+        print(f"[web_search] sanitized {clean_query!r} -> {sanitized!r}")
+        clean_query = sanitized
     norm_query = " ".join(re.findall(r"[a-z0-9]+", clean_query.lower()))
     # Live and location-sensitive searches must not reuse an older result set,
     # including one that may have been contaminated by semantic recall.
@@ -556,7 +585,52 @@ def web_search(query, current_time=None, current_location=None):
             if google_results:
                 formatted = google_results
                 low_confidence = google_low_confidence
+    retried = False
+    if (low_confidence or not formatted) and formatted is not None:
+        # Deterministic server-side retry: the small chat model often promises
+        # a "refined search" but never issues it. Re-run once with the
+        # sanitized + role-filler-stripped content words (sanitize FIRST so a
+        # rescoped retry cannot reintroduce an exclusion operator like -X).
+        retry_q = _rescoped_query(_sanitize_query(clean_query))
+        if retry_q and retry_q.lower() not in (
+            clean_query.lower(),
+            norm_query,
+            (fallback_params.get("q") or "").lower(),
+        ):
+            try:
+                _pace_outbound_request()
+                retry_params = {"q": retry_q, "format": "json"}
+                _apply_location_scoping(retry_q, current_location, retry_params)
+                retry_cats = _pick_categories(retry_q)
+                if retry_cats:
+                    retry_params["categories"] = retry_cats
+                rr = requests.get(M.SEARXNG_URL, params=retry_params, timeout=10)
+                rr.raise_for_status()
+                retry_formatted = [
+                    {
+                        "title": x.get("title", ""),
+                        "url": x.get("url", ""),
+                        "snippet": x.get("content", "") or x.get("snippet", ""),
+                    }
+                    for x in rr.json().get("results", [])[:WEB_SEARCH_RESULT_LIMIT]
+                ]
+                retry_formatted = scrub_search_results(retry_formatted, query=query)
+                if retry_formatted:
+                    retry_formatted, retry_low = relevance.filter_relevance(
+                        retry_formatted, query
+                    )
+                    if retry_formatted:
+                        formatted = retry_formatted
+                        low_confidence = retry_low
+                        retried = True
+                print(
+                    f"[web_search] retry {retry_q!r} -> {len(formatted)} results"
+                )
+            except Exception as e:
+                print(f"[web_search] retry failed: {e}")
     payload = _respond(formatted, low_confidence=low_confidence)
+    if retried:
+        payload["retried"] = True
     # Ask the LLM how long this answer stays fresh so the next identical query
     # re-fetches at the right time ("breaking news" -> seconds, "how to" -> days),
     # rather than a fixed regex heuristic. Falls back to the regex default if

@@ -787,6 +787,30 @@ html, body {
 .music-score summary {
   cursor: pointer;
   color: #60a5fa;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+}
+.music-score summary::-webkit-details-marker {
+  display: none;
+}
+.music-score summary > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.music-score summary > span::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 5px solid #888;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform .2s;
+}
+.music-score[open] summary > span::before {
+  transform: rotate(90deg);
 }
 .music-score pre {
   white-space: pre-wrap;
@@ -1768,6 +1792,37 @@ input[type=file] {
   display: flex;
   align-items: center;
   justify-content: center;
+  font-weight: 700;
+}
+
+#user-name {
+  position: relative;
+}
+
+#reminder-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f87171;
+  margin-left: 6px;
+  vertical-align: middle;
+  animation: reminder-blink 1.2s ease-in-out infinite;
+}
+
+@keyframes reminder-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.task-item.task-due {
+  border-left: 2px solid #f87171;
+  background: rgba(248, 113, 113, 0.07);
+}
+
+.task-due-tag {
+  font-size: 10px;
+  color: #f87171;
   font-weight: 700;
 }
 

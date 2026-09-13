@@ -612,7 +612,18 @@ TOOLS_DETAILED = [
                     },
                     "denoise": {
                         "type": "number",
-                        "description": "Denoising value (0.1 to 1.0). Use 0.25-0.4 for subtle color/lighting changes, 0.45-0.65 for structural edits and object additions, and 0.7-0.85 for massive re-imaginings.",
+                        "description": "Denoising value (0.1 to 1.0). Color/recolor-only changes (e.g. change a garment to bright blue) need 0.5-0.6 or the old color survives — lower values return near-copies. Use 0.45-0.65 for structural edits and object additions, and 0.7-0.85 for massive re-imaginings.",
+                    },
+                    "model": {
+                        "type": "string",
+                        "enum": list(IMAGE_MODELS.keys()),
+                        "description": "Art style to use. Options: "
+                        + ", ".join(
+                            [
+                                f"'{k}' ({v['description']})"
+                                for k, v in IMAGE_MODELS.items()
+                            ]
+                        ),
                     },
                 },
                 "required": ["prompt", "denoise"],
@@ -749,7 +760,7 @@ TOOLS_DETAILED = [
                     },
                     "reminder_at": {
                         "type": "string",
-                        "description": "Reminder time in ISO format. The system will notify about this task at the given time.",
+                        "description": "Reminder time: future server-local time YYYY-MM-DDTHH:MM:SS (e.g. 2026-09-13T12:35:00), derived from [Current date] in the prompt. Never send human phrases like '12:35 pm'. If the user gives no time, ask for one instead of guessing.",
                     },
                     "session_id": {
                         "type": "string",
@@ -1196,7 +1207,7 @@ _TOOL_SHORT_DESC = {
     ),
     "edit_image": (
         "Img2img editor: restyle/modify an existing or uploaded image via "
-        "prompt + denoise strength."
+        "prompt + denoise strength + style model."
     ),
     "get_user_location": (
         "Ask the user's browser for their current city/area (may be denied)."

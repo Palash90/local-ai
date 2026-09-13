@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import random
+import re
 import subprocess
 import time
 import uuid
@@ -27,6 +28,108 @@ ASPECT_SIZES = {
 
 def _aspect_dims(aspect_ratio):
     return ASPECT_SIZES.get(aspect_ratio, ASPECT_SIZES["landscape"])
+
+
+# Max longest-side for img2img edits. Keeps edit VRAM/time near the ~2 MP
+# T2I budget while preserving the source aspect ratio. Dimensions are rounded
+# to multiples of 8 (latent-safe for VAEEncode/KSampler).
+EDIT_MAX_SIDE = 1536
+
+
+def _probe_image_size(path):
+    """Return (w, h) for PNG/JPEG without new deps, else None.
+
+    stdlib-only IHDR/SOF parse so img2img scaling never requires Pillow.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64)
+        if head[:8] == b"\x89PNG\r\n\x1a\n" and len(head) >= 24:
+            import struct
+
+            w, h = struct.unpack(">II", head[16:24])
+            if w > 0 and h > 0:
+                return (w, h)
+        if head[:2] == b"\xff\xd8":
+            import struct
+
+            # Incremental SOF scan: walk JPEG segments via seek so SOF past
+            # the first bytes (large EXIF/XMP headers) is still found with
+            # no fixed read cap and no whole-file load.
+            try:
+                with open(path, "rb") as f:
+                    f.seek(2)
+                    scanned = 0
+                    cap = 32 << 20
+                    while scanned < cap:
+                        hdr = f.read(2)
+                        if len(hdr) < 2 or hdr[0] != 0xFF:
+                            break
+                        marker = hdr[1]
+                        if marker in (0xD8, 0xD9) or (0xD0 <= marker <= 0xD7) or marker == 0x01:
+                            continue
+                        if marker in (0xC0, 0xC1, 0xC2):
+                            body = f.read(7)
+                            if len(body) < 7:
+                                break
+                            h, w = struct.unpack(">HH", body[3:7])
+                            if w > 0 and h > 0:
+                                return (w, h)
+                            break
+                        if marker == 0xDA:
+                            break  # SOS: image data starts, no SOF found
+                        seg_hdr = f.read(2)
+                        if len(seg_hdr) < 2:
+                            break
+                        seg_len = struct.unpack(">H", seg_hdr)[0]
+                        if seg_len < 2:
+                            break
+                        f.seek(seg_len - 2, 1)
+                        scanned += 2 + seg_len
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def _edit_target_dims(path, max_side=EDIT_MAX_SIDE):
+    """Scaled (w, h) for img2img: fit longest side to max_side, multiples of 8."""
+    size = _probe_image_size(path)
+    if not size:
+        return (1536, 1024)
+    w0, h0 = size
+    longest = max(w0, h0)
+    scale = (max_side / longest) if longest > max_side else 1.0
+    w = max(8, int(round(w0 * scale / 8)) * 8)
+    h = max(8, int(round(h0 * scale / 8)) * 8)
+    return (w, h)
+
+
+def _comfyui_history_error(entry):
+    """Return a short error string if a ComfyUI history entry failed, else None.
+
+    Without this, a failed render (e.g. CUDA OOM, which ComfyUI reports in
+    ~20s) is indistinguishable from a slow one, and the poll loop burns the
+    full 300s before reporting a generic timeout.
+    """
+    try:
+        status = ((entry or {}).get("status", {}) or {})
+        if status.get("status_str") == "error" and status.get("completed"):
+            parts = []
+            for m in status.get("messages", []) or []:
+                try:
+                    data = m[1] if isinstance(m, (list, tuple)) and len(m) > 1 else m
+                    if isinstance(data, dict) and data.get("exception_message"):
+                        parts.append(str(data["exception_message"]))
+                    elif data:
+                        parts.append(str(data)[:200])
+                except Exception:
+                    pass
+            return "; ".join(parts[:3]) or "unknown ComfyUI error"
+    except Exception:
+        pass
+    return None
 
 
 def _output_dir(user):
@@ -188,7 +291,6 @@ def generate_image(
                     "clip_name1": cfg["clip1"],
                     "clip_name2": cfg["clip2"],
                     "clip_name3": cfg["t5"],
-                    "type": "sd3",
                 },
             },
             "3": {
@@ -249,6 +351,7 @@ def generate_image(
         else:
             prompt_id = data["prompt_id"]
             found_file = None
+            render_error = None
             for _ in range(300):
                 time.sleep(1)
                 # Check for cancellation on every poll iteration — if the
@@ -272,6 +375,12 @@ def generate_image(
                     hist = hr.json()
 
                     if prompt_id in hist:
+                        render_error = _comfyui_history_error(hist[prompt_id])
+                        if render_error:
+                            print(
+                                f"[generate_image] ComfyUI render failed for task {task_id}: {render_error}"
+                            )
+                            break
                         outputs = hist[prompt_id].get("outputs", {})
                         for node_id, node_out in outputs.items():
                             for img in node_out.get("images", []):
@@ -315,7 +424,10 @@ def generate_image(
                 print(
                     f"[generate_image] TIMEOUT for task {task_id} after 300s"
                 )  # DEBUG
-                result = json.dumps({"error": "Image generation timeout"})
+                if render_error:
+                    result = json.dumps({"error": f"ComfyUI render failed: {render_error}"})
+                else:
+                    result = json.dumps({"error": "Image generation timeout"})
     except Exception as e:
         result = json.dumps({"error": str(e)})
     finally:
@@ -444,7 +556,125 @@ def edit_image(
 
     cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
 
-    workflow = {
+    # Correct img2img: partial diffusion of the source latent. The whole
+    # image is VAE-encoded and KSampler re-denoises it by `denoise`.
+    # (The old mask-node branch was an inpainting operator fed with the
+    # loader's alpha output — opaque uploads have no meaningful mask, so
+    # edits came out near-copy or grey/washed with unpredictable denoise.)
+    try:
+        denoise_f = float(denoise)
+    except (TypeError, ValueError):
+        denoise_f = 0.4
+    denoise_f = min(1.0, max(0.1, denoise_f))
+    # Color/recolor-only edits need enough denoise for a saturated hue
+    # change to actually take on a few-step Turbo model; too low stays a
+    # near-copy (worst case: high-frequency face details drift while the
+    # garment color never shifts). Structural verbs keep user denoise.
+    _STRUCTURAL_RX = re.compile(
+        r"\b(add|remove|replace|insert|delete|erase|background|pose|angle|"
+        r"style|restyle|turn\s+into|morph|swap|hat|glasses|beard)\b",
+        re.IGNORECASE,
+    )
+    _FULL_CHANGE_RX = re.compile(
+        r"\b(re-?imagin|transform|overhaul|cyberpunk|anime|cartoon|painting|"
+        r"fantasy|steampunk|ghibli|pixel-?art)\b",
+        re.IGNORECASE,
+    )
+    if not _STRUCTURAL_RX.search(prompt or "") and not _FULL_CHANGE_RX.search(
+        prompt or ""
+    ):
+        denoise_f = min(denoise_f, 0.6)
+    edit_w, edit_h = _edit_target_dims(input_filepath)
+    # z_image is a Turbo-distilled model tuned for ~8 steps; running 20+
+    # steps overshoots identity (face drift). Keep steps near-native and let
+    # denoise alone control edit strength. SD3.5 is a full model with a
+    # native ~20-30 step range, so it keeps a higher step budget.
+    edit_steps = max(8, min(12, int(round(6 / max(denoise_f, 0.2)))))
+    edit_steps_sd = max(28, min(35, int(round(12 / max(denoise_f, 0.2)))))
+    # Anchor identity: photo edits almost always want the same person/place
+    # with only the requested change applied. The raw instruction prompt
+    # ("change X to green") under-specifies this and the sampler drifts.
+    _IDENTITY_SUFFIX = (
+        ", keep the exact same person, face, identity, pose, background, "
+        "composition and lighting; apply only the requested change"
+    )
+    pos_prompt = (prompt or "") + (
+        _IDENTITY_SUFFIX if "same person" not in (prompt or "") else ""
+    )
+
+    if model == "sd3_5_medium":
+        print("Chose SD 3.5 for image editing")
+        workflow = {
+            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": cfg["unet"]}},
+            "2": {
+                "class_type": "TripleCLIPLoaderGGUF",
+                "inputs": {
+                    "clip_name1": cfg["clip1"],
+                    "clip_name2": cfg["clip2"],
+                    "clip_name3": cfg["t5"],
+                },
+            },
+            "3": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": pos_prompt, "clip": ["2", 0]},
+            },
+            "4": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative_prompt, "clip": ["2", 0]},
+            },
+            "5_load": {"class_type": "LoadImage", "inputs": {"image": input_filename}},
+            # Scale to edit budget (preserves aspect, latent-safe multiples of 8)
+            "5_scale": {
+                "class_type": "ImageScale",
+                "inputs": {
+                    "image": ["5_load", 0],
+                    "width": edit_w,
+                    "height": edit_h,
+                    "upscale_method": "lanczos",
+                    "crop": "disabled",
+                },
+            },
+            # VAE-encode the full source image (no mask: img2img, not inpainting)
+            "5_vae_encode": {
+                "class_type": "VAEEncode",
+                "inputs": {
+                    "pixels": ["5_scale", 0],
+                    "vae": ["7", 0],
+                },
+            },
+            # KSampler re-denoises the source latent by `denoise`
+            "6": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**31),
+                    "steps": edit_steps_sd,
+                    "cfg": 4.5,
+                    "sampler_name": "euler",
+                    "scheduler": "sgm_uniform",
+                    "denoise": denoise_f,
+                    "model": ["1", 0],
+                    "positive": ["3", 0],
+                    "negative": ["4", 0],
+                    "latent_image": ["5_vae_encode", 0],
+                },
+            },
+            "7": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["6", 0], "vae": ["7", 0]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": prefix, "images": ["8", 0]},
+            },
+        }
+    else:
+        if model != "z_image":
+            print(f"Unknown edit model '{model}', falling back to z_image")
+            model = "z_image"
+            cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+        print("Chose Z-Image Turbo for image editing")
+        workflow = {
         # 1. Load Models & Encoders
         "62": {
             "class_type": "CLIPLoader",
@@ -457,7 +687,7 @@ def edit_image(
         },
         "67": {
             "class_type": "CLIPTextEncode",
-            "inputs": {"text": prompt, "clip": ["62", 0]},
+            "inputs": {"text": pos_prompt, "clip": ["62", 0]},
         },
         "71": {
             "class_type": "CLIPTextEncode",
@@ -468,36 +698,39 @@ def edit_image(
             "inputs": {"shift": 3, "model": ["66", 0]},
         },
         "5_load": {"class_type": "LoadImage", "inputs": {"image": input_filename}},
-        # 3. Standard VAE Encode (Encodes the full image cleanly without corruption)
+        # 2. Scale to edit budget (preserves aspect, latent-safe multiples of 8)
+        "5_scale": {
+            "class_type": "ImageScale",
+            "inputs": {
+                "image": ["5_load", 0],
+                "width": edit_w,
+                "height": edit_h,
+                "upscale_method": "lanczos",
+                "crop": "disabled",
+            },
+        },
+        # 3. VAE-encode the full source image (no mask: this is img2img, not inpainting)
         "5_vae_encode": {
             "class_type": "VAEEncode",
             "inputs": {
-                "pixels": ["5_load", 0],
+                "pixels": ["5_scale", 0],
                 "vae": ["63", 0],
             },
         },
-        # 4. Attach Mask directly to Latent space (Prevents grey-out issue)
-        "5_set_mask": {
-            "class_type": "SetLatentNoiseMask",
-            "inputs": {
-                "samples": ["5_vae_encode", 0],
-                "mask": ["5_load", 1],  # LoadImage mask output
-            },
-        },
-        # 5. KSampler
+        # 4. KSampler re-denoises the source latent by `denoise`
         "70": {
             "class_type": "KSampler",
             "inputs": {
                 "seed": random.randint(0, 2**31 - 1),
-                "steps": 8,
+                "steps": edit_steps,
                 "cfg": 1.0,
                 "sampler_name": "res_multistep",
                 "scheduler": "simple",
-                "denoise": float(denoise),  # Dynamically controls edit depth
+                "denoise": denoise_f,  # Dynamically controls edit depth
                 "model": ["69", 0],
                 "positive": ["67", 0],
                 "negative": ["71", 0],
-                "latent_image": ["5_set_mask", 0],
+                "latent_image": ["5_vae_encode", 0],
             },
         },
         "65": {
@@ -508,7 +741,7 @@ def edit_image(
             "class_type": "SaveImage",
             "inputs": {"filename_prefix": prefix, "images": ["65", 0]},
         },
-    }
+        }
 
     with M._data_lock:
         M.tasks[task_id]["gen_prompt"] = prompt
@@ -529,6 +762,7 @@ def edit_image(
         else:
             prompt_id = data["prompt_id"]
             found_file = None
+            render_error = None
             for _ in range(300):
                 time.sleep(1)
                 # Check for cancellation on every poll iteration — if the
@@ -550,12 +784,18 @@ def edit_image(
                     )
                     hist = hr.json()
                     if prompt_id in hist:
+                        render_error = _comfyui_history_error(hist[prompt_id])
+                        if render_error:
+                            print(
+                                f"[edit_image] ComfyUI render failed for task {task_id}: {render_error}"
+                            )
+                            break
                         outputs = hist[prompt_id].get("outputs", {})
                         for node_id, node_out in outputs.items():
                             for img in node_out.get("images", []):
                                 fname = img["filename"]
                                 found_file = os.path.join(
-                                    M.IMG_PATH, img.get("subfolder", ""), fname
+                                    M.COMFYUI_OUTPUT, img.get("subfolder", ""), fname
                                 )
                                 break
                         if found_file:
@@ -589,7 +829,10 @@ def edit_image(
                         }
                     )
             else:
-                result = json.dumps({"error": "Image editing timeout"})
+                if render_error:
+                    result = json.dumps({"error": f"ComfyUI render failed: {render_error}"})
+                else:
+                    result = json.dumps({"error": "Image editing timeout"})
     except Exception as e:
         result = json.dumps({"error": str(e)})
     finally:
@@ -689,13 +932,14 @@ def _run_generate_image(task_id, args):
 
 
 def _run_edit_image(task_id, sid, args, image_b64):
+    edit_model = args.get("model") or "z_image"
     result = M.edit_image(
         prompt=args.get("prompt", ""),
         task_id=task_id,
         image_b64=image_b64,
         negative_prompt=args.get("negative_prompt", ""),
         denoise=args.get("denoise", 0.4),
-        model="z_image",
+        model=edit_model,
         sid=sid,
     )
     res_data = json.loads(result)
@@ -708,12 +952,12 @@ def _run_edit_image(task_id, sid, args, image_b64):
                 t.setdefault("_tools_used", []).append("edit_image")
                 t["image_file"] = rel
                 t["gen_prompt"] = args.get("prompt", "")
-                t["_image_model"] = None
+                t["_image_model"] = edit_model
         return json.dumps(
             {
                 "image_url": image_url,
                 "prompt": args.get("prompt", ""),
-                "model": None,
+                "model": edit_model,
             }
         )
     return result

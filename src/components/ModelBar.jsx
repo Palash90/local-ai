@@ -65,7 +65,7 @@ export default function ModelBar({ modelStatus, modelTps, tokenEstimate, context
         )}
       </span>
       <div id="user-menu" ref={dropdownRef}>
-        <span id="user-name" onClick={() => setDropdownOpen(o => !o)}>{username}</span>
+        <span id="user-name" onClick={() => setDropdownOpen(o => !o)}>{username}{reminderCount > 0 && <span id="reminder-dot" title={`${reminderCount} reminder${reminderCount > 1 ? 's' : ''} due`} />}</span>
         <div id="user-dropdown" className={dropdownOpen ? 'open' : ''}>
           <button className="task-menu-item" onClick={() => { onToggleTasks(); setDropdownOpen(false) }} title="Tasks">
             <span>&#9776; Tasks</span>

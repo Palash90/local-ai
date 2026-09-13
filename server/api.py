@@ -957,6 +957,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self.send_json({"task": t})
                 else:
                     self.send_error(404)
+            except ValueError as e:
+                self.send_json({"error": str(e)}, status=400)
             except Exception as e:
                 print(f"[db] task_update error: {e}")
                 self.send_json({"error": f"Database error: {e}"}, status=500)
@@ -1418,6 +1420,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 t = task_create(user, body.get("title", "Untitled"), body.get("description", ""), body.get("priority", "medium"), body.get("due_date"), body.get("session_id"), body.get("reminder_at"))
                 self.send_json({"task": t})
+            except ValueError as e:
+                self.send_json({"error": str(e)}, status=400)
             except Exception as e:
                 print(f"[db] task_create error: {e}")
                 self.send_json({"error": f"Database error: {e}"}, status=500)
