@@ -333,6 +333,41 @@ def test_self_artifact_citation_filter():
     assert urls == ["https://ex.org/a"]
 
 
+def test_self_artifact_hallucinated_url():
+    """LLM fabricates googleusercontent.com/drive/... URLs for generated
+    artifacts instead of relative /output/... / /music/... paths. Those fakes
+    must be treated as self-artifacts so they never reach fetch_page /
+    web_search verification (the Raga Malkauns 404->403 cascade)."""
+    from server.features.critic import _is_self_artifact, extract_citations
+    assert _is_self_artifact(
+        "https://www.googleusercontent.com/drive/output/palash/gen_cd713f79__00001_.png")
+    assert _is_self_artifact(
+        "https://www.googleusercontent.com/drive/music/palash/gen_54b9cd2395fc.wav")
+    assert _is_self_artifact("/drive/output/palash/gen_abc123.png")
+    assert _is_self_artifact(
+        "https://storage.googleapis.com/x/output/gen_c15e672f.png")
+    # Real external URLs must NOT be filtered.
+    assert not _is_self_artifact("https://darbar.org/exploring-raag-malkauns/")
+    assert not _is_self_artifact(
+        "https://www.indianclassicalmusic.com/raga-malkauns-analysis/")
+    answer = (
+        "Audio: [Play](https://www.googleusercontent.com/drive/music/palash/gen_54b9cd2395fc.wav) "
+        "Image: [View](https://www.googleusercontent.com/drive/output/palash/gen_cd713f79__00001_.png) "
+        "and (Darbar, n.d.) [https://darbar.org/exploring-raag-malkauns/]")
+    urls = [c["url"] for c in extract_citations(answer)]
+    assert urls == ["https://darbar.org/exploring-raag-malkauns/"]
+
+
+def test_fake_artifact_link_re_catches_googleusercontent():
+    from server.features.orchestration import _FAKE_ARTIFACT_LINK_RE
+    dirty = ("See [Image](https://www.googleusercontent.com/drive/output/palash/gen_cd713f79__00001_.png) "
+             "and [Image of a flute](https://storage.googleapis.com/x/y.png) done.")
+    clean = _FAKE_ARTIFACT_LINK_RE.sub("", dirty)
+    assert "googleusercontent" not in clean
+    assert "storage.googleapis" not in clean
+    assert clean.strip().endswith("done.")
+
+
 def test_score_errors_budget_two_then_giveup(stub_state):
     from server.features.critic import _retry_decision
 

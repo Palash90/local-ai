@@ -867,6 +867,13 @@ def _parse_verdict(text):
 
 _SELF_ARTIFACT_PATH_RE = re.compile(r"^/(?:output|music|uploads)/")
 
+# Generated artifact filenames (image/music renders) always start with
+# gen_ + hex (e.g. gen_cd713f79__00001_.png, gen_54b9cd2395fc.wav). The LLM
+# hallucinates full URLs for these (googleusercontent.com/drive/...) instead
+# of the relative /output/... / /music/... paths — match the filename
+# anywhere in the path so those fakes never reach citation verification.
+_SELF_ARTIFACT_NAME_RE = re.compile(r"/gen_[a-f0-9]{4,}")
+
 
 def _is_self_artifact(url):
     """True for links to this server's own generated files (image/music/upload
@@ -876,7 +883,8 @@ def _is_self_artifact(url):
         path = urlsplit(url or "").path
     except Exception:
         return False
-    return bool(_SELF_ARTIFACT_PATH_RE.match(path))
+    return bool(_SELF_ARTIFACT_PATH_RE.match(path)
+                or _SELF_ARTIFACT_NAME_RE.search(path))
 
 
 def extract_citations(answer):

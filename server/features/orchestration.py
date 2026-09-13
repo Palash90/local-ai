@@ -188,17 +188,18 @@ def _delete_task_music(task_id):
 
 
 # Fabricated artifact links the model pastes when its tool loop failed —
-# e.g. "[Image](/[Image: 9771012342.png])", or "[Image of a flute...](https://
-# storage.googleapis.com/...)". Our real images live under /output/ and
-# /uploads/, never GCS — a GCS link presented as generated imagery is
-# fabricated. Bare internal tokens (music_url, None, empty) as targets are
-# the same lie. None of these survive into the stored answer.
+# e.g. "[Image](/[Image: 9771012342.png])", "[Image of a flute...](https://
+# storage.googleapis.com/...)", or "[Image](https://...googleusercontent.com/
+# drive/output/...)". Our real images live under /output/ and /uploads/,
+# never GCS — a GCS link presented as generated imagery is fabricated. Bare
+# internal tokens (music_url, None, empty) as targets are the same lie. None
+# of these survive into the stored answer.
 _FAKE_ARTIFACT_LINK_RE = re.compile(
     r"!?\[[^\]\n]*\]\(\s*(?:/\[[^\]\n]*\][^\)\n]*"
     r"|(?:music_url|music_file|image_url|_music_\w+|_image_\w+|None|none|"
     r"undefined|null|))\s*\)"
     r"|!?\[[^\]\n]*(?:image|picture|photo|figure|illustration)[^\]\n]*\]"
-    r"\(\s*https?://storage\.googleapis\.com/[^)\s]*\)",
+    r"\(\s*https?://(?:storage\.googleapis\.com|[\w.-]*googleusercontent\.com)/[^)\s]*\)",
     re.IGNORECASE)
 
 _ART_LINK_LINE_RE = re.compile(
