@@ -612,14 +612,31 @@ server {
     location /.well-known/carddav { return 301 $scheme://$host/cloud/remote.php/dav; }
     location /.well-known/caldav { return 301 $scheme://$host/cloud/remote.php/dav; }
 
-    # 5. Code Hoster
+    # 5. Code Hoster - SSO protected
     location /code/ {
+        auth_request /ak-auth-ai;
+        auth_request_set $authentik_username $upstream_http_x_authentik_username;
+        auth_request_set $authentik_groups $upstream_http_x_authentik_groups;
+        auth_request_set $authentik_email $upstream_http_x_authentik_email;
+        auth_request_set $authentik_name $upstream_http_x_authentik_name;
+        auth_request_set $authentik_uid $upstream_http_x_authentik_uid;
+        error_page 401 = @ak-sso-ai;
+        error_page 502 503 504 = @service_unavailable;
+
         proxy_pass http://127.0.0.1:9000/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header Accept-Encoding "";
+        proxy_set_header X-Authentik-Username $authentik_username;
+        proxy_set_header X-Authentik-Groups $authentik_groups;
+        proxy_set_header X-Authentik-Email $authentik_email;
+        proxy_set_header X-Authentik-Name $authentik_name;
+        proxy_set_header X-Authentik-UID $authentik_uid;
     }
 }
 
