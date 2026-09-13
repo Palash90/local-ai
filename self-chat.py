@@ -73,7 +73,7 @@ _SHARED_PASSWORD = os.environ.get("SELF_CHAT_PASSWORD", "")
 PASSWORD_A = os.environ.get("SELF_CHAT_A_PASSWORD", _SHARED_PASSWORD)
 PASSWORD_B = os.environ.get("SELF_CHAT_B_PASSWORD", _SHARED_PASSWORD)
 
-STOP_PHRASE = "[END CONVERSATION]"
+STOP_PHRASE = "<end_conversation/>"
 POLL_INTERVAL_SECONDS = 5.0
 
 # The chat server (chat-webui.py) occasionally dies and is restarted by its
@@ -2376,10 +2376,10 @@ def build_input(
         turns = MAX_MESSAGES_PER_AGENT
 
     lines = [
-        f"[SYSTEM DIRECTIVE: You are responding as {current_agent}. Your partner is {partner_agent}.]\n",
-        f"[Turn {message_number}/{turns}]\n",
-        "[SYSTEM DIRECTIVE: Place ALL meta-analysis, praise, and planning OUTSIDE the [CONTENT] tags. ",
-        "The [CONTENT] block must ONLY contain clean narrative/visual deliverable text.]",
+        f"<system_directive>You are responding as {current_agent}. Your partner is {partner_agent}.</system_directive>\n",
+        f"<turn n=\"{message_number}\" of=\"{turns}\"/>\n",
+        "<system_directive>Place ALL meta-analysis, praise, and planning OUTSIDE the <content> tags. ",
+        "The <content> block must ONLY contain clean narrative/visual deliverable text.</system_directive>",
     ]
 
     if cast:
@@ -2391,42 +2391,44 @@ def build_input(
     if mode == "research":
         # Research phase: gather and share sourced material only. Content turns
         # (which follow once BOTH agents have contributed research) write the
-        # actual deliverable inside [CONTENT] using the shared materials.
+        # actual deliverable inside <content> using the shared materials.
         lines.append(
-            "[RESEARCH MODE: This turn is for research ONLY. Perform web searches "
+            "<research_mode>This turn is for research ONLY. Perform web searches "
             "and fetch pages to gather sourced facts, figures, and material needed "
             f"for the task. Search with specific, article-targeting queries and "
             "share only article-level (deep-link) URLs — never a homepage or "
             "section page. Do NOT write any final story or deliverable content "
-            "yet, and do NOT open a [CONTENT] block this turn. Write your "
+            "yet, and do NOT open a <content> block this turn. Write your "
             "findings and their sources in plain text so your partner can read "
             "them, then end with "
-            f"[NEXT TURN: {partner_agent}]."
+            f"<next_turn name=\"{partner_agent}\"/>."
+            "</research_mode>"
         )
     elif message_number <= 2:
         lines.append(
-            f"Immediately establish your role and provide the first creative deliverable inside [CONTENT] tags."
+            f"Immediately establish your role and provide the first creative deliverable inside <content> tags."
         )
     elif message_number >= turns - 2:
         lines.append(
-            f"[PHASE 3: FINALIZATION] Consolidate the work, write the final scene/panels, "
+            f"<phase type=\"finalization\"/> Consolidate the work, write the final scene/panels, "
             f"and terminate the turn sequence by appending {STOP_PHRASE}."
         )
     else:
         lines.append(
-            f"[PHASE 2: DIRECT EXECUTION] Continue building content turn-by-turn. "
+            f"<phase type=\"execution\"/> Continue building content turn-by-turn. "
             f"Do not send meta-talk or prematurely end the story. Speak in {lang}."
         )
 
     if mode == "content" and research_turns and message_number == research_turns + 1:
         lines.append(
-            "[CONTENT MODE: Research is complete and all gathered materials are "
+            "<content_mode>Research is complete and all gathered materials are "
             "shared above. Now write the actual deliverable story using those "
-            "materials, wrapping every publishable part in [CONTENT]...[/CONTENT]."
+            "materials, wrapping every publishable part in <content>...</content>."
+            "</content_mode>"
         )
 
     if per_turn_details:
-        lines.append(f"[DYNAMIC TURN ATTRIBUTES: {per_turn_details}]")
+        lines.append(f"<dynamic_turn>{per_turn_details}</dynamic_turn>")
 
     if incoming:
         lines.extend(["", "----------", incoming])
@@ -3148,7 +3150,7 @@ def _conversation_attempt(
                 print(f"[theme] Reserved turn combination {turn_theme_id}")
         # Two-phase flow for research tasks: the first research_turns of EACH
         # agent are research-only (gather + share sourced material, no
-        # [CONTENT] block), then the agents switch to content mode and write
+        # <content> block), then the agents switch to content mode and write
         # the deliverable using every piece of research that was shared.
         in_research_phase = research and message_number <= research_turns
         mode = "research" if in_research_phase else "content"
@@ -3179,7 +3181,7 @@ def _conversation_attempt(
         )
         reply = result["text"]
         if not reply.strip():
-            prompt += "\n[SYSTEM ERROR: Your previous output was empty. Generate real story content now.]"
+            prompt += "\n<system_error>Your previous output was empty. Generate real story content now.</system_error>"
             result = call_llm(
                 token,
                 session,
@@ -3205,7 +3207,7 @@ def _conversation_attempt(
                 break
         if is_duplicate(reply, incoming):
             # Re-prompt agent to generate new content instead of repeating
-            prompt += "\n[SYSTEM ERROR: Your previous output was identical to your partner's. Generate unique content now.]"
+            prompt += "\n<system_error>Your previous output was identical to your partner's. Generate unique content now.</system_error>"
             result = call_llm(
                 token,
                 session,
@@ -3231,11 +3233,11 @@ def _conversation_attempt(
                 "generate_image — re-prompting to trigger the tool"
             )
             prompt += (
-                "\n[SYSTEM ERROR: Your reply contained a textual "
+                "\n<system_error>Your reply contained a textual "
                 "<image>...</image> placeholder block but you did NOT call "
                 "the generate_image tool. Placeholder tags render as nothing. "
                 "Call generate_image for real so the portrait is produced, "
-                "and keep only clean narrative/visual text inside [CONTENT].]"
+                "and keep only clean narrative/visual text inside <content>.</system_error>"
             )
             result = call_llm(
                 token,
@@ -3252,7 +3254,7 @@ def _conversation_attempt(
             # degenerates into homepage citations for every claim in the
             # deliverable. Re-prompt for targeted searches (bounded) before
             # accepting the turn. The base RESEARCH MODE block still ends
-            # with "then end with [NEXT TURN: ...]", so each retry strips
+            # with "then end with <next_turn/>", so each retry strips
             # that hand-off sentence from the prompt and appends
             # _DEEP_SOURCE_PROMPT (which also explicitly overrides it) —
             # the agent is never told to hand off AND not to hand off at
@@ -3266,7 +3268,7 @@ def _conversation_attempt(
                     "results — re-prompting for targeted searches"
                 )
                 retry_prompt = re.sub(
-                    r",\s*then end with\s*\[NEXT TURN:\s*[^\]]+\]\.?",
+                    r",\s*then end with\s*<next_turn\s+name=\"[^\"]*\"\s*/>\.?",
                     "",
                     prompt,
                     count=1,
@@ -3313,7 +3315,7 @@ def _conversation_attempt(
         transcript.append(entry)
         append_story_entry(entry, fname, citations, stories_dir, round_number, idx)
 
-        if STOP_PHRASE in reply.upper():
+        if STOP_PHRASE.lower() in reply.lower():
             print(f"Round {round_number} ended by {AGENT_NAMES[current_speaker]}\n")
             break
         if counts[current_speaker] >= turns:
@@ -3327,7 +3329,7 @@ def _conversation_attempt(
         shared_image = result.get("image")
         if shared_image:
             shared_image_b64 = image_url_to_b64(shared_image)
-            incoming += f"\n\n[IMAGE SHARED: {shared_image}]"
+            incoming += f'\n\n<shared_image src="{shared_image}"/>'
         shared_searches = result.get("searches")
         if shared_searches:
             block = []
@@ -3359,6 +3361,44 @@ def _conversation_attempt(
         print("LLM Rest Over")
 
     finalize_story(fname, stories_dir, citations)
+
+    # Empty-body guard: a header-only file must never reach the title,
+    # cross-critique, or editor phases. Delete it, record RED, and return
+    # early so run_single_conversation skips straight to the next attempt.
+    with open(fname, "r", encoding="utf-8") as f:
+        _post_finalize_text = f.read()
+    if not _story_body_lines(_post_finalize_text):
+        print(
+            f"[verify] Story body is empty after finalize — "
+            f"auto-RED, discarding {fname}"
+        )
+        _write_moderation(
+            fname,
+            "RED",
+            "Automatic RED: story body is empty — only the header/metadata "
+            "and citations were published; no narrative ever reached the file.",
+            task,
+            genre,
+        )
+        try:
+            os.remove(fname)
+            print(f"[verify] Removed empty story file {fname}")
+        except OSError:
+            pass
+        return {
+            "transcript": transcript,
+            "session_a": session_a,
+            "session_b": session_b,
+            "fname": fname,
+            "stories_dir": stories_dir,
+            "medium": medium,
+            "language": language,
+            "citations": citations,
+            "edited_path": None,
+            "check_source": None,
+            "problems": ["Story body is empty"],
+            "red": True,
+        }
 
     print("=== Title phase ===")
     with open(fname, "r", encoding="utf-8") as f:
@@ -3575,12 +3615,12 @@ def start_story(
 def clean_speaker_text(speaker, text):
     cleaned = re.sub(rf"^(kolpo|kaya|कल्प|কায়া):\s*", "", text, flags=re.IGNORECASE)
     cleaned = re.sub(rf"^{re.escape(speaker)}:\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\[NEXT TURN:\s*[^\]]*\]\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<next_turn\s+name=\"[^\"]*\"\s*/>\s*", "", cleaned, flags=re.IGNORECASE)
 
     # Remove raw action tags automatically
-    cleaned = re.sub(r"\[ACTION:\s*[^\]]+\]", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<action>.*?</action>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
 
-    return cleaned.replace("[END CONVERSATION]", "").strip()
+    return re.sub(r"<end_conversation\s*/>", "", cleaned).strip()
 
 
 def strip_image_markers(text):
@@ -3803,6 +3843,46 @@ def strip_ad_links(text):
     return text
 
 
+def _strip_heading_and_entries(text, heading_re):
+    """Remove a heading line plus the reference-entry lines after it.
+
+    Line-based (never DOTALL): the heading line goes, then any immediately
+    following lines that look like reference entries (bullets, numbered
+    items, or lines carrying markdown links/bare URLs) are consumed until a
+    blank line followed by non-entry prose. Narrative after the block always
+    survives.
+    """
+    lines = (text or "").splitlines()
+    out = []
+    i = 0
+    entry_re = re.compile(
+        r"^\s*(?:[-*•]\s+|\d{1,3}[.)]\s+|.*\[[^\]]*\]\(https?://|.*https?://)"
+    )
+    while i < len(lines):
+        if heading_re.match(lines[i]):
+            i += 1
+            while i < len(lines):
+                s = lines[i].strip()
+                if not s:
+                    # Keep the blank line only if real prose follows; peek
+                    # ahead past further blanks.
+                    j = i
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                    if j < len(lines) and not entry_re.match(lines[j]):
+                        break
+                    i = j
+                    continue
+                if entry_re.match(lines[i]):
+                    i += 1
+                    continue
+                break
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
 def strip_model_citations(text):
     """Remove any Citations & References block the model wrote into a turn.
 
@@ -3812,25 +3892,28 @@ def strip_model_citations(text):
     "## संदर्भ (References)") are dropped so they can never leak into the
     published section.
     """
-    text = re.sub(
-        r"(?i)(?:^|\n)\s*#{1,6}\s+(?:citations?\s*(?:&|and)?\s*)?references?\b.*$",
-        "",
+    text = _strip_heading_and_entries(
         text,
-        flags=re.DOTALL,
+        re.compile(
+            r"\s*#{1,6}\s+(?:citations?\s*(?:&|and)?\s*)?references?\b.*$",
+            flags=re.IGNORECASE,
+        ),
     )
-    text = re.sub(
-        r"(?i)(?:^|\n)\s*#{1,6}\s+sources?\s*(?:&|and)?\s*(?:references?)?\b.*$",
-        "",
+    text = _strip_heading_and_entries(
         text,
-        flags=re.DOTALL,
+        re.compile(
+            r"\s*#{1,6}\s+sources?\s*(?:&|and)?\s*(?:references?)?\b.*$",
+            flags=re.IGNORECASE,
+        ),
     )
     # Localized heading with the English word in parentheses:
     # "## संदर्भ (References)" / "## रेफरेंस (Citations)"
-    text = re.sub(
-        r"(?i)(?:^|\n)\s*#{1,6}\s+[^(\n]{0,40}\(\s*(?:citations?|references?|sources?)\s*\).*$",
-        "",
+    text = _strip_heading_and_entries(
         text,
-        flags=re.DOTALL,
+        re.compile(
+            r"\s*#{1,6}\s+[^(\n]{0,40}\(\s*(?:citations?|references?|sources?)\s*\).*$",
+            flags=re.IGNORECASE,
+        ),
     )
     return text.strip()
 
@@ -3843,39 +3926,52 @@ _VERIFICATION_CHROME_RE = re.compile(
 def strip_verification_chrome(text):
     """Remove the server-appended source-verification <details> block from a
     reply. It is UI chrome for the chat transcript — never story content — but
-    an unclosed [CONTENT] capture would otherwise sweep it into the story."""
+    an unclosed <content> capture would otherwise sweep it into the story."""
     return _VERIFICATION_CHROME_RE.sub("", text or "")
 
 
 def extract_tagged_content(text):
-    """Return only the text inside [CONTENT] blocks.
+    """Return only the text inside <content> blocks.
 
-    The closing tag may appear as ``[/CONTENT]`` (as instructed in the system
-    prompt) or as the ``[END CONTENT]`` variant the models actually emit; both
-    are accepted, so a turn's narrative is never mistaken for planning chatter.
-    Returns None if no [CONTENT] block is present at all — the caller treats
-    that as a planning-only turn with nothing to publish. Multiple blocks are
-    concatenated in order.
+    The closing tag is ``</content>`` (as instructed in the system prompt).
+    Structural tags (``<end_conversation/>`` / ``<next_turn .../>`` /
+    ``<shared_image .../>`` / ``<image_generation_call/>`` / ``<theme_logged/>``)
+    also terminate a block, so a turn's narrative is never mistaken for
+    planning chatter. Returns None if no <content> block is present at all —
+    the caller treats that as a planning-only turn with nothing to publish.
+    Multiple blocks are concatenated in order.
 
-    As a defensive fallback, a message that OPENS with ``[CONTENT]`` but is
-    truncated or never closes the tag (the research mode used to provoke this)
-    still yields its narrative: everything from the ``[CONTENT]`` marker up to
-    the next structural tag (``[NEXT TURN:`` / ``[END CONVERSATION]`` /
-    ``[IMAGE GENERATION CALL:]``) or the end of the message."""
+    As a defensive fallback, a message with ``<content>`` at a line start
+    that is truncated or never closes the tag still yields its narrative:
+    everything from the ``<content>`` marker up to the next structural tag
+    or the end of the message. Trailing structural tags are stripped from
+    every captured block so hand-offs never leak into the story."""
     blocks = re.findall(
-        r"\[CONTENT\](.*?)(?:\[/CONTENT\]|\[END CONTENT\]|\[END\]|$)",
+        r"<content>(.*?)(?:</content>|<end_conversation\s*/?>|<next_turn|<shared_image|<image_generation_call|<theme_logged|$)",
         text,
         flags=re.DOTALL | re.IGNORECASE,
     )
+    # Strip trailing structural tags swept in by the $ fallback.
+    cleaned_blocks = []
+    for b in blocks:
+        b = re.split(
+            r"(?is)\s*(?:<next_turn\b|<end_conversation\s*/?>|<image_generation_call\s*/?>|<theme_logged\s*/?>|<shared_image\b)",
+            b,
+            maxsplit=1,
+        )[0]
+        if b.strip():
+            cleaned_blocks.append(b.strip())
+    blocks = cleaned_blocks
     if not blocks:
-        # Fallback for an unclosed [CONTENT] block. Only trigger when the
-        # message clearly starts with the marker, so a 0-block Phase-1 planning
-        # turn (no [CONTENT] at all) is still treated as nothing to publish.
-        m = re.match(r"(?is)\s*\[CONTENT\]\s*(.*)$", text)
+        # Fallback for an unclosed <content> block appearing mid-message
+        # (e.g. after planning chatter). Matches <content> at any line start,
+        # so a 0-block Phase-1 planning turn (no <content> at all) is still
+        # treated as nothing to publish.
+        m = re.search(r"(?m)(?:^|\n)\s*<content>\s*(.*)", text)
         if m:
             rest = m.group(1)
             rest = re.split(
-                r"(?is)\s*\[(?:NEXT TURN\s*:|END CONVERSATION\]|IMAGE GENERATION CALL\s*:|THEME LOGGED\s*:|IMAGE SHARED\s*:)",
+                r"(?is)\s*(?:<next_turn\b|<end_conversation\s*/?>|<image_generation_call\s*/?>|<theme_logged\s*/?>|<shared_image\b)",
                 rest,
                 maxsplit=1,
             )[0]
@@ -3908,15 +4004,15 @@ def _turn_has_deep_source(searches):
 _DEEP_SOURCE_RETRIES = 2
 
 _DEEP_SOURCE_PROMPT = (
-    "[SYSTEM ERROR: Disregard the earlier instruction to end your turn "
-    "with the [NEXT TURN: ...] hand-off tag. Do NOT hand off yet. Your "
+    "<system_error>Disregard the earlier instruction to end your turn "
+    "with the <next_turn/> hand-off tag. Do NOT hand off yet. Your "
     "searches returned no article-level source URLs (empty result sets, "
     "homepages, or section pages only). Run new web_search calls with "
     "specific, article-targeting queries (exact event/story names, or "
     "site + topic) until your results include 2-3 article URLs (deep "
     "links, not homepages). Once your results contain those, share your "
     "findings with those exact URLs, and only then end your turn with "
-    "the [NEXT TURN: ...] hand-off tag naming your partner.]"
+    "the <next_turn/> hand-off tag naming your partner.</system_error>"
 )
 
 
@@ -3961,38 +4057,38 @@ def append_story_entry(entry, fname, citations, stories_dir, round_number, idx):
 
     # Research-phase turns gather and share material; they must never publish
     # narrative or images, but their web-search results still feed citations.
-    # Exception: if the model wrote a [CONTENT] block anyway (observed when
+    # Exception: if the model wrote a <content> block anyway (observed when
     # judge retries keep a turn in the research phase and the model crams the
     # whole deliverable into it), publishing nothing would silently lose the
-    # entire story body — so the explicit [CONTENT] block always wins.
+    # entire story body — so the explicit <content> block always wins.
     if entry.get("publish") is False and content is None:
         collect_citations(citations, entry.get("searches"))
         print(
-            f"[content] {speaker} turn {turn} — research phase, citations captured only"
+            f"content: {speaker} turn {turn} — research phase, citations captured only"
         )
         return
     if entry.get("publish") is False and content:
         print(
-            f"[content] {speaker} turn {turn} — research phase opened a "
-            "[CONTENT] block; publishing it to avoid losing the story body"
+            f"content: {speaker} turn {turn} — research phase opened a "
+            "<content> block; publishing it to avoid losing the story body"
         )
 
     if content is None:
-        # No [CONTENT] block — Phase 1 planning turn (or a turn that only
+        # No <content> block — Phase 1 planning turn (or a turn that only
         # ran tools). Still capture any citations. If the turn generated an
         # image, embed it anyway so a generated image is never lost from the
-        # story just because the model skipped the [CONTENT] wrapper.
+        # story just because the model skipped the <content> wrapper.
         collect_citations(citations, entry.get("searches"))
         local_img = embed_story_image(
             entry.get("image"), stories_dir, round_number, speaker, idx
         )
         if not local_img:
             print(
-                f"[content] No [CONTENT] block in {speaker} turn {turn} — skipping (planning-only)"
+                f"content: No <content> block in {speaker} turn {turn} — skipping (planning-only)"
             )
             return
         print(
-            f"[content] No [CONTENT] block in {speaker} turn {turn} — embedding generated image only"
+            f"content: No <content> block in {speaker} turn {turn} — embedding generated image only"
         )
         lines = [
             f'<small style="color:#888">_Round {round_number} · {speaker} Turn {turn}_</small>\n\n',
