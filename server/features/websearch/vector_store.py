@@ -158,6 +158,35 @@ def _create_tables(conn):
         )
         """
     )
+    # Human-browsing helpers (sqlite-web): epoch timestamps rendered as
+    # IST wall-clock (UTC+5:30, no DST). Views, not generated columns —
+    # SQLite forbids ADD COLUMN for generated columns, and these are
+    # internal cache fields the LLM never sees. Payload/text bodies are
+    # excluded to keep browsing light.
+    conn.execute(
+        """
+        CREATE VIEW IF NOT EXISTS searches_ist AS
+        SELECT norm_query, query, fresh,
+            datetime(fetched_at, 'unixepoch', '+5 hours', '+30 minutes')
+                AS fetched_at_ist,
+            datetime(expires_at, 'unixepoch', '+5 hours', '+30 minutes')
+                AS expires_at_ist,
+            fetched_at, expires_at
+        FROM searches
+        """
+    )
+    conn.execute(
+        """
+        CREATE VIEW IF NOT EXISTS pages_ist AS
+        SELECT url, final_url, title, doc_type,
+            datetime(fetched_at, 'unixepoch', '+5 hours', '+30 minutes')
+                AS fetched_at_ist,
+            datetime(expires_at, 'unixepoch', '+5 hours', '+30 minutes')
+                AS expires_at_ist,
+            fetched_at, expires_at
+        FROM pages
+        """
+    )
     conn.execute(
         f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS {_VEC_TABLE}

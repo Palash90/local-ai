@@ -137,6 +137,7 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                 args["query"],
                 current_time=args.get("current_time"),
                 current_location=args.get("current_location"),
+                force_refresh=bool(args.get("force_refresh", False)),
             )
         except Exception as e:
             print(f"[web_search] Unhandled exception for task {task_id}: {e}")

@@ -413,7 +413,8 @@ _PLACE_HINTS = [
 ]
 
 
-def web_search(query, current_time=None, current_location=None):
+def web_search(query, current_time=None, current_location=None,
+               force_refresh=False):
     ts = datetime.now()
     clean_query = (query or "").strip()
     sanitized = _sanitize_query(clean_query)
@@ -424,6 +425,13 @@ def web_search(query, current_time=None, current_location=None):
     # Live and location-sensitive searches must not reuse an older result set,
     # including one that may have been contaminated by semantic recall.
     allow_cached_results = not _SEMANTIC_RECALL_UNSAFE_RE.search(clean_query)
+    # Explicit force-refresh (model passes force_refresh=True sparingly, or on
+    # direct user request): skip ALL cache reads (in-memory, persistent
+    # sqlite, semantic recall) and go straight to live SearXNG. The fresh
+    # payload is still written back so the next identical query benefits.
+    use_cache = allow_cached_results and not force_refresh
+    if force_refresh:
+        print(f"[web_search] force_refresh: bypassing cache for {clean_query!r}")
     params = {"q": clean_query, "format": "json"}
     _apply_location_scoping(clean_query, current_location, params)
     cats = _pick_categories(clean_query)
@@ -484,7 +492,7 @@ def web_search(query, current_time=None, current_location=None):
     with _CACHE_LOCK:
         hit = (
             _search_cache_get(norm_query, clean_query, time.monotonic())
-            if allow_cached_results
+            if use_cache
             else None
         )
         # A failed/low-confidence search must not poison the cache for its TTL.
@@ -493,7 +501,7 @@ def web_search(query, current_time=None, current_location=None):
             not hit.get("results") or hit.get("low_confidence")
         ):
             hit = None
-        if hit is None and allow_cached_results:
+        if hit is None and use_cache:
             inflight = _IN_FLIGHT.get(norm_query)
             if inflight is None:
                 inflight = _IN_FLIGHT[norm_query] = threading.Event()
@@ -501,7 +509,7 @@ def web_search(query, current_time=None, current_location=None):
     if hit is not None:
         print("Web-search cache hit")
         return json.dumps(_screen_cached_payload(hit, clean_query))
-    if hit is None and allow_cached_results:
+    if hit is None and use_cache:
         # Persistent (cross-restart) cache: a query answered before this
         # process started should never cost another SearXNG request.
         hit = page_cache.search_get(norm_query)
@@ -509,7 +517,7 @@ def web_search(query, current_time=None, current_location=None):
             _search_cache_store(norm_query, hit, ttl=hit.get("_ttl"))
             print("Web-search cache hit (persistent)")
             return json.dumps(_screen_cached_payload(hit, clean_query))
-    if hit is None and allow_cached_results:
+    if hit is None and use_cache:
         # Semantic recall: this query shares no exact key with a cached search,
         # but we may have already fetched pages (via fetch_page or enrichment)
         # whose meaning matches the query. Reuse those instead of another
@@ -527,7 +535,7 @@ def web_search(query, current_time=None, current_location=None):
             # result. Continue to live SearXNG instead of repeatedly returning
             # the same empty low-confidence payload and growing LLM context.
             print("[web_search] semantic cache hit rejected by relevance gate")
-    if not owns_slot and allow_cached_results:
+    if not owns_slot and use_cache:
         # An identical fetch is already running: wait for its result
         # instead of duplicating the request.
         if inflight.wait(SEARCH_INFLIGHT_WAIT):

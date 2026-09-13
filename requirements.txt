@@ -9,3 +9,4 @@ cryptography
 requests
 starlette
 sqlite-vec==0.1.9
+sqlite-web

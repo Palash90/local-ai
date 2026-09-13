@@ -522,13 +522,14 @@ TOOLS_DETAILED = [
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search. The results contain snippets only; if the snippets are insufficient to answer the question fully, follow up with fetch_page to read the full content of the relevant page. NEVER for questions about the user's own code, projects, or codebase — those must use the codebase-search tools.",
+                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search. The results contain snippets only; if the snippets are insufficient to answer the question fully, follow up with fetch_page to read the full content of the relevant page. NEVER for questions about the user's own code, projects, or codebase — those must use the codebase-search tools. Results may be served from a recent cache; pass force_refresh=true only when you suspect the cached results are stale or the user explicitly asks to search again.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "The search query"},
                         "current_time": {"type": "string", "description": "Current date and time. Pass ONLY for time-sensitive queries (news, events, hours, etc.) where recency matters. Omit for direct-link lookups or general information."},
-                        "current_location": {"type": "string", "description": "User's location. Pass ONLY for location-specific results (weather, local news, nearby places, events). If you don't know the user's location, call get_user_location first to obtain it. Do NOT guess or fabricate location."}
+                        "current_location": {"type": "string", "description": "User's location. Pass ONLY for location-specific results (weather, local news, nearby places, events). If you don't know the user's location, call get_user_location first to obtain it. Do NOT guess or fabricate location."},
+                        "force_refresh": {"type": "boolean", "description": "Bypass cached results and force a live web search. Use SPARINGLY and ONLY when you have concrete reason to believe the cached results are stale or wrong, or when the user explicitly asks to re-check / search again. Each use costs a live search request. Omit or pass false otherwise."}
                     },
                     "required": ["query"],
                 },
@@ -1184,7 +1185,9 @@ _FULL_DOCS_TOOLS = {"web_search", "fetch_page"}
 _TOOL_SHORT_DESC = {
     "web_search": (
         "Search the web for real-time/current information (news, weather, "
-        "prices, events). Returns snippets only. Never for the user's own "
+        "prices, events). Returns snippets only. Results may be cached; "
+        "force_refresh=true only for a suspected-stale or user-requested "
+        "re-check. Never for the user's own "
         "code/codebase — use codebase-search tools for those."
     ),
     "fetch_page": (
