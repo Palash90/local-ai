@@ -3064,124 +3064,114 @@ def _conversation_attempt(
     )
     citations = {}
 
-    while True:
-        counts[current_speaker] += 1
-        message_number = counts[current_speaker]
-        idx = len(transcript)
-        token = token_a if current_speaker == "A" else token_b
-        session = session_a if current_speaker == "A" else session_b
+    try:
+        while True:
+            counts[current_speaker] += 1
+            message_number = counts[current_speaker]
+            idx = len(transcript)
+            token = token_a if current_speaker == "A" else token_b
+            session = session_a if current_speaker == "A" else session_b
 
-        per_turn_str = ""
-        turn_theme_id = None
-        if per_turn_task:
-            # Resolve this turn's per-turn detail fields, re-rolling until the
-            # FULL combination (round scope fields + per-turn fields + mood +
-            # persona) has not already been produced AND the coherence judge
-            # accepts it. Round scope fields were resolved once for the whole
-            # round (and judged with the persona before turn 1), so a veto here
-            # re-rolls the per-turn fields only — the character never changes
-            # mid-story. The judge runs before the theme_api("log") reservation
-            # below, so a vetoed turn combo is never blacklisted.
-            turn_fields = {}
-            for attempt in range(MAX_THEME_REROLL):
-                turn_fields = resolve_details_fields(
-                    details_spec, task, MASTER_DETAILS, freq_filter="Per Turn"
-                )
-                combo = build_combo_dict(
-                    genre,
-                    mood,
-                    persona_details,
-                    {**(round_fields or {}), **turn_fields},
-                )
-                if check_combo_used(token_a, combo, level="turn"):
-                    print(
-                        f"[theme] Turn combination already used (attempt {attempt + 1}); "
-                        f"re-rolling per-turn details"
+            per_turn_str = ""
+            turn_theme_id = None
+            if per_turn_task:
+                # Resolve this turn's per-turn detail fields, re-rolling until the
+                # FULL combination (round scope fields + per-turn fields + mood +
+                # persona) has not already been produced AND the coherence judge
+                # accepts it. Round scope fields were resolved once for the whole
+                # round (and judged with the persona before turn 1), so a veto here
+                # re-rolls the per-turn fields only — the character never changes
+                # mid-story. The judge runs before the theme_api("log") reservation
+                # below, so a vetoed turn combo is never blacklisted.
+                turn_fields = {}
+                for attempt in range(MAX_THEME_REROLL):
+                    turn_fields = resolve_details_fields(
+                        details_spec, task, MASTER_DETAILS, freq_filter="Per Turn"
                     )
-                    continue
-                if theme_judge:
-                    judged = run_theme_judge(
-                        token_a,
-                        task,
+                    combo = build_combo_dict(
                         genre,
-                        relationship=relationship,
-                        mood=mood,
-                        persona_details=persona_details,
-                        round_fields=round_fields,
-                        turn_fields=turn_fields,
-                        mediums=medium,
-                        language=language,
-                        checklist=checklist,
-                        prompt_file=theme_judge_prompt,
+                        mood,
+                        persona_details,
+                        {**(round_fields or {}), **turn_fields},
                     )
-                    print(
-                        f"[theme-judge] Turn {message_number} roll {attempt + 1}: "
-                        f"{judged['verdict']}"
-                        + (f" ({judged['reason']})" if judged["reason"] else "")
-                    )
-                    if judged["verdict"] == "INCOHERENT":
+                    if check_combo_used(token_a, combo, level="turn"):
+                        print(
+                            f"[theme] Turn combination already used (attempt {attempt + 1}); "
+                            f"re-rolling per-turn details"
+                        )
                         continue
-                break
-            else:
-                print(
-                    "[theme] Exhausted per-turn re-roll attempts; proceeding with the last combination"
+                    if theme_judge:
+                        judged = run_theme_judge(
+                            token_a,
+                            task,
+                            genre,
+                            relationship=relationship,
+                            mood=mood,
+                            persona_details=persona_details,
+                            round_fields=round_fields,
+                            turn_fields=turn_fields,
+                            mediums=medium,
+                            language=language,
+                            checklist=checklist,
+                            prompt_file=theme_judge_prompt,
+                        )
+                        print(
+                            f"[theme-judge] Turn {message_number} roll {attempt + 1}: "
+                            f"{judged['verdict']}"
+                            + (f" ({judged['reason']})" if judged["reason"] else "")
+                        )
+                        if judged["verdict"] == "INCOHERENT":
+                            continue
+                    break
+                else:
+                    print(
+                        "[theme] Exhausted per-turn re-roll attempts; proceeding with the last combination"
+                    )
+                per_turn_str = resolve_details(
+                    details_spec,
+                    task,
+                    MASTER_DETAILS,
+                    freq_filter="Per Turn",
+                    preferred=turn_fields,
                 )
-            per_turn_str = resolve_details(
-                details_spec,
+                turn_slug = build_theme_slug(
+                    task, mood, {**(round_fields or {}), **turn_fields}
+                )
+                logged = theme_api(
+                    "log",
+                    token_a,
+                    operation="log",
+                    scope=SELF_CHAT_THEME_SCOPE,
+                    level="turn",
+                    theme=turn_slug,
+                    **combo,
+                )
+                if logged.get("ok"):
+                    turn_theme_id = (logged.get("theme") or {}).get("id")
+                    print(f"[theme] Reserved turn combination {turn_theme_id}")
+            # Two-phase flow for research tasks: the first research_turns of EACH
+            # agent are research-only (gather + share sourced material, no
+            # <content> block), then the agents switch to content mode and write
+            # the deliverable using every piece of research that was shared.
+            in_research_phase = research and message_number <= research_turns
+            mode = "research" if in_research_phase else "content"
+            eff_research_turns = research_turns if research else 0
+            prompt = build_input(
+                current_speaker,
+                message_number,
+                "" if not transcript else incoming,
+                language,
                 task,
-                MASTER_DETAILS,
-                freq_filter="Per Turn",
-                preferred=turn_fields,
+                context,
+                turns,
+                per_turn_details=per_turn_str,
+                cast=cast_block,
+                mode=mode,
+                research_turns=eff_research_turns,
             )
-            turn_slug = build_theme_slug(
-                task, mood, {**(round_fields or {}), **turn_fields}
-            )
-            logged = theme_api(
-                "log",
-                token_a,
-                operation="log",
-                scope=SELF_CHAT_THEME_SCOPE,
-                level="turn",
-                theme=turn_slug,
-                **combo,
-            )
-            if logged.get("ok"):
-                turn_theme_id = (logged.get("theme") or {}).get("id")
-                print(f"[theme] Reserved turn combination {turn_theme_id}")
-        # Two-phase flow for research tasks: the first research_turns of EACH
-        # agent are research-only (gather + share sourced material, no
-        # <content> block), then the agents switch to content mode and write
-        # the deliverable using every piece of research that was shared.
-        in_research_phase = research and message_number <= research_turns
-        mode = "research" if in_research_phase else "content"
-        eff_research_turns = research_turns if research else 0
-        prompt = build_input(
-            current_speaker,
-            message_number,
-            "" if not transcript else incoming,
-            language,
-            task,
-            context,
-            turns,
-            per_turn_details=per_turn_str,
-            cast=cast_block,
-            mode=mode,
-            research_turns=eff_research_turns,
-        )
 
-        wait_for_user_to_leave()
+            wait_for_user_to_leave()
 
-        result = call_llm(
-            token,
-            session,
-            prompt,
-            image_b64=shared_image_b64,
-            research=in_research_phase,
-            character_sheet=character_sheet,
-        )
-        reply = result["text"]
-        if not reply.strip():
-            prompt += "\n<system_error>Your previous output was empty. Generate real story content now.</system_error>"
             result = call_llm(
                 token,
                 session,
@@ -3192,213 +3182,265 @@ def _conversation_attempt(
             )
             reply = result["text"]
             if not reply.strip():
-                if turn_theme_id:
-                    theme_api(
-                        "complete",
-                        token_a,
-                        operation="complete",
-                        theme_id=turn_theme_id,
-                    )
-                    print(f"[theme] Marked turn {turn_theme_id} completed")
-                print(
-                    f"Round {round_number} ended: {AGENT_NAMES[current_speaker]} "
-                    f"returned no content after a retry\n"
-                )
-                break
-        if is_duplicate(reply, incoming):
-            # Re-prompt agent to generate new content instead of repeating
-            prompt += "\n<system_error>Your previous output was identical to your partner's. Generate unique content now.</system_error>"
-            result = call_llm(
-                token,
-                session,
-                prompt,
-                image_b64=shared_image_b64,
-                research=in_research_phase,
-                character_sheet=character_sheet,
-            )
-            reply = result["text"]
-
-        if (
-            "image" in medium
-            and _has_placeholder_image_block(reply)
-            and not result.get("image")
-        ):
-            # The agent wrote a textual <image>...</image> placeholder block
-            # (mirroring the generate_image argument schema) instead of
-            # actually triggering the tool — the portrait would never render.
-            # Re-prompt once so a real image is produced.
-            print(
-                f"[image] {AGENT_NAMES[current_speaker]} turn {message_number}: "
-                "wrote an <image> placeholder block without calling "
-                "generate_image — re-prompting to trigger the tool"
-            )
-            prompt += (
-                "\n<system_error>Your reply contained a textual "
-                "<image>...</image> placeholder block but you did NOT call "
-                "the generate_image tool. Placeholder tags render as nothing. "
-                "Call generate_image for real so the portrait is produced, "
-                "and keep only clean narrative/visual text inside <content>.</system_error>"
-            )
-            result = call_llm(
-                token,
-                session,
-                prompt,
-                image_b64=shared_image_b64,
-                research=in_research_phase,
-                character_sheet=character_sheet,
-            )
-            reply = result["text"]
-
-        if in_research_phase:
-            # A research turn that ends without a single article-level URL
-            # degenerates into homepage citations for every claim in the
-            # deliverable. Re-prompt for targeted searches (bounded) before
-            # accepting the turn. The base RESEARCH MODE block still ends
-            # with "then end with <next_turn/>", so each retry strips
-            # that hand-off sentence from the prompt and appends
-            # _DEEP_SOURCE_PROMPT (which also explicitly overrides it) —
-            # the agent is never told to hand off AND not to hand off at
-            # the same time.
-            for _ in range(_DEEP_SOURCE_RETRIES):
-                if _turn_has_deep_source(result.get("searches")):
-                    break
-                print(
-                    f"[research] {AGENT_NAMES[current_speaker]} turn "
-                    f"{message_number}: no article-level URLs in search "
-                    "results — re-prompting for targeted searches"
-                )
-                retry_prompt = re.sub(
-                    r",\s*then end with\s*<next_turn\s+name=\"[^\"]*\"\s*/>\.?",
-                    "",
-                    prompt,
-                    count=1,
-                )
+                prompt += "\n<system_error>Your previous output was empty. Generate real story content now.</system_error>"
                 result = call_llm(
                     token,
                     session,
-                    retry_prompt + "\n" + _DEEP_SOURCE_PROMPT,
+                    prompt,
                     image_b64=shared_image_b64,
-                    research=True,
+                    research=in_research_phase,
                     character_sheet=character_sheet,
                 )
                 reply = result["text"]
                 if not reply.strip():
-                    break
-            if not _turn_has_deep_source(result.get("searches")):
-                if turn_theme_id:
-                    theme_api(
-                        "complete",
-                        token_a,
-                        operation="complete",
-                        theme_id=turn_theme_id,
+                    if turn_theme_id:
+                        theme_api(
+                            "complete",
+                            token_a,
+                            operation="complete",
+                            theme_id=turn_theme_id,
+                        )
+                        print(f"[theme] Marked turn {turn_theme_id} completed")
+                    print(
+                        f"Round {round_number} ended: {AGENT_NAMES[current_speaker]} "
+                        f"returned no content after a retry\n"
                     )
-                    print(f"[theme] Marked turn {turn_theme_id} completed")
+                    break
+            if is_duplicate(reply, incoming):
+                # Re-prompt agent to generate new content instead of repeating
+                prompt += "\n<system_error>Your previous output was identical to your partner's. Generate unique content now.</system_error>"
+                result = call_llm(
+                    token,
+                    session,
+                    prompt,
+                    image_b64=shared_image_b64,
+                    research=in_research_phase,
+                    character_sheet=character_sheet,
+                )
+                reply = result["text"]
+
+            if (
+                "image" in medium
+                and _has_placeholder_image_block(reply)
+                and not result.get("image")
+            ):
+                # The agent wrote a textual <image>...</image> placeholder block
+                # (mirroring the generate_image argument schema) instead of
+                # actually triggering the tool — the portrait would never render.
+                # Re-prompt once so a real image is produced.
+                print(
+                    f"[image] {AGENT_NAMES[current_speaker]} turn {message_number}: "
+                    "wrote an <image> placeholder block without calling "
+                    "generate_image — re-prompting to trigger the tool"
+                )
+                prompt += (
+                    "\n<system_error>Your reply contained a textual "
+                    "<image>...</image> placeholder block but you did NOT call "
+                    "the generate_image tool. Placeholder tags render as nothing. "
+                    "Call generate_image for real so the portrait is produced, "
+                    "and keep only clean narrative/visual text inside <content>.</system_error>"
+                )
+                result = call_llm(
+                    token,
+                    session,
+                    prompt,
+                    image_b64=shared_image_b64,
+                    research=in_research_phase,
+                    character_sheet=character_sheet,
+                )
+                reply = result["text"]
+
+            if in_research_phase:
+                # A research turn that ends without a single article-level URL
+                # degenerates into homepage citations for every claim in the
+                # deliverable. Re-prompt for targeted searches (bounded) before
+                # accepting the turn. The base RESEARCH MODE block still ends
+                # with "then end with <next_turn/>", so each retry strips
+                # that hand-off sentence from the prompt and appends
+                # _DEEP_SOURCE_PROMPT (which also explicitly overrides it) —
+                # the agent is never told to hand off AND not to hand off at
+                # the same time.
+                for _ in range(_DEEP_SOURCE_RETRIES):
+                    if _turn_has_deep_source(result.get("searches")):
+                        break
+                    print(
+                        f"[research] {AGENT_NAMES[current_speaker]} turn "
+                        f"{message_number}: no article-level URLs in search "
+                        "results — re-prompting for targeted searches"
+                    )
+                    retry_prompt = re.sub(
+                        r",\s*then end with\s*<next_turn\s+name=\"[^\"]*\"\s*/>\.?",
+                        "",
+                        prompt,
+                        count=1,
+                    )
+                    result = call_llm(
+                        token,
+                        session,
+                        retry_prompt + "\n" + _DEEP_SOURCE_PROMPT,
+                        image_b64=shared_image_b64,
+                        research=True,
+                        character_sheet=character_sheet,
+                    )
+                    reply = result["text"]
+                    if not reply.strip():
+                        break
+                if not _turn_has_deep_source(result.get("searches")):
+                    if turn_theme_id:
+                        theme_api(
+                            "complete",
+                            token_a,
+                            operation="complete",
+                            theme_id=turn_theme_id,
+                        )
+                        print(f"[theme] Marked turn {turn_theme_id} completed")
+                    print(
+                        f"Round {round_number} ended: {AGENT_NAMES[current_speaker]} "
+                        f"research turn {message_number} still produced no "
+                        "article-level source URLs after retries\n"
+                    )
+                    break
+
+            if turn_theme_id:
+                theme_api("complete", token_a, operation="complete", theme_id=turn_theme_id)
+                print(f"[theme] Marked turn {turn_theme_id} completed")
+
+            entry = {
+                "speaker": AGENT_NAMES[current_speaker],
+                "message": message_number,
+                "text": reply,
+                "image": result.get("image"),
+                "searches": result.get("searches"),
+                "publish": not in_research_phase,
+            }
+            transcript.append(entry)
+            append_story_entry(entry, fname, citations, stories_dir, round_number, idx)
+
+            if STOP_PHRASE.lower() in reply.lower():
+                print(f"Round {round_number} ended by {AGENT_NAMES[current_speaker]}\n")
+                break
+            if counts[current_speaker] >= turns:
                 print(
                     f"Round {round_number} ended: {AGENT_NAMES[current_speaker]} "
-                    f"research turn {message_number} still produced no "
-                    "article-level source URLs after retries\n"
+                    f"reached the {turns}-message cap\n"
                 )
                 break
 
-        if turn_theme_id:
-            theme_api("complete", token_a, operation="complete", theme_id=turn_theme_id)
-            print(f"[theme] Marked turn {turn_theme_id} completed")
+            incoming = strip_placeholder_image_blocks(reply)
+            shared_image = result.get("image")
+            if shared_image:
+                shared_image_b64 = image_url_to_b64(shared_image)
+                incoming += f'\n\n<shared_image src="{shared_image}"/>'
+            shared_searches = result.get("searches")
+            if shared_searches:
+                block = []
+                # Mirror collect_citations(): when the reports contain article
+                # links, don't hand the partner homepage/section URLs to cite.
+                deep_shared = _turn_has_deep_source(shared_searches)
+                for s in shared_searches:
+                    if not isinstance(s, dict):
+                        continue
+                    query = s.get("query", "")
+                    block.append(f"- Query: {query}")
+                    for r in s.get("results") or []:
+                        title = r.get("title") or r.get("url") or ""
+                        url = r.get("url", "")
+                        if _is_ad_url(url):
+                            continue
+                        if deep_shared and _is_landing_url(url):
+                            continue
+                        snippet = (r.get("snippet") or r.get("content") or "")[:200]
+                        line = f"  - {title}" + (f" | {snippet}" if snippet else "")
+                        if url:
+                            line += f" ({url})"
+                        block.append(line)
+                if block:
+                    incoming += "\n\n[WEB SEARCH REPORTS SHARED:]\n" + "\n".join(block)
+            current_speaker = "B" if current_speaker == "A" else "A"
+            print(f"LLM Rest for {SLEEP_BETWEEN_TURNS} seconds")
+            time.sleep(SLEEP_BETWEEN_TURNS)
+            print("LLM Rest Over")
 
-        entry = {
-            "speaker": AGENT_NAMES[current_speaker],
-            "message": message_number,
-            "text": reply,
-            "image": result.get("image"),
-            "searches": result.get("searches"),
-            "publish": not in_research_phase,
-        }
-        transcript.append(entry)
-        append_story_entry(entry, fname, citations, stories_dir, round_number, idx)
+        finalize_story(fname, stories_dir, citations)
 
-        if STOP_PHRASE.lower() in reply.lower():
-            print(f"Round {round_number} ended by {AGENT_NAMES[current_speaker]}\n")
-            break
-        if counts[current_speaker] >= turns:
+        # Empty-body guard: a header-only file must never reach the title,
+        # cross-critique, or editor phases. Delete it, record RED, and return
+        # early so run_single_conversation skips straight to the next attempt.
+        with open(fname, "r", encoding="utf-8") as f:
+            _post_finalize_text = f.read()
+        if not _story_body_lines(_post_finalize_text):
             print(
-                f"Round {round_number} ended: {AGENT_NAMES[current_speaker]} "
-                f"reached the {turns}-message cap\n"
+                f"[verify] Story body is empty after finalize — "
+                f"auto-RED, discarding {fname}"
             )
-            break
-
-        incoming = strip_placeholder_image_blocks(reply)
-        shared_image = result.get("image")
-        if shared_image:
-            shared_image_b64 = image_url_to_b64(shared_image)
-            incoming += f'\n\n<shared_image src="{shared_image}"/>'
-        shared_searches = result.get("searches")
-        if shared_searches:
-            block = []
-            # Mirror collect_citations(): when the reports contain article
-            # links, don't hand the partner homepage/section URLs to cite.
-            deep_shared = _turn_has_deep_source(shared_searches)
-            for s in shared_searches:
-                if not isinstance(s, dict):
-                    continue
-                query = s.get("query", "")
-                block.append(f"- Query: {query}")
-                for r in s.get("results") or []:
-                    title = r.get("title") or r.get("url") or ""
-                    url = r.get("url", "")
-                    if _is_ad_url(url):
-                        continue
-                    if deep_shared and _is_landing_url(url):
-                        continue
-                    snippet = (r.get("snippet") or r.get("content") or "")[:200]
-                    line = f"  - {title}" + (f" | {snippet}" if snippet else "")
-                    if url:
-                        line += f" ({url})"
-                    block.append(line)
-            if block:
-                incoming += "\n\n[WEB SEARCH REPORTS SHARED:]\n" + "\n".join(block)
-        current_speaker = "B" if current_speaker == "A" else "A"
-        print(f"LLM Rest for {SLEEP_BETWEEN_TURNS} seconds")
-        time.sleep(SLEEP_BETWEEN_TURNS)
-        print("LLM Rest Over")
-
-    finalize_story(fname, stories_dir, citations)
-
-    # Empty-body guard: a header-only file must never reach the title,
-    # cross-critique, or editor phases. Delete it, record RED, and return
-    # early so run_single_conversation skips straight to the next attempt.
-    with open(fname, "r", encoding="utf-8") as f:
-        _post_finalize_text = f.read()
-    if not _story_body_lines(_post_finalize_text):
-        print(
-            f"[verify] Story body is empty after finalize — "
-            f"auto-RED, discarding {fname}"
-        )
-        _write_moderation(
-            fname,
-            "RED",
-            "Automatic RED: story body is empty — only the header/metadata "
-            "and citations were published; no narrative ever reached the file.",
-            task,
-            genre,
-        )
+            _write_moderation(
+                fname,
+                "RED",
+                "Automatic RED: story body is empty — only the header/metadata "
+                "and citations were published; no narrative ever reached the file.",
+                task,
+                genre,
+            )
+            try:
+                os.remove(fname)
+                print(f"[verify] Removed empty story file {fname}")
+            except OSError:
+                pass
+            return {
+                "transcript": transcript,
+                "session_a": session_a,
+                "session_b": session_b,
+                "fname": fname,
+                "stories_dir": stories_dir,
+                "medium": medium,
+                "language": language,
+                "citations": citations,
+                "edited_path": None,
+                "check_source": None,
+                "problems": ["Story body is empty"],
+                "red": True,
+            }
+    except Exception as _attempt_err:
+        # The turn loop or finalize died mid-round (server restart, API
+        # error): never leave a header-only file behind. Empty bodies are
+        # discarded as RED; partial stories re-raise to preserve the old
+        # traceback-and-skip behavior.
+        print(f"[verify] Conversation attempt failed ({_attempt_err!r})")
+        _failed_text = None
         try:
-            os.remove(fname)
-            print(f"[verify] Removed empty story file {fname}")
+            with open(fname, "r", encoding="utf-8") as _ff:
+                _failed_text = _ff.read()
         except OSError:
             pass
-        return {
-            "transcript": transcript,
-            "session_a": session_a,
-            "session_b": session_b,
-            "fname": fname,
-            "stories_dir": stories_dir,
-            "medium": medium,
-            "language": language,
-            "citations": citations,
-            "edited_path": None,
-            "check_source": None,
-            "problems": ["Story body is empty"],
-            "red": True,
-        }
+        if _failed_text is not None and not _story_body_lines(_failed_text):
+            _write_moderation(
+                fname,
+                "RED",
+                f"Automatic RED: conversation attempt failed ({_attempt_err}) "
+                "before any narrative reached the file.",
+                task,
+                genre,
+            )
+            try:
+                os.remove(fname)
+                print(f"[verify] Removed abandoned empty story file {fname}")
+            except OSError:
+                pass
+            return {
+                "transcript": transcript,
+                "session_a": session_a,
+                "session_b": session_b,
+                "fname": fname,
+                "stories_dir": stories_dir,
+                "medium": medium,
+                "language": language,
+                "citations": citations,
+                "edited_path": None,
+                "check_source": None,
+                "problems": [f"Conversation attempt failed: {_attempt_err}"],
+                "red": True,
+            }
+        raise
 
     print("=== Title phase ===")
     with open(fname, "r", encoding="utf-8") as f:
@@ -4652,7 +4694,46 @@ def run_moderator(
             delete_session(token, session_id)
 
 
+def sweep_empty_stories():
+    """Delete header-only story files abandoned by crashed/killed runs.
+
+    A SIGTERM kill (or an untrapped crash outside _conversation_attempt)
+    leaves the header that start_story wrote with no body. Those orphans
+    are removed here at startup so they can never be mistaken for stories.
+    Only files with zero body lines are touched — anything with narrative
+    is left alone.
+    """
+    roots = [STORY_BASE_DIR]
+    for extra in (ADMIN_STORIES_DIR, PREMIUM_STORIES_DIR):
+        if extra and extra not in roots:
+            roots.append(extra)
+    removed = 0
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                if not name.endswith(".md") or ".moderation." in name:
+                    continue
+                fpath = os.path.join(dirpath, name)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        text = f.read()
+                except OSError:
+                    continue
+                if not _story_body_lines(text):
+                    try:
+                        os.remove(fpath)
+                        removed += 1
+                        print(f"[verify] Swept abandoned empty story file {fpath}")
+                    except OSError:
+                        pass
+    if removed:
+        print(f"[verify] Startup sweep removed {removed} empty story file(s)")
+
+
 def run_forever():
+    sweep_empty_stories()
     token_a = login(USERNAME_A, PASSWORD_A)
     token_b = login(USERNAME_B, PASSWORD_B)
     register_agent_tokens([token_a, token_b], [USERNAME_A, USERNAME_B])
