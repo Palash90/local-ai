@@ -49,6 +49,23 @@ def render_score(score_text, tempo=120, title="music", user="local"):
     if not sections or n == 0:
         return json.dumps({"ok": False, "error": "no notes parsed",
                            "errors": errors})
+    # Fail loud, never ship a partial-lie: if the score asked for pitched
+    # lanes (melody/harmony/bass/drone) but every pitched token failed to
+    # parse, the result would be drums-only audio mislabeled as a full
+    # arrangement. Refuse so the model rewrites instead of delivering
+    # tabla-only "Santoor + Tanpura". Pure-drum scores (no pitched lanes
+    # at all) still render.
+    pitched_lanes = [s for s in sections if not s.get("drum")]
+    pitched = sum(1 for s in pitched_lanes for e in s["events"]
+                  if e["type"] in ("note", "chord"))
+    if pitched_lanes and pitched == 0:
+        return json.dumps({
+            "ok": False,
+            "error": "no playable pitched notes: every melody/harmony/"
+                     "bass/drone token failed to parse (rests do not count). "
+                     "Rewrite pitched lanes with valid pitch+duration tokens "
+                     "(e.g. 'G4 q', 'C3:min7 w') — never Swar syllables.",
+            "errors": errors})
     # No compromise on named kits: a score that asks for tabla must render
     # with real tabla — a rock-kit substitute is a lie, not a fallback.
     from server.features.music import fluid

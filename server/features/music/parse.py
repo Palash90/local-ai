@@ -551,6 +551,13 @@ def parse_score(text, tempo=120):
                     lead_dyn = DYN_MAP["!"]
                     tok = LEAD_ACCENT_RE.sub("", tok)
                 tok = _norm_chord(tok)
+                if re.match(r"^[A-G][#b]?-?\d+:$", tok, re.IGNORECASE):
+                    # 'C4:' — the model uses a colon as a pitch/duration
+                    # separator ("C4: w" means C4 whole-note). A trailing
+                    # colon with no chord quality carries no meaning, so
+                    # drop it and let the duration merge below. Glued
+                    # 'C4:w' keeps its dedicated error (ambiguous chord?).
+                    tok = tok[:-1]
                 if (CHORD_SYM_RE.match(tok) and i < len(toks)
                         and toks[i].lower() in ARP_FLAGS):
                     tok = tok + toks[i]
