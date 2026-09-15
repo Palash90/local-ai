@@ -64,19 +64,21 @@ REASONING_BUDGET = int(os.environ.get("REASONING_BUDGET", "1024"))
 # still generous headroom for a verdict while keeping worst-case latency
 # inside it.
 GUARDRAIL_REASONING_BUDGET = 512
-MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "2048"))
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "4096"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sampling router (two-call split).
 #
-# Round 0 of every task fires a tiny greedy classifier call (bounded by
+# Round 0 of every task fires a classifier call (bounded by
 # SAMPLING_ROUTER_MAX_TOKENS) that labels the user's message intent; the label
 # maps to a sampling profile injected into all LLM rounds of that task via
 # per-request temperature/top_k/top_p (supported by llama-server,
-# tools/server/server-chat.cpp). Any router failure falls back to empty
+# tools/server/server-chat.cpp). The cap is 256 (not 12) because thinking
+# models spend the whole budget in reasoning_content, leaving empty content
+# on tiny caps. Any router failure falls back to empty
 # overrides (= server defaults), never blocks generation.
 # ─────────────────────────────────────────────────────────────────────────────
-SAMPLING_ROUTER_MAX_TOKENS = 12
+SAMPLING_ROUTER_MAX_TOKENS = 256
 SAMPLING_ROUTER_TIMEOUT = 90  # covers a cold model load on either lane
 SAMPLING_ROUTER_PROMPT = (
     "Classify the user's latest message by what kind of response it needs.\n"
@@ -283,7 +285,10 @@ VERIFY_PORT = int(os.environ.get("VERIFY_PORT", "8083"))
 VERIFY_MODEL = os.environ.get("VERIFY_MODEL", "gemma-4-E2B-it-Q4_K_M")
 VERIFY_CONTEXT_SIZE = int(os.environ.get("VERIFY_CONTEXT_SIZE", "8192"))
 VERIFY_IDLE_TIMEOUT = int(os.environ.get("VERIFY_IDLE_TIMEOUT", "300"))
-LLAMA_SERVER_ARGS = [
+# Backup of the known-good E4B GPU profile (pre-26B). Rollback target:
+# to revert the gemma26b-gpu-lane experiment, rename this back to
+# LLAMA_SERVER_ARGS (and flip model.json "gpu" back to gemma4-e4b-q4).
+LLAMA_SERVER_ARGS_E4B_BACKUP = [
     "--host", "127.0.0.1",
     "--port", "8081",
     "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
@@ -302,6 +307,74 @@ LLAMA_SERVER_ARGS = [
     "-tb", "8",
     "-ub", "512",
     "--timeout", "3600",
+
+    # Prompt-cache reuse: allow slots to reuse/shift cached prefix segments
+    # across multi-turn chats and tool rounds instead of re-prefilling.
+    "--cache-reuse", "256",
+
+    # KV-cache checkpointing: enables POST /slots/{id}?action=save|restore so
+    # the conversation KV survives model unload/reload cycles (image gen).
+    # The router passes this down to each loaded model instance.
+    "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
+
+    # Sampling Parameters
+    "--temp", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64",
+    "--min-p", "0.05",
+    "--parallel", "1"
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GPU lane profile for gemma4-26b (26B-A4B MoE, UD_IQ3_S, ~11GB).
+# Validated standalone on :8089 at 32k: 2848MiB VRAM with q4_0 KV,
+# ~19 tok/s decode, full 12-ball reasoning solve.
+#
+# Deltas vs LLAMA_SERVER_ARGS_E4B_BACKUP:
+#  + --cpu-moe ......... experts stay in RAM, attention/router/KV in VRAM.
+#    Without this, -ngl 99 tries to put 128 experts in 3.6GB free VRAM
+#    (measured: "failed to fit params", then cudaMalloc OOM).
+#  + -b 2048 ........... bounds the Flash-Attention scratch buffer; a big -b
+#    (e.g. 16384) adds ~1.8GB and fakes a "VRAM wall" at long context.
+#  q8_0 -> q4_0 KV ..... 2848 vs 3082MiB measured at 32k; headroom for 64-128k.
+#  + --ctx-checkpoints 1  Gemma4 prompt checkpoints are ~9x Qwen's
+#    (~106MB at 32k q8, measured); unbounded checkpoints blow RAM at 128k.
+#  + --reasoning-budget . thinking models spend ~2000 tokens in
+#    reasoning_content before answering (measured on 12-ball); uncapped
+#    thinking truncates tool-call JSON and empties short (12-token) calls.
+#  ctx from GPU_CTX_SIZE_26B (default 32768): ramp 32k -> 64k -> 128k.
+# ─────────────────────────────────────────────────────────────────────────────
+LLAMA_SERVER_ARGS = [
+    "--host", "127.0.0.1",
+    "--port", "8081",
+    "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
+    "--jinja",
+
+    # GPU / VRAM & Performance (MoE squeeze).
+    # -ngl 32 covers all 30 Gemma4-26B layers (full non-expert offload;
+    # experts stay in RAM via --cpu-moe below).
+    "-ngl", "35",
+    "--cpu-moe",
+    "-fa", "on",
+    "--ctx-size", os.environ.get("GPU_CTX_SIZE_26B", "32768"),
+    "-ctk", "q4_0",
+    "-ctv", "q4_0",
+    "--no-mmproj-offload",
+    "--ctx-checkpoints", "1",
+
+    # Threads & Batching
+    "-t", "8",
+    "-tb", "8",
+    "-b", "2048",
+    "-ub", "512",
+    "--timeout", "3600",
+
+    # Reasoning budget: cap thinking so tool-call JSON survives
+    # (same pattern as the CPU lane below). 2048 (was 1024): Raga-class
+    # research exhausted 1024 mid-thought; keep MAX_OUTPUT_TOKENS >= 2x
+    # this so answers survive thinking.
+    "--reasoning-budget", "2048",
+    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
 
     # Prompt-cache reuse: allow slots to reuse/shift cached prefix segments
     # across multi-turn chats and tool rounds instead of re-prefilling.

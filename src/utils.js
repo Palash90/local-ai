@@ -32,3 +32,42 @@ export async function downloadFile(url, fallbackName = 'file') {
     window.open(full, '_blank')
   }
 }
+
+// Join soft line breaks inside inline $...$ math spans so the KaTeX inline
+// tokenizer (which excludes \n from math content) can match them. Fenced
+// code blocks and $$ display blocks pass through untouched. Pure function:
+// same input always yields same output, no DOM access (safe for tests).
+export function normalizeMathLineBreaks(text) {
+  if (!text || typeof text !== 'string' || !text.includes('$')) return text
+  return text.split(/(```[\s\S]*?```)/g).map((seg, i) => {
+    if (i % 2 === 1) return seg
+    return seg.split(/(\$\$[\s\S]*?\$\$)/g).map((chunk, j) => {
+      if (j % 2 === 1) return chunk
+      let out = ''
+      let inMath = false
+      let k = 0
+      while (k < chunk.length) {
+        const ch = chunk[k]
+        if (ch === '\\' && k + 1 < chunk.length) {
+          out += ch + chunk[k + 1]
+          k += 2
+          continue
+        }
+        if (ch === '$') {
+          if (chunk[k + 1] === '$') {
+            out += '$$'
+            k += 2
+            continue
+          }
+          inMath = !inMath
+          out += ch
+          k += 1
+          continue
+        }
+        out += (ch === '\n' && inMath) ? ' ' : ch
+        k += 1
+      }
+      return out
+    }).join('')
+  }).join('')
+}

@@ -4,7 +4,7 @@ import { marked } from 'marked'
 import markedKatex from 'marked-katex-extension'
 import DOMPurify from 'dompurify'
 import { speak as apiSpeak, getTaskStatus as apiGetTaskStatus, shareMessage as apiShareMessage } from '../api'
-import { downloadFile, toApiImage, toApiMusic } from '../utils'
+import { downloadFile, toApiImage, toApiMusic, normalizeMathLineBreaks } from '../utils'
 import StatusBox from './StatusBox'
 
 marked.use(markedKatex({ throwOnError: false, nonStandard: true }))
@@ -629,7 +629,7 @@ function ReasoningBlock({ text, open, onToggle }) {
 
   let html
   try {
-    html = DOMPurify.sanitize(marked.parse(capped))
+    html = DOMPurify.sanitize(marked.parse(normalizeMathLineBreaks(capped)))
   } catch {
     html = escHtml(capped)
   }
