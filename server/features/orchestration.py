@@ -1078,6 +1078,22 @@ def _queue_worker(mode):
                     M.tasks[item["task_id"]]["_started_at"] = time.time()
                     if queued_at is not None:
                         M.tasks[item["task_id"]].setdefault("_timings", {})["queue_ms"] = int((time.time() - queued_at) * 1000)
+        # Thermal pacing (duty-cycle control): breathe between pickups so
+        # sustained load can't outrun chassis cooling. This shared worker is
+        # the single site for all task lanes (guardrail judges exempt: their
+        # seconds-long bursts don't move package temp, and they carry 240s
+        # floors plus fail-closed semantics). In-flight rounds are never
+        # touched — pacing applies between pickups only. Logs only when the
+        # scaled extension fires, so the 1s floor stays silent.
+        if mode != "guardrail":
+            try:
+                _plat_temp = M.get_platform_temp()
+                _pace = M.pace_delay(_plat_temp)
+            except Exception:
+                _plat_temp, _pace = None, 1.0
+            if _pace > 1.0:
+                print(f"[thermal] pacing {_pace:.0f}s before {mode} round (platform {_plat_temp:.0f}C)", flush=True)
+            time.sleep(_pace)
         M._event_post(
             "start",
             item["task_id"],

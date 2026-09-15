@@ -354,7 +354,7 @@ LLAMA_SERVER_ARGS = [
     # -ngl 32 covers all 30 Gemma4-26B layers (full non-expert offload;
     # experts stay in RAM via --cpu-moe below).
     "-ngl", "35",
-    "--cpu-moe",
+    "--n-cpu-moe", "28",
     "-fa", "on",
     "--ctx-size", os.environ.get("GPU_CTX_SIZE_26B", "32768"),
     "-ctk", "q4_0",

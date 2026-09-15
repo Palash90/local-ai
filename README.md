@@ -12,6 +12,7 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 
 **Docs:** [ARCHITECTURE.md](ARCHITECTURE.md) — runtime design & diagrams ·
 [TEST_STEPS.md](TEST_STEPS.md) — manual regression plan ·
+[SESSION-2026-09-15.md](SESSION-2026-09-15.md) — ops log: 26B squeeze, swap saga, thermal triad ·
 [server_startup_commands.md](server_startup_commands.md)
 
 > **AI collaboration disclosure.** This repository is developed with AI coding

@@ -31,6 +31,69 @@ _LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8083", "embed": "808
 RAM_UNLOAD_MIN_FREED_MB = 512
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Thermal pacing (duty-cycle control for sustained CPU+GPU load).
+#
+# Lineage: the fixed 5s post-image-render sleep (images.py) was sized for the
+# E4B era's bursty heat; 26B-class MoE inference heats slowly and continuously
+# (Ryzen experts + GPU decode), which a fixed sleep can't track. Pacing spreads
+# the same energy over time so chassis cooling keeps up; paced full-clock work
+# beats firmware-clamped crawling by a wide margin.
+#
+# Shape: a 1s floor on every pickup (hygiene: breaks back-to-back chains, gives
+# the EC fan loop a sampling beat) + temperature-scaled extension that is
+# exactly 0 when cool. Never sleeps mid-round; sleeps between pickups only.
+# ─────────────────────────────────────────────────────────────────────────────
+PACE_FLOOR_SECONDS = 1.0
+PACE_START_C = float(os.environ.get("THERMAL_PACE_START_C", "80"))
+PACE_SCALE_S_PER_C = float(os.environ.get("THERMAL_PACE_SCALE", "2.0"))
+PACE_MAX_SECONDS = float(os.environ.get("THERMAL_PACE_MAX_S", "20.0"))
+# Optional override: path to a file holding millidegree-Celsius (sysfs style).
+# Empty = auto-detect the first thermal_zone of type "acpitz".
+PLATFORM_TEMP_PATH = os.environ.get("PLATFORM_TEMP_PATH", "").strip()
+
+
+def get_platform_temp():
+    """Platform temperature in Celsius, or None when unavailable.
+
+    Reads the ACPI thermal zone (the package/board sensor that drives the
+    firmware's power squeeze) — deliberately NOT the GPU die temp, which lags
+    the binding constraint on this box. Never raises: missing sensor files or
+    unparsable content yield None, and pacing degrades to the 1s floor.
+    """
+    try:
+        path = PLATFORM_TEMP_PATH
+        if not path:
+            import glob as _glob
+
+            for zone in sorted(_glob.glob("/sys/class/thermal/thermal_zone*")):
+                try:
+                    with open(os.path.join(zone, "type"), "r") as fh:
+                        if fh.read().strip() == "acpitz":
+                            path = os.path.join(zone, "temp")
+                            break
+                except OSError:
+                    continue
+        if not path:
+            return None
+        with open(path, "r") as fh:
+            return float(fh.read().strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
+
+
+def pace_delay(temp_c):
+    """Seconds to breathe before the next work pickup. Pure function.
+
+    None (no sensor) or cool (< start) -> the 1s floor. Hot -> floor plus
+    linear scale, capped. Callers sleep unconditionally on the result; the
+    floor keeps behavior uniform instead of branching.
+    """
+    if temp_c is None or temp_c < PACE_START_C:
+        return PACE_FLOOR_SECONDS
+    return min(PACE_MAX_SECONDS, PACE_FLOOR_SECONDS + (temp_c - PACE_START_C) * PACE_SCALE_S_PER_C)
+
+
 def model_status_snapshot():
     # The UI reports the interactive (GPU) server's state.
     with M._data_lock:

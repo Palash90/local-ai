@@ -981,6 +981,19 @@ def _run_edit_image(task_id, sid, args, image_b64):
     return result
 
 
+def _thermal_pace_after_render(tool_name):
+    """Post-render cooldown: legacy 5s VRAM-settle floor plus thermal scaling.
+
+    The fixed 5s predates sustained MoE heat (short GPU bursts then; slow CPU
+    integrator now). The floor preserves the original settle purpose; the
+    extension spreads render-adjacent heat the same way queue pacing does.
+    """
+    try:
+        return max(5.0, M.pace_delay(M.get_platform_temp()))
+    except Exception:
+        return 5.0
+
+
 def _image_worker():
     """Run one image job at a time from the image queue.
 
@@ -1004,12 +1017,14 @@ def _image_worker():
         try:
             if tool_name == "generate_image":
                 result = _run_generate_image(task_id, args)
-                print("Waiting 5s for GPU to cool down")
-                time.sleep(5)
+                _cool = _thermal_pace_after_render("generate_image")
+                print(f"Waiting {_cool:.0f}s for GPU to cool down")
+                time.sleep(_cool)
             elif tool_name == "edit_image":
                 result = _run_edit_image(task_id, sid, args, job.get("image_b64"))
-                print("Waiting 5s for GPU to cool down")
-                time.sleep(5)
+                _cool = _thermal_pace_after_render("edit_image")
+                print(f"Waiting {_cool:.0f}s for GPU to cool down")
+                time.sleep(_cool)
             else:
                 result = json.dumps({"error": f"Unknown image tool: {tool_name}"})
         except Exception as e:

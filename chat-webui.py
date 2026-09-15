@@ -293,10 +293,12 @@ from server.features.monitoring import (  # noqa: E402
     ensure_llama_server,
     ensure_embed_ready,
     get_gpu_temp,
+    get_platform_temp,
     get_ram_usage,
     kill_comfyui,
     kill_llama_server,
     model_status_snapshot,
+    pace_delay,
     restart_llama_server,
     restart_servers,
 )
