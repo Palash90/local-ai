@@ -594,6 +594,8 @@ def _event_loop():
                     "cpu": bool(data.get("cpu")),
                     "no_tools": bool(data.get("no_tools")),
                     "openai_lane": bool(data.get("openai_lane")),
+                    "client_tools": list(data.get("client_tools") or []),
+                    "client_tool_choice": data.get("client_tool_choice") or "none",
                     "_started_at": t.get("_started_at"),
                     "skip_ensure_llama": bool(data.get("skip_ensure_llama")),
                 }
@@ -724,7 +726,11 @@ def _event_loop():
                         spam_done = (tt.get("_toolspam_done", 0) + 1) if tt else 0
                         if tt:
                             tt["_toolspam_done"] = spam_done
-                    if spam_done > 2:
+                    if spam_done > 2 or (spam_done >= 1 and t.get("openai_lane")):
+                        # OpenAI lane fails fast: API clients get one quick,
+                        # descriptive error instead of three GPU-burning
+                        # retries that all produce the same markup. Chat lanes
+                        # keep the bounded re-schedule below.
                         M._set_task_error(
                             task_id,
                             "Model repeatedly emitted tool-call markup instead of a reply",
@@ -1107,6 +1113,8 @@ def _queue_worker(mode):
             cpu=item.get("cpu"),
             no_tools=item.get("no_tools"),
             openai_lane=item.get("openai_lane"),
+            client_tools=item.get("client_tools"),
+            client_tool_choice=item.get("client_tool_choice"),
             skip_ensure_llama=item.get("skip_ensure_llama"),
             # Carry the MCP lane flag through the queue: the RAM/thermal pause
             # paths below rewrite M.tasks[tid] to a minimal dict (dropping

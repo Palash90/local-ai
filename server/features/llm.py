@@ -1051,7 +1051,13 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         with M._data_lock:
             task_user = M.tasks.get(task_id, {}).get("_user", "")
             task_no_tools = M.tasks.get(task_id, {}).get("no_tools", False)
-        tool_free = task_user in M.TOOL_FREE_AGENTS or task_no_tools
+            client_tools = list(M.tasks.get(task_id, {}).get("client_tools") or [])
+            client_tool_choice = M.tasks.get(task_id, {}).get("client_tool_choice") or "none"
+        # Client-supplied tools (OpenAI lane) take precedence: the model gets
+        # a real structured tool channel, so it emits native tool_calls
+        # instead of leaking tool-call markup as text. Server tools are never
+        # mixed into API-lane requests.
+        tool_free = (task_user in M.TOOL_FREE_AGENTS or task_no_tools) and not client_tools
         messages = _append_turn_context(messages, task_id, task_user, tool_free)
         # The turn-context block (docs + directives) is appended AFTER the
         # history trim, so it never counted toward the budget — a 15 KB music
@@ -1115,8 +1121,8 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         payload = {
             "model": M.server_model_id(mode),
             "messages": messages,
-            "tools": [] if tool_free else wire_tools,
-            "tool_choice": "none" if tool_free else "auto",
+            "tools": client_tools if client_tools else ([] if tool_free else wire_tools),
+            "tool_choice": client_tool_choice if client_tools else ("none" if tool_free else "auto"),
             "max_tokens": M.MAX_OUTPUT_TOKENS,
             "reasoning_budget_tokens": M.REASONING_BUDGET,
         }

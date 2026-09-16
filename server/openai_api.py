@@ -291,6 +291,31 @@ def handle_chat_completions(handler):
 
     print(f"[openai_api] Received request: stream={stream}, model={model}, messages={len(messages)}")
 
+    # ── Client-supplied tools (pass-through) ────────────────────────
+    # OpenAI clients (e.g. opencode) send their own `tools` and expect
+    # structured `tool_calls` back, which they execute themselves. Honor
+    # them: without this the model sees tool context in the conversation
+    # history but has no structured tool channel, so tool-trained models
+    # leak `<|tool_call|>` markup as plain text instead of replying.
+    client_tools = body.get("tools") or []
+    if not isinstance(client_tools, list):
+        handler.send_json(
+            {"error": {"message": "'tools' must be an array", "type": "invalid_request_error"}},
+            status=400,
+        )
+        return
+    for t in client_tools:
+        fn = (t.get("function") if isinstance(t, dict) else None) or {}
+        if not isinstance(t, dict) or t.get("type") != "function" or not fn.get("name"):
+            handler.send_json(
+                {"error": {"message": "Each entry in 'tools' must have type 'function' and a function.name", "type": "invalid_request_error"}},
+                status=400,
+            )
+            return
+    client_tool_choice = body.get("tool_choice", "auto" if client_tools else "none")
+    if client_tools:
+        print(f"[openai_api] Passing through {len(client_tools)} client tool(s), tool_choice={client_tool_choice}")
+
     # ── Build the user message for the pipeline ─────────────────────────
     # The last user message becomes the "new" message submitted to the queue.
     # All preceding messages are injected into the session as history so the
@@ -364,7 +389,9 @@ def handle_chat_completions(handler):
         "client_timestamp": None,
         "research": False,
         "cpu": False,
-        "no_tools": True,
+        "no_tools": not client_tools,
+        "client_tools": client_tools,
+        "client_tool_choice": client_tool_choice,
         "openai_lane": True,
         "mode": mode,
         "skip_ensure_llama": True,
