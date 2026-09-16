@@ -24,7 +24,7 @@ from server.config import (
     OPENAI_API_KEY,
 )
 from server.features.state import M
-from server.features.orchestration import _enqueue_ranked
+from server.features.orchestration import _enqueue_ranked, _toolcall_summary
 from server.features.openai_adapter import (
     stream_tool_calls,
     format_tool_calls_for_response,
@@ -494,7 +494,7 @@ def handle_chat_completions(handler):
                         tool_calls = msg.get("tool_calls")
                         break
 
-    print(f"[openai_api] Task {task_id} response_len={len(response_text)}, tool_calls={len(tool_calls) if tool_calls else 0}")
+    print(f"[openai_api] Task {task_id} response_len={len(response_text)}, tool_calls={len(tool_calls) if tool_calls else 0}" + (f": {_toolcall_summary(tool_calls)}" if tool_calls else ""))
 
     if not stream:
         message = {"role": "assistant"}

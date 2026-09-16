@@ -1,6 +1,7 @@
 """The event loop, task queue and task-state helpers that drive a chat request."""
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -666,7 +667,10 @@ def _event_loop():
                         tt.setdefault("_search_details", [])
                 pending = len(msg["tool_calls"])
                 is_openai = t.get("openai_lane")
-                print(f"[llm_ok] Round {round_num}: LLM requested {pending} tool(s) for task {task_id}" + (" (OpenAI lane: client will execute)" if is_openai else ""))  # DEBUG
+                summary, repeats = _track_tool_repeat(task_id, msg["tool_calls"])
+                print(f"[llm_ok] Round {round_num}: LLM requested {pending} tool(s) for task {task_id}: {summary}" + (" (OpenAI lane: client will execute)" if is_openai else ""))  # DEBUG
+                if repeats >= TOOL_LOOP_WATCH_THRESHOLD:
+                    print(f"[loop-watch] task {task_id}: identical tool call {repeats}x in a row: {summary}")
                 with M._data_lock:
                     tt = M.tasks.get(task_id)
                     if tt:
@@ -1088,6 +1092,75 @@ def _maybe_park_research(task_id, sid, round_num):
         tt["message"] = "Paused — a higher-priority chat is running, will resume automatically."
     print(f"[preempt] parked research task {task_id} at round {round_num} for higher-priority waiter")
     return True
+
+
+# Rounds of consecutive identical client tool calls after which a
+# [loop-watch] line is logged (logging only — never steers or blocks).
+TOOL_LOOP_WATCH_THRESHOLD = 3
+
+
+def _toolcall_summary(tool_calls, arg_preview_chars=120):
+    """Compact one-line summary of structured tool calls for logs.
+
+    Renders ``name(arg-preview)`` per call, e.g.
+    ``web_search({"q": "gemma 26b uncen…"})``. Defensive: bare/missing
+    ``function`` dicts (seen in the wild) render as ``?`` instead of
+    raising. Argument previews are truncated so query text can't flood
+    the log.
+    """
+    parts = []
+    for tc in tool_calls or []:
+        fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
+        name = fn.get("name") or "?"
+        args = fn.get("arguments", "")
+        if not isinstance(args, str):
+            try:
+                args = json.dumps(args, sort_keys=True)
+            except (TypeError, ValueError):
+                args = repr(args)
+        args = " ".join(args.split())
+        if len(args) > arg_preview_chars:
+            args = args[:arg_preview_chars] + "…"
+        parts.append(f"{name}({args})")
+    return ", ".join(parts) or "?"
+
+
+def _toolcall_signature(tool_calls):
+    """Stable signature of a round's tool calls for repeat detection."""
+    norm = []
+    for tc in tool_calls or []:
+        fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
+        args = fn.get("arguments", "")
+        if not isinstance(args, str):
+            try:
+                args = json.dumps(args, sort_keys=True)
+            except (TypeError, ValueError):
+                args = repr(args)
+        norm.append((fn.get("name") or "?", args))
+    raw = json.dumps(norm, sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _track_tool_repeat(task_id, tool_calls):
+    """Update the consecutive-repeat counter for a round's tool calls.
+
+    Returns ``(summary, repeats)`` where ``repeats`` is how many rounds in
+    a row produced the identical signature. Callers log ``[loop-watch]``
+    when ``repeats`` hits ``TOOL_LOOP_WATCH_THRESHOLD``.
+    """
+    summary = _toolcall_summary(tool_calls)
+    sig = _toolcall_signature(tool_calls)
+    with M._data_lock:
+        tt = M.tasks.get(task_id)
+        if tt is None:
+            return summary, 1
+        if tt.get("_last_tool_sig") == sig:
+            repeats = int(tt.get("_tool_repeat_count") or 1) + 1
+        else:
+            repeats = 1
+        tt["_last_tool_sig"] = sig
+        tt["_tool_repeat_count"] = repeats
+    return summary, repeats
 
 
 def _queue_worker(mode):
