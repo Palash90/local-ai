@@ -14,6 +14,7 @@ import requests
 from server.features.state import M
 from server.features.users import _safe_username
 from server.features.monitoring import evict_cpu_model_for_image
+from server.features.monitoring import _free_ram_mb
 
 # LLM-selectable framing presets for generate_image. All values are divisible
 # by 8 (latent-safe for EmptySD3LatentImage) and stay near the ~2 MP budget of
@@ -204,6 +205,10 @@ def generate_image(
     except Exception:
         pass
     print(f"[image] Calling unload_llama_model(gpu), current status: {M.server_status('gpu')}")
+    # Snapshot residency for the post-render reload gate below: only lanes
+    # that were actually serving get reloaded (an idle-unloaded guardrail
+    # must not be pointlessly loaded into RAM after every render).
+    gpu_was_loaded, guard_was_loaded = _lanes_loaded_for_reload()
     gpu_ok = M.unload_llama_model("gpu")
     print(f"[image] gpu unload returned: {gpu_ok}, status now: {M.server_status('gpu')}")
     print(f"[image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
@@ -440,12 +445,19 @@ def generate_image(
         with M._data_lock:
             M._image_active = False
         # Return the render RAM ComfyUI retains (~8 GB with --lowvram):
-        # kill + reboot it before loading llama models so render RAM cannot
-        # overlap their allocations.
-        M.recycle_comfyui(wait=True)
+        # recycle only when RAM is tight so back-to-back renders reuse warm
+        # models instead of cold-booting (~30-60s saved per render); the
+        # evacuation monitor remains the backstop.
+        _recycle_after_render("generate_image")
         M.set_status(task_id, "Loading chat model...")
-        M.load_llama_model("gpu")
-        M.load_llama_model("guardrail")
+        if gpu_was_loaded:
+            M.load_llama_model("gpu")
+        else:
+            print("[image] GPU lane was idle before render — leaving unloaded", flush=True)
+        if guard_was_loaded:
+            M.load_llama_model("guardrail")
+        else:
+            print("[image] Guardrail lane was idle before render — leaving unloaded", flush=True)
     return result
 
 
@@ -526,6 +538,9 @@ def edit_image(
     # The CPU server (self-chat agents) is held until the render finishes and
     # its model is evicted below (RAM, not VRAM — both can't fit at once).
     print(f"[edit_image] Calling unload_llama_model(gpu), current status: {M.server_status('gpu')}")
+    # Snapshot residency for the post-render reload gate below (same pattern
+    # as generate_image): only lanes that were serving get reloaded.
+    gpu_was_loaded, guard_was_loaded = _lanes_loaded_for_reload()
     gpu_ok = M.unload_llama_model("gpu")
     print(f"[edit_image] gpu unload returned: {gpu_ok}, status now: {M.server_status('gpu')}")
     print(f"[edit_image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
@@ -851,10 +866,16 @@ def edit_image(
         with M._data_lock:
             M._image_active = False
         # Same post-render recycle as generate_image (see the comment there).
-        M.recycle_comfyui(wait=True)
+        _recycle_after_render("edit_image")
         M.set_status(task_id, "Loading chat model...")
-        M.load_llama_model("gpu")
-        M.load_llama_model("guardrail")
+        if gpu_was_loaded:
+            M.load_llama_model("gpu")
+        else:
+            print("[edit_image] GPU lane was idle before render — leaving unloaded", flush=True)
+        if guard_was_loaded:
+            M.load_llama_model("guardrail")
+        else:
+            print("[edit_image] Guardrail lane was idle before render — leaving unloaded", flush=True)
 
     return result
 
@@ -992,6 +1013,47 @@ def _thermal_pace_after_render(tool_name):
         return max(5.0, M.pace_delay(M.get_platform_temp()))
     except Exception:
         return 5.0
+
+
+def _lanes_loaded_for_reload():
+    """Snapshot which VRAM lanes are resident (post-render reload gating).
+
+    Called right before the pre-render unloads. Fail-safe defaults to True
+    (reload): a needless load costs seconds, a skipped one breaks the next
+    chat round. A concurrent idle-unload racing us only causes a redundant
+    load — the idle loop re-unloads later.
+    """
+    try:
+        gpu_was = M.server_status("gpu") == "chat_loaded"
+    except Exception:
+        gpu_was = True
+    try:
+        guard_was = M.server_status("guardrail") == "chat_loaded"
+    except Exception:
+        guard_was = True
+    return gpu_was, guard_was
+
+
+def _recycle_after_render(tool_name):
+    """Recycle ComfyUI after a render only when RAM is tight.
+
+    The recycle exists to return the ~8 GB a render pins in RAM — but when
+    headroom is ample it just forces the *next* render to cold-boot and
+    re-stage ~19 GB of models (~30-60s). Same headroom constant as the
+    pre-render CPU eviction; RAM evacuation remains the backstop either way.
+    Honors COMFYUI_RECYCLE_AFTER_RENDER=0 via recycle_comfyui itself.
+    """
+    try:
+        avail = _free_ram_mb()
+        headroom = M.IMAGE_RENDER_RAM_HEADROOM_MB
+    except Exception:
+        avail, headroom = None, None
+    if avail is not None and headroom is not None and avail >= headroom:
+        print(f"[image] Skipping ComfyUI recycle after {tool_name} — "
+              f"{avail} MB free (>= {headroom} MB headroom); next render "
+              f"reuses warm models", flush=True)
+        return
+    M.recycle_comfyui(wait=True)
 
 
 def _image_worker():

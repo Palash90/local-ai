@@ -925,18 +925,23 @@ def _is_simple_round(messages, task=None):
 def _route_sampling(mode, messages):
     """Classify the latest user message and return sampling overrides.
 
-    One tiny greedy call against the same llama-server that will serve the
-    real request. Returns {} (= server defaults) on any failure — the router
-    can never block generation.
+    One small classifier call against the CPU lane (fast E4B-class model),
+    deliberately NOT the task's own lane: routing is low-stakes text and must
+    never cost a full flagship round-trip (the 256-token probe needed for
+    thinking models runs ~10x faster here than on the GPU MoE). The returned
+    overrides apply to the task's real lane unchanged. Returns {} (=
+    server defaults) on any failure — including a cold/unloaded CPU lane,
+    which fails fast on connection-refused — so the router can never block
+    generation.
     """
     text = _last_user_text(messages)
     if not text.strip():
         return {}
     try:
         r = requests.post(
-            M.server_url(mode),
+            M.server_url("cpu"),
             json={
-                "model": M.server_model_id(mode),
+                "model": M.server_model_id("cpu"),
                 "messages": [
                     {"role": "system", "content": M.SAMPLING_ROUTER_PROMPT},
                     {"role": "user", "content": text[:4000]},
@@ -956,7 +961,7 @@ def _route_sampling(mode, messages):
         return {}
     for bucket, params in M.SAMPLING_BUCKETS.items():
         if bucket in label:
-            print(f"[sampling-router] {mode}: '{label.strip()}' → {bucket} {params}")
+            print(f"[sampling-router] {mode} (via cpu): '{label.strip()}' → {bucket} {params}")
             return dict(params)
     print(f"[sampling-router] unrecognised label '{label}'; using server defaults")
     return {}
