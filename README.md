@@ -63,11 +63,11 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 | 3002 | markdown hosting (stories) | `restart_services.sh` (uvicorn) | FastAPI app, role-gated collections |
 | 8000 | MCP gateway | in-process thread of chat-webui | FastMCP + OAuth; `MCP_USER` token auth (plus an outbound `start_mcp_client` thread for external MCP servers) |
 | 8079 | llama-server (CPU) | lazy / `restart_servers` | self-chat agents, 32K ctx, RAM-backed |
-| 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI, 24K ctx, VRAM-backed |
+| 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI, 32K ctx (`GPU_CTX_SIZE_26B`, MoE profile below), VRAM-backed |
 | 8083 | llama-server (guardrail) | lazy by MCP gateway / judge | small verify model, idle-unloads after 300s |
 | 8084 | llama-server (embed) | lazy by chat-webui / `restart_servers` | serves `/embedding` (nomic); vector layer of `page_cache` |
 | 8080 | SearXNG | docker / systemd | web search backend; `setup.sh` binds `127.0.0.1:8080`, `docker-compose.yaml` binds `8080:8080` (all interfaces) — bind to localhost if you don't need LAN-wide search |
-| 8188 | ComfyUI | lazy on image request | image generation; recycled after every render to return its RAM (`COMFYUI_RECYCLE_AFTER_RENDER=0` to disable) |
+| 8188 | ComfyUI | lazy on image request | image generation; recycled after renders only when RAM is below headroom (else reused warm; `COMFYUI_RECYCLE_AFTER_RENDER=0` to disable) |
 | 9000 | code host | `restart_services.sh` | `code_host.py` (lives outside this repo) |
 | 9010 | Authentik proxy outpost | docker | nginx `auth_request` upstream |
 
@@ -128,13 +128,16 @@ embed server starts on its own eager thread) and starts ComfyUI on demand. If yo
 prefer to run the services manually:
 
 ```bash
-# GPU llama-server — interactive chat UI users (VRAM-backed, 24K context)
+# GPU llama-server — interactive chat UI users (VRAM-backed, 32K MoE context;
+# canonical flags live in server/config.py LLAMA_SERVER_ARGS, this block tracks it)
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 127.0.0.1 --port 8081 \
     --models-dir ~/local-ai-files/my-models/ \
-    --jinja -ngl 99 -fa on --ctx-size 24576 \
-    -ctk q8_0 -ctv q8_0 --no-mmproj-offload \
-    -t 8 -tb 8 -ub 512 --timeout 3600 \
+    --jinja -ngl 35 --n-cpu-moe 28 -fa on --ctx-size 32768 \
+    -ctk q4_0 -ctv q4_0 --no-mmproj-offload --ctx-checkpoints 1 \
+    -t 8 -tb 8 -b 2048 -ub 512 --timeout 3600 \
+    --reasoning-budget 2048 \
+    --reasoning-budget-message "Reasoning limit reached, summarize final answer." \
     --cache-reuse 256 --slot-save-path ~/local-ai-files/kv-slots \
     --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0.05
 

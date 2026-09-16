@@ -362,7 +362,7 @@ regenerated once ComfyUI finishes (see HARDENING.md §4).
 graph TD
     E1["_event_loop (single dispatcher)"] --> EvDispatch{"event type?"}
     EvDispatch -- "start" --> EvStart["store task metadata"] --> Resumed{"_resumed?\n(RAM-evacuation restart)"}
-    Resumed -- "no (fresh task)" --> Prep["prepare_session (features/sessions.py):\n1. mode = task_mode(task)\n2. ensure + load lane's server\n3. inject sys prompt + date + location\n4. inject user context\n5. append user msg, auto-name session"] --> Router["sampling router (llm.py):\ntiny greedy classify call →\ncreative/code/factual/chat →\nper-request temperature/top_k/top_p"]
+    Resumed -- "no (fresh task)" --> Prep["prepare_session (features/sessions.py):\n1. mode = task_mode(task)\n2. ensure + load lane's server\n3. inject sys prompt + date + location\n4. inject user context\n5. append user msg, auto-name session"] --> Router["sampling router (llm.py):\n256-token classify call on the CPU lane\n(not the task lane — routing must never\ncost a flagship round-trip) →\ncreative/code/factual/chat →\nper-request temperature/top_k/top_p"]
     Router --> Round0["start_llm_round(0)"]
     Resumed -- "yes (resume)" --> Round0
 
@@ -569,6 +569,12 @@ playable WAV), plus a non-LLM `make music` chat shortcut
 
 ### 12. Resource Management (features/monitoring.py)
 
+Three independent governors share the box (see HARDENING.md triad table):
+RAM evacuation (userspace), firmware thermal protection (package temp), and
+platform power-state management (AC vs battery). Only the first announces
+itself in logs; the other two are diagnosable via `nvidia-smi -q -d POWER`,
+clocks, `acpitz`, and fan RPM.
+
 ```mermaid
 graph TD
     TM["_thermal_monitor (10s)"] --> Temp["nvidia-smi temp"]
@@ -579,11 +585,14 @@ graph TD
     Run -- Yes --> LetFinish["let task finish"]
     Hot -- No --> Cool{"was hot and ≤ 75 C?"}
     Cool -- Yes --> Clear["_overheated = False"]
+    TM --> PT["platform temp (acpitz)"]
+    PT --> Pace["pace_delay(temp): 1s floor +\n(temp-80)×2s, cap ~20s"]
+    Pace --> PQ["shared queue worker sleeps\nbefore pickup (guardrail exempt);\nimage worker: max(5s, paced)"]
     TM --> RAM{"RAM ≥ 95%?"}
     RAM -- Yes --> Evac["_evacuate_ram:\nrequeue in-flight to lane fronts\n(status requeued — non-terminal, UI keeps polling —\nentry flagged _resumed so the restart skips\nprepare_session and never re-appends the user msg),\nkill llama-servers + ComfyUI,\nwait ≤ 70%, restart_servers()"]
     IDLE["_idle_unload_loop (10s)"] --> ICheck{"per lane: loaded, idle > timeout\n(cpu: CPU_IDLE_UNLOAD_SECONDS),\nqueue/current task empty,\nnot streaming? (global counter)"}
     ICheck -- Yes --> ISave["save KV slot → unload lane"]
-    IMG["images.py: unload gpu+guardrail (VRAM),\nevict cpu model (RAM, immediate — a killed round\nrequeues), reload + KV restore"] --> REC["recycle_comfyui (background thread):\nkill + reboot ComfyUI — --lowvram\nweights never return RAM otherwise\n(~8 GB held idle → evacuation trigger);\nCOMFYUI_RECYCLE_AFTER_RENDER=0 disables"]
+    IMG["images.py: unload gpu+guardrail (VRAM),\nevict cpu model (RAM, immediate — a killed round\nrequeues), reload ONLY lanes resident\nbefore render + KV restore"] --> REC["conditional ComfyUI recycle:\nskip reboot when free RAM ≥ headroom\n(back-to-back renders reuse warm models);\nrecycle when tight; COMFYUI_RECYCLE_AFTER_RENDER=0\ndisables entirely"]
     CM["connection_manager\n(systemd service,\nscripts/connection-manager.service)"] --> DNS["GoDaddy DDNS AAAA update\n(when public IPv6 changes)"]
     CM --> HB["heartbeat POST to GCP VM\nover WireGuard (10s)"]
 ```

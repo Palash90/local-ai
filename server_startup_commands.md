@@ -85,8 +85,9 @@ python comfy_main.py --lowvram --input-directory ~/local-ai-files/ComfyUI/input 
 ### Llama Server
 
 > **Stale draft** — flags below are an old example. Source of truth is
-> `server/config.py` (`LLAMA_*_ARGS`): GPU `-ngl 99 -fa on`, 24576 ctx,
-> reasoning budget 1024, `--slot-save-path ~/local-ai-files/kv-slots`;
+> `server/config.py` (`LLAMA_*_ARGS`): GPU `-ngl 35 --n-cpu-moe 28 -fa on`,
+> 32768 ctx (`GPU_CTX_SIZE_26B`), q4_0 KV, reasoning budget 2048,
+> `--slot-save-path ~/local-ai-files/kv-slots`;
 > CPU `--ctx-size 32768` (`CPU_CTX_SIZE`); guardrail ctx 16384. All servers
 > bind `127.0.0.1` (`CHAT_HOST`), not `0.0.0.0`. CPU (:8079), guardrail
 > (:8083) and embed (:8084) lanes are covered by `restart_services.sh` /

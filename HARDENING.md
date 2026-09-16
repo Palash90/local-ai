@@ -87,7 +87,7 @@ sequenceDiagram
     GH->>U: ComfyUI workflow (poll 120s)
     U-->>GH: render complete (VRAM freed)
     GH->>GH: _image_active = False
-    GH->>Q: lanes resume; gpu/guardrail reload + KV restore<br/>(~5s cooldown); ComfyUI recycled in background
+    GH->>Q: lanes resume; reload ONLY lanes resident before render + KV restore<br/>(~5s cooldown, thermal-paced); ComfyUI recycled in background only when RAM tight
 ```
 
 Every layer of this is about **not silently losing a live round**:
@@ -178,7 +178,27 @@ completion rather than being recycled mid-answer.
 | `SELF_CHAT_MODE` | `.env` | `cpu` | Lane for self-chat agents (research defaults here) |
 | `RAM_EVAC_THRESHOLD` / `RAM_RESUME_THRESHOLD` | config | 95 % / 70 % | Whole-box evacuation hysteresis |
 | `TEMP_THRESHOLD_ON` / `TEMP_THRESHOLD_OFF` | config | 90 °C / 75 °C | Thermal hysteresis (GPU lane pause) |
-| `COMFYUI_RECYCLE_AFTER_RENDER` | `.env` | enabled | Recycle ComfyUI process after each render to return RAM |
+| `COMFYUI_RECYCLE_AFTER_RENDER` | `.env` | enabled | Recycle ComfyUI after renders with < headroom free RAM (skipped when ample — back-to-back renders reuse warm models) |
 | `FORCE_GPU_LANE` | config | test flag | Pin all traffic to the GPU lane |
 | `MAX_QUEUE_SIZE` | state | 15 | Per-lane queue cap (503 beyond) |
 | `TASK_STUCK_TIMEOUT` | — | **removed** | History only — see §5 |
+| `THERMAL_PACE_START_C` / `THERMAL_PACE_SCALE` / `THERMAL_PACE_MAX_S` | `.env` | `80` / `2.0` / `20.0` | Duty-cycle pacing: 1s floor + scaled sleep between queue pickups (guardrail exempt); image worker uses `max(5s, paced)` |
+
+## 8. The three governors (2026-09-16)
+
+One symptom (slow tokens) has three independent causes on this box. They share
+no code, no sensor, and no log line — diagnose in this order:
+
+| # | Governor | Sensor | Actuator | Signature |
+|---|---|---|---|---|
+| 1 | RAM evacuation (this codebase) | `free` vs 95% threshold, 10s polls | kill-all + requeue + resume | `[ram]` logs, `requeued` task state |
+| 2 | Firmware thermal protection | `acpitz` package temp (~96 °C trip) | dGPU power squeeze (35W → 10W), 210MHz clocks | silent; only `nvidia-smi -q -d POWER`, clocks, and tg collapse (~7x) show it |
+| 3 | Platform power-state mgmt | AC vs battery (+ EC latch across replug) | battery-mode caps (fans, clocks, dGPU budget) | stuck low power limit while cool; silent fans; `powerprofilesctl` |
+
+Notes from the incident that mapped this (26B MoE sustained load, two
+unplug/replug cycles): the GPU die read 68–87 °C while the package sat at
+96 °C — watch `acpitz`, not GPU temp. Unplug-latch and heat compound
+(~2x each alone, ~7x together; clocks ÷7.3 ≈ throughput ÷7.2). Thermal pacing
+(§7 table) bounds sustained load; it does not replace any governor above.
+Rules: heavy tasks on AC uninterrupted; 5s power-limit check after every
+replug; cool below 80 °C platform before benchmarking anything.

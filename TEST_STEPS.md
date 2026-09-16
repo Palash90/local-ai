@@ -442,7 +442,8 @@ With a browser (or headed test) authenticated via SSO:
 **J4. Image VRAM choreography (gate + serialization)**
 - Fire 2 concurrent `generate_image` chats → `_image_queue` serializes them (one `image_active` at a time); during the render a normal chat request must NOT reload the GPU model into VRAM (`_image_active` gate) — assert no cudaMalloc OOM in logs
 - Judge calls during the render hold (`[judge] image render active`) and fire after ComfyUI finishes — a judge model load must never overlap a render (RAM-evacuation guard, see §I2)
-- **Post-render ComfyUI recycle**: after each render logs show `[comfyui] Recycling process to return render RAM` → old process killed → fresh boot (`[comfyui] Recycle complete`); ComfyUI RSS drops from multi-GB to base (~300 MB) — assert `free -m` no longer drifts upward across renders and no `[ram]` evacuation follows a render. Next render re-loads the model from disk (slower start, expected). `COMFYUI_RECYCLE_AFTER_RENDER=0` disables
+- **Post-render ComfyUI recycle (conditional)**: with ample free RAM (≥ `IMAGE_RENDER_RAM_HEADROOM_MB`) logs show `[image] Skipping ComfyUI recycle after … — NNNN MB free` and the next render reuses warm models (fast start); under pressure the classic `[comfyui] Recycling process…` path runs instead — assert both branches across a high-RAM and a pressured render. `COMFYUI_RECYCLE_AFTER_RENDER=0` disables entirely
+- After render: ComfyUI VRAM freed, **only pre-render-resident lanes reloaded** (assert `[image] … was idle before render — leaving unloaded` when guardrail/CPU idled; KV restored for reloaded lanes), ~5s cooldown observed (thermal-paced when hot, see J7)
 - After render: ComfyUI VRAM freed, GPU model reloaded, KV restored, ~5s cooldown observed
 
 **J5. CPU idle-unload, verified (Phase 0)**
@@ -464,6 +465,12 @@ With a browser (or headed test) authenticated via SSO:
 
 **J8. Lane independence during long CPU research**
 - Keep a CPU research task busy while a UI (GPU) user chats: UI first token latency must look like a GPU-lane hot/cold load (no CPU-lane queuing); UI model still unloads at its own 300s idle even if the CPU round is mid-stream (KNOWN global-stream-gate caveat — see HARDENING.md §6)
+
+**J9. Thermal pacing (duty-cycle control)**
+- Unit level: `pytest server/features/tests/test_thermal_pace.py` — boundary table (None/cool → 1s floor; 84 °C → 9s; ≥95 °C → 20s cap) + sensor-absent/garbage paths
+- Live, no heat needed: set `THERMAL_PACE_START_C=50` in `.env` + restart → any chat shows `[thermal] pacing Ns before {gpu,cpu} round` in `logs/chat-webui.log`; unset + restart → pacing lines stop (1s floor is silent by design)
+- Guardrail exemption: judge calls during the lowered-threshold window show no pacing delay
+- Image floors: post-render logs show the 5s floor extended only when hot (`max(5, paced)`); cool renders keep exactly 5s
 
 ---
 
