@@ -574,6 +574,9 @@ def _event_loop():
             audio_b64 = data.get("audio")
             user = data.get("user", "")
             client_ts = data.get("client_timestamp")
+            # Preemption resume: a parked research task carries its next
+            # round here (read before the dict rewrite below drops it).
+            parked_round = t.get("_parked_round")
             with M._data_lock:
                 M.tasks[task_id] = {
                     "status": "working",
@@ -609,7 +612,19 @@ def _event_loop():
                 M._prepare_session(task_id, sid, user_message, image_b64, audio_b64, client_ts)
                 M._render_make_music(task_id, sid, user_message, user)
                 continue
-            if data.get("_resumed"):
+            if parked_round is not None:
+                # Preemption resume: the session already holds the user
+                # message plus every round so far — skip _prepare_session
+                # (same rationale as _resumed below) and continue from the
+                # parked round instead of restarting at 0. Takes precedence
+                # over _resumed: a RAM evacuation mid-park must not reset
+                # research progress.
+                with M._data_lock:
+                    tt = M.tasks.get(task_id)
+                    if tt:
+                        tt["_round"] = parked_round
+                M._start_llm_round(task_id, sid, parked_round)
+            elif data.get("_resumed"):
                 # RAM-evacuation resume: _prepare_session already ran on the
                 # first attempt — the user message and everything the model
                 # produced since (tool trail, steering turns) are in the
@@ -961,7 +976,8 @@ def _event_loop():
                     if tt:
                         tt["_round"] = round_num
                 if round_num < M._task_max_rounds(task_id):
-                    M._start_llm_round(task_id, sid, round_num)
+                    if not _maybe_park_research(task_id, sid, round_num):
+                        M._start_llm_round(task_id, sid, round_num)
                 else:
                     M._set_task_error(task_id, "Max tool rounds exceeded", sid)
 
@@ -993,7 +1009,8 @@ def _event_loop():
                     if tt:
                         tt["_round"] = round_num
                 if round_num < M._task_max_rounds(task_id):
-                    M._start_llm_round(task_id, data["sid"], round_num)
+                    if not _maybe_park_research(task_id, data["sid"], round_num):
+                        M._start_llm_round(task_id, data["sid"], round_num)
                 else:
                     M._set_task_error(task_id, "Max tool rounds exceeded", data["sid"])
 
@@ -1033,6 +1050,44 @@ def _enqueue_ranked(queue, entry):
             break
         pos = i
     queue.insert(pos, entry)
+
+
+# Queue-head ranks allowed to preempt in-flight research between rounds:
+# interactive UI chats and the OpenAI lane. MCP and kaya/kolpo wait for
+# research to finish.
+PREEMPT_RANKS = (LANE_RANK_UI, LANE_RANK_OPENAI)
+
+
+def _higher_priority_waiting():
+    """True when the GPU queue head outranks in-flight research (UI/OpenAI)."""
+    with M._queue_locks["gpu"]:
+        q = M._task_queues["gpu"]
+        if not q:
+            return False
+        return _lane_rank(q[0]) in PREEMPT_RANKS
+
+
+def _maybe_park_research(task_id, sid, round_num):
+    """Park an in-flight research task between rounds if a UI/OpenAI chat is
+    queued. Returns True when parked (caller must NOT chain the next round);
+    the lane worker requeues the task and it auto-resumes later from
+    ``_parked_round``. Non-research tasks are never parked."""
+    with M._data_lock:
+        t = M.tasks.get(task_id, {})
+        if not t.get("research"):
+            return False
+    if not _higher_priority_waiting():
+        return False
+    with M._data_lock:
+        tt = M.tasks.get(task_id)
+        if not tt or tt.get("status") in ("done", "error", "cancelled", "requeued"):
+            return False
+        tt["status"] = "parked"
+        tt["_parked_round"] = round_num
+        tt["_parked_sid"] = sid
+        tt["message"] = "Paused — a higher-priority chat is running, will resume automatically."
+    print(f"[preempt] parked research task {task_id} at round {round_num} for higher-priority waiter")
+    return True
 
 
 def _queue_worker(mode):
@@ -1134,10 +1189,20 @@ def _queue_worker(mode):
         # LANE. The other lane's worker keeps running independently the whole
         # time. ("requeued" is set only by _evacuate_ram on the CURRENT task,
         # never at enqueue time, so it cannot race with a fresh "queued".)
+        # A "parked" research task yielded between rounds for a
+        # higher-priority waiter: put it back in line (ranked — behind
+        # UI/OpenAI waiters, ahead of MCP) and pick up the head instead.
         while True:
             with M._data_lock:
                 st = M.tasks.get(item["task_id"], {}).get("status")
             if st in ("done", "error", "cancelled", "requeued"):
+                break
+            if st == "parked":
+                with queue_lock:
+                    _enqueue_ranked(task_queue, item)
+                    M._current_task_ids[mode] = None
+                print(f"[preempt] requeued parked task {item['task_id']}; picking up higher-priority waiter")
+                item = None
                 break
             time.sleep(0.5)
         with queue_lock:
