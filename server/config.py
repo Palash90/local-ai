@@ -56,6 +56,26 @@ SHARE_BASE_URL = os.environ.get("SHARE_BASE_URL", "").strip().rstrip("/")
 # environment variable (e.g. in .env).  Leave empty to disable the endpoints.
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
+# OpenAI-lane server tools (hybrid lane). The OpenAI-compatible endpoint can
+# offer local-ai's own search/fetch tools alongside client-supplied tools so
+# API clients (e.g. opencode) get UI-lane behavior: server-named calls are
+# executed in-lane, client-named calls are returned for the client to run.
+# Env default; a per-request `server_tools` field (true/false/"only")
+# overrides it.
+#   "auto"   — merge the subset below with client tools (default)
+#   "never"  — client tools only (legacy behavior)
+#   "always" — merge even when the client passes no tools at all
+OPENAI_SERVER_TOOLS = os.environ.get("OPENAI_SERVER_TOOLS", "auto").strip().lower()
+
+# Server tools allowed on the OpenAI lane: search + fetch only. Image/music
+# (VRAM eviction stalls API responses), location (blocks 60s headless) and
+# files/memory/tasks (local state) stay UI-lane-only.
+OPENAI_LANE_SERVER_TOOL_NAMES = {"web_search", "fetch_page", "tool_details"}
+
+# Max server-executed tool rounds per OpenAI-lane task before forcing a
+# text-only final round (ping-pong guard).
+OPENAI_LANE_MAX_SERVER_ROUNDS = int(os.environ.get("OPENAI_LANE_MAX_SERVER_ROUNDS", "3"))
+
 REASONING_BUDGET = int(os.environ.get("REASONING_BUDGET", "1024"))
 # The judge lane emits one short verdict per call, but judges are thinking
 # models: a 2048-token reasoning budget means a worst case of ~3 minutes of
@@ -349,6 +369,7 @@ LLAMA_SERVER_ARGS = [
     "--port", "8081",
     "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
     "--jinja",
+    "--chat-template-file", os.path.expanduser("~/local-ai-files/models/gemma4-26b/chat_template.jinja"),
 
     # GPU / VRAM & Performance (MoE squeeze).
     # -ngl 32 covers all 30 Gemma4-26B layers (full non-expert offload;

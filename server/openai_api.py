@@ -22,6 +22,7 @@ from server.config import (
     MODEL_ID,
     MODEL_ID_CPU,
     OPENAI_API_KEY,
+    OPENAI_SERVER_TOOLS,
 )
 from server.features.state import M
 from server.features.orchestration import _enqueue_ranked, _toolcall_summary
@@ -317,6 +318,29 @@ def handle_chat_completions(handler):
     if client_tools:
         print(f"[openai_api] Passing through {len(client_tools)} client tool(s), tool_choice={client_tool_choice}")
 
+    # ── Hybrid lane: server-executed tools ──────────────────────────
+    # Local-ai's own search/fetch tools ride along so API clients get
+    # UI-lane behavior. Default from OPENAI_SERVER_TOOLS env (auto);
+    # per-request `server_tools` overrides: false/never disables,
+    # true/always merges, "only" drops client tools entirely.
+    _st_raw = body.get("server_tools", None)
+    if _st_raw is None:
+        server_tool_mode = (OPENAI_SERVER_TOOLS or "auto").strip().lower()
+    elif _st_raw is True or (isinstance(_st_raw, str) and _st_raw.strip().lower() in ("always", "true", "1", "yes", "on")):
+        server_tool_mode = "always"
+    elif isinstance(_st_raw, str) and _st_raw.strip().lower() == "only":
+        server_tool_mode = "only"
+    else:
+        server_tool_mode = "never"
+    if server_tool_mode not in ("auto", "always", "only", "never"):
+        server_tool_mode = "auto"
+    server_tools_only = (server_tool_mode == "only")
+    if server_tools_only:
+        client_tools = []
+        client_tool_choice = "none"
+    if server_tool_mode in ("auto", "always", "only"):
+        print(f"[openai_api] server tools mode={server_tool_mode} (search+fetch will merge on wire)")
+
     # ── Build the user message for the pipeline ─────────────────────────
     # The last user message becomes the "new" message submitted to the queue.
     # All preceding messages are injected into the session as history so the
@@ -390,9 +414,10 @@ def handle_chat_completions(handler):
         "client_timestamp": None,
         "research": False,
         "cpu": False,
-        "no_tools": not client_tools,
+        "no_tools": not client_tools and server_tool_mode == "never",
         "client_tools": client_tools,
         "client_tool_choice": client_tool_choice,
+        "server_tool_mode": server_tool_mode,
         "openai_lane": True,
         "mode": mode,
         "skip_ensure_llama": True,
@@ -493,6 +518,18 @@ def handle_chat_completions(handler):
                     if msg.get("role") == "assistant" and msg.get("tool_calls"):
                         tool_calls = msg.get("tool_calls")
                         break
+    if tool_calls:
+        # Hybrid lane: server-executed calls (web_search/fetch_page/...)
+        # already ran in-lane — never hand them back for the client to
+        # re-execute. Filter to client-named calls only.
+        try:
+            from server.config import OPENAI_LANE_SERVER_TOOL_NAMES as _SRV_NAMES
+        except Exception:
+            _SRV_NAMES = {"web_search", "fetch_page", "tool_details"}
+        tool_calls = [tc for tc in tool_calls
+                      if ((tc.get("function") or {}).get("name") not in _SRV_NAMES)]
+        if not tool_calls:
+            tool_calls = None
 
     print(f"[openai_api] Task {task_id} response_len={len(response_text)}, tool_calls={len(tool_calls) if tool_calls else 0}" + (f": {_toolcall_summary(tool_calls)}" if tool_calls else ""))
 

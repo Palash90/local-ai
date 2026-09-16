@@ -1023,6 +1023,51 @@ def _append_turn_context(messages, task_id, user, tool_free):
     return list(messages) + [{"role": "system", "content": body}]
 
 
+def _openai_lane_wire_tools(client_tools, server_tools, server_tool_mode, tool_free):
+    """Build the `tools` array for the llama-server payload.
+
+    Chat lanes ignore this (server_tool_mode == "never"): legacy ternary.
+    OpenAI lane: merge the server search/fetch subset with client tools so
+    the model can call either channel. Server names win on collision
+    (client dupes dropped, logged by the caller partition).
+    """
+    if server_tool_mode == "never":
+        return client_tools if client_tools else ([] if tool_free else server_tools)
+    try:
+        from server.config import OPENAI_LANE_SERVER_TOOL_NAMES
+    except Exception:
+        OPENAI_LANE_SERVER_TOOL_NAMES = {"web_search", "fetch_page", "tool_details"}
+    subset = [t for t in (server_tools or [])
+              if isinstance(t, dict) and (t.get("function") or {}).get("name") in OPENAI_LANE_SERVER_TOOL_NAMES]
+    if server_tool_mode == "only":
+        return list(subset)
+    if server_tool_mode in ("always",) or not client_tools:
+        if tool_free and server_tool_mode == "auto" and not client_tools:
+            return []
+        merged = list(subset)
+        seen = { (t.get("function") or {}).get("name") for t in merged }
+        for t in (client_tools or []):
+            if (t.get("function") or {}).get("name") not in seen:
+                merged.append(t)
+        return merged
+    # auto + client tools present
+    merged = list(subset)
+    seen = { (t.get("function") or {}).get("name") for t in merged }
+    for t in (client_tools or []):
+        if (t.get("function") or {}).get("name") not in seen:
+            merged.append(t)
+    return merged
+
+
+def _openai_lane_tool_choice(client_tools, client_tool_choice, server_tool_mode, tool_free):
+    """Force `auto` whenever a merged tool array goes on the wire."""
+    if server_tool_mode == "never":
+        return client_tool_choice if client_tools else ("none" if tool_free else "auto")
+    if tool_free and server_tool_mode == "auto" and not client_tools:
+        return "none"
+    return "auto"
+
+
 def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
     print("Entered LLM ")
     phase_start = time.monotonic()
@@ -1046,11 +1091,14 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             task_no_tools = M.tasks.get(task_id, {}).get("no_tools", False)
             client_tools = list(M.tasks.get(task_id, {}).get("client_tools") or [])
             client_tool_choice = M.tasks.get(task_id, {}).get("client_tool_choice") or "none"
-        # Client-supplied tools (OpenAI lane) take precedence: the model gets
+            server_tool_mode = (M.tasks.get(task_id, {}).get("server_tool_mode") or "never").strip().lower()
+        # Hybrid OpenAI lane: server search/fetch tools ride alongside
+        # client tools (server-first execution in orchestration). On chat
+        # lanes server_tool_mode is unset -> "never" -> legacy behavior.
+        # Client-supplied tools take precedence: the model gets
         # a real structured tool channel, so it emits native tool_calls
-        # instead of leaking tool-call markup as text. Server tools are never
-        # mixed into API-lane requests.
-        tool_free = (task_user in M.TOOL_FREE_AGENTS or task_no_tools) and not client_tools
+        # instead of leaking tool-call markup as text.
+        tool_free = (task_user in M.TOOL_FREE_AGENTS or task_no_tools) and not client_tools and server_tool_mode == "never"
         messages = _append_turn_context(messages, task_id, task_user, tool_free)
         # The turn-context block (docs + directives) is appended AFTER the
         # history trim, so it never counted toward the budget — a 15 KB music
@@ -1114,8 +1162,10 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         payload = {
             "model": M.server_model_id(mode),
             "messages": messages,
-            "tools": client_tools if client_tools else ([] if tool_free else wire_tools),
-            "tool_choice": client_tool_choice if client_tools else ("none" if tool_free else "auto"),
+            "tools": _openai_lane_wire_tools(
+                client_tools, wire_tools, server_tool_mode, tool_free),
+            "tool_choice": _openai_lane_tool_choice(
+                client_tools, client_tool_choice, server_tool_mode, tool_free),
             "max_tokens": M.MAX_OUTPUT_TOKENS,
             "reasoning_budget_tokens": M.REASONING_BUDGET,
         }

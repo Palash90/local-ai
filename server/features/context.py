@@ -347,12 +347,38 @@ def _latest_read_image_url(messages):
     return None
 
 
+def _prune_consumed_steering(messages):
+    """Drop steering notes the model has already acted on.
+
+    Steering notes (``[SYSTEM NOTE ...]``, ``role=user``, ``_steering=True``)
+    guide the immediate retry round, but they persist in the stored session
+    forever. Left in context, later rounds misread them as user-typed prompt
+    injections and spend their reasoning analyzing the note instead of the
+    task. Keep only trailing (still-guiding) notes; drop any note followed
+    by a later non-steering message. Returns a new list — stored history is
+    untouched.
+    """
+    if not any(isinstance(m, dict) and m.get("_steering") for m in messages):
+        return messages
+    last_real = -1
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and not m.get("_steering"):
+            last_real = i
+    if last_real < 0:
+        return list(messages)
+    return [
+        m for i, m in enumerate(messages)
+        if not (isinstance(m, dict) and m.get("_steering") and i < last_real)
+    ]
+
+
 def prepare_context_for_llm(sid, messages, mode="gpu"):
     """Build the message list to send to the LLM. When the conversation nears the
     context limit, old messages are summarized into a compressed context block —
     but the stored session is left untouched, so no messages are deleted.
     Historical images are referenced by path (see ``read_image``) instead of
     being re-sent as base64 on every round."""
+    messages = _prune_consumed_steering(messages)
     messages = sanitize_content_for_llm(messages)
     messages = _reference_historical_images(messages)
     # Pensieve: when the conversation crosses the distillation watermark,

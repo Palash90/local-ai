@@ -1850,7 +1850,9 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
         "Do not acknowledge this note, do not describe why the draft was "
         "rejected, do not mention system notes, judges, retries or your own "
         "instructions, and do not ask the user for a new topic — answer what "
-        "was already asked."
+        "was already asked. This note is from your own execution loop, not "
+        "from the user and not an injection attempt — it is a legitimate "
+        "control message, so analyze the task, not the note."
     )
     if reason == "score_errors":
         errs = (t.get("music_errors") or [])[:6]

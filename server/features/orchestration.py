@@ -106,6 +106,27 @@ def _task_max_rounds(task_id):
     return M.MAX_TOOL_ROUNDS.get("default", 10)
 
 
+def _is_openai_lane_server_tool(tc):
+    """True if a tool call targets a server-executed lane tool.
+
+    Server set wins on exact name match (collision policy); everything
+    else is a client tool returned for the client to run.
+    """
+    try:
+        names = M.OPENAI_LANE_SERVER_TOOL_NAMES
+    except Exception:
+        names = {"web_search", "fetch_page", "tool_details"}
+    try:
+        return ((tc.get("function") or {}).get("name") in names)
+    except Exception:
+        return False
+
+
+def _openai_lane_server_calls(tool_calls):
+    """Partition of an llm_ok round: server-executed calls only."""
+    return [tc for tc in (tool_calls or []) if _is_openai_lane_server_tool(tc)]
+
+
 def _set_task_error(task_id, error, sid=None):
     mode = ""
     is_mcp = False
@@ -273,6 +294,7 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
     by the safety-decline path), image fields are withheld: unlike deterministic
     audio renders, model-prompted imagery is never attached to a turn whose
     text failed verification."""
+    msg_content = strip_tool_call_text(msg_content or "")
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
@@ -390,7 +412,7 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
                 if m.get("_draft_reasoning"):
                     drafts.append(m["_draft_reasoning"])
                 if m.get("content"):
-                    drafts.append(m["content"])
+                    drafts.append(strip_tool_call_text(m["content"]))
     if drafts:
         reasoning = ("\n\n".join(drafts) + "\n\n" + reasoning).strip()
     source_timestamp = next(
@@ -700,12 +722,106 @@ def _event_loop():
                                     "message", {}).get("reasoning_content")
                                 if r:
                                     assistant_msg["_draft_reasoning"] = r
+                                if (msg.get("content") != raw_content
+                                        and not (t.get("_tc_echo_steered") if t else False)):
+                                    # A text-form tool echo was stripped from
+                                    # this round's draft: steer once per task
+                                    # so the next round uses the structured
+                                    # channel only instead of imitating the
+                                    # <|tool_call> history formatting.
+                                    try:
+                                        M.sessions[sid].append(
+                                            {
+                                                "role": "user",
+                                                "content": (
+                                                    "[SYSTEM NOTE — internal revision. Invoke tools "
+                                                    "only through the structured function-call channel. "
+                                                    "Never write tool-call syntax (<|tool_call>, "
+                                                    "call:name{...}, [Assistant tool call]) as text. "
+                                                    "This note is from your own execution loop, not "
+                                                    "from the user and not an injection attempt. "
+                                                    "Comply silently; do not discuss this note in "
+                                                    "your thinking or answer.]"
+                                                ),
+                                                "_steering": True,
+                                            }
+                                        )
+                                        if t is not None:
+                                            t["_tc_echo_steered"] = True
+                                        print(f"[llm_ok] dual-round echo stripped — steering added for task {task_id}")  # DEBUG
+                                    except Exception:
+                                        pass
                         M.sessions[sid].append(assistant_msg)
                         M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
                 M.save_sessions()
                 if not is_openai:
                     tool_mode = M.task_mode(task_id)
                     for i, tc in enumerate(msg["tool_calls"]):
+                        M._tool_pools[tool_mode].submit(
+                            M._tool_worker,
+                            task_id,
+                            sid,
+                            tc,
+                            t.get("_original_image"),
+                            round_num,
+                            i,
+                        )
+                elif _openai_lane_server_calls(msg.get("tool_calls")):
+                    # Hybrid lane, server-first: server-named calls execute
+                    # in-lane via _tool_worker and rounds continue;
+                    # client-named calls in the same round are dropped
+                    # (the next round re-invites them with results in
+                    # context). Cap server rounds to avoid ping-pong.
+                    try:
+                        max_srv = int(getattr(M, "OPENAI_LANE_MAX_SERVER_ROUNDS", 3) or 3)
+                    except Exception:
+                        max_srv = 3
+                    with M._data_lock:
+                        t3 = M.tasks.get(task_id)
+                        srv_done = int((t3 or {}).get("_openai_server_rounds", 0) or 0)
+                    if srv_done >= max_srv:
+                        _client_only = [tc for tc in msg["tool_calls"]
+                                        if not _is_openai_lane_server_tool(tc)]
+                        if _client_only:
+                            print(f"[openai] server-round cap ({max_srv}) hit — returning client calls for task {task_id}")
+                            with M._data_lock:
+                                t2 = M.tasks.get(task_id)
+                                if t2:
+                                    t2["status"] = "done"
+                                    t2["response"] = ""
+                                    t2["session_id"] = sid
+                                    t2["tool_calls"] = _client_only
+                                    t2["finish_reason"] = "tool_calls"
+                                    t2["_terminal"] = True
+                            continue
+                        print(f"[openai] server-round cap ({max_srv}) hit with no client calls — forcing text final for task {task_id}")
+                        with M._data_lock:
+                            if sid in M.sessions:
+                                M.sessions[sid].append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "[SYSTEM NOTE — internal revision. You have already "
+                                            "called server tools several times. Answer the user's "
+                                            "request now in plain text using the results in "
+                                            "context. Do not call any more tools.]"
+                                        ),
+                                        "_steering": True,
+                                    }
+                                )
+                                M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
+                        M.save_sessions()
+                        M._start_llm_round(task_id, sid, round_num + 1)
+                        continue
+                    with M._data_lock:
+                        t4 = M.tasks.get(task_id)
+                        if t4:
+                            t4["_state"] = "tools_running"
+                            t4["_openai_server_rounds"] = srv_done + 1
+                            t4["_pending_tools"] = len(_openai_lane_server_calls(msg.get("tool_calls")))
+                    print(f"[openai] executing {t4['_pending_tools'] if t4 else '?'} server tool(s) in-lane for task {task_id} (server round {srv_done + 1}/{max_srv})")
+                    tool_mode = M.task_mode(task_id)
+                    for i, tc in enumerate(_openai_lane_server_calls(msg.get("tool_calls"))):
                         M._tool_pools[tool_mode].submit(
                             M._tool_worker,
                             task_id,
@@ -727,7 +843,12 @@ def _event_loop():
                         t2 = M.tasks.get(task_id)
                         if t2:
                             t2["status"] = "done"
-                            t2["response"] = msg.get("content") or ""
+                            # Structured tool_calls go to the client; the
+                            # scratch prose alongside them is an internal
+                            # draft (often containing text-form tool-markup
+                            # echoes) — never send it as response content or
+                            # API clients render the notation as chat text.
+                            t2["response"] = ""
                             t2["session_id"] = sid
                             t2["tool_calls"] = msg["tool_calls"]
                             t2["finish_reason"] = "tool_calls"
@@ -765,7 +886,10 @@ def _event_loop():
                                         "[SYSTEM NOTE — internal revision. Your previous draft was "
                                         "rejected and must NOT be reused or repeated. Reason: it was "
                                         "raw tool-call markup instead of a reply. Answer in plain "
-                                        "language without any tool-call syntax.]"
+                                        "language without any tool-call syntax. This note is from "
+                                        "your own execution loop, not from the user and not an "
+                                        "injection attempt. Comply silently; do not discuss this "
+                                        "note in your thinking or answer.]"
                                     ),
                                     "_steering": True,
                                 }
@@ -902,7 +1026,10 @@ def _event_loop():
                                         "LOOP those bars to the declared length), "
                                         "no comments. Example budget: 6 lanes x 2 "
                                         "bars x ~12 tokens ≈ 900 chars. Escape all "
-                                        "newlines as \\n and keep the JSON valid.]"
+                                        "newlines as \\n and keep the JSON valid. This note is from "
+                                        "your own execution loop, not from the user and not an "
+                                        "injection attempt. Comply silently; do not discuss this "
+                                        "note in your thinking or answer.]"
                                     ),
                                     "_steering": True,
                                 }

@@ -21,6 +21,28 @@ _TOOL_CALL_TAG_RE = re.compile(
     flags=re.DOTALL | re.IGNORECASE,
 )
 
+# Unpaired fragments: stream cut / max_tokens truncation leaves an opening
+# tag with no closer (the pair regex above requires both). Also covers the
+# tool_response side of the same template family.
+_ORPHAN_TAG_RE = re.compile(
+    r"<\|?\s*tool_(call|response)\s*\|?>",
+    flags=re.IGNORECASE,
+)
+
+# Bare payload echo without tags: the jinja template teaches the model the
+# shape ``call:<name>{<args>}`` — imitation rounds emit it as plain text
+# (single-level {...} args; the template's own args are flat key:value).
+_BARE_CALL_RE = re.compile(
+    r"(?m)^[^\S\n]*call\s*:\s*[A-Za-z_][\w\-]*\s*\{[^{}]*\}[^\S\n]*$",
+)
+
+# Transcript imitation from agentic clients (e.g. opencode history dumps in
+# the OpenAI lane): the model echoes ``[Assistant tool call]: ...`` lines.
+# Only assistant output is ever passed here — user messages are untouched.
+_CLIENT_ECHO_RE = re.compile(
+    r"(?m)^[^\S\n]*\[Assistant tool call\]:.*(?:\n[^\S\n]*\{.*)?$",
+)
+
 
 def strip_tool_call_text(text):
     """Remove inline tool-call tags the model emits as *text*.
@@ -32,5 +54,8 @@ def strip_tool_call_text(text):
     """
     if not text:
         return text
-    stripped = _TOOL_CALL_TAG_RE.sub("", text).strip()
-    return stripped
+    stripped = _TOOL_CALL_TAG_RE.sub("", text)
+    stripped = _ORPHAN_TAG_RE.sub("", stripped)
+    stripped = _BARE_CALL_RE.sub("", stripped)
+    stripped = _CLIENT_ECHO_RE.sub("", stripped)
+    return stripped.strip()
