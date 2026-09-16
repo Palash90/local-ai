@@ -998,23 +998,41 @@ def _event_loop():
                     M._set_task_error(task_id, "Max tool rounds exceeded", data["sid"])
 
 
-def _human_priority_active():
-    '''
-    # Removed the following check as self-agent bots will continue on CPU
-    # Not needed anymore
-    
-    with M._queue_locks["gpu"]:
-        if M._current_task_ids["gpu"] is not None or M._task_queues["gpu"]:
-            return True
-    now = time.time()
-    with M._tokens_lock:
-        for token, entry in M._active_tokens.items():
-            if token in M._agent_tokens or entry.get("user") in M._agent_users:
-                continue
-            if now - entry.get("last_seen", 0) <= M.ACTIVE_WINDOW_SECONDS:
-                return True
-    '''
-    return False
+# Lane priority for the shared GPU queue: interactive UI users first, then
+# the OpenAI lane, then the MCP lane. The CPU lane (kaya/kolpo self-chat)
+# is a separate worker and sits below all of these by construction.
+LANE_RANK_UI = 0
+LANE_RANK_OPENAI = 1
+LANE_RANK_MCP = 2
+
+
+def _lane_rank(item):
+    """Return the queue priority rank of a task-queue entry (lower runs first)."""
+    if not isinstance(item, dict):
+        return LANE_RANK_UI
+    if item.get("_mcp"):
+        return LANE_RANK_MCP
+    if item.get("openai_lane"):
+        return LANE_RANK_OPENAI
+    return LANE_RANK_UI
+
+
+def _enqueue_ranked(queue, entry):
+    """Insert ``entry`` into a task ``queue`` list behind the last queued
+    item of equal-or-higher priority.
+
+    Ordering is stable FIFO within a lane; a higher-priority arrival jumps
+    ahead of lower-priority waiters but never ahead of its own lane. Caller
+    must hold the lane's queue lock.
+    """
+    rank = _lane_rank(entry)
+    pos = len(queue)
+    for i in range(len(queue) - 1, -1, -1):
+        if _lane_rank(queue[i]) <= rank:
+            pos = i + 1
+            break
+        pos = i
+    queue.insert(pos, entry)
 
 
 def _queue_worker(mode):
@@ -1027,21 +1045,16 @@ def _queue_worker(mode):
     physical hardware if they both actually need the GPU (chat model load or
     image generation), which is arbitrated separately.
 
-    The CPU lane additionally yields to any human presence (see
-    ``_human_priority_active``) before starting its *next* task. An
-    already-running self-chat round is never interrupted — it runs on its own
-    hardware and was already established not to block the GPU lane — this
-    only holds the CPU lane from picking up new work while a human is around.
+    Within the shared GPU queue, tasks are ordered by lane priority (see
+    ``_lane_rank``): interactive UI users first, then the OpenAI lane, then
+    the MCP lane. Ordering is stable FIFO within a lane. The CPU lane
+    (kaya/kolpo self-chat agents) is a separate worker and is lowest by
+    construction.
     """
     queue_lock = M._queue_locks[mode]
     queue_cond = M._queue_conds[mode]
     task_queue = M._task_queues[mode]
     while True:
-        if mode in ("cpu", "guardrail"):
-            # If a human is currently active in the UI, hold off agent tasks
-            while _human_priority_active():
-                time.sleep(1.0)
-                
         item = None
         with queue_lock:
             while not task_queue:
@@ -1061,17 +1074,6 @@ def _queue_worker(mode):
                         M.tasks[tid] = {
                             "status": "waiting",
                             "message": f"Server paused — {label}. Will resume shortly.",
-                            "session_id": qitem["session_id"],
-                        }
-                queue_cond.wait(5)
-                continue
-            if mode in ("cpu", "guardrail") and M._human_priority_active():
-                for qitem in task_queue:
-                    tid = qitem["task_id"]
-                    if tid in M.tasks:
-                        M.tasks[tid] = {
-                            "status": "waiting",
-                            "message": "Yielding to an active user session...",
                             "session_id": qitem["session_id"],
                         }
                 queue_cond.wait(5)
@@ -1202,7 +1204,7 @@ def _mcp_db_worker():
         # bookkeeping for idle/RAM/thermal protection) rather than bypassing it.
         print(f"[mcp-db] queuing task {task_id} on {mode} lane", flush=True)
         with M._queue_locks[mode]:
-            M._task_queues[mode].append(entry)
+            _enqueue_ranked(M._task_queues[mode], entry)
             M._queue_conds[mode].notify_all()
         print(f"[mcp-db] waiting for task {task_id} to complete", flush=True)
         while True:

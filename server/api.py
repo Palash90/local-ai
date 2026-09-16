@@ -48,6 +48,7 @@ from server.config import (
 )
 from server.features.tasks_db import _MISSING
 from server.features.users import _safe_username
+from server.features.orchestration import _enqueue_ranked
 
 IMAGE_MIME = {
     ".png": "image/png",
@@ -1176,7 +1177,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         tasks.pop(task_id, None)
                     self.send_json({"error": "Server busy"}, status=503)
                     return
-                _task_queues[mode].append(entry)
+                _enqueue_ranked(_task_queues[mode], entry)
                 _queue_conds[mode].notify()
             # Return the task_id immediately so the UI can enqueue the pending
             # message and poll /api/status/{task_id} for live progress ("Waiting

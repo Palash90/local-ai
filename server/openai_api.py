@@ -24,6 +24,7 @@ from server.config import (
     OPENAI_API_KEY,
 )
 from server.features.state import M
+from server.features.orchestration import _enqueue_ranked
 from server.features.openai_adapter import (
     stream_tool_calls,
     format_tool_calls_for_response,
@@ -414,7 +415,7 @@ def handle_chat_completions(handler):
                 status=503,
             )
             return
-        M._task_queues[mode].append(entry)
+        _enqueue_ranked(M._task_queues[mode], entry)
         M._queue_conds[mode].notify()
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"

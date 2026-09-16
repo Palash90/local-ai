@@ -337,15 +337,8 @@ def consult_expert_model(prompt: str, mode: str = "cpu", **kwargs):
     """
     Executes a prompt against the expert/agent model pool.
     """
-    from server.features.state import _llm_pools, _human_priority_active
-    import time
+    from server.features.state import _llm_pools
 
-    # Pause CPU execution if a human user is active
-    if mode in ("cpu", "guardrail"):
-        while _human_priority_active():
-            time.sleep(1.0)
-
-    # Submit task to the designated LLM thread pool
     pool = _llm_pools.get(mode, _llm_pools["cpu"])
     
     # Add your model invocation / API request logic here
