@@ -75,6 +75,29 @@ def _guardrail_external():
         return False
 
 
+def judge_endpoint(default_model=""):
+    """Resolve (base_url, completions_url, model_id) for verdict traffic.
+
+    Remote (``GUARDRAIL_EXTERNAL``): the ``GUARD_LLM_BASE`` endpoint with the
+    ``GUARD_LLM_MODEL`` tag (falls back to ``default_model`` when the env tag
+    is unset — the remote will 404 an unknown id and the normal fail-open /
+    fail-closed policy applies). Local: ``(None, None, default_model)`` so
+    callers keep their legacy lane-based resolution untouched. Never raises.
+    """
+    try:
+        if not _guardrail_external():
+            return None, None, (default_model or "").strip()
+        try:
+            from server.config import GUARD_LLM_BASE
+        except ImportError:
+            GUARD_LLM_BASE = "http://localhost:8083"
+        base = str(GUARD_LLM_BASE or "").rstrip("/") or "http://localhost:8083"
+        model = os.environ.get("GUARD_LLM_MODEL", "").strip() or (default_model or "").strip()
+        return base, f"{base}/v1/chat/completions", model
+    except Exception:
+        return None, None, (default_model or "").strip()
+
+
 def _model_ids_listed(base_url):
     """Cached set of model ids the server at ``base_url`` advertises, or None
     when the endpoint couldn't be queried (caller should not guess)."""
@@ -374,11 +397,22 @@ def wait_until_render_safe(timeout=_RENDER_WAIT_TIMEOUT, cooldown=_RENDER_COOLDO
     the post-render VRAM settle before judge weights land in RAM. Returns
     True when the render window cleared, False on timeout (callers proceed
     anyway — same semantics as ``llm._wait_image_active_clear``).
+
+    Skipped entirely for external judges (``GUARDRAIL_EXTERNAL``): a remote
+    endpoint allocates no local RAM/VRAM, so holding its verdicts for a
+    local render is pure added latency.
     """
     try:
         from server.features.state import M
     except Exception:
         return True
+    try:
+        # getattr: test fakes and older entrypoints may lack the flag;
+        # fail-safe defaults to the local (holding) behavior.
+        if bool(getattr(M, "GUARDRAIL_EXTERNAL", False)):
+            return True
+    except Exception:
+        pass
     tag = f"[judge][{label}]" if label else "[judge]"
     deadline = time.time() + timeout
     waited = False

@@ -108,3 +108,67 @@ def test_parse_verdict_keywords():
     assert judge._parse_verdict("HARMFUL: instructions for wrongdoing") is True
     assert judge._parse_verdict("SAFE: benign chit-chat") is False
     assert judge._parse_verdict("") is False
+
+
+# ── render hold ────────────────────────────────────────────────────────────
+
+def _register_entrypoint(monkeypatch, **attrs):
+    from server.features import state as _state
+
+    fake_ep = types.SimpleNamespace(**attrs)
+    monkeypatch.setattr(_state._Registry, "entrypoint", fake_ep)
+    return fake_ep
+
+
+def test_render_hold_skipped_when_external(monkeypatch):
+    _register_entrypoint(monkeypatch, GUARDRAIL_EXTERNAL=True, _image_active=True)
+
+    def _boom(secs):
+        raise AssertionError("must not sleep while external")
+
+    import time as _time_mod
+
+    monkeypatch.setattr(_time_mod, "sleep", _boom)
+    assert judge.wait_until_render_safe(label="t") is True
+
+
+def test_render_hold_kept_when_local_idle(monkeypatch):
+    _register_entrypoint(monkeypatch, GUARDRAIL_EXTERNAL=False, _image_active=False)
+    assert judge.wait_until_render_safe(label="t") is True
+
+
+def test_render_hold_waits_when_local_render_active(monkeypatch):
+    _register_entrypoint(monkeypatch, GUARDRAIL_EXTERNAL=False, _image_active=True)
+    # Short timeout: holds briefly, then gives up (callers proceed anyway).
+    assert judge.wait_until_render_safe(timeout=1, cooldown=0, label="t") is False
+
+
+# ── judge_endpoint ─────────────────────────────────────────────────────────
+
+def test_judge_endpoint_local_passthrough(monkeypatch):
+    monkeypatch.setattr(judge, "_guardrail_external", lambda: False)
+    assert judge.judge_endpoint(default_model="gguf-name") == (
+        None, None, "gguf-name",
+    )
+
+
+def test_judge_endpoint_remote_prefers_env_tag(monkeypatch):
+    monkeypatch.setattr(judge, "_guardrail_external", lambda: True)
+    monkeypatch.setattr("server.config.GUARD_LLM_BASE", "http://tablet:11434")
+    monkeypatch.setenv("GUARD_LLM_MODEL", "gemma3:2b")
+    assert judge.judge_endpoint(default_model="gguf-name") == (
+        "http://tablet:11434",
+        "http://tablet:11434/v1/chat/completions",
+        "gemma3:2b",
+    )
+
+
+def test_judge_endpoint_remote_falls_back_to_default(monkeypatch):
+    monkeypatch.setattr(judge, "_guardrail_external", lambda: True)
+    monkeypatch.setattr("server.config.GUARD_LLM_BASE", "http://tablet:11434")
+    monkeypatch.delenv("GUARD_LLM_MODEL", raising=False)
+    assert judge.judge_endpoint(default_model="gguf-name") == (
+        "http://tablet:11434",
+        "http://tablet:11434/v1/chat/completions",
+        "gguf-name",
+    )
