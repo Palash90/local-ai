@@ -50,6 +50,16 @@ export default function App() {
   const resolvedTasksRef = useRef(new Set())
 
   useEffect(() => {
+    // Public share pages (/s/<token>) must work for everyone, including
+    // logged-out guests and SSO identities without app access: skip the
+    // authenticated check-auth probe entirely so the page fires zero
+    // authenticated requests (a denied identity would otherwise log a 403
+    // row in the Network tab even though the share itself is public).
+    if (shareTokenFromPath()) {
+      setAuthenticated(false)
+      setAuthChecked(true)
+      return
+    }
     // Authentication is enforced by nginx's auth_request against Authentik:
     // by the time this SPA loads, the browser already has a valid SSO session
     // and /api/check-auth answers from the forwarded X-Authentik-* headers.

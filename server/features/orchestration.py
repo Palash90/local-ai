@@ -9,7 +9,7 @@ import time
 
 from server.features.context import resolve_image_path
 from server.features.state import M
-from server.features.toolstrip import strip_tool_call_text
+from server.features.toolstrip import strip_tool_call_text, is_pure_tool_json
 
 
 def set_status(task_id, message):
@@ -125,6 +125,106 @@ def _is_openai_lane_server_tool(tc):
 def _openai_lane_server_calls(tool_calls):
     """Partition of an llm_ok round: server-executed calls only."""
     return [tc for tc in (tool_calls or []) if _is_openai_lane_server_tool(tc)]
+
+
+def _rewrite_search_fetches(tool_calls, task_id=None):
+    """Rewrite search-shaped client fetches to server web_search in place.
+
+    Returns (new_calls, rewritten_count). Preserves each call's id/index so
+    tool_ok matching and session history stay consistent. Non-matching
+    calls pass through untouched.
+    """
+    try:
+        mode = (getattr(M, "OPENAI_LANE_SEARCH_REWRITE", "auto") or "auto").strip().lower()
+    except Exception:
+        mode = "auto"
+    if mode == "never":
+        return list(tool_calls or []), 0
+    new_calls, n = [], 0
+    for tc in (tool_calls or []):
+        q = _extract_search_query(tc)
+        if q is None:
+            new_calls.append(tc)
+            continue
+        fn = (tc.get("function") or {})
+        new_calls.append({
+            "index": tc.get("index", 0),
+            "id": tc.get("id", ""),
+            "type": tc.get("type", "function"),
+            "function": {"name": "web_search", "arguments": json.dumps({"query": q})},
+        })
+        n += 1
+        try:
+            orig = (json.loads(fn.get("arguments") or "{}")
+                    if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})).get("url", "")
+        except Exception:
+            orig = ""
+        print(f"[openai] rewrote search-shaped {fn.get('name')} → web_search "
+              f"(q={q[:80]!r}, from {str(orig)[:100]!r}) for task {task_id}")
+    return new_calls, n
+
+
+# Search-engine results pages: a client fetch of one of these is a search
+# wearing a URL costume, not a genuine page read. (host, path-prefix) pairs.
+_SEARCH_ENGINE_PATHS = (
+    ("google.com", "/search"),
+    ("bing.com", "/search"),
+    ("search.brave.com", "/search"),
+    ("duckduckgo.com", "/html"),
+    ("search.yahoo.com", "/search"),
+    ("yandex.", "/search"),
+    ("startpage.com", "/sp/search"),
+    ("mojeek.com", "/search"),
+    ("marginalia-search.com", "/search"),
+    ("127.0.0.1", "/search"),
+    ("localhost", "/search"),
+)
+
+_SEARCH_QUERY_PARAMS = ("q", "query", "text", "p")
+
+
+def _extract_search_query(tc):
+    """Return the search query if a client fetch call targets a search-engine
+    results page, else None (fail-open to client passthrough).
+
+    Never raises: malformed args/URLs simply don't rewrite.
+    """
+    try:
+        fn = tc.get("function") or {}
+        try:
+            aliases = M.OPENAI_LANE_FETCH_ALIASES
+        except Exception:
+            aliases = {"webfetch", "fetch", "fetch_url", "web_fetch", "read_url"}
+        if fn.get("name") not in aliases:
+            return None
+        args = fn.get("arguments") or ""
+        if isinstance(args, str):
+            args = json.loads(args)
+        if not isinstance(args, dict):
+            return None
+        url = args.get("url") or ""
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            return None
+        from urllib.parse import urlparse, parse_qs, unquote_plus
+        parts = urlparse(url)
+        host = (parts.hostname or "").lower()
+        path = parts.path or ""
+        matched = any(
+            (host == h or host.endswith("." + h)
+             or (h == "yandex." and host.startswith("yandex.")))
+            and path.startswith(p)
+            for h, p in _SEARCH_ENGINE_PATHS
+        )
+        if not matched:
+            return None
+        qs = parse_qs(parts.query)
+        for param in _SEARCH_QUERY_PARAMS:
+            vals = qs.get(param) or []
+            if vals and vals[0].strip():
+                return unquote_plus(vals[0].strip())[:400]
+        return None
+    except Exception:
+        return None
 
 
 def _set_task_error(task_id, error, sid=None):
@@ -387,6 +487,21 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         msg_content, bool(image_url), bool(music_url)
     )
     msg_content = _FAKE_ARTIFACT_LINK_RE.sub("", msg_content or "")
+    if msg_content and is_pure_tool_json(msg_content):
+        # The final message is nothing but machine echo (e.g. a ReAct
+        # {"action": ...} blob or pasted result JSON that survived the
+        # regexes). The artifact card/player already carries the payload,
+        # so caption instead of delivering raw JSON — and never leave the
+        # echo in stored history for the next round to imitate.
+        if image_url and not music_url:
+            msg_content = "Here's your image — see above."
+        elif music_url and not image_url:
+            msg_content = "Here's your track — player above."
+        elif image_url and music_url:
+            msg_content = "Done — image and track above."
+        else:
+            msg_content = ""
+        print(f"[finalize] pure tool-JSON final replaced with caption for task {task_id}")  # DEBUG
     if image_url:
         print(f"[finalize] image_file='{image_filename}' → image_url='{image_url}' for task {task_id}")  # DEBUG
     timings = body.get("timings", {})
@@ -402,7 +517,17 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         task_timings["total_ms"] = elapsed_ms
     print(f"[latency] task={task_id} total_ms={elapsed_ms} timings={task_timings}", flush=True)
     if not msg_content:
-        msg_content = "(No response content generated)"
+        # Strippers may have removed a pure machine echo (ReAct JSON etc.)
+        # leaving nothing: caption from the attachments rather than the
+        # generic fallback so image/music turns still read naturally.
+        if image_url and not music_url:
+            msg_content = "Here's your image — see above."
+        elif music_url and not image_url:
+            msg_content = "Here's your track — player above."
+        elif image_url and music_url:
+            msg_content = "Done — image and track above."
+        else:
+            msg_content = "(No response content generated)"
     reasoning = body.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
     drafts = []
     with M._data_lock:
@@ -689,6 +814,14 @@ def _event_loop():
                         tt.setdefault("_search_details", [])
                 pending = len(msg["tool_calls"])
                 is_openai = t.get("openai_lane")
+                if is_openai:
+                    # Option (b): search-shaped client fetches (e.g. opencode
+                    # webfetch of a google.com/search URL) become server
+                    # web_search calls up front, so summary, stored history
+                    # and dispatch all see what actually runs.
+                    msg["tool_calls"], _n_rw = _rewrite_search_fetches(
+                        msg.get("tool_calls"), task_id)
+                    pending = len(msg["tool_calls"])
                 summary, repeats = _track_tool_repeat(task_id, msg["tool_calls"])
                 print(f"[llm_ok] Round {round_num}: LLM requested {pending} tool(s) for task {task_id}: {summary}" + (" (OpenAI lane: client will execute)" if is_openai else ""))  # DEBUG
                 if repeats >= TOOL_LOOP_WATCH_THRESHOLD:

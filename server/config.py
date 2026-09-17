@@ -76,6 +76,16 @@ OPENAI_LANE_SERVER_TOOL_NAMES = {"web_search", "fetch_page", "tool_details"}
 # text-only final round (ping-pong guard).
 OPENAI_LANE_MAX_SERVER_ROUNDS = int(os.environ.get("OPENAI_LANE_MAX_SERVER_ROUNDS", "3"))
 
+# Search-rewrite (option b): a client fetch call whose URL is a search-engine
+# results page (e.g. opencode's webfetch of google.com/search?q=...) is
+# rewritten in-lane to web_search and executed server-side instead of being
+# returned for the client to scrape. "auto" (default) rewrites; "never" keeps
+# legacy passthrough.
+OPENAI_LANE_SEARCH_REWRITE = os.environ.get("OPENAI_LANE_SEARCH_REWRITE", "auto").strip().lower()
+
+# Client fetch-shaped tool names eligible for the search rewrite.
+OPENAI_LANE_FETCH_ALIASES = {"webfetch", "fetch", "fetch_url", "web_fetch", "read_url"}
+
 REASONING_BUDGET = int(os.environ.get("REASONING_BUDGET", "1024"))
 # The judge lane emits one short verdict per call, but judges are thinking
 # models: a 2048-token reasoning budget means a worst case of ~3 minutes of

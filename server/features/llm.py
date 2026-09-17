@@ -977,6 +977,8 @@ def _append_turn_context(messages, task_id, user, tool_free):
         env = t.get("_turn_env") or ""
         research = bool(t.get("research"))
         orig = t.get("_original_message") or ""
+        openai_lane = bool(t.get("openai_lane"))
+        lane_server_tools = (t.get("server_tool_mode") or "never").strip().lower()
     if not env:
         # Task built without _prepare_session (or pre-dating this): make a
         # fresh, equivalent block rather than send a prompt with no date.
@@ -992,6 +994,16 @@ def _append_turn_context(messages, task_id, user, tool_free):
             + "\n</current_info>"
         )
     parts = [env]
+    if openai_lane and lane_server_tools != "never":
+        # Hybrid-lane directive (option c): act through tools, don't narrate
+        # plans; prefer the server search/fetch tools for web lookups.
+        # Volatile (never stored), so it can't become imitation fodder.
+        parts.append(
+            "<lane_tools>\nUse tools to act — never write a plan describing "
+            "searches you will perform instead of calling them. For web "
+            "lookups prefer the server tools web_search and fetch_page over "
+            "client fetch tools.\n</lane_tools>"
+        )
     if research:
         try:
             from server.features.sessions import RESEARCH_DIRECTIVE

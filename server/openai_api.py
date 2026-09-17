@@ -392,8 +392,15 @@ def handle_chat_completions(handler):
             "user_id": _API_USER,
         }
 
-    # Inject all preceding messages as conversation history
-    history_entries = _messages_to_session(messages[:last_user_idx])
+    # Inject all messages except the last user message as conversation
+    # history, preserving order. Messages after the last user (the normal
+    # OpenAI tool loop: assistant(tool_calls) -> tool(result)) must be kept
+    # — dropping that tail discards every tool result and the model re-asks
+    # forever. The last user message itself is submitted as the new prompt
+    # via _prepare_session, so it is excluded here to avoid duplication.
+    history_entries = _messages_to_session(
+        messages[:last_user_idx] + messages[last_user_idx + 1:]
+    )
     if history_entries:
         with M._data_lock:
             M.sessions[session_id] = history_entries

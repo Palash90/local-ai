@@ -1,7 +1,17 @@
 export function toApiImage(url, shareToken) {
   if (!url || typeof url !== 'string') return url
-  if (url.startsWith('data:') || /^https?:/i.test(url) || url.startsWith('/api/')) return url
-  if (shareToken && url.startsWith('/')) return `/api/public/share/${shareToken}/image/${url.slice(1)}`
+  if (url.startsWith('data:') || /^https?:/i.test(url)) return url
+  if (url.startsWith('/api/public/')) return url
+  if (shareToken) {
+    // On public share pages everything must stay public: rewrite raw
+    // /api/image/... links (which need SSO) to the scoped share route.
+    // Unknown /api/... shapes pass through (server answers 404, never 403).
+    if (url.startsWith('/api/image/')) return `/api/public/share/${shareToken}/image/${url.slice('/api/image/'.length)}`
+    if (url.startsWith('/api/')) return url
+    if (url.startsWith('/')) return `/api/public/share/${shareToken}/image/${url.slice(1)}`
+    return url
+  }
+  if (url.startsWith('/api/')) return url
   if (url.startsWith('/uploads/') || url.startsWith('/output/')) return '/api/image/' + url.slice(1)
   if (url.startsWith('/')) return '/api/image/' + url.slice(1)
   return url
@@ -9,8 +19,15 @@ export function toApiImage(url, shareToken) {
 
 export function toApiMusic(url, shareToken) {
   if (!url || typeof url !== 'string') return url
-  if (url.startsWith('data:') || /^https?:/i.test(url) || url.startsWith('/api/')) return url
-  if (shareToken && url.startsWith('/music/')) return `/api/public/share/${shareToken}/music/${url.slice('/music/'.length)}`
+  if (url.startsWith('data:') || /^https?:/i.test(url)) return url
+  if (url.startsWith('/api/public/')) return url
+  if (shareToken) {
+    if (url.startsWith('/api/music/')) return `/api/public/share/${shareToken}/music/${url.slice('/api/music/'.length)}`
+    if (url.startsWith('/api/')) return url
+    if (url.startsWith('/music/')) return `/api/public/share/${shareToken}/music/${url.slice('/music/'.length)}`
+    return url
+  }
+  if (url.startsWith('/api/')) return url
   if (url.startsWith('/music/')) return '/api/music/' + url.slice('/music/'.length)
   return url
 }
