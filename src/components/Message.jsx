@@ -818,8 +818,14 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
   const genPrompt = msg._gen_prompt
   const imageUrl = toApiImage(msg._image_url, shareToken)
   const musicUrl = toApiMusic(msg._music_url, shareToken)
+  const musicStreamUrl = toApiMusic(msg._music_stream_url, shareToken)
+  const musicScore = msg._music_score
+  const musicLevels = msg._music_levels
+  const imageModel = msg._image_model
   // Plural channels (backend emits _images/_tracks arrays; old sessions only
   // carry the singular keys). Arrays win; singular falls back to one entry.
+  // NOTE: keep the singular declarations above — this block reads them and
+  // consts throw if touched before init (TDZ).
   const images = (Array.isArray(msg._images) && msg._images.length > 0
     ? msg._images
     : (msg._image_url ? [{ url: msg._image_url, prompt: genPrompt, model: imageModel }] : [])
@@ -835,10 +841,6 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
     url: toApiMusic(tr.url, shareToken),
     stream_url: toApiMusic(tr.stream_url, shareToken),
   })).filter((tr) => tr.url)
-  const musicStreamUrl = toApiMusic(msg._music_stream_url, shareToken)
-  const musicScore = msg._music_score
-  const musicLevels = msg._music_levels
-  const imageModel = msg._image_model
   const artifacts = msg._artifacts || []
   const isUserImgUrl = typeof userImg === 'string' && (userImg.startsWith('/') || /^https?:/.test(userImg))
   const userImgSrc = userImg ? (isUserImgUrl ? toApiImage(userImg, shareToken) : 'data:image/jpeg;base64,' + userImg) : null
