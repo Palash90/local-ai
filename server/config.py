@@ -382,9 +382,13 @@ LLAMA_SERVER_ARGS = [
     "--chat-template-file", os.path.expanduser("~/local-ai-files/models/gemma4-26b/chat_template.jinja"),
 
     # GPU / VRAM & Performance (MoE squeeze).
-    # -ngl 32 covers all 30 Gemma4-26B layers (full non-expert offload;
-    # experts stay in RAM via --cpu-moe below).
-    "-ngl", "35",
+    # -ngl covers the first N Gemma4-26B dense layers (experts stay in RAM
+    # via --cpu-moe below). 2026-09-17: lowered 35 -> 24 after measured CUDA
+    # OOM at full offload — per-layer dense cost is ~82 MB (tensor table),
+    # so 35 puts ~3.6 GB weights + KV/scratch peak at ~4.5 GB vs 3.93 free
+    # on the 4 GB card. 24 frees ~0.9 GB. Tune via GPU_NGL_26B (sweep up
+    # while loads succeed twice in a row); full 30 needs the card to itself.
+    "-ngl", os.environ.get("GPU_NGL_26B", "24"),
     "--n-cpu-moe", "28",
     "-fa", "on",
     "--ctx-size", os.environ.get("GPU_CTX_SIZE_26B", "32768"),
