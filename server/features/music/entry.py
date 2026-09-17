@@ -33,6 +33,17 @@ def _render_make_music(task_id, sid, user_message, user):
         t["music_url"] = music_url
         t["music_levels"] = res.get("levels", [])
         t["music_duration"] = res.get("duration_s")
+        # Plural channel (see tools.generate_music): every render appends.
+        t.setdefault("music_files", []).append(
+            {
+                "rel": rel,
+                "url": music_url,
+                "stream_url": res.get("music_stream_url"),
+                "score": res.get("score", score_text),
+                "levels": res.get("levels", []),
+                "duration_s": res.get("duration_s"),
+            }
+        )
         t.setdefault("_tools_used", []).append("generate_music")
     lanes = ", ".join(info.get("lanes", []))
     _glabel = info.get("genre") or info.get("mood") or "arrangement"
