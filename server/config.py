@@ -374,7 +374,7 @@ LLAMA_SERVER_ARGS_E4B_BACKUP = [
 #    thinking truncates tool-call JSON and empties short (12-token) calls.
 #  ctx from GPU_CTX_SIZE_26B (default 32768): ramp 32k -> 64k -> 128k.
 # ─────────────────────────────────────────────────────────────────────────────
-LLAMA_SERVER_ARGS = [
+LLAMA_SERVER_ARGS_GEMMA4_26B = [
     "--host", "127.0.0.1",
     "--port", "8081",
     "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
@@ -427,6 +427,52 @@ LLAMA_SERVER_ARGS = [
     "--min-p", "0.05",
     "--parallel", "1"
 ]
+
+LLAMA_ARGS_QWEN_38_27B = [
+    "--host", "127.0.0.1",
+    "--port", "8081",
+    "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
+
+    "-ngl", "8",
+    "-fa", "on",
+    "--ctx-size", os.environ.get("GPU_CTX_SIZE_26B", "32768"),
+    "-ctk", "q4_0",
+    "-ctv", "q4_0",
+    "--no-mmproj-offload",
+    "--ctx-checkpoints", "1",
+
+    # Threads & Batching
+    "-t", "8",
+    "-tb", "8",
+    "-b", "2048",
+    "-ub", "512",
+    "--timeout", "3600",
+
+    # Reasoning budget: cap thinking so tool-call JSON survives
+    # (same pattern as the CPU lane below). 2048 (was 1024): Raga-class
+    # research exhausted 1024 mid-thought; keep MAX_OUTPUT_TOKENS >= 2x
+    # this so answers survive thinking.
+    "--reasoning-budget", "2048",
+    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+
+    # Prompt-cache reuse: allow slots to reuse/shift cached prefix segments
+    # across multi-turn chats and tool rounds instead of re-prefilling.
+    "--cache-reuse", "256",
+
+    # KV-cache checkpointing: enables POST /slots/{id}?action=save|restore so
+    # the conversation KV survives model unload/reload cycles (image gen).
+    # The router passes this down to each loaded model instance.
+    "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
+
+    # Sampling Parameters
+    "--temp", "0.6",
+    "--top-p", "0.95",
+    "--top-k", "20",
+    "--min-p", "0",
+    "--parallel", "1"
+]
+
+LLAMA_SERVER_ARGS=LLAMA_ARGS_QWEN_38_27B
 
 # Second set of llama-server arguments used when processing automated
 # self-chat messages (editor/moderator/agent runs). These are background,
