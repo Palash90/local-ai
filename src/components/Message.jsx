@@ -818,6 +818,23 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
   const genPrompt = msg._gen_prompt
   const imageUrl = toApiImage(msg._image_url, shareToken)
   const musicUrl = toApiMusic(msg._music_url, shareToken)
+  // Plural channels (backend emits _images/_tracks arrays; old sessions only
+  // carry the singular keys). Arrays win; singular falls back to one entry.
+  const images = (Array.isArray(msg._images) && msg._images.length > 0
+    ? msg._images
+    : (msg._image_url ? [{ url: msg._image_url, prompt: genPrompt, model: imageModel }] : [])
+  ).map((im) => ({ ...im, url: toApiImage(im.url, shareToken) })).filter((im) => im.url)
+  const tracks = (Array.isArray(msg._tracks) && msg._tracks.length > 0
+    ? msg._tracks
+    : (msg._music_url ? [{
+        url: msg._music_url, stream_url: msg._music_stream_url,
+        score: musicScore, levels: musicLevels,
+      }] : [])
+  ).map((tr) => ({
+    ...tr,
+    url: toApiMusic(tr.url, shareToken),
+    stream_url: toApiMusic(tr.stream_url, shareToken),
+  })).filter((tr) => tr.url)
   const musicStreamUrl = toApiMusic(msg._music_stream_url, shareToken)
   const musicScore = msg._music_score
   const musicLevels = msg._music_levels
@@ -918,25 +935,25 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
           <ShareButton sessionId={sessionId} msgIndex={msgIndex} />
         )}
       </div>
-      {imageUrl && (
-        <div className="image-wrap">
+      {images.map((im, i) => (
+        <div className="image-wrap" key={im.url || i}>
           <img
-            src={imageUrl}
+            src={im.url}
             style={{ maxWidth: '100%', borderRadius: 10, cursor: 'pointer' }}
-            onClick={() => onImageOpen(imageUrl)}
+            onClick={() => onImageOpen(im.url)}
             alt="Generated"
           />
           <div className="img-actions">
-            <button type="button" className="img-download-btn" onClick={() => downloadFile(imageUrl, 'image.png')}>
+            <button type="button" className="img-download-btn" onClick={() => downloadFile(im.url, `image-${i + 1}.png`)}>
               Download
             </button>
           </div>
         </div>
-      )}
-      {musicUrl && (
-        <MusicPlayer musicUrl={musicUrl} musicStreamUrl={musicStreamUrl}
-          musicScore={musicScore} musicLevels={musicLevels} />
-      )}
+      ))}
+      {tracks.map((tr, i) => (
+        <MusicPlayer key={tr.url || i} musicUrl={tr.url} musicStreamUrl={tr.stream_url}
+          musicScore={tr.score} musicLevels={tr.levels} />
+      ))}
       {userImgSrc && (
         <img
           src={userImgSrc}

@@ -921,6 +921,16 @@ def _run_generate_image(task_id, args):
                 t["image_file"] = rel
                 t["gen_prompt"] = args.get("prompt", "")
                 t["_image_model"] = image_model_s
+                # Plural channel: every render appends so multi-image tasks
+                # keep all files (the singular keys above stay last-wins for
+                # critic/sessions/L3/tests compatibility).
+                t.setdefault("image_files", []).append(
+                    {
+                        "rel": rel,
+                        "prompt": args.get("prompt", ""),
+                        "model": image_model_s,
+                    }
+                )
         return json.dumps(
             {
                 "image_url": image_url,
@@ -953,6 +963,14 @@ def _run_edit_image(task_id, sid, args, image_b64):
                 t["image_file"] = rel
                 t["gen_prompt"] = args.get("prompt", "")
                 t["_image_model"] = edit_model
+                # Plural channel (see _run_generate_image).
+                t.setdefault("image_files", []).append(
+                    {
+                        "rel": rel,
+                        "prompt": args.get("prompt", ""),
+                        "model": edit_model,
+                    }
+                )
         return json.dumps(
             {
                 "image_url": image_url,

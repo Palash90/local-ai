@@ -251,6 +251,22 @@ def _strip_pasted_artifact_paths(text, image_attached, music_attached):
     return out.strip()
 
 
+def _busted_stream_url(rel, stream_url):
+    """Append a cache-busting ``?v=<mtime>`` to a music stream URL.
+
+    Content-addressed URLs are immutable-cached for a year; if a sidecar is
+    ever re-encoded under the same name, the mtime query busts the stale
+    browser cache. Query is stripped server-side. Fail-safe passthrough.
+    """
+    if stream_url and rel and "?" not in stream_url:
+        try:
+            _op = os.path.join(M.MUSIC_DIR, rel.rsplit(".", 1)[0] + ".opus")
+            return f"{stream_url}?v={int(os.path.getmtime(_op))}"
+        except OSError:
+            pass
+    return stream_url
+
+
 def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
     """Append the finalized assistant message. With attach_image=False (used
     by the safety-decline path), image fields are withheld: unlike deterministic
@@ -266,10 +282,12 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         image_filename = t.get("image_file")
         gen_prompt = t.get("gen_prompt")
         image_model = t.get("_image_model")
+        image_file_list = list(t.get("image_files", []) or [])
         music_rel = t.get("music_file")
         music_score = t.get("music_score")
         music_levels = t.get("music_levels")
         music_stream_url = t.get("music_stream_url")
+        music_file_list = list(t.get("music_files", []) or [])
         verification = t.get("_verification")
         verification_duration = t.get("_verification_duration")
         judge_result = t.get("_judge_result")
@@ -296,11 +314,52 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         # Content-addressed URLs are immutable-cached for a year; if a
         # sidecar is ever re-encoded under the same name, a ?v=<mtime>
         # busts the stale browser cache. Query is stripped server-side.
-        try:
-            _op = os.path.join(M.MUSIC_DIR, music_rel.rsplit(".", 1)[0] + ".opus")
-            music_stream_url = f"{music_stream_url}?v={int(os.path.getmtime(_op))}"
-        except OSError:
-            pass
+        music_stream_url = _busted_stream_url(music_rel, music_stream_url)
+    # Plural channels: every render in this task, in order. Singular keys
+    # above stay last-wins for critic/sessions/L3/shares compatibility.
+    images = []
+    if attach_image:
+        for _entry in image_file_list:
+            _rel = (_entry or {}).get("rel")
+            if _rel:
+                images.append(
+                    {
+                        "url": f"/output/{_rel}",
+                        "prompt": (_entry or {}).get("prompt", ""),
+                        "model": (_entry or {}).get("model"),
+                    }
+                )
+    if not images and image_url:
+        # Anaphoric carry-over (or legacy single render): mirror the singular.
+        images.append(
+            {"url": image_url, "prompt": gen_prompt or "", "model": image_model}
+        )
+    tracks = []
+    for _entry in music_file_list:
+        _entry = _entry or {}
+        _rel = _entry.get("rel")
+        _url = _entry.get("url") or (f"/music/{_rel}" if _rel else None)
+        if not _url:
+            continue
+        tracks.append(
+            {
+                "url": _url,
+                "stream_url": _busted_stream_url(_rel, _entry.get("stream_url")),
+                "score": _entry.get("score", ""),
+                "levels": _entry.get("levels", []),
+                "duration_s": _entry.get("duration_s"),
+            }
+        )
+    if not tracks and music_url:
+        tracks.append(
+            {
+                "url": music_url,
+                "stream_url": music_stream_url,
+                "score": music_score,
+                "levels": music_levels,
+                "duration_s": None,
+            }
+        )
     msg_content = _strip_pasted_artifact_paths(
         msg_content, bool(image_url), bool(music_url)
     )
@@ -346,9 +405,11 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         "_reasoning": reasoning,
         "_tools_used": tools_used,
         "_image_url": image_url,
+        "_images": images,
         "_gen_prompt": gen_prompt,
         "_image_model": image_model,
         "_music_url": music_url,
+        "_tracks": tracks,
         "_music_stream_url": music_stream_url,
         "_music_score": music_score,
         "_music_levels": music_levels,
@@ -391,10 +452,12 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
                 "tools_used": tools_used,
                 "image": image_url,
                 "_image_url": image_url,
+                "_images": images,
                 "gen_prompt": gen_prompt,
                 "_image_model": image_model,
                 "music": music_url,
                 "_music_url": music_url,
+                "_tracks": tracks,
                 "_music_score": music_score,
                 "_music_levels": music_levels,
                 "_search_details": search_details,
