@@ -54,3 +54,32 @@ def test_recycle_runs_when_ram_unknown(monkeypatch):
     monkeypatch.setattr(images, "_free_ram_mb", lambda: None)
     images._recycle_after_render("generate_image")
     assert recycled == [True]
+
+
+def _fake_unload_m(monkeypatch, keep):
+    unloaded = []
+
+    def _keep(mode):
+        return keep.get(mode, False)
+
+    fake_m = types.SimpleNamespace(
+        lane_keep_resident=_keep,
+        unload_llama_model=lambda mode: unloaded.append(mode) or True,
+        server_status=lambda mode: "chat_loaded",
+    )
+    monkeypatch.setattr(images, "M", fake_m)
+    return unloaded
+
+
+def test_maybe_unload_skips_kept_lane(monkeypatch):
+    unloaded = _fake_unload_m(monkeypatch, {"gpu": True, "guardrail": True})
+    assert images._maybe_unload_lane("gpu", "image") is False
+    assert images._maybe_unload_lane("guardrail", "image") is False
+    assert unloaded == []
+
+
+def test_maybe_unload_unloads_unkept_lane(monkeypatch):
+    unloaded = _fake_unload_m(monkeypatch, {"gpu": False, "guardrail": False})
+    assert images._maybe_unload_lane("gpu", "image") is True
+    assert images._maybe_unload_lane("guardrail", "image") is True
+    assert unloaded == ["gpu", "guardrail"]

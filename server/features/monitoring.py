@@ -138,7 +138,13 @@ def kill_llama_server(mode=None):
 
     ``mode`` is ``"gpu"`` (port 8081), ``"cpu"`` (port 8079) or ``None`` to
     kill both servers at once (emergency RAM evacuation, full restart).
+
+    No-op for the guardrail lane while ``GUARDRAIL_EXTERNAL`` is set: there is
+    no local guardrail process to kill and the remote endpoint is not ours.
     """
+    if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
+        print("[guardrail] external judge — skipping local kill", flush=True)
+        return
     if mode is None:
         subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
         time.sleep(1)
@@ -183,7 +189,14 @@ def _start_llama_process(args, mode="gpu"):
 
 def restart_llama_server(mode):
     """Restart the llama-server for ``mode`` (``"gpu"`` or ``"cpu"``) using its
-    own argument set and port, leaving the other server untouched."""
+    own argument set and port, leaving the other server untouched.
+
+    No-op for the guardrail lane while ``GUARDRAIL_EXTERNAL`` is set: the
+    remote endpoint is not ours to restart (spawning a local 8083 would only
+    shadow nothing and waste RAM)."""
+    if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
+        print("[guardrail] external judge — skipping local restart", flush=True)
+        return
     print(f"[llama] Restarting llama-server ({mode})")
     M.kill_llama_server(mode)
     time.sleep(1)
@@ -205,6 +218,8 @@ def restart_llama_server(mode):
 
 
 def ensure_llama_server(mode):
+    if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
+        return
     base = M.server_base(mode)
     if M.is_llama_alive(base):
         return
@@ -283,6 +298,24 @@ def _guardrail_ready_now(model_id=None):
     )
 
 
+def _external_judge_ping():
+    """Lightweight readiness probe for an external judge endpoint.
+
+    Never starts, restarts, loads or unloads anything: the remote endpoint
+    (e.g. Ollama on a tablet) manages its own models. Returns True when
+    ``GET {GUARD_LLM_BASE}/v1/models`` answers 200.
+    """
+    try:
+        from server.config import GUARD_LLM_BASE
+    except ImportError:
+        GUARD_LLM_BASE = "http://localhost:8083"
+    try:
+        r = requests.get(f"{GUARD_LLM_BASE.rstrip('/')}/v1/models", timeout=5)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 def ensure_guardrail_ready(timeout=240, model_id=None):
     """Start/refresh the LLM judge (guardrail) llama-server and wait for it to
     actually serve the requested judge model.
@@ -301,6 +334,12 @@ def ensure_guardrail_ready(timeout=240, model_id=None):
 
     Returns True if the requested judge is ready to serve, False otherwise.
     """
+    if M.GUARDRAIL_EXTERNAL:
+        # Remote judges (Ollama on another machine): ping-only, never manage.
+        ok = _external_judge_ping()
+        if not ok:
+            print("[guardrail] external judge endpoint unreachable", flush=True)
+        return ok
     global _guardrail_starting
     model_id = (model_id or "").strip() or M.server_model_id("guardrail")
     base = M.server_base("guardrail")
@@ -439,7 +478,9 @@ def restart_servers():
         _start_llama_process(M.LLAMA_SERVER_ARGS_CPU, "cpu")
     else:
         print("[llama] Skipping CPU llama-server start (no agent lane activity)")
-    if _guardrail_lane_needed():
+    if M.GUARDRAIL_EXTERNAL:
+        print("[llama] Skipping guardrail llama-server start (external judge endpoint)")
+    elif _guardrail_lane_needed():
         _start_llama_process(M.LLAMA_SERVER_ARGS_GUARDRAIL, "guardrail")
     else:
         print("[llama] Skipping guardrail llama-server start (no guardrail lane activity)")
@@ -608,6 +649,16 @@ def _verify_cpu_unload(avail_before, context="idle"):
         f"[{context}] cpu model still resident after 30s (freed ~{freed or 0} MB) — killing cpu llama-server",
         flush=True,
     )
+    if M.lane_keep_resident("cpu"):
+        # Never-evict mode: the kill escalation is what actually evicts RAM,
+        # so it is suppressed too. Log loudly — sustained residency under
+        # pressure is exactly what the RAM evacuation backstop is for.
+        print(
+            f"[{context}] KEEP_CPU_RESIDENT set — NOT killing cpu server "
+            f"(RAM evacuation remains the backstop)",
+            flush=True,
+        )
+        return
     M.kill_llama_server("cpu")
     time.sleep(2)
     avail = _free_ram_mb()
@@ -636,7 +687,14 @@ def evict_cpu_model_for_image():
     cpu lane is left resident instead: ComfyUI gets its headroom without
     force-killing in-flight agent rounds or peer reviews (which would otherwise
     500/fail-open mid-eviction). Eviction only happens below the threshold.
+
+    ``KEEP_CPU_RESIDENT`` suppresses eviction unconditionally (never-evict
+    mode): the render contends with a resident CPU model and OOM risk moves
+    to the whole-box RAM evacuation backstop.
     """
+    if M.lane_keep_resident("cpu"):
+        print("[image] CPU lane pinned resident (KEEP_CPU_RESIDENT) — skipping eviction", flush=True)
+        return
     avail_before = _free_ram_mb()
     if avail_before is not None and avail_before >= IMAGE_RENDER_RAM_HEADROOM_MB:
         print(
@@ -660,6 +718,19 @@ def evict_cpu_model_for_image():
             f"[image] cpu unload returned {ok} (avail_before={avail_before} MB) — continuing with render",
             flush=True,
         )
+
+
+def _idle_unload_suppressed(mode):
+    """True when the idle loop must not unload ``mode``.
+
+    Never-evict lanes (``KEEP_*_RESIDENT``) and the external guardrail lane
+    stay resident; emergency evacuation and thermal unload still override
+    (they don't consult this helper). Fail-safe False on any error.
+    """
+    try:
+        return bool(M.lane_keep_resident(mode))
+    except Exception:
+        return False
 
 
 def _idle_unload_loop():
@@ -691,6 +762,11 @@ def _idle_unload_loop():
             lu = M.server_last_use(mode)
             idle = time.time() - lu
             busy = queue_active or any_streaming
+            if _idle_unload_suppressed(mode):
+                # Never-evict lane (KEEP_*_RESIDENT, or external guardrail):
+                # routine idle unload is suppressed. Emergency evacuation and
+                # thermal unload still override (see _evacuate_ram/_thermal_monitor).
+                continue
             if ms == "chat_loaded" and idle > timeout and not busy:
                 print(
                     f"[idle] No {mode} LLM activity for {idle:.0f}s (>{timeout}s), releasing model weights...",

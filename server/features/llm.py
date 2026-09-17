@@ -536,7 +536,13 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None):
     unload. The image-eviction path passes a short value (e.g. 15s) so an image
     never stalls behind a busy CPU slot for the full default 180s. When None,
     the default 180s timeout is used.
+
+    No-op for the guardrail lane while ``GUARDRAIL_EXTERNAL`` is set: the
+    remote endpoint manages its own models.
     """
+    if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
+        print("[llama] guardrail is external — skipping local unload")
+        return True
     current_status = M.server_status(mode)
     print(f"[llama] unload_llama_model called: mode={mode}, current_status={current_status}")
     with M._model_transition_lock:
@@ -702,7 +708,24 @@ def load_llama_model(mode="gpu", model_id=None):
     completion only has to evaluate new tokens. The guardrail lane is exempt:
     judge calls are stateless single-shots, and per-user judges may differ
     from ``MODEL_ID_GUARDRAIL``, so a cached KV snapshot never applies.
+
+    While ``GUARDRAIL_EXTERNAL`` is set this only pings the remote endpoint
+    (``GET {GUARD_LLM_BASE}/v1/models``) and never POSTs a load: the remote
+    endpoint manages its own models.
     """
+    if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
+        try:
+            from server.config import GUARD_LLM_BASE
+        except ImportError:
+            GUARD_LLM_BASE = "http://localhost:8083"
+        try:
+            r = requests.get(f"{GUARD_LLM_BASE.rstrip('/')}/v1/models", timeout=5)
+            if r.status_code == 200:
+                print(f"[llama] external guardrail judge reachable at {GUARD_LLM_BASE}")
+                return True
+        except Exception as e:
+            print(f"[llama] external guardrail judge unreachable: {e}")
+        return False
     # Gate GPU/guardrail loads behind image generation. generate_image/edit_image
     # set _image_active=True at the START (before unloading) and only clear it
     # after ComfyUI has finished and VRAM is freed. Without this wait, a chat

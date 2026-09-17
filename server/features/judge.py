@@ -56,6 +56,25 @@ def _guardrail_base():
         return "http://localhost:8083"
 
 
+def _guardrail_external():
+    """True when judges live on a remote endpoint (e.g. Ollama on another
+    machine) instead of the local guardrail llama-server.
+
+    Prefers the entrypoint proxy (monkeypatchable in tests) with a direct
+    config fallback. Never raises.
+    """
+    try:
+        from server.features.state import M
+        return bool(M.GUARDRAIL_EXTERNAL)
+    except Exception:
+        pass
+    try:
+        from server.config import GUARDRAIL_EXTERNAL
+        return bool(GUARDRAIL_EXTERNAL)
+    except Exception:
+        return False
+
+
 def _model_ids_listed(base_url):
     """Cached set of model ids the server at ``base_url`` advertises, or None
     when the endpoint couldn't be queried (caller should not guess)."""
@@ -259,11 +278,23 @@ def _judge_candidates(base_url, forced=None):
 
     out = []
     requested = (forced or "").strip()
+    env_forced = os.environ.get("GUARD_LLM_MODEL", "").strip()
+    if _guardrail_external():
+        # Remote endpoint (Ollama): local bookkeeping is meaningless — there
+        # is no status.value on /v1/models and the chat model id is a local
+        # GGUF filename the remote will 404. Prefer the configured remote tag
+        # first (a per-user pin is a local filename that cannot exist
+        # remotely), then the pin, then whatever the endpoint lists.
+        if env_forced:
+            out.append(env_forced)
+        if requested and requested not in out:
+            out.append(requested)
+        out.extend(m for m in ids if m not in out)
+        return out
     if requested:
         out.append(requested)
-    forced = os.environ.get("GUARD_LLM_MODEL", "").strip()
-    if forced:
-        out.append(forced)
+    if env_forced:
+        out.append(env_forced)
     out.extend(m for m in loaded if m not in out)
     chat = _chat_model_id()
     if chat and chat not in out:
@@ -689,6 +720,10 @@ def _judge_post_loop(label, system_prompt, user_content, base_url, timeout,
     max_tokens = _judge_max_tokens()
     last_err = ""
     attempts = 0
+    # llama.cpp-only extras (reasoning budget, prompt-cache opt-out) are
+    # dropped for external endpoints (Ollama): unknown fields are ignored at
+    # best, and the payload stays strictly OpenAI-compatible.
+    external = _guardrail_external()
     while True:
         attempts += 1
         conn_failed = False
@@ -701,13 +736,14 @@ def _judge_post_loop(label, system_prompt, user_content, base_url, timeout,
                 ],
                 "temperature": 0,
                 "max_tokens": max_tokens,
+                "stream": False,
+            }
+            if not external:
                 # Explicit, small reasoning budget so a thinking model on a
                 # server without its own --reasoning-budget (the GPU fallback)
                 # cannot burn thousands of tokens before the verdict word.
-                "reasoning_budget_tokens": _judge_reasoning_budget(),
-                "cache_prompt": False,
-                "stream": False,
-            }
+                payload["reasoning_budget_tokens"] = _judge_reasoning_budget()
+                payload["cache_prompt"] = False
             try:
                 if gpu_base:
                     from server.features.llm import _mark_chat_generating
