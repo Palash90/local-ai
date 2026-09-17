@@ -144,7 +144,6 @@ def test_render_hold_waits_when_local_render_active(monkeypatch):
 
 
 # ── judge_endpoint ─────────────────────────────────────────────────────────
-
 def test_judge_endpoint_local_passthrough(monkeypatch):
     monkeypatch.setattr(judge, "_guardrail_external", lambda: False)
     assert judge.judge_endpoint(default_model="gguf-name") == (
@@ -172,3 +171,69 @@ def test_judge_endpoint_remote_falls_back_to_default(monkeypatch):
         "http://tablet:11434/v1/chat/completions",
         "gguf-name",
     )
+
+
+# ── remote "user-set judge, else default" ──────────────────────────────────
+
+def _listed_models(monkeypatch, *ids):
+    def fake_get(url, timeout=None):
+        return _Resp(200, {"data": [{"id": mid} for mid in ids]})
+
+    import requests
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+
+def test_candidates_remote_user_pin_first(monkeypatch):
+    # kaya-style row holding an Ollama tag: the pin answers first try.
+    monkeypatch.setattr(judge, "_guardrail_external", lambda: True)
+    monkeypatch.setenv("GUARD_LLM_MODEL", "gemma3:2b")
+    _listed_models(monkeypatch, "gemma3:2b", "qwen3:4b")
+    out = judge._judge_candidates("http://tablet:11434", forced="qwen3:4b")
+    assert out[0] == "qwen3:4b"
+    assert out[1] == "gemma3:2b"
+
+
+def test_candidates_remote_default_skips_gguf_probe(monkeypatch):
+    # No user row: the pin IS the local default, so the shared remote tag
+    # leads and no 404 is burned on the GGUF id.
+    monkeypatch.setattr(judge, "_guardrail_external", lambda: True)
+    monkeypatch.setenv("GUARD_LLM_MODEL", "gemma3:2b")
+    _listed_models(monkeypatch, "gemma3:2b")
+    out = judge._judge_candidates(
+        "http://tablet:11434", forced="gemma-4-E2B-it-Q4_K_M"
+    )
+    assert out[0] == "gemma3:2b"
+
+
+def test_candidates_remote_warns_without_env_tag(monkeypatch, capsys):
+    monkeypatch.setattr(judge, "_guardrail_external", lambda: True)
+    monkeypatch.delenv("GUARD_LLM_MODEL", raising=False)
+    monkeypatch.setattr(judge, "_warned_no_remote_tag", False)
+    _listed_models(monkeypatch, "gemma3:2b")
+    out = judge._judge_candidates("http://tablet:11434", forced="qwen3:4b")
+    assert out[0] == "qwen3:4b"
+    assert "GUARD_LLM_MODEL is empty" in capsys.readouterr().out
+
+
+def test_post_loop_falls_through_stale_pin(monkeypatch):
+    # Stale GGUF pin 404s on Ollama, shared tag answers: stale rows degrade,
+    # they don't block.
+    monkeypatch.setattr(judge, "_guardrail_external", lambda: True)
+    seen = []
+
+    def fake_post(url, json=None, timeout=None):
+        seen.append(json["model"])
+        if json["model"] == "gemma4-e2b-q4":
+            return _Resp(404, {}, text="no such model")
+        return _Resp(200, {"choices": [{"message": {"content": "SAFE"}}]})
+
+    import requests
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    cand, text = judge._judge_post_loop(
+        "test", "sys", "some user text", "http://x:11434", 90,
+        2000, None, ["gemma4-e2b-q4", "gemma3:2b"], "cache-key", None,
+    )
+    assert (cand, text) == ("gemma3:2b", "SAFE")
+    assert seen == ["gemma4-e2b-q4", "gemma3:2b"]

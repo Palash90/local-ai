@@ -235,6 +235,7 @@ def _parse_verdict(content):
 
 _JUDGE_MODEL_CACHE = {}
 _JUDGE_MIN_TIMEOUT = 90
+_warned_no_remote_tag = False
 
 
 def _judge_system():
@@ -303,13 +304,26 @@ def _judge_candidates(base_url, forced=None):
     requested = (forced or "").strip()
     env_forced = os.environ.get("GUARD_LLM_MODEL", "").strip()
     if _guardrail_external():
-        # Remote endpoint (Ollama): local bookkeeping is meaningless — there
-        # is no status.value on /v1/models and the chat model id is a local
-        # GGUF filename the remote will 404. Prefer the configured remote tag
-        # first (a per-user pin is a local filename that cannot exist
-        # remotely), then the pin, then whatever the endpoint lists.
-        if env_forced:
+        # Remote endpoint (Ollama): "user-set judge, else default". The pin
+        # is a user choice and goes first — unless it IS the local default
+        # (user has no user_judges row), in which case the shared remote tag
+        # is the default and probing the local GGUF id would only burn a 404.
+        # Stale pins fall through to the env tag, then to whatever is listed;
+        # the winner is cached per (base, pin) so steady state is single-POST.
+        if requested and requested != _default_judge_model():
+            out.append(requested)
+        if env_forced and env_forced not in out:
             out.append(env_forced)
+        if not env_forced:
+            global _warned_no_remote_tag
+            if not _warned_no_remote_tag:
+                _warned_no_remote_tag = True
+                print(
+                    "[guardrail][judge] GUARDRAIL_EXTERNAL set but "
+                    "GUARD_LLM_MODEL is empty — remote default falls through "
+                    "to whatever the endpoint lists",
+                    flush=True,
+                )
         if requested and requested not in out:
             out.append(requested)
         out.extend(m for m in ids if m not in out)
