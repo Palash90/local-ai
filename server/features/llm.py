@@ -524,7 +524,7 @@ def _is_vram_occupied(threshold_mb=500):
         return False
 
 
-def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None):
+def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None, force=False):
     """Unload the model from the llama-server for ``mode``.
 
     For the guardrail lane ``model_id`` defaults to whichever judge is
@@ -536,6 +536,15 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None):
     unload. The image-eviction path passes a short value (e.g. 15s) so an image
     never stalls behind a busy CPU slot for the full default 180s. When None,
     the default 180s timeout is used.
+
+    Unless ``force`` is set, the unload is *refused* (returns False) while the
+    lane has in-flight inference: killing the child mid-stream surfaces as
+    ``500 proxy error: Failed to read connection`` in the victim round. The
+    pre-unload waits (``_wait_chat_generating_clear``) race fresh round starts
+    (TOCTOU), so this under-lock re-check is the actual guarantee; callers
+    that must proceed (image renders, after a bounded drain) retry with
+    ``force=True``. Idle/thermal callers pass ``force=False`` and simply retry
+    on their next cycle.
     """
     current_status = M.server_status(mode)
     print(f"[llama] unload_llama_model called: mode={mode}, current_status={current_status}")
@@ -549,6 +558,14 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None):
             else:
                 print(f"[llama] {mode} already unloaded — skipping")
                 return True
+
+        if not force and lane_generating_count(mode) > 0:
+            print(
+                f"[llama] {mode} has in-flight inference — refusing unload "
+                f"(retry after drain, or force=True)",
+                flush=True,
+            )
+            return False
 
         print(f"[llama] Requesting {mode} model unload from VRAM/RAM...")
         # Checkpoint the KV cache BEFORE it is destroyed by the unload, so the
@@ -642,6 +659,21 @@ def _wait_image_active_clear(timeout=600):
         time.sleep(0.5)
     print(f"[llama] _wait_image_active_clear: gave up after {timeout}s — proceeding anyway")
     return False
+
+
+def lane_generating_count(mode):
+    """Live in-flight inference count for ``mode`` (fail-safe 0).
+
+    Read under ``_chat_generating_lock`` from the per-lane counters that
+    every streaming POST holds (see :func:`_mark_chat_generating`). Exposed
+    via ``M`` so unload paths can refuse to kill a lane mid-inference even
+    when the pre-unload wait raced a fresh round start (TOCTOU).
+    """
+    try:
+        with M._chat_generating_lock:
+            return int(M._chat_generating_by_lane.get(mode, 0))
+    except Exception:
+        return 0
 
 
 def _mark_chat_generating(mode, active):

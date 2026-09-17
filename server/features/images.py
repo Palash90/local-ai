@@ -27,6 +27,40 @@ ASPECT_SIZES = {
 }
 
 
+def _unload_lane_for_render(mode, tag, drain_budget=120):
+    """Unload ``mode`` for an image render without killing live inference.
+
+    ``unload_llama_model`` refuses while the lane streams (killing the child
+    mid-stream surfaces as ``500 proxy error: Failed to read connection`` in
+    the victim round — the pre-unload wait races fresh round starts). Retry
+    after short drains until ``drain_budget`` seconds, then force so a stuck
+    round can't wedge renders forever. Returns True when this call unloaded
+    (caller must reload after the render).
+    """
+    deadline = time.time() + drain_budget
+    forced = False
+    while True:
+        if M.unload_llama_model(mode, force=forced):
+            return True
+        if not forced and M.lane_generating_count(mode) > 0 and time.time() < deadline:
+            print(
+                f"[{tag}] {mode} started streaming mid-render unload — "
+                f"draining before retry...",
+                flush=True,
+            )
+            time.sleep(2)
+            continue
+        if not forced:
+            print(
+                f"[{tag}] {mode} still busy after drain budget — forcing "
+                f"unload (may interrupt a round)",
+                flush=True,
+            )
+            forced = True
+            continue
+        return False
+
+
 def _aspect_dims(aspect_ratio):
     return ASPECT_SIZES.get(aspect_ratio, ASPECT_SIZES["landscape"])
 
@@ -209,10 +243,14 @@ def generate_image(
     # that were actually serving get reloaded (an idle-unloaded guardrail
     # must not be pointlessly loaded into RAM after every render).
     gpu_was_loaded, guard_was_loaded = _lanes_loaded_for_reload()
-    gpu_ok = M.unload_llama_model("gpu")
+    # Drain-retry unload: never kill a round that started streaming after the
+    # pre-unload wait cleared (TOCTOU -> 500 proxy error in the victim round).
+    # Unconditional (as before): idle lanes no-op inside unload, and the
+    # post-render reload gate below decides what comes back.
+    gpu_ok = _unload_lane_for_render("gpu", "image")
     print(f"[image] gpu unload returned: {gpu_ok}, status now: {M.server_status('gpu')}")
     print(f"[image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
-    guard_ok = M.unload_llama_model("guardrail")
+    guard_ok = _unload_lane_for_render("guardrail", "image")
     print(f"[image] guardrail unload returned: {guard_ok}, status now: {M.server_status('guardrail')}")
     # Verify unload actually freed VRAM — poll until both are "unloaded".
     for _wait in range(10):
@@ -541,10 +579,12 @@ def edit_image(
     # Snapshot residency for the post-render reload gate below (same pattern
     # as generate_image): only lanes that were serving get reloaded.
     gpu_was_loaded, guard_was_loaded = _lanes_loaded_for_reload()
-    gpu_ok = M.unload_llama_model("gpu")
+    # Drain-retry unload (see generate_image): never kill a freshly started
+    # round that raced the pre-unload wait.
+    gpu_ok = _unload_lane_for_render("gpu", "edit_image")
     print(f"[edit_image] gpu unload returned: {gpu_ok}, status now: {M.server_status('gpu')}")
     print(f"[edit_image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
-    guard_ok = M.unload_llama_model("guardrail")
+    guard_ok = _unload_lane_for_render("guardrail", "edit_image")
     print(f"[edit_image] guardrail unload returned: {guard_ok}, status now: {M.server_status('guardrail')}")
     # Verify unload actually freed VRAM — poll until both are "unloaded".
     for _wait in range(10):

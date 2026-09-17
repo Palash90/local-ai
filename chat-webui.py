@@ -249,6 +249,7 @@ from server.features.llm import (  # noqa: E402
     active_model_id,
     is_llama_alive,
     is_model_ready,
+    lane_generating_count,
     load_llama_model,
     mark_slot_kv_dirty,
     restore_slot_checkpoint,
