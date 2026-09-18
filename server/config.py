@@ -472,7 +472,7 @@ LLAMA_ARGS_QWEN_38_27B = [
     "--parallel", "1"
 ]
 
-LLAMA_SERVER_ARGS=LLAMA_ARGS_QWEN_38_27B
+LLAMA_SERVER_ARGS=LLAMA_SERVER_ARGS_E4B_BACKUP
 
 # Second set of llama-server arguments used when processing automated
 # self-chat messages (editor/moderator/agent runs). These are background,

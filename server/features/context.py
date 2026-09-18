@@ -159,6 +159,78 @@ def _summarize_with_llm(text, mode="gpu"):
         return None
 
 
+def _lane_allows_trailing_system(mode="gpu"):
+    """Mirror of llm.model_allows_trailing_system without the import cycle.
+
+    Only Qwen lanes are strict (embedded template rejects non-leading
+    system/developer). Everything else (Gemma/custom template) is lenient.
+    """
+    try:
+        if mode == "cpu":
+            mid = (M.MODEL_ID_CPU or M.MODEL_ID or "")
+        elif mode == "guardrail":
+            mid = (M.MODEL_ID_GUARDRAIL or "")
+        else:
+            mid = (M.MODEL_ID or "")
+        return "qwen" not in mid.lower()
+    except Exception:
+        return True
+
+
+def _fold_late_systems_for_strict_lane(messages, mode="gpu"):
+    """Fold non-leading system/developer msgs so strict templates survive.
+
+    Safety net for strict-order lanes (Qwen): external API clients
+    (openai_api._messages_to_session) or future callers can hand us a
+    mid-conversation system/developer message, which would 400 the whole
+    request. Moved content rides as <turn_context> on the last user message
+    (stable prefix untouched, best for KV reuse); with no user message it
+    merges into the leading system block. Lenient lanes pass through.
+    Returns a new list.
+    """
+    if _lane_allows_trailing_system(mode):
+        return messages
+    out = [dict(m) if isinstance(m, dict) else m for m in messages]
+    late_blocks = []
+    kept = []
+    for i, m in enumerate(out):
+        if (
+            isinstance(m, dict)
+            and m.get("role") in ("system", "developer")
+            and i > 0
+            and len(kept) > 0
+        ):
+            c = m.get("content")
+            if isinstance(c, list):
+                c = " ".join(
+                    p.get("text", "")
+                    for p in c
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            if c:
+                late_blocks.append(str(c))
+            continue
+        kept.append(m)
+    if not late_blocks:
+        return kept
+    wrapped = "<turn_context>\n" + "\n\n".join(late_blocks) + "\n</turn_context>"
+    for i in range(len(kept) - 1, -1, -1):
+        m = kept[i]
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                kept[i] = {**m, "content": f"{c}\n\n{wrapped}"}
+            elif isinstance(c, list):
+                kept[i] = {**m, "content": list(c) + [{"type": "text", "text": wrapped}]}
+            else:
+                kept[i] = {**m, "content": wrapped}
+            return kept
+    if kept and isinstance(kept[0], dict) and kept[0].get("role") == "system" and isinstance(kept[0].get("content"), str):
+        kept[0] = {**kept[0], "content": f"{kept[0]['content']}\n\n{wrapped}"}
+        return kept
+    return kept + [{"role": "user", "content": wrapped}]
+
+
 def compact_messages_copy(messages, keep_messages=6, mode="gpu"):
     """Return a compacted COPY of the message list (summary + recent messages)
     WITHOUT modifying the stored session. Old messages are summarized, not deleted."""
@@ -200,7 +272,15 @@ def compact_messages_copy(messages, keep_messages=6, mode="gpu"):
     new_msgs = []
     if sys_msg:
         new_msgs.append(sys_msg)
-    new_msgs.append({"role": "system", "content": f"[Compressed context]: {summary}"})
+    if not _lane_allows_trailing_system(mode) and sys_msg and isinstance(sys_msg.get("content"), str):
+        # Strict-order lane (Qwen): no second system — merge the summary
+        # into the leading system block instead of appending a new one.
+        new_msgs[0] = {
+            **sys_msg,
+            "content": f"{sys_msg['content']}\n\n[Compressed context]: {summary}",
+        }
+    else:
+        new_msgs.append({"role": "system", "content": f"[Compressed context]: {summary}"})
     new_msgs.extend(recent)
     return new_msgs
 
@@ -396,6 +476,7 @@ def prepare_context_for_llm(sid, messages, mode="gpu"):
     total = estimate_tokens(messages)
     if total <= M.AUTO_COMPACT_THRESHOLD:
         context = trim_messages_for_context(messages, mode)
+        context = _fold_late_systems_for_strict_lane(context, mode)
         # Always expose the context that was actually SENT (after
         # distillation/trim) so the UI's token gauge reports the real
         # in-use size instead of the full stored history.
@@ -405,6 +486,7 @@ def prepare_context_for_llm(sid, messages, mode="gpu"):
     # print(f"[context] Session {sid} estimate {total} tokens exceeds threshold {M.AUTO_COMPACT_THRESHOLD}; building compressed context for LLM")
     compacted = compact_messages_copy(messages, mode=mode)
     context = trim_messages_for_context(compacted, mode)
+    context = _fold_late_systems_for_strict_lane(context, mode)
     # The effective prefix sent to the LLM has changed, so any cached KV for
     # this session no longer matches the new prompt — drop it so it is never
     # restored. Best-effort (import lazily to avoid an import cycle).

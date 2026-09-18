@@ -416,6 +416,28 @@ def active_model_id(mode="gpu"):
     return server_model_id(mode)
 
 
+def _strict_system_order(mode="gpu"):
+    """True when the lane's chat template only accepts leading system msgs.
+
+    Qwen's embedded GGUF template merges only leading system/developer
+    messages and calls raise_exception('System message must be at the
+    beginning.') for any later one, so the sender must never emit a
+    trailing system message on that lane. Gemma's custom template renders
+    late-system as a normal <|turn>system turn, so it is unaffected.
+    Matched on model id substring so future qwen3.x models are covered.
+    """
+    try:
+        mid = (server_model_id(mode) or "").lower()
+    except Exception:
+        return False
+    return "qwen" in mid
+
+
+def model_allows_trailing_system(mode="gpu"):
+    """True when a trailing ``role: system`` message survives the template."""
+    return not _strict_system_order(mode)
+
+
 def is_llama_alive(base=None):
     """True when the llama-server at ``base`` answers /health.
 
@@ -992,7 +1014,7 @@ def _route_sampling(mode, messages):
     return {}
 
 
-def _append_turn_context(messages, task_id, user, tool_free):
+def _append_turn_context(messages, task_id, user, tool_free, mode="gpu"):
     """Append this round's volatile context as one trailing system message:
     the task's date/location block, the research directive when the task
     asked for research, and the user's warm tool docs for any tool their
@@ -1003,6 +1025,10 @@ def _append_turn_context(messages, task_id, user, tool_free):
     messages — stays byte-identical round over round. That keeps llama.cpp
     prefix reuse and the per-session KV checkpoints hitting instead of
     re-prefilling on the first timestamp change. Returns a new list.
+
+    Strict-order lanes (Qwen: only leading system allowed) fold the block
+    into the last user message as <turn_context> (or into msgs[0] when no
+    user message exists) instead of emitting a second system message.
     """
     with M._data_lock:
         t = M.tasks.get(task_id) or {}
@@ -1064,7 +1090,28 @@ def _append_turn_context(messages, task_id, user, tool_free):
     body = "\n\n".join(p for p in parts if p)
     if not body:
         return messages
-    return list(messages) + [{"role": "system", "content": body}]
+    if model_allows_trailing_system(mode):
+        return list(messages) + [{"role": "system", "content": body}]
+    # Strict-order lane (Qwen): fold into the last user message so the
+    # payload keeps n_sys <= 1. Multimodal list-content gets a text part;
+    # with no user message yet, merge into the leading system block.
+    wrapped = f"<turn_context>\n{body}\n</turn_context>"
+    out = [dict(m) if isinstance(m, dict) else m for m in messages]
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
+        if isinstance(m, dict) and m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, str):
+                out[i] = {**m, "content": f"{c}\n\n{wrapped}"}
+            elif isinstance(c, list):
+                out[i] = {**m, "content": list(c) + [{"type": "text", "text": wrapped}]}
+            else:
+                out[i] = {**m, "content": wrapped}
+            return out
+    if out and isinstance(out[0], dict) and out[0].get("role") == "system" and isinstance(out[0].get("content"), str):
+        out[0] = {**out[0], "content": f"{out[0]['content']}\n\n{wrapped}"}
+        return out
+    return out + [{"role": "user", "content": wrapped}]
 
 
 def _openai_lane_wire_tools(client_tools, server_tools, server_tool_mode, tool_free):
@@ -1143,7 +1190,7 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         # a real structured tool channel, so it emits native tool_calls
         # instead of leaking tool-call markup as text.
         tool_free = (task_user in M.TOOL_FREE_AGENTS or task_no_tools) and not client_tools and server_tool_mode == "never"
-        messages = _append_turn_context(messages, task_id, task_user, tool_free)
+        messages = _append_turn_context(messages, task_id, task_user, tool_free, mode)
         # The turn-context block (docs + directives) is appended AFTER the
         # history trim, so it never counted toward the budget — a 15 KB music
         # DSL doc could push the real prompt past ctx and earn a 400 from
