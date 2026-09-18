@@ -301,15 +301,13 @@ LLAMA_SLOT_SAVE_DIR = os.environ.get(
 )
 os.makedirs(LLAMA_SLOT_SAVE_DIR, exist_ok=True)
 
-LLAMA_QWEN_NGL = "0"
 LLAMA_GEMMA_NGL = "99"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MCP verification server — a lightweight CPU-only llama-server dedicated to
-# LEVEL 2 (input) and LEVEL 3 (output) LLM verification for the MCP gateway.
-# Runs gemma4-e4b-qat (small, fast QAT model) with a tight 8K context.
-# Started by the MCP gateway on first batch and auto-unloaded after
-# VERIFY_IDLE_TIMEOUT seconds of inactivity to free RAM.
+# MCP verification server — RETIRED as a standalone process. Verification now
+# rides the guardrail lane (local :8083, or GUARD_LLM_BASE when external), so
+# these VERIFY_* knobs are legacy (kept for import compatibility). See
+# .env.example.
 # ─────────────────────────────────────────────────────────────────────────────
 VERIFY_PORT = int(os.environ.get("VERIFY_PORT", "8083"))
 VERIFY_MODEL = os.environ.get("VERIFY_MODEL", "gemma-4-E2B-it-Q4_K_M")

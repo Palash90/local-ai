@@ -64,7 +64,7 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 | 8000 | MCP gateway | in-process thread of chat-webui | FastMCP + OAuth; `MCP_USER` token auth (plus an outbound `start_mcp_client` thread for external MCP servers) |
 | 8079 | llama-server (CPU) | lazy / `restart_servers` | self-chat agents, 32K ctx, RAM-backed |
 | 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI, 32K ctx (`GPU_CTX_SIZE_26B`, MoE profile below), VRAM-backed |
-| 8083 | llama-server (guardrail) | lazy by MCP gateway / judge | small verify model, idle-unloads after 300s |
+| 8083 | llama-server (guardrail) | lazy by MCP gateway / judge, skipped when external | small verify model, idle-unloads after 300s; or remote judges via `GUARD_LLM_BASE` (tablet Ollama) |
 | 8084 | llama-server (embed) | lazy by chat-webui / `restart_servers` | serves `/embedding` (nomic); vector layer of `page_cache` |
 | 8080 | SearXNG | docker / systemd | web search backend; `setup.sh` binds `127.0.0.1:8080`, `docker-compose.yaml` binds `8080:8080` (all interfaces) — bind to localhost if you don't need LAN-wide search |
 | 8188 | ComfyUI | lazy on image request | image generation; recycled after renders only when RAM is below headroom (else reused warm; `COMFYUI_RECYCLE_AFTER_RENDER=0` to disable) |
@@ -83,7 +83,8 @@ bash setup.sh
 #    LLM (chat):   put GGUFs into ~/local-ai-files/my-models/
 #                  model.json holds "gpu" (chat UI) and "cpu" (self-chat
 #                  agents) model ids — edit if you use other models
-#                  (the guardrail/verify model is VERIFY_MODEL in .env/config)
+#                  (the guardrail judge is MODEL_ID_GUARDRAIL locally,
+#                  GUARD_LLM_MODEL when judges are remote — see .env)
 #    Embeddings:   nomic-embed-text-v1.5.Q8_0 into ~/local-ai-files/my-models/
 #                  (served on :8084 for the page_cache vector layer)
 #    Image (z_image): copy these into ~/local-ai/ComfyUI/models/:
