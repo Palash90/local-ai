@@ -70,6 +70,13 @@ def _aspect_dims(aspect_ratio):
 # to multiples of 8 (latent-safe for VAEEncode/KSampler).
 EDIT_MAX_SIDE = 1536
 
+# ComfyUI /history poll budget (seconds) for generate_image and edit_image.
+# Z-Image Turbo needs ~5-6 min per render on the 4GB card (~36s/step x 8
+# steps + model staging under --lowvram); the old 300s budget timed out
+# renders sitting at 7/8 steps, and the post-timeout recycle then killed
+# the nearly-done render.
+COMFYUI_RENDER_TIMEOUT_S = 600
+
 
 def _probe_image_size(path):
     """Return (w, h) for PNG/JPEG without new deps, else None.
@@ -393,8 +400,14 @@ def generate_image(
             prompt_id = data["prompt_id"]
             found_file = None
             render_error = None
-            for _ in range(300):
+            for _poll in range(COMFYUI_RENDER_TIMEOUT_S):
                 time.sleep(1)
+                if _poll and _poll % 60 == 0:
+                    print(
+                        f"[generate_image] still waiting on ComfyUI for task "
+                        f"{task_id} ({_poll}s/{COMFYUI_RENDER_TIMEOUT_S}s)",
+                        flush=True,
+                    )
                 # Check for cancellation on every poll iteration — if the
                 # task was cancelled, interrupt ComfyUI immediately so the
                 # render stops without waiting for the full generation cycle.
@@ -463,7 +476,7 @@ def generate_image(
                     )
             else:
                 print(
-                    f"[generate_image] TIMEOUT for task {task_id} after 300s"
+                    f"[generate_image] TIMEOUT for task {task_id} after {COMFYUI_RENDER_TIMEOUT_S}s"
                 )  # DEBUG
                 if render_error:
                     result = json.dumps({"error": f"ComfyUI render failed: {render_error}"})
@@ -818,8 +831,14 @@ def edit_image(
             prompt_id = data["prompt_id"]
             found_file = None
             render_error = None
-            for _ in range(300):
+            for _poll in range(COMFYUI_RENDER_TIMEOUT_S):
                 time.sleep(1)
+                if _poll and _poll % 60 == 0:
+                    print(
+                        f"[edit_image] still waiting on ComfyUI for task "
+                        f"{task_id} ({_poll}s/{COMFYUI_RENDER_TIMEOUT_S}s)",
+                        flush=True,
+                    )
                 # Check for cancellation on every poll iteration — if the
                 # task was cancelled, interrupt ComfyUI immediately.
                 with M._data_lock:
