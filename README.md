@@ -278,6 +278,14 @@ local-ai/
 ├── genre_creator.py         Interactive console helper to author task genre schemas
 ├── mcp_config.json          External MCP servers for mcp_client.py
 │                            (codebase-search = codebase-memory-mcp graph)
+├── opencode client MCP      `~/.config/opencode/opencode.json` → `mcp.playwright`:
+│                            `npx -y @playwright/mcp@0.0.81 --headless --no-sandbox
+│                            --executable-path ~/.cache/ms-playwright/chromium-1193/chrome-linux/chrome`
+│                            (26 tools: navigate/snapshot/click/type/screenshot…).
+│                            Gotchas baked in: package defaults to branded Chrome
+│                            (/opt/google/chrome — absent here, hence executable-path);
+│                            Chromium sandbox fails as non-root (hence --no-sandbox);
+│                            restart the opencode session to pick up new MCP tools.
 ├── docker-compose.yaml      Containerized stack + SearXNG
 ├── authentik-compose.yaml   Authentik identity provider
 ├── local_cloud.sh / gcp_nginx.conf   nginx front-ends: `local_cloud.sh` is the
