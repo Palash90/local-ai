@@ -20,7 +20,10 @@ import threading
 from server.config import APP_DB, FILES_DIR
 
 # Single overridable path; defaults to one file in the shared FILES_DIR.
-DB_PATH = os.environ.get("LOCAL_AI_DB", APP_DB)
+# NOTE: plain os.environ.get(key, default) is NOT enough here — a present-
+# but-empty LOCAL_AI_DB= line returns "" (not the default), and
+# os.path.dirname("") == "" makes makedirs crash at import (boot killer).
+DB_PATH = os.environ.get("LOCAL_AI_DB", "").strip() or APP_DB
 
 # One re-entrant lock serializes every connection so cross-feature writes can
 # never interleave. RLock (not Lock) lets init() drive the one-time migration
@@ -236,7 +239,9 @@ def _migrate_legacy():
 # ---------------------------------------------------------------------------
 
 def _do_init():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    parent = os.path.dirname(DB_PATH)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     try:
         _create_tables(conn)

@@ -290,6 +290,17 @@ def main():
         if vals.get(key, "").strip() in PLACEHOLDERS:
             warnings.append(f"{key} is empty — related feature will be disabled")
 
+    # Path keys where a value without a directory silently lands in the
+    # process working directory instead of the data dir.
+    for key in ("LOCAL_AI_DB",):
+        v = vals.get(key, "").strip()
+        if v and not os.path.dirname(v):
+            warnings.append(
+                f"{key}={v} has no directory — DB will be created in the "
+                f"process working directory; use an absolute path or empty "
+                f"(built-in default) instead"
+            )
+
     if os.path.isfile(args.example):
         example_keys = set(load_env(args.example))
         env_keys = set(vals)
