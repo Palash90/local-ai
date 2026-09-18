@@ -411,14 +411,28 @@ async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str 
     import re as _re
 
     task_lane = "guardrail"
-    model_id = sanitize_judge_model(
-        (model_id or "").strip() or M.server_model_id(task_lane),
-        M.server_base(task_lane),
-    )
+    model_id = (model_id or "").strip() or M.server_model_id(task_lane)
     text = (message or "").strip()
     if not text:
         print(f"[guardrail][L2] empty message, auto-passing")
         return True, ""
+
+    # Remote judges (GUARDRAIL_EXTERNAL, e.g. Ollama on a tablet): verdict
+    # traffic goes to GUARD_LLM_BASE with the GUARD_LLM_MODEL tag instead of
+    # the local guardrail lane. Local behavior is untouched otherwise.
+    from server.features.judge import judge_endpoint
+    ext_base, ext_url, ext_model = judge_endpoint(default_model=model_id)
+    if ext_base:
+        if not os.environ.get("GUARD_LLM_MODEL", "").strip():
+            print(
+                "[guardrail][L2] GUARDRAIL_EXTERNAL set but GUARD_LLM_MODEL "
+                "is empty — remote judge will reject the local model id",
+                flush=True,
+            )
+        verify_base, verify_url, model_id = ext_base, ext_url, ext_model
+    else:
+        verify_base, verify_url = M.server_base(task_lane), M.server_url(task_lane)
+    model_id = sanitize_judge_model(model_id, verify_base)
 
     # Never stack a judge model load on top of an active ComfyUI render —
     # that collision is what triggers emergency RAM evacuations. Waiting is
@@ -455,7 +469,7 @@ async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str 
         try:
             async with httpx.AsyncClient() as client:
                 r = await client.post(
-                    M.server_url(task_lane),
+                    verify_url,
                     json=payload,
                     timeout=VERIFY_TIMEOUT,
                 )
@@ -468,7 +482,7 @@ async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str 
         except Exception as e:
             return "", "", str(e)
 
-    print(f"[guardrail][L2] calling {task_lane} LLM server at {M.server_url(task_lane)}")
+    print(f"[guardrail][L2] calling {task_lane} LLM server at {verify_url}")
     print(f"[guardrail][L2] input message: {text}")
     reply, reasoning, err = await _judge_call()
     if not reply and reasoning:

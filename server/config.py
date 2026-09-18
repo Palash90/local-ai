@@ -525,10 +525,75 @@ LLAMA_SERVER_ARGS_CPU = [
 ]
 
 
-LLAMA_BASE_GUARDRAIL = "http://localhost:8083"
+LLAMA_BASE_GUARDRAIL = os.environ.get(
+    "LLAMA_BASE_GUARDRAIL", "http://localhost:8083"
+).rstrip("/")
 LLAMA_URL_GUARDRAIL = f"{LLAMA_BASE_GUARDRAIL}/v1/chat/completions"
 MODEL_ID_GUARDRAIL = "gemma-4-E2B-it-Q4_K_M"
 MCP_USER = os.environ.get("MCP_USER", "")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lane residency ("never evict") flags. Each lane unloads independently on idle
+# timeout / image render; setting its KEEP_* flag suppresses every *routine*
+# unload (idle loop, image choreography) so the model stays resident in RAM
+# (and VRAM for gpu) across the whole uptime. The 95%-RAM emergency evacuation
+# and the thermal GPU unload are safety backstops and intentionally override
+# these flags. All default to 0 (current behavior).
+# ─────────────────────────────────────────────────────────────────────────────
+def _env_flag(name, default="0"):
+    return os.environ.get(name, default).strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+KEEP_GPU_RESIDENT = _env_flag("KEEP_GPU_RESIDENT")
+KEEP_CPU_RESIDENT = _env_flag("KEEP_CPU_RESIDENT")
+KEEP_GUARDRAIL_RESIDENT = _env_flag("KEEP_GUARDRAIL_RESIDENT")
+
+
+def lane_keep_resident(mode):
+    """True when ``mode``'s model must never be routinely unloaded."""
+    if mode == "gpu":
+        return KEEP_GPU_RESIDENT
+    if mode == "cpu":
+        return KEEP_CPU_RESIDENT
+    if mode == "guardrail":
+        return KEEP_GUARDRAIL_RESIDENT or GUARDRAIL_EXTERNAL
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# External guardrail judges. Verdict traffic already routes via GUARD_LLM_BASE
+# (see server/features/judge.py); pointing it at another machine (e.g. Ollama
+# on a tablet over private WiFi) with GUARD_LLM_MODEL=<ollama-tag> moves all
+# judging off this box. GUARDRAIL_EXTERNAL disables every *local* lifecycle
+# operation for the guardrail lane (start/restart, load/unload, idle-unload,
+# image-choreography unload) — the remote endpoint manages its own models.
+# Auto-detected from GUARD_LLM_BASE unless GUARDRAIL_EXTERNAL is set explicitly.
+# ─────────────────────────────────────────────────────────────────────────────
+GUARD_LLM_BASE = os.environ.get(
+    "GUARD_LLM_BASE", "http://localhost:8083"
+).rstrip("/")
+
+
+def _is_local_base(url):
+    try:
+        from urllib.parse import urlparse
+        parts = urlparse(url)
+        return (parts.hostname or "").lower() in (
+            "localhost", "127.0.0.1", "::1",
+        ) and str(parts.port or "") == "8083"
+    except Exception:
+        return True
+
+
+_GUARDRAIL_EXTERNAL_ENV = os.environ.get("GUARDRAIL_EXTERNAL", "").strip().lower()
+if _GUARDRAIL_EXTERNAL_ENV in ("1", "true", "yes", "on"):
+    GUARDRAIL_EXTERNAL = True
+elif _GUARDRAIL_EXTERNAL_ENV in ("0", "false", "no", "off"):
+    GUARDRAIL_EXTERNAL = False
+else:
+    GUARDRAIL_EXTERNAL = not _is_local_base(GUARD_LLM_BASE)
 
 # Background agent peer review: who critiques whom for the full cross-agent
 # round on the CPU lane. Keys are agent usernames; a reply finalized by the

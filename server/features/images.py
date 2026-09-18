@@ -241,22 +241,20 @@ def generate_image(
     print(f"[image] Calling unload_llama_model(gpu), current status: {M.server_status('gpu')}")
     # Snapshot residency for the post-render reload gate below: only lanes
     # that were actually serving get reloaded (an idle-unloaded guardrail
-    # must not be pointlessly loaded into RAM after every render).
+    # must not be pointlessly loaded into RAM after every render). Lanes
+    # pinned resident (KEEP_*_RESIDENT / external guardrail) are left alone
+    # and need no reload either.
     gpu_was_loaded, guard_was_loaded = _lanes_loaded_for_reload()
-    # Drain-retry unload: never kill a round that started streaming after the
-    # pre-unload wait cleared (TOCTOU -> 500 proxy error in the victim round).
-    # Unconditional (as before): idle lanes no-op inside unload, and the
-    # post-render reload gate below decides what comes back.
-    gpu_ok = _unload_lane_for_render("gpu", "image")
-    print(f"[image] gpu unload returned: {gpu_ok}, status now: {M.server_status('gpu')}")
+    gpu_unloaded_here = _maybe_unload_lane("gpu", "image") if gpu_was_loaded else False
     print(f"[image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
-    guard_ok = _unload_lane_for_render("guardrail", "image")
-    print(f"[image] guardrail unload returned: {guard_ok}, status now: {M.server_status('guardrail')}")
-    # Verify unload actually freed VRAM — poll until both are "unloaded".
+    guard_unloaded_here = _maybe_unload_lane("guardrail", "image") if guard_was_loaded else False
+    # Verify unload actually freed VRAM — poll only lanes we unloaded here.
     for _wait in range(10):
         gpu_ms = M.server_status("gpu")
         guard_ms = M.server_status("guardrail")
-        if gpu_ms == "unloaded" and guard_ms == "unloaded":
+        if (not gpu_unloaded_here or gpu_ms == "unloaded") and (
+            not guard_unloaded_here or guard_ms == "unloaded"
+        ):
             break
         print(f"[image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms})...")
         time.sleep(2)
@@ -488,12 +486,16 @@ def generate_image(
         # evacuation monitor remains the backstop.
         _recycle_after_render("generate_image")
         M.set_status(task_id, "Loading chat model...")
-        if gpu_was_loaded:
+        if gpu_unloaded_here:
             M.load_llama_model("gpu")
+        elif gpu_was_loaded:
+            print("[image] GPU lane left resident — no reload needed", flush=True)
         else:
             print("[image] GPU lane was idle before render — leaving unloaded", flush=True)
-        if guard_was_loaded:
+        if guard_unloaded_here:
             M.load_llama_model("guardrail")
+        elif guard_was_loaded:
+            print("[image] Guardrail lane left resident — no reload needed", flush=True)
         else:
             print("[image] Guardrail lane was idle before render — leaving unloaded", flush=True)
     return result
@@ -577,20 +579,18 @@ def edit_image(
     # its model is evicted below (RAM, not VRAM — both can't fit at once).
     print(f"[edit_image] Calling unload_llama_model(gpu), current status: {M.server_status('gpu')}")
     # Snapshot residency for the post-render reload gate below (same pattern
-    # as generate_image): only lanes that were serving get reloaded.
+    # as generate_image): only lanes unloaded here get reloaded.
     gpu_was_loaded, guard_was_loaded = _lanes_loaded_for_reload()
-    # Drain-retry unload (see generate_image): never kill a freshly started
-    # round that raced the pre-unload wait.
-    gpu_ok = _unload_lane_for_render("gpu", "edit_image")
-    print(f"[edit_image] gpu unload returned: {gpu_ok}, status now: {M.server_status('gpu')}")
+    gpu_unloaded_here = _maybe_unload_lane("gpu", "edit_image") if gpu_was_loaded else False
     print(f"[edit_image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
-    guard_ok = _unload_lane_for_render("guardrail", "edit_image")
-    print(f"[edit_image] guardrail unload returned: {guard_ok}, status now: {M.server_status('guardrail')}")
-    # Verify unload actually freed VRAM — poll until both are "unloaded".
+    guard_unloaded_here = _maybe_unload_lane("guardrail", "edit_image") if guard_was_loaded else False
+    # Verify unload actually freed VRAM — poll only lanes we unloaded here.
     for _wait in range(10):
         gpu_ms = M.server_status("gpu")
         guard_ms = M.server_status("guardrail")
-        if gpu_ms == "unloaded" and guard_ms == "unloaded":
+        if (not gpu_unloaded_here or gpu_ms == "unloaded") and (
+            not guard_unloaded_here or guard_ms == "unloaded"
+        ):
             break
         print(f"[edit_image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms})...")
         time.sleep(2)
@@ -908,12 +908,16 @@ def edit_image(
         # Same post-render recycle as generate_image (see the comment there).
         _recycle_after_render("edit_image")
         M.set_status(task_id, "Loading chat model...")
-        if gpu_was_loaded:
+        if gpu_unloaded_here:
             M.load_llama_model("gpu")
+        elif gpu_was_loaded:
+            print("[edit_image] GPU lane left resident — no reload needed", flush=True)
         else:
             print("[edit_image] GPU lane was idle before render — leaving unloaded", flush=True)
-        if guard_was_loaded:
+        if guard_unloaded_here:
             M.load_llama_model("guardrail")
+        elif guard_was_loaded:
+            print("[edit_image] Guardrail lane left resident — no reload needed", flush=True)
         else:
             print("[edit_image] Guardrail lane was idle before render — leaving unloaded", flush=True)
 
@@ -1053,6 +1057,27 @@ def _thermal_pace_after_render(tool_name):
         return max(5.0, M.pace_delay(M.get_platform_temp()))
     except Exception:
         return 5.0
+
+
+def _maybe_unload_lane(mode, tag):
+    """Unload ``mode`` for an image render unless residency says otherwise.
+
+    Returns True when this call actually unloaded (the caller must reload the
+    lane after the render), False when the lane was left resident:
+    ``KEEP_*_RESIDENT`` lanes, or the guardrail lane while
+    ``GUARDRAIL_EXTERNAL`` is set (the remote endpoint needs no VRAM
+    choreography and is never managed locally).
+
+    Non-resident lanes unload via ``_unload_lane_for_render`` (drain-retry):
+    never kill a round that started streaming after the pre-unload wait
+    cleared (TOCTOU -> 500 proxy error in the victim round).
+    """
+    if M.lane_keep_resident(mode):
+        print(f"[{tag}] {mode} lane pinned resident — skipping pre-render unload", flush=True)
+        return False
+    ok = _unload_lane_for_render(mode, tag)
+    print(f"[{tag}] {mode} unload returned: {ok}, status now: {M.server_status(mode)}")
+    return bool(ok)
 
 
 def _lanes_loaded_for_reload():

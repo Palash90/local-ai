@@ -56,6 +56,48 @@ def _guardrail_base():
         return "http://localhost:8083"
 
 
+def _guardrail_external():
+    """True when judges live on a remote endpoint (e.g. Ollama on another
+    machine) instead of the local guardrail llama-server.
+
+    Prefers the entrypoint proxy (monkeypatchable in tests) with a direct
+    config fallback. Never raises.
+    """
+    try:
+        from server.features.state import M
+        return bool(M.GUARDRAIL_EXTERNAL)
+    except Exception:
+        pass
+    try:
+        from server.config import GUARDRAIL_EXTERNAL
+        return bool(GUARDRAIL_EXTERNAL)
+    except Exception:
+        return False
+
+
+def judge_endpoint(default_model=""):
+    """Resolve (base_url, completions_url, model_id) for verdict traffic.
+
+    Remote (``GUARDRAIL_EXTERNAL``): the ``GUARD_LLM_BASE`` endpoint with the
+    ``GUARD_LLM_MODEL`` tag (falls back to ``default_model`` when the env tag
+    is unset — the remote will 404 an unknown id and the normal fail-open /
+    fail-closed policy applies). Local: ``(None, None, default_model)`` so
+    callers keep their legacy lane-based resolution untouched. Never raises.
+    """
+    try:
+        if not _guardrail_external():
+            return None, None, (default_model or "").strip()
+        try:
+            from server.config import GUARD_LLM_BASE
+        except ImportError:
+            GUARD_LLM_BASE = "http://localhost:8083"
+        base = str(GUARD_LLM_BASE or "").rstrip("/") or "http://localhost:8083"
+        model = os.environ.get("GUARD_LLM_MODEL", "").strip() or (default_model or "").strip()
+        return base, f"{base}/v1/chat/completions", model
+    except Exception:
+        return None, None, (default_model or "").strip()
+
+
 def _model_ids_listed(base_url):
     """Cached set of model ids the server at ``base_url`` advertises, or None
     when the endpoint couldn't be queried (caller should not guess)."""
@@ -193,6 +235,7 @@ def _parse_verdict(content):
 
 _JUDGE_MODEL_CACHE = {}
 _JUDGE_MIN_TIMEOUT = 90
+_warned_no_remote_tag = False
 
 
 def _judge_system():
@@ -259,11 +302,36 @@ def _judge_candidates(base_url, forced=None):
 
     out = []
     requested = (forced or "").strip()
+    env_forced = os.environ.get("GUARD_LLM_MODEL", "").strip()
+    if _guardrail_external():
+        # Remote endpoint (Ollama): "user-set judge, else default". The pin
+        # is a user choice and goes first — unless it IS the local default
+        # (user has no user_judges row), in which case the shared remote tag
+        # is the default and probing the local GGUF id would only burn a 404.
+        # Stale pins fall through to the env tag, then to whatever is listed;
+        # the winner is cached per (base, pin) so steady state is single-POST.
+        if requested and requested != _default_judge_model():
+            out.append(requested)
+        if env_forced and env_forced not in out:
+            out.append(env_forced)
+        if not env_forced:
+            global _warned_no_remote_tag
+            if not _warned_no_remote_tag:
+                _warned_no_remote_tag = True
+                print(
+                    "[guardrail][judge] GUARDRAIL_EXTERNAL set but "
+                    "GUARD_LLM_MODEL is empty — remote default falls through "
+                    "to whatever the endpoint lists",
+                    flush=True,
+                )
+        if requested and requested not in out:
+            out.append(requested)
+        out.extend(m for m in ids if m not in out)
+        return out
     if requested:
         out.append(requested)
-    forced = os.environ.get("GUARD_LLM_MODEL", "").strip()
-    if forced:
-        out.append(forced)
+    if env_forced:
+        out.append(env_forced)
     out.extend(m for m in loaded if m not in out)
     chat = _chat_model_id()
     if chat and chat not in out:
@@ -343,11 +411,22 @@ def wait_until_render_safe(timeout=_RENDER_WAIT_TIMEOUT, cooldown=_RENDER_COOLDO
     the post-render VRAM settle before judge weights land in RAM. Returns
     True when the render window cleared, False on timeout (callers proceed
     anyway — same semantics as ``llm._wait_image_active_clear``).
+
+    Skipped entirely for external judges (``GUARDRAIL_EXTERNAL``): a remote
+    endpoint allocates no local RAM/VRAM, so holding its verdicts for a
+    local render is pure added latency.
     """
     try:
         from server.features.state import M
     except Exception:
         return True
+    try:
+        # getattr: test fakes and older entrypoints may lack the flag;
+        # fail-safe defaults to the local (holding) behavior.
+        if bool(getattr(M, "GUARDRAIL_EXTERNAL", False)):
+            return True
+    except Exception:
+        pass
     tag = f"[judge][{label}]" if label else "[judge]"
     deadline = time.time() + timeout
     waited = False
@@ -689,6 +768,10 @@ def _judge_post_loop(label, system_prompt, user_content, base_url, timeout,
     max_tokens = _judge_max_tokens()
     last_err = ""
     attempts = 0
+    # llama.cpp-only extras (reasoning budget, prompt-cache opt-out) are
+    # dropped for external endpoints (Ollama): unknown fields are ignored at
+    # best, and the payload stays strictly OpenAI-compatible.
+    external = _guardrail_external()
     while True:
         attempts += 1
         conn_failed = False
@@ -701,13 +784,14 @@ def _judge_post_loop(label, system_prompt, user_content, base_url, timeout,
                 ],
                 "temperature": 0,
                 "max_tokens": max_tokens,
+                "stream": False,
+            }
+            if not external:
                 # Explicit, small reasoning budget so a thinking model on a
                 # server without its own --reasoning-budget (the GPU fallback)
                 # cannot burn thousands of tokens before the verdict word.
-                "reasoning_budget_tokens": _judge_reasoning_budget(),
-                "cache_prompt": False,
-                "stream": False,
-            }
+                payload["reasoning_budget_tokens"] = _judge_reasoning_budget()
+                payload["cache_prompt"] = False
             try:
                 if gpu_base:
                     from server.features.llm import _mark_chat_generating
