@@ -71,11 +71,12 @@ def _aspect_dims(aspect_ratio):
 EDIT_MAX_SIDE = 1536
 
 # ComfyUI /history poll budget (seconds) for generate_image and edit_image.
-# Z-Image Turbo needs ~5-6 min per render on the 4GB card (~36s/step x 8
-# steps + model staging under --lowvram); the old 300s budget timed out
-# renders sitting at 7/8 steps, and the post-timeout recycle then killed
-# the nearly-done render.
-COMFYUI_RENDER_TIMEOUT_S = 600
+# Measured wall times on the 4GB card (--lowvram, weights streaming over
+# PCIe): Z-Image Turbo ~5-6 min (8 x ~36s + staging), Krea2-Edit ~10 min
+# (12 x ~50s + staging). A render killed at 11/12 steps by an expired
+# budget is pure waste, so budget covers the slowest path with margin;
+# genuine failures still short-circuit fast via render_error.
+COMFYUI_RENDER_TIMEOUT_S = 900
 
 # Weight files each image model needs, as cfg-key -> candidate ComfyUI
 # model subdirs (CLIP loaders resolve both clip/ and text_encoders/).
