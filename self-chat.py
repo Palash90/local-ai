@@ -4983,7 +4983,7 @@ if args.dry_run:
     run_dry_run()
     raise SystemExit(0)
 
-user_input = input("Keep sessions {y/n} [default: n] ? ")
+user_input = "y" #input("Keep sessions {y/n} [default: n] ? ")
 keep_sessions = user_input.strip().lower() == "y"
 
 
