@@ -50,6 +50,42 @@ def test_candidates_local_order_unchanged(monkeypatch):
     assert out[0] == "pinned"
 
 
+def test_candidates_local_stale_pin_keeps_default_second(monkeypatch):
+    """A stale per-user pin must never collapse the list to one doomed id.
+
+    Regression: pins pointing at removed models (plus a down lane, so no
+    loaded/listed fallbacks) left candidates == [pin] -> HTTP 400 ->
+    fail-open with no verdict. Default rides second now.
+    """
+    monkeypatch.setattr(judge, "_guardrail_external", lambda: False)
+    monkeypatch.delenv("GUARD_LLM_MODEL", raising=False)
+
+    def fake_get(url, timeout=None):
+        raise ConnectionError("lane down")
+
+    import requests
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    out = judge._judge_candidates("http://localhost:8083", forced="stale-pin")
+    assert out[0] == "stale-pin"
+    assert out[1] == judge._default_judge_model()
+
+
+def test_candidates_local_no_duplicate_default(monkeypatch):
+    monkeypatch.setattr(judge, "_guardrail_external", lambda: False)
+    monkeypatch.delenv("GUARD_LLM_MODEL", raising=False)
+
+    def fake_get(url, timeout=None):
+        raise ConnectionError("lane down")
+
+    import requests
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    default = judge._default_judge_model()
+    out = judge._judge_candidates("http://localhost:8083", forced=default)
+    assert out.count(default) == 1
+
+
 # ── payload ────────────────────────────────────────────────────────────────
 
 def _run_post(monkeypatch, external, content="SAFE"):

@@ -775,7 +775,7 @@ def edit_image(
                     "source_latent": ["5_vae_encode", 0],
                     "vae": ["7", 0],
                     "source_image": ["5_load", 0],
-                    "ref_boost": 3,
+                    "ref_boost": 2,
                     "fit_mode": "fit",
                 },
             },

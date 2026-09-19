@@ -330,7 +330,14 @@ def _judge_candidates(base_url, forced=None):
         return out
     if requested:
         out.append(requested)
-    if env_forced:
+    # The configured default always rides second: a stale per-user pin (or
+    # an unreachable endpoint that sanitize couldn't pre-flight) must never
+    # collapse the candidate list to a single doomed id. The loop tries in
+    # order, so this costs nothing unless the pin actually fails.
+    default = _default_judge_model()
+    if default and default not in out:
+        out.append(default)
+    if env_forced and env_forced not in out:
         out.append(env_forced)
     out.extend(m for m in loaded if m not in out)
     chat = _chat_model_id()
