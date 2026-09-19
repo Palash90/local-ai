@@ -77,6 +77,62 @@ EDIT_MAX_SIDE = 1536
 # the nearly-done render.
 COMFYUI_RENDER_TIMEOUT_S = 600
 
+# Weight files each image model needs, as cfg-key -> candidate ComfyUI
+# model subdirs (CLIP loaders resolve both clip/ and text_encoders/).
+_IMAGE_MODEL_FILES = {
+    "z_image": {
+        "unet": ("diffusion_models",),
+        "clip1": ("clip", "text_encoders"),
+        "vae": ("vae",),
+    },
+    "flux_kontext": {
+        "unet": ("unet",),
+        "clip1": ("clip", "text_encoders"),
+        "t5": ("clip", "text_encoders"),
+        "vae": ("vae",),
+    },
+    "krea2_edit": {
+        "unet": ("unet",),
+        "clip1": ("clip", "text_encoders"),
+        "lora": ("loras",),
+        "vae": ("vae",),
+    },
+}
+
+# Max edit_image dispatches per task (attempts, not successes): without a
+# cap a validation failure loops forever — each failed round still burns a
+# full GPU unload / ComfyUI recycle / reload cycle before ComfyUI rejects
+# the prompt in milliseconds.
+MAX_EDIT_ATTEMPTS_PER_TASK = 2
+
+
+def _missing_model_files(model, cfg):
+    """Weight filenames from cfg absent under ComfyUI/models. [] = ready.
+
+    Fail-open ([]) on any unexpected error so unit contexts without a full
+    state proxy never break; the ComfyUI validation remains the backstop.
+    """
+    try:
+        spec = _IMAGE_MODEL_FILES.get(model) or {}
+        try:
+            models_dir = os.path.join(M.COMFYUI_DIR, "models")
+        except Exception:
+            models_dir = os.path.expanduser("~/local-ai/ComfyUI/models")
+        missing = []
+        for key, subdirs in spec.items():
+            fname = (cfg or {}).get(key)
+            if not fname:
+                missing.append(f"{key}=<unset>")
+                continue
+            if not any(
+                os.path.isfile(os.path.join(models_dir, sub, fname))
+                for sub in subdirs
+            ):
+                missing.append(str(fname))
+        return missing
+    except Exception:
+        return []
+
 
 def _probe_image_size(path):
     """Return (w, h) for PNG/JPEG without new deps, else None.
@@ -220,6 +276,15 @@ def generate_image(
     prompt, task_id, negative_prompt="", model="z_image", aspect_ratio="landscape"
 ):
     print(f"\n[image] Generating image for task {task_id} with the prompt: {prompt}")
+    cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+    if model not in M.IMAGE_MODELS:
+        print(f"Unknown image model '{model}' — falling back to z_image")
+        model = "z_image"
+        cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+    missing = _missing_model_files(model, cfg)
+    if missing:
+        print(f"[generate_image] pre-flight failed for task {task_id}: missing {missing} — no lanes touched")
+        return json.dumps({"error": f"Image model '{model}' unavailable, missing weights: {', '.join(missing)}. Ask the operator to stage them, or pick another model."})
     M.set_status(task_id, "Freeing VRAM for image generation...")
     # Wait for any active GPU/guardrail LLM inference to finish before we take
     # over the GPU. The reverse of the image_active gate: we must NOT unload the
@@ -277,6 +342,10 @@ def generate_image(
     gen_tag = str(uuid.uuid4())[:8]
     prefix = f"{_safe_username(user)}/gen_{gen_tag}_"
     cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+    if model != "z_image":
+        print(f"Unknown image model '{model}' — falling back to z_image")
+        model = "z_image"
+        cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
     if model == "z_image":
         print("Chose Z-Image Turbo for image generation")
         workflow = {
@@ -329,55 +398,6 @@ def generate_image(
                 "inputs": {"filename_prefix": prefix, "images": ["65", 0]},
             },
         }
-    elif model == "sd3_5_medium":
-        print("Chose SD 3.5 for image generation")
-        workflow = {
-            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": cfg["unet"]}},
-            "2": {
-                "class_type": "TripleCLIPLoaderGGUF",
-                "inputs": {
-                    "clip_name1": cfg["clip1"],
-                    "clip_name2": cfg["clip2"],
-                    "clip_name3": cfg["t5"],
-                },
-            },
-            "3": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": prompt, "clip": ["2", 0]},
-            },
-            "4": {
-                "class_type": "CLIPTextEncode",
-                "inputs": {"text": negative_prompt, "clip": ["2", 0]},
-            },
-            "5": {
-                "class_type": "EmptySD3LatentImage",
-                "inputs": {"width": width, "height": height, "batch_size": 1},
-            },
-            "6": {
-                "class_type": "KSampler",
-                "inputs": {
-                    "seed": random.randint(0, 2**31),
-                    "steps": 20,  # Recommended steps for SD 3.5 Medium
-                    "cfg": 4.5,  # Recommended CFG range for SD 3.5 Medium: 3.5 to 5.0
-                    "sampler_name": "euler",
-                    "scheduler": "sgm_uniform",
-                    "denoise": 1.0,
-                    "model": ["1", 0],
-                    "positive": ["3", 0],
-                    "negative": ["4", 0],
-                    "latent_image": ["5", 0],
-                },
-            },
-            "7": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
-            "8": {
-                "class_type": "VAEDecode",
-                "inputs": {"samples": ["6", 0], "vae": ["7", 0]},
-            },
-            "9": {
-                "class_type": "SaveImage",
-                "inputs": {"filename_prefix": prefix, "images": ["8", 0]},
-            },
-        }
     else:
         print("No Image Model Selected Perfectly")
 
@@ -395,7 +415,27 @@ def generate_image(
         data = r.json()
 
         if "error" in data:
-            result = json.dumps({"error": f"ComfyUI: {data['error']}"})
+            # Surface node-level validation detail: ComfyUI's top-level
+            # error is often a bare 'prompt_outputs_failed_validation'
+            # with the failing node only in node_errors (previously
+            # discarded, leaving failures undiagnosable from our logs).
+            node_errors = data.get("node_errors")
+            if node_errors:
+                try:
+                    print(
+                        f"[generate_image] ComfyUI validation failed for task "
+                        f"{task_id}: {json.dumps(node_errors)[:2000]}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+            detail = ""
+            if node_errors:
+                try:
+                    detail = f" Failing nodes: {json.dumps(node_errors)[:1500]}"
+                except Exception:
+                    pass
+            result = json.dumps({"error": f"ComfyUI: {data['error']}.{detail}"})
         else:
             prompt_id = data["prompt_id"]
             found_file = None
@@ -520,7 +560,7 @@ def edit_image(
     image_b64,
     negative_prompt="",
     denoise=0.4,
-    model="z_image",
+    model="flux_kontext",
     sid=None,
 ):
     print("Image edit called with denoise", denoise)
@@ -575,6 +615,15 @@ def edit_image(
     print(
         f"[edit_image] Found image ({len(image_b64)} bytes base64), proceeding with edit"
     )
+    cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+    if model not in M.IMAGE_MODELS:
+        print(f"Unknown edit model '{model}' — falling back to z_image")
+        model = "z_image"
+        cfg = M.IMAGE_MODELS.get(model, M.IMAGE_MODELS["z_image"])
+    missing = _missing_model_files(model, cfg)
+    if missing:
+        print(f"[edit_image] pre-flight failed for task {task_id}: missing {missing} — no lanes touched")
+        return json.dumps({"error": f"Edit model '{model}' unavailable, missing weights: {', '.join(missing)}. Ask the operator to stage them, or pick another model."})
 
     print(f"\n[image_edit] Editing image for task {task_id} with prompt: {prompt}")
     M.set_status(task_id, "Freeing VRAM for image editing...")
@@ -655,10 +704,8 @@ def edit_image(
     edit_w, edit_h = _edit_target_dims(input_filepath)
     # z_image is a Turbo-distilled model tuned for ~8 steps; running 20+
     # steps overshoots identity (face drift). Keep steps near-native and let
-    # denoise alone control edit strength. SD3.5 is a full model with a
-    # native ~20-30 step range, so it keeps a higher step budget.
+    # denoise alone control edit strength.
     edit_steps = max(8, min(12, int(round(6 / max(denoise_f, 0.2)))))
-    edit_steps_sd = max(28, min(35, int(round(12 / max(denoise_f, 0.2)))))
     # Anchor identity: photo edits almost always want the same person/place
     # with only the requested change applied. The raw instruction prompt
     # ("change X to green") under-specifies this and the sampler drifts.
@@ -670,16 +717,106 @@ def edit_image(
         _IDENTITY_SUFFIX if "same person" not in (prompt or "") else ""
     )
 
-    if model == "sd3_5_medium":
-        print("Chose SD 3.5 for image editing")
+    if model == "krea2_edit":
+        print("Chose Krea2 Identity Edit for image editing")
+        # Identity-preserving instruction edit (conradlocke v1.2 LoRA +
+        # ComfyUI-Krea2Edit nodes). Turbo backbone: 10 steps, CFG 1.
+        # Source injected as in-context VAE tokens + grounded Qwen3-VL
+        # encoding — sampler starts from empty latent at output res.
+        workflow = {
+            "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": cfg["unet"]}},
+            "1b": {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "model": ["1", 0],
+                    "lora_name": cfg["lora"],
+                    "strength_model": 1.0,
+                },
+            },
+            "2": {
+                "class_type": "CLIPLoader",
+                "inputs": {
+                    "clip_name": cfg["clip1"],
+                    "type": "krea2",
+                    "device": "default",
+                },
+            },
+            "3": {
+                "class_type": "Krea2EditGroundedEncode",
+                "inputs": {
+                    "clip": ["2", 0],
+                    "prompt": pos_prompt,
+                    "image": ["5_load", 0],
+                    "grounding_px": 768,
+                },
+            },
+            "4": {
+                "class_type": "Krea2EditGroundedEncode",
+                "inputs": {
+                    "clip": ["2", 0],
+                    "prompt": negative_prompt,
+                    "image": ["5_load", 0],
+                    "grounding_px": 768,
+                },
+            },
+            "5_load": {"class_type": "LoadImage", "inputs": {"image": input_filename}},
+            "5_vae_encode": {
+                "class_type": "VAEEncode",
+                "inputs": {"pixels": ["5_load", 0], "vae": ["7", 0]},
+            },
+            "5_patch": {
+                "class_type": "Krea2EditModelPatch",
+                "inputs": {
+                    "model": ["1b", 0],
+                    "source_latent": ["5_vae_encode", 0],
+                    "vae": ["7", 0],
+                    "source_image": ["5_load", 0],
+                    "ref_boost": 3,
+                    "fit_mode": "fit",
+                },
+            },
+            "5_latent": {
+                "class_type": "EmptySD3LatentImage",
+                "inputs": {"width": edit_w, "height": edit_h, "batch_size": 1},
+            },
+            "6": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "seed": random.randint(0, 2**31),
+                    "steps": 12,
+                    "cfg": 1.0,
+                    "sampler_name": "euler",
+                    "scheduler": "simple",
+                    "denoise": 1.0,
+                    "model": ["5_patch", 0],
+                    "positive": ["3", 0],
+                    "negative": ["4", 0],
+                    "latent_image": ["5_latent", 0],
+                },
+            },
+            "7": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
+            "8": {
+                "class_type": "VAEDecode",
+                "inputs": {"samples": ["6", 0], "vae": ["7", 0]},
+            },
+            "9": {
+                "class_type": "SaveImage",
+                "inputs": {"filename_prefix": prefix, "images": ["8", 0]},
+            },
+        }
+    elif model == "flux_kontext":
+        print("Chose Flux Kontext for image editing")
+        # Kontext preserves content via reference conditioning, not low
+        # denoise — floor it so the instruction has room to act.
+        kontext_denoise = max(denoise_f, 0.8)
         workflow = {
             "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": cfg["unet"]}},
             "2": {
-                "class_type": "TripleCLIPLoaderGGUF",
+                "class_type": "DualCLIPLoaderGGUF",
                 "inputs": {
                     "clip_name1": cfg["clip1"],
-                    "clip_name2": cfg["clip2"],
-                    "clip_name3": cfg["t5"],
+                    "clip_name2": cfg["t5"],
+                    "type": "flux",
                 },
             },
             "3": {
@@ -690,8 +827,11 @@ def edit_image(
                 "class_type": "CLIPTextEncode",
                 "inputs": {"text": negative_prompt, "clip": ["2", 0]},
             },
+            "5": {
+                "class_type": "FluxGuidance",
+                "inputs": {"guidance": 2.5, "conditioning": ["3", 0]},
+            },
             "5_load": {"class_type": "LoadImage", "inputs": {"image": input_filename}},
-            # Scale to edit budget (preserves aspect, latent-safe multiples of 8)
             "5_scale": {
                 "class_type": "ImageScale",
                 "inputs": {
@@ -702,26 +842,21 @@ def edit_image(
                     "crop": "disabled",
                 },
             },
-            # VAE-encode the full source image (no mask: img2img, not inpainting)
             "5_vae_encode": {
                 "class_type": "VAEEncode",
-                "inputs": {
-                    "pixels": ["5_scale", 0],
-                    "vae": ["7", 0],
-                },
+                "inputs": {"pixels": ["5_scale", 0], "vae": ["7", 0]},
             },
-            # KSampler re-denoises the source latent by `denoise`
             "6": {
                 "class_type": "KSampler",
                 "inputs": {
                     "seed": random.randint(0, 2**31),
-                    "steps": edit_steps_sd,
-                    "cfg": 4.5,
+                    "steps": 20,
+                    "cfg": 1.0,
                     "sampler_name": "euler",
-                    "scheduler": "sgm_uniform",
-                    "denoise": denoise_f,
+                    "scheduler": "simple",
+                    "denoise": kontext_denoise,
                     "model": ["1", 0],
-                    "positive": ["3", 0],
+                    "positive": ["5", 0],
                     "negative": ["4", 0],
                     "latent_image": ["5_vae_encode", 0],
                 },
@@ -820,13 +955,34 @@ def edit_image(
     M.set_status(task_id, f"Editing image ({model})... Prompt: {prompt[:150]}")
 
     try:
+        print(
+            f"[edit_image] submitting model={model} nodes="
+            + ",".join(f"{k}:{v.get('class_type')}" for k, v in workflow.items()),
+            flush=True,
+        )
         r = requests.post(
             f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
         )
         data = r.json()
 
         if "error" in data:
-            result = json.dumps({"error": f"ComfyUI: {data['error']}"})
+            node_errors = data.get("node_errors")
+            if node_errors:
+                try:
+                    print(
+                        f"[edit_image] ComfyUI validation failed for task "
+                        f"{task_id}: {json.dumps(node_errors)[:2000]}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+            detail = ""
+            if node_errors:
+                try:
+                    detail = f" Failing nodes: {json.dumps(node_errors)[:1500]}"
+                except Exception:
+                    pass
+            result = json.dumps({"error": f"ComfyUI: {data['error']}.{detail}"})
         else:
             prompt_id = data["prompt_id"]
             found_file = None
@@ -1026,7 +1182,16 @@ def _run_generate_image(task_id, args):
 
 
 def _run_edit_image(task_id, sid, args, image_b64):
-    edit_model = args.get("model") or "z_image"
+    # Hard-pinned: the model keeps selecting z_image for edits despite
+    # schema steering, and Turbo distorts identity. Generation keeps free
+    # model choice; edits always ride krea2_edit (identity-preserving).
+    requested = args.get("model") or "krea2_edit"
+    if requested != "krea2_edit":
+        print(
+            f"[edit_image] overriding requested model '{requested}' -> "
+            f"'krea2_edit' (edits are pinned to Krea2 Identity Edit)"
+        )
+    edit_model = "krea2_edit"
     result = M.edit_image(
         prompt=args.get("prompt", ""),
         task_id=task_id,
@@ -1043,7 +1208,9 @@ def _run_edit_image(task_id, sid, args, image_b64):
         with M._data_lock:
             t = M.tasks.get(task_id)
             if t:
-                t.setdefault("_tools_used", []).append("edit_image")
+                # NOTE: the "edit_image" attempt marker is appended at dispatch
+                # (tools._dispatch_tool), not here, so failed attempts count
+                # toward MAX_EDIT_ATTEMPTS_PER_TASK too.
                 t["image_file"] = rel
                 t["gen_prompt"] = args.get("prompt", "")
                 t["_image_model"] = edit_model

@@ -343,7 +343,32 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         )
 
     elif tool_name == "edit_image":
-        M._enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index)
+        # Attempt cap (mirrors generate_image's 1-per-task limit): validation
+        # failures used to loop forever, each burning a full GPU unload /
+        # ComfyUI recycle / reload cycle. Counted at dispatch so failures
+        # count too, not just successes.
+        from server.features.images import MAX_EDIT_ATTEMPTS_PER_TASK
+        if tu.count("edit_image") >= MAX_EDIT_ATTEMPTS_PER_TASK:
+            result = json.dumps(
+                {"error": "Edit attempt limit reached for this task "
+                          f"({MAX_EDIT_ATTEMPTS_PER_TASK} tries). Do not retry — "
+                          "report the last error to the user instead."}
+            )
+            M._event_post(
+                "tool_ok",
+                task_id,
+                tc_id=tc["id"],
+                result=result,
+                sid=sid,
+                round=round_num,
+                tool_index=tool_index,
+            )
+        else:
+            with M._data_lock:
+                t = M.tasks.get(task_id)
+                if t:
+                    t.setdefault("_tools_used", []).append("edit_image")
+            M._enqueue_image_job(task_id, sid, tool_name, args, tc, round_num, tool_index)
         return
 
     elif tool_name == "generate_image":
