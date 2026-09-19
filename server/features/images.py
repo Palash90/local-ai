@@ -686,7 +686,10 @@ def edit_image(
     # Color/recolor-only edits need enough denoise for a saturated hue
     # change to actually take on a few-step Turbo model; too low stays a
     # near-copy (worst case: high-frequency face details drift while the
-    # garment color never shifts). Structural verbs keep user denoise.
+    # garment color never shifts). Scoped to z_image: instruction-following
+    # editors (krea/flux) preserve identity via reference conditioning and
+    # need room to act — the LLM's denoise stands (0.1-1.0 clamp only).
+    # Structural verbs keep user denoise on all models.
     _STRUCTURAL_RX = re.compile(
         r"\b(add|remove|replace|insert|delete|erase|background|pose|angle|"
         r"style|restyle|turn\s+into|morph|swap|hat|glasses|beard)\b",
@@ -697,7 +700,7 @@ def edit_image(
         r"fantasy|steampunk|ghibli|pixel-?art)\b",
         re.IGNORECASE,
     )
-    if not _STRUCTURAL_RX.search(prompt or "") and not _FULL_CHANGE_RX.search(
+    if model == "z_image" and not _STRUCTURAL_RX.search(prompt or "") and not _FULL_CHANGE_RX.search(
         prompt or ""
     ):
         denoise_f = min(denoise_f, 0.6)
@@ -806,9 +809,8 @@ def edit_image(
         }
     elif model == "flux_kontext":
         print("Chose Flux Kontext for image editing")
-        # Kontext preserves content via reference conditioning, not low
-        # denoise — floor it so the instruction has room to act.
-        kontext_denoise = max(denoise_f, 0.8)
+        # Reference-conditioned editor: the LLM's denoise stands.
+        kontext_denoise = denoise_f
         workflow = {
             "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": cfg["unet"]}},
             "2": {
