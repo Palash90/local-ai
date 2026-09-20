@@ -10,7 +10,10 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` passed (evidence linked) · 
 
 ## Chat SPA (`/ai/`, authed)
 
-- [ ] U01 render+auth — page loads signed-in, no console errors
+- [x] U01 render+auth — page loads signed-in, no console errors
+  (evidence: e2e/shots/session_check.png — kolpo session, Hindi content,
+  sources, composer; login via headed Chromium persistent profile
+  ~/.config/localai-e2e-chromium after manual login)
 - [ ] U02 new chat + poll — message sends, streams, completes
 - [ ] U03 link targets — external links open `_blank`
 - [ ] U04 upload — image attaches to composer
