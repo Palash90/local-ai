@@ -755,13 +755,8 @@ def edit_image(
                 },
             },
             "4": {
-                "class_type": "Krea2EditGroundedEncode",
-                "inputs": {
-                    "clip": ["2", 0],
-                    "prompt": negative_prompt,
-                    "image": ["5_load", 0],
-                    "grounding_px": 768,
-                },
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": negative_prompt, "clip": ["2", 0]},
             },
             "5_load": {"class_type": "LoadImage", "inputs": {"image": input_filename}},
             "5_vae_encode": {
