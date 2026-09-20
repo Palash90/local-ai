@@ -835,65 +835,78 @@ def load_llama_model(mode="gpu", model_id=None):
                     M._guardrail_loaded_model = ""
 
         url = f"{base}/models/load"
-        t_start = time.time()
-        print(f"[llama] Sending load request for model '{model_id}' to {url}...")
-        try:
-            r = requests.post(
-                url, json={"model": model_id}, timeout=180
-            )
-            t_load_resp = time.time() - t_start
-            print(f"[llama] Load response: {r.status_code} (took {t_load_resp:.1f}s) {r.text[:200]}")
-            if r.status_code in (200, 201):
-                print(f"[llama] {mode} load accepted, waiting for ready...")
-                for i in range(30):
-                    if M.is_model_ready(base, model_id):
-                        t_ready = time.time() - t_start
-                        print(f"[llama] {mode} model ready (attempt {i+1}, total {t_ready:.1f}s)")
-                        with M._data_lock:
-                            if mode == "cpu":
-                                M._cpu_model_status = "chat_loaded"
-                                M._cpu_last_llm_use = time.time()
-                            elif mode == "guardrail":
-                                M._guardrail_model_status = "chat_loaded"
-                                M._guardrail_last_llm_use = time.time()
-                                M._guardrail_loaded_model = model_id
-                            else:
-                                M.model_status = "chat_loaded"
-                                M._last_llm_use = time.time()
-                        if was_unloaded and mode != "guardrail":
-                            t_restore_start = time.time()
-                            M.restore_slot_checkpoint(mode)
-                            t_restore = time.time() - t_restore_start
-                            print(f"[llama] {mode} KV restore took {t_restore:.1f}s")
-                        return True
-                    time.sleep(2)
-            else:
-                print(f"[llama] Load failed ({r.status_code}): {r.text[:500]}")
-        except requests.Timeout:
-            print(f"[llama] Load timeout after 180s")
-        except requests.ConnectionError as ce:
-            print(f"[llama] Load connection error: {ce}")
-        except Exception as e:
-            print(f"[llama] Load exception: {e}")
-
-        # Fallback check: the load request may have failed with "already running"
-        # (another caller raced us to load the same model) — verify the model is
-        # actually ready rather than just assuming so.
-        if M.is_model_ready(base, model_id):
-            with M._data_lock:
-                if mode == "cpu":
-                    M._cpu_model_status = "chat_loaded"
-                    M._cpu_last_llm_use = time.time()
-                elif mode == "guardrail":
-                    M._guardrail_model_status = "chat_loaded"
-                    M._guardrail_last_llm_use = time.time()
-                    M._guardrail_loaded_model = model_id
+        # Post-render reload race: ComfyUI's VRAM releases async (cudaFree
+        # lags the unload response), so a load fired immediately after a
+        # render can OOM during child init (observed: 231MB compute-buffer
+        # alloc failed). Mirror the pre-render _wait_vram_freed gate.
+        # Best-effort: proceed on timeout rather than block chat forever.
+        if mode in ("gpu", "guardrail"):
+            _wait_vram_freed(threshold_mb=500, timeout=60)
+        for load_attempt in (1, 2):
+            if load_attempt > 1:
+                print(f"[llama] Retrying {mode} load in 10s (attempt {load_attempt}/2)...")
+                time.sleep(10)
+                if mode in ("gpu", "guardrail"):
+                    _wait_vram_freed(threshold_mb=500, timeout=30)
+            t_start = time.time()
+            print(f"[llama] Sending load request for model '{model_id}' to {url}...")
+            try:
+                r = requests.post(
+                    url, json={"model": model_id}, timeout=180
+                )
+                t_load_resp = time.time() - t_start
+                print(f"[llama] Load response: {r.status_code} (took {t_load_resp:.1f}s) {r.text[:200]}")
+                if r.status_code in (200, 201):
+                    print(f"[llama] {mode} load accepted, waiting for ready...")
+                    for i in range(30):
+                        if M.is_model_ready(base, model_id):
+                            t_ready = time.time() - t_start
+                            print(f"[llama] {mode} model ready (attempt {i+1}, total {t_ready:.1f}s)")
+                            with M._data_lock:
+                                if mode == "cpu":
+                                    M._cpu_model_status = "chat_loaded"
+                                    M._cpu_last_llm_use = time.time()
+                                elif mode == "guardrail":
+                                    M._guardrail_model_status = "chat_loaded"
+                                    M._guardrail_last_llm_use = time.time()
+                                    M._guardrail_loaded_model = model_id
+                                else:
+                                    M.model_status = "chat_loaded"
+                                    M._last_llm_use = time.time()
+                            if was_unloaded and mode != "guardrail":
+                                t_restore_start = time.time()
+                                M.restore_slot_checkpoint(mode)
+                                t_restore = time.time() - t_restore_start
+                                print(f"[llama] {mode} KV restore took {t_restore:.1f}s")
+                            return True
+                        time.sleep(2)
                 else:
-                    M.model_status = "chat_loaded"
-                    M._last_llm_use = time.time()
-            if was_unloaded and mode != "guardrail":
-                M.restore_slot_checkpoint(mode)
-            return True
+                    print(f"[llama] Load failed ({r.status_code}): {r.text[:500]}")
+            except requests.Timeout:
+                print(f"[llama] Load timeout after 180s")
+            except requests.ConnectionError as ce:
+                print(f"[llama] Load connection error: {ce}")
+            except Exception as e:
+                print(f"[llama] Load exception: {e}")
+
+            # Fallback check: the load request may have failed with "already running"
+            # (another caller raced us to load the same model) — verify the model is
+            # actually ready rather than just assuming so.
+            if M.is_model_ready(base, model_id):
+                with M._data_lock:
+                    if mode == "cpu":
+                        M._cpu_model_status = "chat_loaded"
+                        M._cpu_last_llm_use = time.time()
+                    elif mode == "guardrail":
+                        M._guardrail_model_status = "chat_loaded"
+                        M._guardrail_last_llm_use = time.time()
+                        M._guardrail_loaded_model = model_id
+                    else:
+                        M.model_status = "chat_loaded"
+                        M._last_llm_use = time.time()
+                if was_unloaded and mode != "guardrail":
+                    M.restore_slot_checkpoint(mode)
+                return True
 
         with M._data_lock:
             if mode == "cpu":
