@@ -903,3 +903,35 @@ def test_display_words_ignored_in_headers():
     _, errs, _ = parse_score("[MELODY2 walking vol=80]\nD4 q E4 q |", 120)
     assert errs and not any("unknown lane word" in e for e in errs), errs
     assert any("no instrument" in e for e in errs), errs
+
+
+def test_strict_prefail_refuses_broken_score_without_rendering(tmp_path=None):
+    """Pre-render validation: strict mode refuses before FluidSynth."""
+    import json
+    from server.features.music.render import render_score
+    bad = ("[GUITAR clean]\n"
+           "C3:maj7 ar w | E3:maj7 ar |\n")
+    res = json.loads(render_score(bad, 120, user="local", strict=True))
+    assert res["ok"] is False
+    assert "nothing rendered" in res["error"]
+    assert any("missing a duration" in e for e in res["errors"])
+    assert "wav_path" not in res
+
+
+def test_strict_prefail_accepts_clean_score():
+    import json
+    from server.features.music.render import render_score
+    good = "[PIANO]\nC4 q E4 q G4 q C5 h | G4 h R q"
+    res = json.loads(render_score(good, 120, user="local", strict=True))
+    assert res["ok"] is True, res
+
+
+def test_lenient_default_still_renders_partial():
+    """Machine paths (arranged/showcase) stay lenient: errors ride along."""
+    import json
+    from server.features.music.render import render_score
+    partial = ("[PIANO]\nC4 q E4 q G4 q C5 h |\n"
+               "[GUITAR]\nC3:maj7 ar w | E3:maj7 ar |\n")
+    res = json.loads(render_score(partial, 120, user="local"))
+    assert res["ok"] is True, res
+    assert any("missing a duration" in e for e in res.get("errors", []))

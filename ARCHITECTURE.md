@@ -647,21 +647,40 @@ parse-failed lies like "The Santoor piece has been generated"), and
 `duration_claimed` (answer states a length > 1.5× the tool's real
 `duration_s` + 10s — catches "…about a minute if looped"), `score_errors`
 (the DSL compiled but the parser dropped tokens, so the track is broken —
-the retry embeds the rejected tokens verbatim), `fusion_imbalance` (a 2+
+the retry embeds the rejected tokens verbatim, and the steering restates
+the arpeggio-duration rule: rolled chords need a written duration,
+`C3:min7ar w`, never bare `C3:min7ar`), `lane_roles` (a pitched lane with
+no role word — roles live inside `[]` headers, `# comments` are never parsed,
+so role-less lanes are invisible to every other gate; 2+ pitched lanes also
+require a MELODY/MELODY2 and a HARMONY/PAD voice, explicit solos exempt), `fusion_imbalance` (a 2+
 tradition request whose rendered levels lack a whole family — one retry
 naming the missing side, then deliver), `variation` (melody lanes doubled
 note-for-note, one vamp tiled over 12+ bars, or zero dynamics — the retry
 names lanes and bar counts), `cadence` (final bass note off the tonic or
 final melody outside the tonic triad — endings read from written bars, not
 tiled loops), `lead_home` (fusion whose MELODY lane sits outside the primary
-genre's palette without an explicit lead assignment), and `length_mismatch` (an
+genre's palette without an explicit lead assignment), `lead_presence` (the
+converse: a lead-assigned instrument — "santoor-led", "carries the melody"
+— that holds no MELODY/MELODY2 lane; topic mentions and negations excluded),
+and `length_mismatch` (an
 explicit user duration — digits or spelled-out "about a minute" — vs a
-rendered `duration_s` outside 0.6×–1.8× of the target). The music DSL docs
-enforce the same contract upstream: minimum texture (MELODY+HARMONY always,
+rendered `duration_s` outside 0.6×–1.8× of the target — the retry hands the
+model precomputed numbers (target s, rendered s, @tempo, expected bar count)
+so the fix is arithmetic, not guessing). The music DSL docs
+enforce the same contract upstream: role + instrument paired inside every
+lane header (role-less headers parse but are verification-invisible),
+minimum texture (MELODY+HARMONY always,
 BASS+RHYTHM when rhythm is asked, single lane only for explicit solos) and
 LENGTH MATH (bars ≈ seconds × BPM ÷ 240, sections sum to the target ±20%). Verdicts from all
 judges, plus the re-run history, are appended to the final answer's reasoning
 block as a `### Guardrail verification` trail (`critic._verification_addendum`).
+When a gate's own retry budget is spent, evaluation looks past it for a
+later still-actionable mismatch instead of delivering blind (a stuck early
+gate must not starve later ones; `score_errors` keeps its honest-giveup
+terminal). Pre-render, the `generate_music` tool path validates the score
+first (`render_score(strict=True)`): a broken LLM-written score is refused
+with its errors before FluidSynth runs — no partial player, no render cost —
+while machine-generated scores (arranged/showcase/`make music`) stay lenient.
 Two finalize-side companions (`orchestration`): anaphoric artifact
 **carry-over** (re-attaches the referenced prior `_image_url`/`_music_url`
 card onto the new message) and pasted-path **stripping** (text lines that

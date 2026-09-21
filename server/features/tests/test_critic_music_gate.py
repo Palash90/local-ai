@@ -291,7 +291,10 @@ def test_verification_addendum_caps_sources():
     assert "…2 more source verdicts" in out
 
 
-def test_quality_judge_excludes_generator_model(stub_state):
+def test_quality_judge_same_model_grading(stub_state):
+    """Content judges verdict on the GPU chat model by design: the critic
+    must NOT pass a self-grade exclusion or request a GPU fallback — the
+    GPU path is the only path."""
     import threading
     import types
     import server.features.judge as jd
@@ -302,7 +305,7 @@ def test_quality_judge_excludes_generator_model(stub_state):
                     allow_gpu_fallback=False, exclude_models=None):
         calls["exclude"] = exclude_models
         calls["fallback"] = allow_gpu_fallback
-        return None  # simulate "no independent judge"
+        return None  # simulate "GPU judge unavailable"
 
     orig = jd.llm_verify_answer_quality
     jd.llm_verify_answer_quality = fake_verify
@@ -317,9 +320,9 @@ def test_quality_judge_excludes_generator_model(stub_state):
         jv = cr._judge_answer_quality("t", "some answer")
     finally:
         jd.llm_verify_answer_quality = orig
-    assert calls["exclude"] == {"gemma4-e4b-q4"}
-    assert calls["fallback"] is True
-    assert jv and "self-grade blocked" in jv["note"]
+    assert calls["exclude"] is None
+    assert calls["fallback"] is False
+    assert jv and "GPU judge unavailable" in jv["note"]
 
 
 def test_self_artifact_citation_filter():
@@ -780,3 +783,200 @@ def test_systemic_note_counts_mixed_missing_duration_phrasing():
     note = _systemic_error_note(mixed)
     assert "5 of your" in note and "lead-sheet" in note
     assert _systemic_error_note(mixed[:3]) == ""
+
+
+def test_score_errors_steering_teaches_ar_duration():
+    from server.features import critic as cr
+    text = dict(cr._STEERING_PRESETS)["score_errors"] if hasattr(cr, "_STEERING_PRESETS") else None
+    if text is None:
+        import re as _re
+        src = open("server/features/critic.py").read()
+        m = _re.search(r'"score_errors": \(\s*"(.*?)"\s*\)', src, _re.S)
+        assert m, "score_errors steering missing"
+        text = m.group(1)
+    assert "C3:min7ar w" in text
+    assert "never a bare" in text
+
+
+def test_lead_presence_gate():
+    from server.features.critic import _lead_presence_problems
+    sax_lead = "[MELODY sax vol=80]\nD4 q E4 q G4 q A4 q |\n"
+    santoor_lead = "[MELODY santoor vol=80]\nD4 q E4 q G4 q A4 q |\n"
+    side_lane = ("[MELODY sax vol=80]\nD4 q E4 q G4 q A4 q |\n"
+                 "[Santoor vol=80]\nD4 q E4 q G4 q A4 q |\n")
+    # santoor-led ask, sax leads: fires
+    bad = _lead_presence_problems("santoor-led fusion piece", sax_lead)
+    assert bad and "Santoor" in bad[0] and "MELODY" in bad[0]
+    # santoor leads: silent
+    assert _lead_presence_problems("santoor-led fusion piece", santoor_lead) == []
+    # santoor on MELODY2 counts as lead voice
+    duo = sax_lead + "[MELODY2 santoor vol=80]\nD4 q E4 q G4 q A4 q |\n"
+    assert _lead_presence_problems("santoor carries the melody", duo) == []
+    # custom-role side lane is not a lead voice: fires
+    assert _lead_presence_problems("piece for santoor", side_lane) != []
+    # bare topic mention: silent
+    assert _lead_presence_problems("what does a santoor sound like", sax_lead) == []
+    # negated: silent
+    assert _lead_presence_problems("fusion without santoor", sax_lead) == []
+    # no lead phrasing at all: silent
+    assert _lead_presence_problems("calm bossa piece with sax", sax_lead) == []
+
+
+def test_lead_presence_wires_through_mismatch(stub_state):
+    from server.features.critic import _requirement_mismatch
+    score = ("[MELODY sax vol=80]\nD4 q E4 q G4 q A4 q |\n"
+             "[HARMONY epiano vol=70]\nD3:min7 w |\n"
+             "[PAD santoor vol=70]\nD4 w | D4 w |\n")
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_url": "/music/palash/gen_x.wav",
+                   "music_duration": 30.0,
+                   "music_score": score,
+                   "music_levels": [
+                       {"instrument": "sax", "name": "MELODY"},
+                       {"instrument": "epiano", "name": "HARMONY"},
+                       {"instrument": "santoor", "name": "SANTOOR"},
+                   ]}}
+    reason = _run(stub_state, tasks,
+                  "santoor-led calm fusion", "Here is your santoor-led piece!")
+    assert reason == "lead_presence"
+
+
+def test_lane_roles_gate():
+    from server.features.critic import _lane_role_problems
+    good = ("[MELODY santoor vol=80]\nD4 q E4 q G4 q A4 q |\n"
+            "[HARMONY piano vol=65]\nC3:maj7 w |\n")
+    assert _lane_role_problems("any ask", good) == []
+    # comment-only roles + bare headers: fires
+    bad = ("# MELODY: Santoor (Primary Lead)\n"
+           "[Santoor vol=80]\nD4 q E4 q G4 q A4 q |\n"
+           "[Piano vol=65]\nC3:maj7 w |\n")
+    notes = _lane_role_problems("any ask", bad)
+    assert notes and any("Santoor" in n for n in notes)
+    # missing harmony voice: fires
+    no_harm = ("[MELODY santoor vol=80]\nD4 q E4 q G4 q A4 q |\n"
+               "[BASS ebass vol=70]\nC2 w | C2 w |\n")
+    assert any("HARMONY" in n for n in _lane_role_problems("any ask", no_harm))
+    # missing melody voice: fires
+    no_mel = ("[HARMONY piano vol=65]\nC3:maj7 w | C3:maj7 w |\n"
+              "[BASS ebass vol=70]\nC2 w | C2 w |\n")
+    assert any("MELODY" in n for n in _lane_role_problems("any ask", no_mel))
+    # explicit-solo single lane: exempt
+    solo = "[Piano vol=90]\nC4 q E4 q G4 q A4 q |\n"
+    assert _lane_role_problems("piano solo please", solo) == []
+    # unparseable: silent, not a crash
+    assert _lane_role_problems("any ask", "") == []
+
+
+def test_lane_roles_wires_through_mismatch(stub_state):
+    from server.features.critic import _requirement_mismatch
+    score = ("[Santoor vol=80]\nD4 q E4 q G4 q A4 q |\n"
+             "[Piano vol=65]\nC3:maj7 w |\n")
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_url": "/music/palash/gen_x.wav",
+                   "music_duration": 30.0,
+                   "music_score": score,
+                   "music_levels": [
+                       {"instrument": "santoor", "name": "SANTOOR"},
+                       {"instrument": "piano", "name": "Piano"},
+                   ]}}
+    reason = _run(stub_state, tasks,
+                  "compose something calm", "Here is your piece!")
+    assert reason == "lane_roles"
+
+
+def test_missing_instruments_bass_alias_family(stub_state):
+    from server.features.critic import _missing_instruments
+    levels = [{"instrument": "bassguitar", "name": "BASS"}]
+    # "bass" ask must not flag a rendered bassguitar lane.
+    assert _missing_instruments("deep bass groove", levels) == set()
+    # Genuinely absent still fires.
+    assert _missing_instruments("santoor melody", levels) == {"SANTOOR"}
+
+
+def test_skip_exhausted_falls_through_to_length(stub_state):
+    from server.features.critic import _requirement_mismatch
+    score = ("[MELODY santoor vol=80]\nD4 q E4 q G4 q G4 q |\n"
+             "[HARMONY piano vol=70]\nD3:min7 w |\n"
+             "[BASS bassguitar vol=70]\nC2 h G2 q C2 q |\n")
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_url": "/music/palash/gen_x.wav",
+                   "music_duration": 29.83,
+                   "music_score": score,
+                   "music_levels": [
+                       {"instrument": "santoor", "name": "MELODY"},
+                       {"instrument": "piano", "name": "HARMONY"},
+                       {"instrument": "bassguitar", "name": "BASS"},
+                   ]}}
+    ask = "santoor-led calm piece, about a minute"
+    # No skip: all gates silent except length (short render).
+    assert _run(stub_state, tasks, ask, "Here is your piece!") == "length_mismatch"
+    # Length itself skipped with nothing else firing: the deferred fallback
+    # returns it (so the decision layer finalizes with the right reason).
+    from server.features import state as st
+    import threading, types
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    try:
+        assert _requirement_mismatch(
+            "t", "s1", ask, "Here is your piece!",
+            _skip=frozenset({"length_mismatch"})) == "length_mismatch"
+    finally:
+        pass
+
+
+def test_retry_decision_second_chance_past_spent_gate(stub_state):
+    from server.features.critic import _retry_decision
+    from server.features import state as st
+    import threading, types
+    # Spent "variation" must not mask a still-actionable length_mismatch.
+    score = ("[MELODY santoor vol=80]\nD4 q E4 q G4 q G4 q |\n"
+             "[HARMONY piano vol=70]\nD3:min7 w |\n")
+    tasks = {"t": {"music_file": "palash/gen_x.wav",
+                   "music_url": "/music/palash/gen_x.wav",
+                   "music_duration": 29.83,
+                   "music_score": score,
+                   "music_levels": [
+                       {"instrument": "santoor", "name": "MELODY"},
+                       {"instrument": "piano", "name": "HARMONY"},
+                   ],
+                   "music_errors": [],
+                   "_mismatch_counts": {"variation": 1},
+                   "_mismatch_done": 1,
+                   "_original_message": "santoor piece, about a minute"}}
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    try:
+        action, reason = _retry_decision(
+            "t", None, "variation", "Here!",
+            _ctx=("s1", "santoor piece, about a minute"))
+    finally:
+        pass
+    assert (action, reason) == ("retry", "length_mismatch")
+
+
+def test_length_math_steering_has_numbers(stub_state):
+    from server.features import critic as cr
+    from server.features import state as st
+    import threading, types
+    tasks = {"t": {"music_score": "@tempo 90\n[MELODY santoor]\nD4 q |\n",
+                   "music_duration": 29.83,
+                   "_original_message": "piece about a minute"}}
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks,
+        sessions={"s1": []}, sessions_meta={},
+    )
+    # Stub the session/round plumbing the reschedule tail needs.
+    ep = st._Registry.entrypoint
+    ep.set_status = lambda *a, **k: None
+    ep.save_sessions = lambda: None
+    ep._start_llm_round = lambda *a, **k: None
+    try:
+        cr._reschedule("t", "s1", 1, "length_mismatch", None)
+    finally:
+        pass
+    note = tasks["t"].get("_last_mismatch")
+    assert note == "length_mismatch"
+    steering = st._Registry.entrypoint.sessions["s1"][-1]["content"]
+    assert "LENGTH MATH" in steering
+    assert "60" in steering and "90" in steering and "29.83" in steering
+    assert "round(60 × 90 ÷ 240) = 22" in steering or "= 22" in steering or "= 23" in steering

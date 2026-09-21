@@ -416,6 +416,39 @@ def _fetch_page_impl(url, max_chars=24000, chunk=1):
         )
     except Exception as e:
         print(f"[fetch_page] Failed: {e}")
-        return json.dumps({"url": url, "error": f"Failed to fetch page: {e}"})
+        err = f"Failed to fetch page: {e}"
+        hint = _browser_fallback_hint(f"{e}")
+        if hint:
+            err += hint
+        return json.dumps({"url": url, "error": err})
+
+
+# Tokens signalling a bot-block (JS wall / WAF / rate limit) rather than a
+# missing/dead page. Mirrors the critic's existence-probe set.
+_BROWSER_FALLBACK_TOKENS = (
+    "403", "405", "429", "forbidden", "captcha", "cloudflare",
+    "blocked", "denied",
+)
+
+
+def _browser_fallback_hint(exc_text):
+    """Steering hint toward the headed browser MCP, or "" when it can't help.
+
+    Bot-blocked pages (JS walls, 403/429/captcha) can still be read through
+    the browser automation tools: navigate, then evaluate
+    ``document.body.innerText``. Anything else (404, DNS, timeouts) gets no
+    hint — the browser wouldn't help there either.
+    """
+    lowered = (exc_text or "").lower()
+    if not any(tok in lowered for tok in _BROWSER_FALLBACK_TOKENS):
+        return ""
+    return (
+        " The site is bot-blocking direct fetches — open it with the "
+        "browser automation tools instead: call "
+        "browser__browser_navigate with {\"url\": \"<this page URL>\"}, "
+        "then browser__browser_evaluate with {\"function\": "
+        "\"() => document.body.innerText.slice(0,8000)\"} and use the "
+        "returned page text."
+    )
 
 

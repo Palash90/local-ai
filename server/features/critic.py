@@ -405,6 +405,107 @@ def _lead_home_problems(user_input, score_text):
             f"a {primary} lead"]
 
 
+_PITCHED_ROLES = {"MELODY", "MELODY2", "HARMONY", "PAD", "BASS",
+                  "DRONE", "LEAD", "TEXTURE", "CHORDS"}
+
+
+def _lane_role_problems(user_input, score_text):
+    """Every pitched lane needs a role word; texture needs MELODY+HARMONY.
+
+    Headers like ``[Santoor vol=80]`` parse (known instrument) but carry no
+    role, so every role-based gate goes blind and `# MELODY: …` comments do
+    nothing (comments are never parsed). With 2+ pitched lanes the doc's
+    MINIMUM TEXTURE applies: at least one MELODY/MELODY2 and one
+    HARMONY/PAD. Explicit-solo single-lane pieces are exempt. Skips when the
+    score doesn't parse.
+    """
+    from server.features.music.parse import parse_score
+    try:
+        sections, _, _ = parse_score(score_text or "", 120)
+    except Exception:
+        return []
+    pitched = [s for s in (sections or []) if not (s or {}).get("drum")]
+    if not pitched:
+        return []
+    if len(pitched) == 1 and re.search(r"\bsolo\b", user_input or "",
+                                       re.IGNORECASE):
+        return []
+    problems = []
+    for s in pitched:
+        role = ((s or {}).get("role") or "")
+        if role not in _PITCHED_ROLES:
+            label = ((s or {}).get("name") or "?").title()
+            problems.append(
+                f"lane '{label}' has no role word — write role + instrument "
+                f"inside the brackets (e.g. [MELODY santoor vol=80]); "
+                f"role words in # comments do nothing")
+    if len(pitched) >= 2:
+        roles = {((s or {}).get("role") or "") for s in pitched}
+        if not (roles & {"MELODY", "MELODY2"}):
+            problems.append(
+                "no MELODY/MELODY2 lane — the lead voice needs one")
+        if not (roles & {"HARMONY", "PAD"}):
+            problems.append(
+                "no HARMONY/PAD lane — chords need a harmony voice, "
+                "never melody alone")
+    return problems
+
+
+_LEAD_ASSIGN_RX_TMPL = (
+    r"\b%s\b[^.?!]{0,40}?\b(?:led|leading|lead|leads|melody|front|solo|"
+    r"carries|carry|plays|play|takes|take)\b"
+    r"|\b(?:led|leading|lead|melody|solo|front|piece for|piece on)\b"
+    r"[^.?!]{0,40}?\b%s\b"
+)
+
+
+def _lead_presence_problems(user_input, score_text):
+    """A lead-position instrument must actually lead.
+
+    Converse of :func:`_lead_home_problems`: when the request assigns an
+    instrument to the lead ("santoor-led", "santoor carries the melody",
+    "piece for santoor") but neither MELODY nor MELODY2 plays it, the
+    render contradicts the ask. Bare topic mentions ("what does a santoor
+    sound like") and negations ("without santoor") never trigger — the
+    instrument must sit next to a lead verb, and
+    :func:`_requested_instruments` already drops negated ones. Custom-role
+    lanes (``[Santoor …]`` instead of ``[MELODY santoor …]``) don't count
+    as lead voices — second voices must use MELODY2. Skips when the score
+    doesn't parse.
+    """
+    from server.features.music.parse import parse_score
+    text = user_input or ""
+    want = _requested_instruments(text)
+    if not want:
+        return []
+    try:
+        sections, _, _ = parse_score(score_text or "", 120)
+    except Exception:
+        return []
+    lead_instrs = set()
+    for s in sections or []:
+        if ((s or {}).get("role") or "") in ("MELODY", "MELODY2"):
+            u = str((s or {}).get("instr") or "").upper().replace("_", " ")
+            u = _INSTRUMENT_ALIASES.get(u, u)
+            if u:
+                lead_instrs.add(u)
+    problems = []
+    for alias in sorted(want):
+        if alias in lead_instrs:
+            continue
+        rx = _LEAD_ASSIGN_RX_TMPL % (
+            re.escape(alias.lower()), re.escape(alias.lower()))
+        if not re.search(rx, text, re.IGNORECASE):
+            continue
+        problems.append(
+            f"{alias.title()} is assigned the lead but no MELODY/MELODY2 "
+            f"lane plays it — give MELODY to {alias.title()} (a second "
+            f"voice may ride MELODY2), move the current lead to a second "
+            f"voice, and use role MELODY2 for second voices, never custom "
+            f"role names")
+    return problems
+
+
 # Instrument names the presence gate understands: every PROGRAMS alias and
 # drum-kit word, minus prose collisions ("lead the verse" is not a LEAD
 # lane). "drums" maps to the KIT kit.
@@ -575,7 +676,16 @@ def _missing_instruments(user_input, levels):
     want = _requested_instruments(user_input)
     if not want:
         return set()
-    return want - _rendered_instruments(levels)
+    got = _rendered_instruments(levels)
+    missing = set()
+    for w in want:
+        # Family-tolerant match: the ask says "bass (guitar)" while the
+        # render labels the lane "bassguitar" (and vice versa) — a
+        # startswith match in either direction counts as present. Exact
+        # equality still rules (a bare "drum" never matches "tabla").
+        if not any(w == g or g.startswith(w) or w.startswith(g) for g in got):
+            missing.add(w)
+    return missing
 
 
 _MUSIC_CLAIM_RE = re.compile(
@@ -726,10 +836,13 @@ _STEERING_HINTS = {
         "fine too — never prose like 'D minor'), no prose or stage "
         "directions, every lane bar-complete with '|' at each bar end, and "
         "keep at least MELODY + HARMONY lanes (plus BASS + RHYTHM if rhythm "
-        "was part of the request). Lane headers take role + instrument words "
-        "in any order — extra role words are fine, descriptive words like "
-        "'soft' are ignored (put dynamics in vol=) — and unknown words must "
-        "go; follow any did-you-mean hint verbatim. ALSO keep the whole "
+        "was part of the request). Arpeggiated chords still need a duration "
+        "— the tones roll across the written duration, so write 'C3:min7ar w' "
+        "(likewise 'ad'/'au'), never a bare 'C3:min7ar' with nothing after "
+        "it. Lane headers take role + instrument words in any order — extra "
+        "role words are fine, descriptive words like 'soft' are ignored (put "
+        "dynamics in vol=) — and unknown words must go; follow any did-you-mean "
+        "hint verbatim. ALSO keep the whole "
         "score ≤1100 characters: ≤6 lanes and at most 2 bars of material "
         "per lane — sections loop those bars to the declared length. "
         "Writing out every bar blows the output budget and fails the "
@@ -1277,7 +1390,6 @@ def _judge_research_answer(task_id, answer):
         result = llm_verify_research_answer(
             user_input, answer,
             model_id=resolve_judge_model(user or ""),
-            allow_gpu_fallback=M.task_mode(task_id) == "gpu",
         )
     except Exception as e:
         print(f"[critic] research-answer judge call failed: {e}")
@@ -1354,17 +1466,12 @@ def _judge_answer_quality(task_id, answer):
         t = M.tasks.get(task_id) or {}
         user_input = t.get("_original_message", "")
         user = t.get("_user", "")
-    mode = M.task_mode(task_id)
     try:
-        generator_model = M.server_model_id(mode)
-    except Exception:
-        generator_model = ""
-    try:
+        # Content judges verdict on the GPU chat model (same-model grading
+        # by design) — no self-grade exclusion.
         result = llm_verify_answer_quality(
             user_input, answer,
             model_id=resolve_judge_model(user or ""),
-            allow_gpu_fallback=mode == "gpu",
-            exclude_models={generator_model},
         )
     except Exception as e:
         print(f"[critic] answer-quality judge call failed: {e}")
@@ -1374,12 +1481,11 @@ def _judge_answer_quality(task_id, answer):
             tt = M.tasks.get(task_id)
             if tt:
                 tt["_judge_result"] = None
-        # No confidence badge, no self-graded 100 — record the honest skip
+        # No confidence badge — record the honest skip
         # so the reasoning trail says why.
         return {
             "url": "", "meta": None, "action": "JUDGE",
-            "note": "quality judge skipped — no independent judge model "
-                    "available (self-grade blocked)",
+            "note": "quality judge skipped — GPU judge unavailable",
             "corrected_meta": None, "reason": "", "model": None,
         }
     with M._data_lock:
@@ -1539,7 +1645,7 @@ def _claimed_duration_seconds(text):
     return best
 
 
-def _requirement_mismatch(task_id, sid, user_input, answer):
+def _requirement_mismatch(task_id, sid, user_input, answer, _skip=()):
     """Return a retry ``reason`` when the answer falls short of an explicit user
     requirement that a steering re-run could satisfy, else None.
 
@@ -1564,6 +1670,22 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
         music_duration = t.get("music_duration")
         music_errors = list(t.get("music_errors") or [])
         is_research = bool(t.get("research"))
+    # Budget-exhaustion fallthrough: music gates evaluate in a fixed order,
+    # so a persistently-firing early gate (whose retry budget is spent) would
+    # otherwise starve later gates forever — e.g. a stuck missing_instruments
+    # masking a length_mismatch that still has budget. Skipped reasons are
+    # remembered as the deferred fallback (preserving score_errors_giveup and
+    # the finalize-with-reason trail) while evaluation continues past them.
+    # Only music-gate reasons participate; image/research/citation gates keep
+    # first-fire behavior.
+    _deferred = None
+
+    def _hit(reason):
+        nonlocal _deferred
+        if reason in (_skip or ()):
+            _deferred = _deferred or reason
+            return None
+        return reason
     if is_research:
         headings = [
             m.group(1).strip()
@@ -1612,7 +1734,9 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
         # piece is structurally broken (missing bars/lanes) no matter what
         # the duration says. Fix-and-rerender once before anything else.
         if music_errors:
-            return "score_errors"
+            _r = _hit("score_errors")
+            if _r:
+                return _r
         # Fusion balance before length: a re-render for a missing tradition
         # changes the duration anyway, so the structural fix goes first.
         _levels = list(t.get("music_levels") or [])
@@ -1626,7 +1750,9 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
                         _tt["_fusion_rendered"] = sorted({
                             str((lv or {}).get("instrument") or "?")
                             for lv in _levels})
-                return "fusion_imbalance"
+                _r = _hit("fusion_imbalance")
+                if _r:
+                    return _r
             # Named instruments the user asked for by name that earned no
             # lane (negated ones excluded): same re-render contract.
             _mi = sorted(_missing_instruments(user_input, _levels))
@@ -1635,19 +1761,34 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
                     _tt = M.tasks.get(task_id)
                     if _tt is not None:
                         _tt["_missing_instruments"] = _mi
-                return "missing_instruments"
+                _r = _hit("missing_instruments")
+                if _r:
+                    return _r
         # Variation before length too: a re-render for monotony changes
         # everything downstream anyway. Compares what the lanes ACTUALLY
         # play — duplicated leads, one vamp tiled over a long grid, and
         # zero dynamics — which no prompt rule alone has stopped.
         if music_ok and (t.get("music_score") or "").strip():
+            # Roles first: role-less lanes are invisible to every other
+            # structural gate, so label them before checking anything else.
+            _lr = _lane_role_problems(user_input, t.get("music_score") or "")
+            if _lr:
+                with M._data_lock:
+                    _tt = M.tasks.get(task_id)
+                    if _tt is not None:
+                        _tt["_lane_roles_note"] = "; ".join(_lr[:3])
+                _r = _hit("lane_roles")
+                if _r:
+                    return _r
             _var = _variation_problems(t.get("music_score") or "")
             if _var:
                 with M._data_lock:
                     _tt = M.tasks.get(task_id)
                     if _tt is not None:
                         _tt["_variation_notes"] = _var[:4]
-                return "variation"
+                _r = _hit("variation")
+                if _r:
+                    return _r
             # Coded-composer rules the prompt alone can't enforce: the ending
             # must cadence, and in fusion the lead must belong to the primary
             # genre's palette (borrowing is for second voices).
@@ -1658,36 +1799,55 @@ def _requirement_mismatch(task_id, sid, user_input, answer):
                     _tt = M.tasks.get(task_id)
                     if _tt is not None:
                         _tt["_cadence_notes"] = _cad[:2]
-                return "cadence"
+                _r = _hit("cadence")
+                if _r:
+                    return _r
             _lh = _lead_home_problems(user_input, _score)
             if _lh:
                 with M._data_lock:
                     _tt = M.tasks.get(task_id)
                     if _tt is not None:
                         _tt["_lead_home_note"] = _lh[0]
-                return "lead_home"
+                _r = _hit("lead_home")
+                if _r:
+                    return _r
+            # Converse: a lead-assigned instrument must actually lead.
+            _lp = _lead_presence_problems(user_input, _score)
+            if _lp:
+                with M._data_lock:
+                    _tt = M.tasks.get(task_id)
+                    if _tt is not None:
+                        _tt["_lead_presence_note"] = _lp[0]
+                _r = _hit("lead_presence")
+                if _r:
+                    return _r
         # Explicit user length vs real rendered length: tolerate the model's
         # counting (0.6×–1.8×) but catch the "minute that came out at 32s".
         target = _claimed_duration_seconds(user_input)
         if (target and isinstance(music_duration, (int, float))
                 and music_duration > 0
                 and not (0.6 * target <= music_duration <= 1.8 * target)):
-            return "length_mismatch"
+            _r = _hit("length_mismatch")
+            if _r:
+                return _r
     if music_ok and isinstance(music_duration, (int, float)) and music_duration > 0:
         claimed = _claimed_duration_seconds(answer)
         # Tolerate rounding; catch the real lie: claimed length wildly exceeds
         # what was rendered (e.g. a 9.3s piece sold as "1 minute").
         if claimed and claimed > music_duration * 1.5 + 10:
-            return "duration_claimed"
+            _r = _hit("duration_claimed")
+            if _r:
+                return _r
     if _CITE_ASK_RE.search(user_input):
         if not any(c.get("url") for c in extract_citations(answer)):
             return "citations_requested"
     if _WEB_ASK_RE.search(user_input) and "web_search" not in tools_used:
         return "web_requested"
-    return None
+    return _deferred
 
 
-def _retry_decision(task_id, judge_result, mismatch_reason, answer=None):
+def _retry_decision(task_id, judge_result, mismatch_reason, answer=None,
+                    _ctx=None):
     """Decide what ``run_verification_worker`` must do with the judged answer.
 
     Returns ``(action, reason)`` with ``action`` ∈ {"finalize", "retry",
@@ -1699,7 +1859,10 @@ def _retry_decision(task_id, judge_result, mismatch_reason, answer=None):
       delivered — decline is reserved for true leaks).
     - requirement mismatch → per-reason budget (score_errors: 2, others: 1)
       with 4 mismatch re-runs max per task, then deliver regardless
-      (score_errors appends its honest giveup ask instead).
+      (score_errors appends its honest giveup ask instead). When a reason's
+      own budget is spent, evaluation looks PAST it for a later,
+      still-actionable mismatch (via ``_ctx`` = (sid, user_input)) instead
+      of delivering blind — a stuck early gate must not starve later ones.
     - judge NO_CITATIONS → one steering re-run, then deliver regardless.
     - quality below ``VERIFY_QUALITY_GATE`` → retry up to ``VERIFY_MAX_RETRIES``,
       then deliver the last answer.
@@ -1739,6 +1902,30 @@ def _retry_decision(task_id, judge_result, mismatch_reason, answer=None):
         _total = t.get("_mismatch_done", 0)
         if _done_here < _per and _total < 4:
             return "retry", mismatch_reason
+        if _total < 4 and _ctx and mismatch_reason != "score_errors":
+            # This reason's budget is spent, but a LATER gate may still
+            # have budget and something real to say (e.g. a stuck
+            # missing_instruments masking a length_mismatch). Look past
+            # every spent reason once; fall through to finalize below.
+            # score_errors keeps its giveup path (handled next) so a
+            # twice-broken score still delivers honestly instead of
+            # churning.
+            _sid, _user_input = _ctx
+            _spent = {mismatch_reason}
+            if isinstance(_counts, dict):
+                for _r, _c in _counts.items():
+                    _lim = 2 if _r == "score_errors" else 1
+                    if _c >= _lim:
+                        _spent.add(_r)
+            try:
+                _nxt = _requirement_mismatch(
+                    task_id, _sid, _user_input, answer, _skip=frozenset(_spent))
+            except Exception:
+                _nxt = None
+            if _nxt:
+                print(f"[critic] {mismatch_reason} budget spent — retrying "
+                      f"next actionable mismatch '{_nxt}' for task {task_id}")
+                return "retry", _nxt
         if mismatch_reason == "score_errors":
             return "finalize", "score_errors_giveup"
         return "finalize", mismatch_reason
@@ -1881,6 +2068,29 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
                 "\n\n[Named instruments with no lane in the render: "
                 + ", ".join(missing) + ". Add one lane each.]"
             )
+    if reason == "length_mismatch":
+        # The LLM does the arithmetic itself: hand it the three measured
+        # numbers plus the expected bar count so the retry is computation,
+        # not guessing. Tempo comes from the score's own @tempo directive.
+        try:
+            from server.features.music.parse import parse_tempo
+            _tempo = parse_tempo(t.get("music_score") or "") or 120
+            _target = _claimed_duration_seconds(
+                t.get("_original_message") or "") or 0
+            _dur = t.get("music_duration") or 0
+            if _target > 0 and _tempo > 0:
+                _bars = round(_target * _tempo / 240)
+                steering += (
+                    f"\n\n[LENGTH MATH — show your work in the draft: target "
+                    f"≈ {_target:g}s, rendered {_dur:g}s at {_tempo} BPM. "
+                    f"Total @section bars must equal round(target × tempo ÷ "
+                    f"240) = round({_target:g} × {_tempo} ÷ 240) = {_bars}. "
+                    f"Recompute from YOUR @tempo and bar counts (bars × 240 "
+                    f"÷ tempo = seconds) and set @section bars to land "
+                    f"within 20% of target, then render again.]"
+                )
+        except Exception as e:
+            print(f"[critic] length-math steering skipped: {e}")
     if reason == "cadence":
         notes = t.get("_cadence_notes") or []
         if notes:
@@ -1889,6 +2099,17 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
         note = t.get("_lead_home_note") or ""
         if note:
             steering += "\n\n[" + note + "]"
+    if reason == "lead_presence":
+        note = t.get("_lead_presence_note") or ""
+        if note:
+            steering += "\n\n[" + note + "]"
+    if reason == "lane_roles":
+        note = t.get("_lane_roles_note") or ""
+        if note:
+            steering += (
+                "\n\n[Lane structure broken — fix each item: "
+                + note + "]"
+            )
     if reason == "variation":
         notes = t.get("_variation_notes") or []
         if notes:
@@ -1943,7 +2164,7 @@ def run_verification_worker(task_id, sid, answer, body, mode):
             user_input = t.get("_original_message", "")
         mismatch_reason = _requirement_mismatch(task_id, sid, user_input, answer)
         action, reason = _retry_decision(task_id, judge_result, mismatch_reason,
-                                         answer)
+                                         answer, _ctx=(sid, user_input))
 
         if action == "retry":
             _reschedule(task_id, sid, round_num, reason, judge_result)

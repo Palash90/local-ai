@@ -1,5 +1,15 @@
 {
   "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.81", "--no-sandbox", "--executable-path", "/home/palash/.cache/ms-playwright/chromium-1193/chrome-linux/chrome"],
+      "env":{
+        "DISPLAY": ":1",
+        "XAUTHORITY": "/run/user/1000/gdm/Xauthority"
+      },
+      "enabled": true,
+      "_comment": "Headed (no --headless) browser automation for bot-blocked fetch_page fallback. Later headless flip = add --headless to args."
+    },
     "codebase-search": {
       "command": "npx",
       "args": ["-y", "codebase-memory-mcp@latest"],

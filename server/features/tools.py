@@ -1,8 +1,10 @@
 """LLM tool implementations: web search, page fetching, image tools dispatch."""
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import threading
 from datetime import datetime
 from urllib.parse import urlparse
@@ -11,10 +13,148 @@ from server.mcp_client import mcp_manager, dispatch_mcp_tool
 from server.features.state import M
 from server.features.websearch import fetch_page, web_search
 from server.features.websearch import relevance as _relevance
+from server.features.websearch import vector_store as page_cache
 from server.features.pensieve import memory_read as _pensieve_read
 
 # Private names remain available to older focused checks and integrations.
 _screen_cached_payload = _relevance._screen_cached_payload
+
+
+# ── Headed-browser navigation gate ──────────────────────────────────────────
+# browser__browser_navigate drives a local Chromium, so its SSRF surface is
+# the same as fetch_page's: refuse loopback/LAN/metadata targets server-side
+# (prompt text alone can't be trusted). Also refused while an image render
+# owns the machine — Chromium on top of ComfyUI is the one shape that could
+# make text-phase fetching trip a RAM evacuation.
+
+def _browser_navigate_gate(tool_name, args):
+    """Return an error string refusing the navigation, or "" to allow it."""
+    if tool_name != "browser__browser_navigate":
+        return ""
+    try:
+        image_active = bool(M._image_active)
+    except Exception:
+        image_active = False
+    if image_active:
+        return (
+            "Browser navigation skipped: an image render owns the machine "
+            "right now. Fall back to the direct fetch_page result or search "
+            "snippets instead."
+        )
+    url = ""
+    try:
+        if isinstance(args, dict):
+            url = (args.get("url") or "").strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return f"Refused to open URL (only http/https allowed): {url}"
+        host = (parsed.hostname or "").lower()
+        if (
+            host in ("localhost", "metadata.google.internal")
+            or host.endswith(".local")
+            or host.endswith(".internal")
+            or host.endswith(".lan")
+        ):
+            return f"Refused to open private/internal address: {url}"
+        ip = socket.gethostbyname(parsed.hostname or "")
+        addr = ipaddress.ip_address(ip)
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_multicast
+            or getattr(addr, "is_reserved", False)
+        ):
+            return f"Refused to open private/internal address: {url}"
+    except Exception as e:
+        return f"Refused to open URL ({e}): {url}"
+    return ""
+
+
+# ── Headed-browser read persistence ─────────────────────────────────────────
+# Browser-opened pages must persist exactly like direct fetch_page results:
+# a fetch_page-shaped _search_details entry (so citation verification treats
+# them as grounded) plus a page_cache write on cache miss (so repeats,
+# chunked re-reads and the semantic layer reuse them without relaunching
+# Chromium). Browser fills misses only — a good direct entry is never
+# overwritten here. TTL policy is identical to direct fetches
+# (page_put's default). Best-effort: never raises.
+
+_BROWSER_TEXT_CAP = 24000  # mirrors fetch_page's default max_chars
+
+
+def _browser_extract_evaluate_text(result):
+    """Pull the innerText out of a browser__browser_evaluate result."""
+    text = result if isinstance(result, str) else ""
+    if not text or "### Result" not in text:
+        return ""
+    body = text.split("### Result", 1)[1]
+    body = body.split("### Ran Playwright code", 1)[0]
+    body = body.strip()
+    # The server JSON-quotes the evaluated string.
+    if len(body) >= 2 and body[0] == '"' and body[-1] == '"':
+        try:
+            body = json.loads(body)
+        except Exception:
+            body = body[1:-1]
+    body = body.replace("\\n", "\n").strip()
+    return body
+
+
+def _browser_note_result(task_id, tool_name, args, result):
+    """Record a headed-browser read; see the block comment above."""
+    try:
+        if not isinstance(args, dict):
+            return
+        with M._data_lock:
+            t = M.tasks.get(task_id)
+            if t is None:
+                return
+            if tool_name == "browser__browser_navigate":
+                url = (args.get("url") or "").strip()
+                if not url or not isinstance(result, str) or "Page URL:" not in result:
+                    return
+                title = ""
+                m = re.search(r"^- Page Title:\s*(.+)$", result, re.MULTILINE)
+                if m:
+                    title = m.group(1).strip()
+                t["_browser_url"] = url
+                t["_browser_title"] = title
+                return
+            if tool_name != "browser__browser_evaluate":
+                return
+            url = (t.get("_browser_url") or "").strip()
+            if not url:
+                return
+            title = t.get("_browser_title") or ""
+            text = _browser_extract_evaluate_text(result)
+            if not text:
+                return
+            text = text[:_BROWSER_TEXT_CAP]
+            t.setdefault("_search_details", []).append(
+                {
+                    "tool": "fetch_page",
+                    "url": url,
+                    "title": title,
+                    "content": text,
+                    "error": "",
+                    "via": "browser",
+                    "retrieved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+            )
+            canon = url.split("#", 1)[0] or url
+            try:
+                if page_cache.page_get(canon) is None:
+                    page_cache.page_put(
+                        canon, url, title, text, doc_type="web",
+                    )
+                else:
+                    print(f"[browser-persist] cache hit for {canon} — details only")
+            except Exception as e:
+                print(f"[browser-persist] cache write failed: {e}")
+            print(f"[browser-persist] recorded {len(text)} chars from {canon}")
+    except Exception as e:
+        print(f"[browser-persist] skipped: {e}")
 
 
 def _tool_worker(task_id, sid, tc, image_b64, round_num, tool_index):
@@ -224,9 +364,15 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         with M._data_lock:
             t_user = M.tasks.get(task_id, {}).get("_user", "")
         try:
+            # Strict pre-render validation: an LLM-written score with parse
+            # errors is refused BEFORE FluidSynth (no partial player, no
+            # render cost) — the errors return as the tool result so the
+            # next round fixes the tokens directly. Creativity stays at the
+            # model's sampling; only the grammar is enforced mechanically.
             result = M.render_music_score(
                 args.get("score", ""), tempo=int(args.get("tempo") or 120),
                 title=args.get("title", "music"), user=t_user,
+                strict=True,
             )
         except Exception as e:
             print(f"[generate_music] Unhandled exception for task {task_id}: {e}")
@@ -518,11 +664,17 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
         )
 
     elif mcp_manager.is_mcp_tool(tool_name):
-        try:
-            result = dispatch_mcp_tool(tool_name, args)
-        except Exception as e:
-            print(f"[MCP] Tool '{tool_name}' failed: {e}")
-            result = json.dumps({"error": f"MCP tool {tool_name} failed: {e}"})
+        gate_err = _browser_navigate_gate(tool_name, args)
+        if gate_err:
+            print(f"[browser-gate] refused {tool_name}: {gate_err}")
+            result = json.dumps({"error": gate_err})
+        else:
+            try:
+                result = dispatch_mcp_tool(tool_name, args)
+                _browser_note_result(task_id, tool_name, args, result)
+            except Exception as e:
+                print(f"[MCP] Tool '{tool_name}' failed: {e}")
+                result = json.dumps({"error": f"MCP tool {tool_name} failed: {e}"})
 
         M._event_post(
             "tool_ok",

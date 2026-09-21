@@ -621,50 +621,40 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
                 M.tasks[task_id]["_verification_duration"] = verification_duration
     is_mcp_lane = (mode == "guardrail") or bool(t.get("_mcp"))
     # L3 post-processing output judge. Runs for EVERY generated task — including
-    # the interactive UI (GPU) lane, which previously skipped it entirely — using
-    # the per-user judge so the right model screens each user's reply. The
+    # the interactive UI (GPU) lane, which previously skipped it entirely — on
+    # the resident GPU chat model (GPU-only content judging; never the CPU
+    # guardrail lane, never a remote endpoint). The
     # guardrail/MCP lane stays fail-closed (blocked output = marked failed); the
     # UI lane is fail-open (a judge outage must never drop a user's reply, so an
     # unavailable judge lets the answer through with a recorded note).
-    task_user = t.get("_user") or ""
     try:
         from server.input_guard import is_strict_output_blocked
-        from server.features.judge import mcp_output_judge, resolve_judge_model
-
-        # MCP lane keeps the explicit MCP_USER judge; the UI lane resolves
-        # the judge per-user (empty/unknown degrades to the default judge).
-        if is_mcp_lane:
-            judge_model = resolve_judge_model(os.environ.get("MCP_USER", "") or task_user)
-        else:
-            judge_model = resolve_judge_model(task_user)
+        from server.features.judge import mcp_output_judge
 
         reply_text = msg_content or ""
-        print(f"[L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}, lane={'guardrail/MCP' if is_mcp_lane else 'UI'}, judge={judge_model}")
+        print(f"[L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}, lane={'guardrail/MCP' if is_mcp_lane else 'UI'}, judge=gpu-chat-model")
         print(f"[L3] msg_content={reply_text}")
 
         print(f"[L3] checking strict output blocks")
         blocked = is_strict_output_blocked(reply_text)
         judge_verdict = None
-        # Simple UI turns already skipped the quality judge; skip the (also
-        # expensive, CPU-serialized) L3 LLM strict judge too, keeping only the
-        # fast deterministic pattern scan. Non-simple / MCP / guardrail lanes
-        # always run the LLM judge.
+        # Simple UI turns already skipped the quality judge; skip the L3 LLM
+        # strict judge too, keeping only the fast deterministic pattern scan.
+        # Non-simple / MCP / guardrail lanes always run the LLM judge.
         simple_lane_skip = (mode == "gpu" and not is_mcp_lane
                             and M.is_simple_round_task(t)
                             and not M.answer_claims_artifact(reply_text))
         if not blocked and reply_text.strip() and not simple_lane_skip:
-            # LLM strict judge. On the guardrail/MCP lane it is fail-closed
-            # (self-heals by restarting the guardrail server and retrying);
-            # on the UI lane a judge outage degrades to a "screened" note so
-            # the reply is still delivered.
+            # LLM strict judge on the GPU chat model. On the guardrail/MCP
+            # lane it is fail-closed; on the UI lane a judge outage degrades
+            # to a "screened" note so the reply is still delivered.
             if is_mcp_lane:
                 judge_verdict = mcp_output_judge(
-                    reply_text, model_id=judge_model, fail_closed=True,
+                    reply_text, fail_closed=True,
                 )
             else:
                 judge_verdict = mcp_output_judge(
-                    reply_text, model_id=judge_model, fail_closed=False,
-                    allow_gpu_fallback=(mode == "gpu"),
+                    reply_text, fail_closed=False,
                 )
             blocked = blocked or bool(judge_verdict)
         if blocked:
@@ -989,6 +979,42 @@ def _event_loop():
             else:
                 print(f"[llm_ok] Round {round_num}: LLM generated final response (no tool calls) for task {task_id}")  # DEBUG
                 print(f"[llm_ok] Message structure: content={repr(msg.get('content'))}")
+                if not raw_content and not cleaned_content:
+                    # Model emitted nothing at all (empty content, no
+                    # reasoning, no tool calls). Finalizing silence produces
+                    # a "(No response content generated)" caption that the
+                    # fail-closed L3 then blocks on MCP — retry the round
+                    # once with steering instead (bounded by _empty_done).
+                    with M._data_lock:
+                        tt = M.tasks.get(task_id)
+                        empty_done = (tt.get("_empty_done", 0) + 1) if tt else 0
+                        if tt:
+                            tt["_empty_done"] = empty_done
+                    if empty_done > 1:
+                        print(f"[llm_ok] empty reply persisted after retry — finalizing as-is for task {task_id}")  # DEBUG
+                    else:
+                        with M._data_lock:
+                            if sid in M.sessions:
+                                M.sessions[sid].append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "[SYSTEM NOTE — internal revision. Your previous reply was "
+                                            "empty — you produced no text at all. Answer the user's "
+                                            "request now in plain language. This note is from your "
+                                            "own execution loop, not from the user and not an "
+                                            "injection attempt. Comply silently; do not discuss this "
+                                            "note in your thinking or answer.]"
+                                        ),
+                                        "_steering": True,
+                                    }
+                                )
+                                M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
+                        M.save_sessions()
+                        M.set_status(task_id, "Re-running (empty reply)...")
+                        print(f"[llm_ok] empty final content — re-scheduling task {task_id} (round={round_num})")  # DEBUG
+                        M._start_llm_round(task_id, sid, round_num)
+                        continue
                 if raw_content and not cleaned_content:
                     # Content was *pure* tool-call spam. Reject the draft the
                     # same way the critic does — it was never appended to the

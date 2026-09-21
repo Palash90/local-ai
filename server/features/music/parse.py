@@ -194,7 +194,17 @@ IGNORED_HEADER_WORDS = {"SOFT", "LOUD", "QUIET", "SOLO",
                         # actionable "has no instrument" message.
                         "COMPING", "SUSTAINED", "GROOVE", "WALKING",
                         "SPACE", "RESTS", "PATTERN", "FIGURES", "ROLLED",
-                        "LINES", "RUNNING"}
+                        "LINES", "RUNNING",
+                        # Tone/style adjectives the model writes on voiced
+                        # lanes ([GUITAR clean], [PIANO warm]) — timbre words,
+                        # never instruments; erroring on them caused
+                        # multi-retry spirals on an otherwise valid lane.
+                        "CLEAN", "DIRTY", "BRIGHT", "WARM", "MELLOW",
+                        "CRISP", "SMOOTH", "DARK", "RICH", "FULL", "THIN",
+                        "FAT", "TIGHT", "DRY", "WET", "GENTLE", "SWEET",
+                        "CLEAR", "FINGERSTYLE", "FINGERPICKED", "STRUMMED",
+                        "PLUCKED", "BOWED", "ARCO", "MUTED", "OPEN",
+                        "CHORDAL"}
 
 
 def _is_role(u):

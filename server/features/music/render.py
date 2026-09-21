@@ -37,7 +37,8 @@ def _music_dir():
     return MUSIC_DIR_DEFAULT
 
 
-def render_score(score_text, tempo=120, title="music", user="local"):
+def render_score(score_text, tempo=120, title="music", user="local",
+                 strict=False):
     import wave
     from server.features.music.parse import parse_score, parse_tempo
     from server.features.music.midi_out import build_midi
@@ -45,6 +46,21 @@ def render_score(score_text, tempo=120, title="music", user="local"):
 
     tempo = parse_tempo(score_text, tempo)
     sections, errors, structure = parse_score(score_text, tempo)
+    if strict and errors:
+        # Pre-render validation (LLM-written scores only): refuse before
+        # FluidSynth so a broken score never becomes a partial "incomplete
+        # player" delivery. The errors ride the tool result straight back
+        # into the next LLM round for a cheap fix — no render cost, no
+        # critic retry spent. Machine-generated scores (arranged/showcase)
+        # stay lenient: no model is listening to fix them.
+        top = [str(e) for e in (errors or [])][:12]
+        return json.dumps({
+            "ok": False,
+            "error": (
+                f"score has {len(errors)} parse error(s) — nothing rendered. "
+                "Fix every flagged token and resubmit the full corrected "
+                "score: " + "; ".join(top)),
+            "errors": top})
     n = sum(len(s["events"]) for s in sections)
     if not sections or n == 0:
         return json.dumps({"ok": False, "error": "no notes parsed",

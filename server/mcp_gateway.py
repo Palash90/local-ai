@@ -403,36 +403,40 @@ VERIFY_TIMEOUT = 90
 
 
 async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str = None) -> tuple:
+    # Hard outer deadline: no L2 may hang the tool call past this, no matter
+    # where it sticks (model load, queued slot, slow inference). Without it
+    # a wedged lane reproduces the silent-hang incident (no verdict line,
+    # no task insert, client times out): fail-closed WITH a logged line.
+    try:
+        return await asyncio.wait_for(
+            _run_llm_verify_inner(message, judge_system_prompt, model_id),
+            timeout=120,
+        )
+    except asyncio.TimeoutError:
+        print(f"[guardrail][L2] TIMEOUT after 120s — treating as HARMFUL (fail-closed)", flush=True)
+        return False, "LLM judge timed out after 120s"
+
+
+async def _run_llm_verify_inner(message: str, judge_system_prompt: str, model_id: str = None) -> tuple:
+    # L2 input judge is pinned to the guardrail lane (:8083) — never the CPU
+    # lane, never a remote endpoint. Tablet is fully out of L2 (no fallback).
+    # The verdict model is the lane default (E2B): a one-word classifier
+    # wants the small fast model, not per-user chat-model pins (kept in DB
+    # for paths that honor them).
     from server.features.state import M
     from server.features.monitoring import ensure_guardrail_ready
-    from server.features.judge import sanitize_judge_model
     from server.features.judge import _parse_verdict, _parse_strict_verdict
     from server.features.judge import wait_until_render_safe
     import re as _re
 
     task_lane = "guardrail"
-    model_id = (model_id or "").strip() or M.server_model_id(task_lane)
+    model_id = M.server_model_id(task_lane)
     text = (message or "").strip()
     if not text:
         print(f"[guardrail][L2] empty message, auto-passing")
         return True, ""
 
-    # Remote judges (GUARDRAIL_EXTERNAL, e.g. Ollama on a tablet): verdict
-    # traffic goes to GUARD_LLM_BASE with the GUARD_LLM_MODEL tag instead of
-    # the local guardrail lane. Local behavior is untouched otherwise.
-    from server.features.judge import judge_endpoint
-    ext_base, ext_url, ext_model = judge_endpoint(default_model=model_id)
-    if ext_base:
-        if not os.environ.get("GUARD_LLM_MODEL", "").strip():
-            print(
-                "[guardrail][L2] GUARDRAIL_EXTERNAL set but GUARD_LLM_MODEL "
-                "is empty — remote judge will reject the local model id",
-                flush=True,
-            )
-        verify_base, verify_url, model_id = ext_base, ext_url, ext_model
-    else:
-        verify_base, verify_url = M.server_base(task_lane), M.server_url(task_lane)
-    model_id = sanitize_judge_model(model_id, verify_base)
+    verify_base, verify_url = M.server_base(task_lane), M.server_url(task_lane)
 
     # Never stack a judge model load on top of an active ComfyUI render —
     # that collision is what triggers emergency RAM evacuations. Waiting is
@@ -441,7 +445,10 @@ async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str 
         print(f"[guardrail][L2] render window never cleared — verifying anyway")
 
     print(f"[guardrail][L2] ensuring {task_lane} server is running (with model {model_id} loaded)")
-    await asyncio.to_thread(ensure_guardrail_ready, model_id=model_id)
+    ok = await asyncio.to_thread(ensure_guardrail_ready, model_id=model_id)
+    if not ok:
+        print(f"[guardrail][L2] guardrail server not ready — treating as HARMFUL (fail-closed)", flush=True)
+        return False, "LLM judge unavailable (guardrail lane not ready)"
     print(f"[guardrail][L2] {task_lane} server ready")
 
     payload = {
@@ -451,19 +458,19 @@ async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str 
             {"role": "user", "content": text[:4000]},
         ],
         "temperature": 0,
-        "max_tokens": 2048,
+        "max_tokens": 512,
         "stream": False,
     }
 
-    async def _judge_call(max_tokens=2048):
+    async def _judge_call(max_tokens=512):
         """POST the judge payload; return (content, reasoning, error_string).
 
-        Reasoning-capable "it" models emit a long ``reasoning_content`` before the
-        verdict in ``content``. If ``max_tokens`` is too small the reasoning eats
-        the whole budget and ``content`` comes back empty (finish_reason length),
-        which used to misread as 'judge unavailable'. We return both fields so the
-        caller can fall back to judging on the reasoning text, plus a larger budget
-        on retry.
+        The verdict is one word, so the budget stays small on purpose: on
+        the single-slot CPU lane a 2048-token reasoning burn at ~14 t/s can
+        exceed client patience before httpx ever fires. Reasoning-capable
+        models that burn the budget before the verdict emit
+        ``reasoning_content`` instead — we judge on that text, plus a larger
+        budget on retry.
         """
         payload["max_tokens"] = max_tokens
         try:
@@ -494,15 +501,16 @@ async def _run_llm_verify(message: str, judge_system_prompt: str, model_id: str 
         )
         reply = reasoning
     if not reply:
-        # Availability failure (connection error / non-200 / empty reply): restart,
-        # wait for the model, and retry with a larger budget before failing closed.
+        # Availability failure (connection error / non-200 / empty reply):
+        # re-ensure the guardrail lane and retry once with a larger budget
+        # before failing closed.
         print(
             f"[guardrail][L2] judge call unavailable ({err or 'empty'}) — "
-            "restarting judge & retrying once",
+            "re-ensuring guardrail lane & retrying once",
             flush=True,
         )
         await asyncio.to_thread(ensure_guardrail_ready, model_id=model_id)
-        reply, reasoning, err = await _judge_call(max_tokens=4096)
+        reply, reasoning, err = await _judge_call(max_tokens=1024)
         if not reply and reasoning:
             reply = reasoning
         if not reply:
@@ -620,10 +628,11 @@ async def create_session(
         str(sp.get("prompt", "")) if isinstance(sp, dict) else str(sp)
         for sp in (system_prompts or [])
     ]
-    judge_model = resolve_judge_model(_request_username(ctx))
     for sp in sp_texts:
         if sp and await asyncio.to_thread(
-            llm_classify_harmful, sp, None, 20, JUDGE_FAIL_CLOSED, judge_model
+            # Guardrail-lane default (E2B) serves L2; per-user pins stay in
+            # DB for paths that honor them.
+            llm_classify_harmful, sp, None, 20, JUDGE_FAIL_CLOSED, None
         ):
             return json.dumps({
                 "declined": True,
@@ -740,10 +749,9 @@ async def send_chat_message(
 
     print(f"[guardrail][L2] running LLM verification on guardrail lane...")
     from server.features.judge import _judge_system
-    judge_model = resolve_judge_model(_request_username(ctx))
-    passed, reason = await _run_llm_verify(
-        message, _judge_system(), model_id=judge_model
-    )
+    # L2 verdicts run on the guardrail-lane default (E2B); per-user pins
+    # stay in DB for paths that honor them.
+    passed, reason = await _run_llm_verify(message, _judge_system())
     if not passed:
         print(f"[guardrail][L2] REJECTED: {reason}")
         return json.dumps({
@@ -898,9 +906,8 @@ async def _run_batch(batch_id):
     b = batch_get(batch_id)
     if not b:
         return
-    # Batches are owned by the single configured MCP identity, so every item's
-    # L2/L3 judge resolves to MCP_USER's configured judge model.
-    batch_judge_model = resolve_judge_model(MCP_USER)
+    # Batches are owned by the single configured MCP identity; L2 verdicts
+    # run on the guardrail-lane default (E2B).
     shared_sid = b["session_id"]
     for it in b["items"]:
         if it["status"] in ("done", "error"):
@@ -944,9 +951,7 @@ async def _run_batch(batch_id):
                 continue
 
             from server.features.judge import _judge_system
-            passed, reason = await _run_llm_verify(
-                prompt, _judge_system(), model_id=batch_judge_model
-            )
+            passed, reason = await _run_llm_verify(prompt, _judge_system())
             if not passed:
                 print(
                     f"[guardrail][L2] blocked batch item {it['index']} "
@@ -1027,13 +1032,15 @@ async def _run_batch(batch_id):
                 pass
 
             if reply:
-                from server.features.judge import _strict_judge_system
-                passed, reason = await _run_llm_verify(
-                    reply, _strict_judge_system(), model_id=batch_judge_model
-                )
-                if not passed:
+                # L3-equivalent strict check on the GPU chat model
+                # (GPU-only content judging; never CPU/tablet). mcp_output_judge
+                # is synchronous — bridge it off the event loop.
+                from server.features.judge import mcp_output_judge
+                blocked = await asyncio.to_thread(mcp_output_judge, reply)
+                if blocked:
+                    reason = "strict output judge (GPU chat model) blocked the reply"
                     print(
-                        f"[guardrail][L3] blocked batch item {it['index']} "
+                        f"[gpu-judge][L3] blocked batch item {it['index']} "
                         f"(batch {batch_id}): {reason}"
                     )
                     item_update(

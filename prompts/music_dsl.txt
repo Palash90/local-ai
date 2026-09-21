@@ -51,12 +51,24 @@ repeat on stage.
   name like PADS) + ONE single-word instrument from the ALIAS list below.
   NEVER blend two aliases into one token (PIANO_PAD, SITAR_FLUTE are invalid)
   — if you want two colours layered, emit TWO lanes with separate headers.
+  ROLE IS MANDATORY ON EVERY PITCHED LANE AND LIVES INSIDE THE BRACKETS:
+  [MELODY santoor vol=80], [HARMONY piano vol=65] — never [Santoor vol=80]
+  with the role left to a # comment (comments are never parsed; a role-less
+  lane is invisible to verification and the lead gates go blind). Second
+  voices use MELODY2, never invented role names. When the request assigns a
+  lead ("santoor-led", "santoor carries the melody", "piece for santoor"),
+  that instrument goes on MELODY — and when it names TWO rhythm voices
+  ("tabla and soft drums"), write TWO rhythm lanes (RHYTHM + PERC2), one
+  per voice.
   An 'unknown lane word' error in a tool result means: replace the flagged
   word with the suggested alias, or split it into two lanes. Never re-emit
   the same invented word and hope. 'bad token w'/'bad token q' on a note
   line means that lane was read as DRUMS (rhythm-ish role or unknown word
   in the header) — note durations are not drum syllables; give the lane a
   clear melodic role (MELODY/HARMONY/BASS) with a real alias.
+  STYLE DETAILS the gates cannot check: octave bass alternates root and
+  octave (C2 q C3 q, never root-root-fifth); hammer piano mixes block bars
+  (C3:maj7 w) with rolled bars (C3:maj7 ar w) — all-rolled is not hammer.
 
 RESEARCH UNKNOWN TERMS FIRST — never compose from a name alone: if the
 request names a raga/tala/maqam/mode/groove/instrument/form you cannot

@@ -221,6 +221,21 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   key absent and WAV plays. No new dependency: system libopus0, degrades to
   WAV-only if absent. Identical score+tempo reuses existing files
   (`dedup_hit`, content hash) instead of re-rendering.
+- Structural gates (unit: `server/features/tests/test_critic_music_gate.py`):
+  santoor-led ask with sax on MELODY → one `lead_presence` re-run, then
+  santoor-led delivery; role-less `[Santoor vol=80]` headers → `lane_roles`
+  re-run with `[MELODY santoor …]` headers; bare `E3:maj7ar` →
+  `score_errors` steering containing the corrected `C3:min7ar w` form;
+  explicit-solo single lane stays exempt.
+- Pre-render validation (unit: `server/features/music/tests/test_music.py`):
+  `render_score(strict=True)` on a broken LLM score refuses with errors and
+  renders nothing; clean scores render; default (arranged/showcase) stays
+  lenient and renders partials.
+- Length math (unit: same gate file): short render vs "about a minute" →
+  `length_mismatch` with a steering block showing target/rendered/BPM math;
+  a spent early gate (e.g. `missing_instruments`) falls through to a later
+  actionable one instead of delivering blind; `BASS` ask matches a
+  `bassguitar` lane.
 - Score budget + malformed-call retry: scores over ~1100 chars get cut by the
   generation token budget and llama.cpp 500s the tool call (`Failed to parse
   tool call arguments`); the server steers (shorten + valid JSON) and retries

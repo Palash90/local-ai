@@ -9,3 +9,6 @@ repomix-output.xml
 # Environment / secrets (fill in your real values; never commit these)
 .env
 .env.bak.*
+
+# Headed Playwright MCP run artifacts (snapshots/console logs)
+.playwright-mcp/

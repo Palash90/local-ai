@@ -665,6 +665,144 @@ def _gpu_judge_fallback_base(requested_model_id, label):
     return base
 
 
+def _wait_gpu_render_safe(label, timeout=_RENDER_WAIT_TIMEOUT,
+                          cooldown=_RENDER_COOLDOWN):
+    """Hold a GPU-lane verdict call while an image render owns the GPU.
+
+    Image renders unload the GPU chat model for ComfyUI, so a verdict POST
+    during ``M._image_active`` would hit an unloaded server. Unlike
+    :func:`wait_until_render_safe` this ALWAYS holds (it is the GPU lane
+    itself being judged on) regardless of ``GUARDRAIL_EXTERNAL``. Returns
+    True when the window cleared, False on timeout (callers proceed anyway
+    and let the normal connection-error policy apply).
+    """
+    try:
+        from server.features.state import M
+    except Exception:
+        return True
+    tag = f"[guardrail][{label}]" if label else "[guardrail]"
+    deadline = time.time() + timeout
+    waited = False
+    while time.time() < deadline:
+        try:
+            active = bool(getattr(M, "_image_active", False))
+        except Exception:
+            active = False
+        if not active:
+            break
+        waited = True
+        time.sleep(1)
+    if not waited:
+        return True
+    print(f"{tag} image render active — holding GPU verdict until it finishes",
+          flush=True)
+    time.sleep(min(cooldown, max(0.0, deadline - time.time())))
+    return time.time() < deadline
+
+
+def _gpu_verdict_post(label, system_prompt, user_content, timeout):
+    """GPU-only verdict POST shared by every content (output) judge.
+
+    Content judges grade generated text with the resident GPU chat model —
+    never the CPU guardrail lane, never a remote endpoint. The POST goes
+    straight at the GPU server (bypassing the lane queue, which is blocked
+    waiting on the very task under judgment) with the lane's own guards:
+    render-window hold, KV-dirty marking, and the generating counter so
+    idle-unload accounting stays truthful.
+
+    Returns ``(model_id_used, content)`` or ``(None, None)``. ``content``
+    falls back to the raw reasoning text when a thinking model exhausts its
+    budget before emitting ``content``. Never raises.
+    """
+    try:
+        from server.features.state import M
+    except Exception as e:
+        print(f"[guardrail][{label}] GPU verdict unavailable (no state): {e}")
+        return None, None
+    try:
+        base = M.server_base("gpu")
+        model = _chat_model_id()
+    except Exception as e:
+        print(f"[guardrail][{label}] GPU verdict unavailable (no base/model): {e}")
+        return None, None
+    if not base or not model:
+        print(f"[guardrail][{label}] GPU verdict unavailable (base/model empty)")
+        return None, None
+    user_content = (user_content or "").strip()
+    if not user_content:
+        return None, None
+    _wait_gpu_render_safe(label)
+    try:
+        import requests
+    except Exception as e:
+        print(f"[guardrail][{label}] requests unavailable: {e}")
+        return None, None
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0,
+        "max_tokens": _judge_max_tokens(),
+        "stream": False,
+        # Explicit, small reasoning budget: the GPU server carries no
+        # server-side --reasoning-budget, and a thinking chat model must
+        # not burn thousands of tokens before the verdict word.
+        "reasoning_budget_tokens": _judge_reasoning_budget(),
+        "cache_prompt": False,
+    }
+    try:
+        from server.features.llm import _mark_chat_generating
+        _mark_chat_generating("gpu", True)
+    except Exception:
+        pass
+    try:
+        try:
+            M.mark_slot_kv_dirty("gpu")
+        except Exception:
+            pass
+        last_err = ""
+        for attempt in range(2):
+            try:
+                r = requests.post(
+                    f"{base.rstrip('/')}/v1/chat/completions",
+                    json=payload,
+                    timeout=timeout,
+                )
+            except Exception as e:
+                last_err = f"connection error: {e}"
+                print(f"[gpu-judge][{label}] GPU verdict call failed: {e}")
+                continue
+            if r.status_code == 200:
+                msg = r.json().get("choices", [{}])[0].get("message", {}) or {}
+                content = msg.get("content") or ""
+                if not content.strip():
+                    reasoning = (msg.get("reasoning_content")
+                                 or msg.get("reasoning") or "")
+                    if reasoning:
+                        content = reasoning
+                return model, (content or "").strip()
+            last_err = f"HTTP {r.status_code}: {r.text[:150]}"
+            print(f"[gpu-judge][{label}] GPU verdict rejected — {last_err}")
+            if r.status_code in (500, 502, 503) and attempt == 0:
+                # Transient slot-drain race: the verdict POST landed while
+                # the server was still releasing the generation slot
+                # ("proxy error: Failed to read connection"). One short
+                # breather + retry before giving up.
+                time.sleep(3)
+                continue
+            break
+        print(f"[gpu-judge][{label}] GPU verdict unavailable ({last_err})")
+        return None, None
+    finally:
+        try:
+            from server.features.llm import _mark_chat_generating
+            _mark_chat_generating("gpu", False)
+        except Exception:
+            pass
+
+
 def _judge_completion(label, system_prompt, user_content, base_url, timeout,
                       max_chars=2000, model_id=None, allow_gpu_fallback=False,
                       exclude_models=None):
@@ -855,7 +993,8 @@ def _judge_post_loop(label, system_prompt, user_content, base_url, timeout,
 
 
 def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
-               max_chars=2000, model_id=None, allow_gpu_fallback=False):
+               max_chars=2000, model_id=None, allow_gpu_fallback=False,
+               _gpu_only=False):
     """Shared judge plumbing: POST the classify prompt, log exactly what was
     passed and what came back, apply fail-open/fail-closed policy.
 
@@ -865,6 +1004,11 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
     judge) and is tried first; on the guardrail server an unavailable pinned
     judge is (re)loaded via ``ensure_judge_ready`` before the retry. Returns
     True only for an affirmative HARMFUL verdict.
+
+    ``_gpu_only`` (content/output judges): skip the guardrail/remote
+    machinery entirely and verdict on the resident GPU chat model via
+    :func:`_gpu_verdict_post`. ``base_url``/``model_id`` are then ignored
+    for routing. Input (L2) judges must never set this.
     """
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         try:
@@ -874,15 +1018,23 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
     text = (text or "").strip()
     if not text:
         return False
-    print(
-        f"[guardrail][{label}] -> {base_url} fail_closed={fail_closed} "
-        f"model={model_id or 'auto'} text={text!r}"
-    )
-    cand, content = _judge_completion(
-        label, system_prompt, text, base_url, timeout,
-        max_chars=max_chars, model_id=model_id,
-        allow_gpu_fallback=allow_gpu_fallback,
-    )
+    if _gpu_only:
+        print(
+            f"[gpu-judge][{label}] fail_closed={fail_closed} "
+            f"text={text!r}"
+        )
+        cand, content = _gpu_verdict_post(
+            label, system_prompt, text[:max_chars], timeout)
+    else:
+        print(
+            f"[guardrail][{label}] -> {base_url} fail_closed={fail_closed} "
+            f"model={model_id or 'auto'} text={text!r}"
+        )
+        cand, content = _judge_completion(
+            label, system_prompt, text, base_url, timeout,
+            max_chars=max_chars, model_id=model_id,
+            allow_gpu_fallback=allow_gpu_fallback,
+        )
     if cand is None:
         print(
             f"[guardrail][{label}] judge unavailable — treating as "
@@ -898,7 +1050,7 @@ def _run_judge(label, system_prompt, text, base_url, timeout, fail_closed,
 
 
 def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=False,
-                                model_id=None):
+                                 model_id=None):
     """Return True if an LLM judge classifies generated ``text`` as harmful
     how-to content.
 
@@ -906,13 +1058,16 @@ def llm_classify_harmful_output(text, base_url=None, timeout=20, fail_closed=Fal
     run against the model's own reply (the single-message read path and the
     batch worker) so that completions which comply with a harmful request are
     caught even when the prompt itself dodged the input filters. Synchronous;
-    ``fail_closed`` mirrors :func:`llm_classify_harmful`. ``model_id`` pins a
-    per-user judge.
+    ``fail_closed`` mirrors :func:`llm_classify_harmful`.
+
+    GPU-only: the verdict comes from the resident GPU chat model via
+    :func:`_gpu_verdict_post` — never the CPU guardrail lane, never a remote
+    endpoint. ``base_url``/``model_id`` are accepted for backward
+    compatibility and ignored for routing.
     """
-    base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     return _run_judge(
-        "output-judge", _judge_output_system(), text, base_url, timeout,
-        fail_closed, max_chars=4000, model_id=model_id,
+        "output-judge", _judge_output_system(), text, None, timeout,
+        fail_closed, max_chars=4000, model_id=None, _gpu_only=True,
     )
 
 
@@ -949,18 +1104,21 @@ def mcp_output_judge(text, timeout=None, fail_closed=True, model_id=None,
     last line of defence: it is called after pattern scans and the existing
     output judge, and covers ALL prohibited categories plus prompt/input
     leaking.  ``fail_closed`` defaults to True — if the judge model is down
-    or errors, the output is BLOCKED. ``model_id`` pins a per-user judge.
+    or errors, the output is BLOCKED.
+
+    GPU-only: the verdict comes from the resident GPU chat model via
+    :func:`_gpu_verdict_post` — never the CPU guardrail lane, never a remote
+    endpoint. ``model_id``/``allow_gpu_fallback`` are accepted for backward
+    compatibility and ignored for routing.
 
     The text is truncated to 6000 chars before judging to stay within the
     judge model's context window while still covering the bulk of the output.
     """
-    base_url = os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
-    # The guardrail lane is CPU-only and this prompt carries up to 6000 chars
-    # of reply text: a cold model load plus thinking-model inference can
-    # legitimately run 2-4 minutes (observed: 90s read timeouts right after a
-    # RAM-evacuation restart). Floor the L3 window at 240s — GUARD_LLM_TIMEOUT
-    # can raise it, never lower it below this floor. A truly DOWN server still
-    # fails fast (connection refused), so this only tolerates slow starts.
+    # The verdict POST carries up to 6000 chars of reply text: thinking-model
+    # inference can legitimately run minutes. Floor the L3 window at 240s —
+    # GUARD_LLM_TIMEOUT can raise it, never lower it below this floor. A truly
+    # DOWN server still fails fast (connection refused), so this only
+    # tolerates slow inference.
     if timeout is None or timeout < 240:
         try:
             env_timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "240"))
@@ -971,22 +1129,21 @@ def mcp_output_judge(text, timeout=None, fail_closed=True, model_id=None,
     if not text:
         return False
     print(
-        f"[guardrail][strict-output-judge] -> {base_url} "
-        f"fail_closed={fail_closed} model={model_id or 'auto'} text={text!r}"
+        f"[gpu-judge][strict-output-judge] "
+        f"fail_closed={fail_closed} text={text!r}"
     )
-    cand, content = _judge_completion(
+    cand, content = _gpu_verdict_post(
         "strict-output-judge", _strict_judge_system(), text[:6000],
-        base_url, timeout, max_chars=6000, model_id=model_id,
-        allow_gpu_fallback=allow_gpu_fallback,
+        timeout,
     )
     if cand is None:
         print(
-            "[guardrail][strict-output-judge] judge unavailable — BLOCKED (fail-closed)"
+            "[gpu-judge][strict-output-judge] judge unavailable — BLOCKED (fail-closed)"
         )
         return fail_closed
     verdict = _parse_strict_verdict(content)
     print(
-        f"[guardrail][strict-output-judge] model={cand} "
+        f"[gpu-judge][strict-output-judge] model={cand} "
         f"verdict={'BLOCKED' if verdict else 'SAFE'} raw={content!r}"
     )
     return verdict
@@ -1071,10 +1228,14 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
     ``{model, ok, citations, unsafe, quality, reason}``, or None when the judge
     is unavailable — fail-open, the research answer is still delivered (the
     deterministic pattern layer and the critic citation pass remain the hard
-    gates). ``model_id`` pins a per-user judge. The caller decides whether a
+    gates). The caller decides whether a
     below-gate ``quality`` or a False ``citations`` triggers a re-run.
+
+    GPU-only: the verdict comes from the resident GPU chat model via
+    :func:`_gpu_verdict_post` — never the CPU guardrail lane, never a remote
+    endpoint. ``base_url``/``model_id``/``allow_gpu_fallback`` are accepted
+    for backward compatibility and ignored for routing.
     """
-    base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         try:
             timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "240"))
@@ -1085,20 +1246,19 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
         return {"model": None, "ok": True, "citations": True,
                 "unsafe": False, "quality": None, "reason": "empty answer"}
     print(
-        f"[guardrail][research-verify] -> {base_url} model={model_id or 'auto'} "
+        f"[gpu-judge][research-verify] "
         f"user_input={repr((user_input or '')[:200])} answer_len={len(answer)}"
     )
     user_content = (
         f"USER QUESTION:\n{(user_input or '').strip()}\n\n"
         f"MODEL ANSWER:\n{answer}"
     )
-    cand, content = _judge_completion(
-        "research-verify", _get_prompt("judge_research.txt"), user_content,
-        base_url, timeout, max_chars=max_chars, model_id=model_id,
-        allow_gpu_fallback=allow_gpu_fallback,
+    cand, content = _gpu_verdict_post(
+        "research-verify", _get_prompt("judge_research.txt"),
+        user_content[:max_chars], timeout,
     )
     if cand is None:
-        print("[guardrail][research-verify] judge unavailable — fail-open")
+        print("[gpu-judge][research-verify] judge unavailable — fail-open")
         return None
     status = _parse_research_verdict(content)
     quality = _parse_quality(content)
@@ -1114,7 +1274,7 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
         result["citations"] = None
         result["reason"] = f"unrecognized judge reply: {result['reason']}"
     print(
-        f"[guardrail][research-verify] model={cand} status={status or 'UNKNOWN'} "
+        f"[gpu-judge][research-verify] model={cand} status={status or 'UNKNOWN'} "
         f"quality={quality} reason={result['reason'][:160]!r}"
     )
     return result
@@ -1133,10 +1293,16 @@ def llm_verify_answer_quality(user_input, answer, base_url=None, timeout=None,
 
     Synchronous (requests). Returns ``{model, ok, unsafe, quality, reason}``,
     or None when the judge is unavailable — fail-open (the caller still delivers
-    with a recorded note rather than dropping the reply). ``model_id`` pins a
-    per-user judge.
+    with a recorded note rather than dropping the reply).
+
+    GPU-only: the verdict comes from the resident GPU chat model via
+    :func:`_gpu_verdict_post` — never the CPU guardrail lane, never a remote
+    endpoint. ``base_url``/``model_id``/``allow_gpu_fallback`` are accepted
+    for backward compatibility and ignored for routing. ``exclude_models``
+    is likewise accepted and ignored: same-model grading is the intended
+    design here (one stateless call grading the finished text), not a
+    self-grade to refuse.
     """
-    base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         try:
             timeout = int(os.environ.get("GUARD_LLM_TIMEOUT", "240"))
@@ -1147,20 +1313,19 @@ def llm_verify_answer_quality(user_input, answer, base_url=None, timeout=None,
         return {"model": None, "ok": True, "unsafe": False,
                 "quality": None, "reason": "empty answer"}
     print(
-        f"[guardrail][quality-judge] -> {base_url} model={model_id or 'auto'} "
+        f"[gpu-judge][quality-judge] "
         f"user_input={repr((user_input or '')[:200])} answer_len={len(answer)}"
     )
     user_content = (
         f"USER REQUEST:\n{(user_input or '').strip()}\n\n"
         f"MODEL ANSWER:\n{answer}"
     )
-    cand, content = _judge_completion(
-        "quality-judge", _get_prompt("judge_quality.txt"), user_content,
-        base_url, timeout, max_chars=max_chars, model_id=model_id,
-        allow_gpu_fallback=allow_gpu_fallback, exclude_models=exclude_models,
+    cand, content = _gpu_verdict_post(
+        "quality-judge", _get_prompt("judge_quality.txt"),
+        user_content[:max_chars], timeout,
     )
     if cand is None:
-        print("[guardrail][quality-judge] judge unavailable — fail-open")
+        print("[gpu-judge][quality-judge] judge unavailable — fail-open")
         return None
     status = _parse_research_verdict(content)
     quality = _parse_quality(content)
@@ -1172,7 +1337,7 @@ def llm_verify_answer_quality(user_input, answer, base_url=None, timeout=None,
         "reason": (content or "").strip()[:400],
     }
     print(
-        f"[guardrail][quality-judge] model={cand} status={status or 'UNKNOWN'} "
+        f"[gpu-judge][quality-judge] model={cand} status={status or 'UNKNOWN'} "
         f"quality={quality} reason={result['reason'][:160]!r}"
     )
     return result
@@ -1187,6 +1352,9 @@ def llm_classify_harmful(text, base_url=None, timeout=None, fail_closed=False,
     harmful (blocked) so a missing/unavailable judge can never silently let
     dangerous traffic through; when False it degrades to the pattern layer.
     ``model_id`` pins a per-user judge.
+
+    L2 input judging lives on the guardrail lane (:8083); an explicit
+    ``base_url`` still overrides (tests).
     """
     base_url = base_url or os.environ.get("GUARD_LLM_BASE", "http://localhost:8083")
     return _run_judge(
