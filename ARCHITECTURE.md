@@ -43,7 +43,7 @@ graph TD
         Nginx -->|"proxy_pass"| CodeHost["code host\n127.0.0.1:9000"]
         HTTPServer -->|"localhost:8081"| LLamaGPU["llama-server (GPU)\ninteractive UI users"]
         HTTPServer -->|"localhost:8079"| LLamaCPU["llama-server (CPU)\nself-chat agents"]
-        HTTPServer -->|"localhost:8083"| LLamaGuard["llama-server (guardrail)\njudge / L2-L3 verify"]
+        HTTPServer -->|"localhost:8083"| LLamaGuard["llama-server (guardrail)\nL2 input judge (E2B, lazy+resident);\nL3 output judges run on GPU"]
         HTTPServer -->|"localhost:8084"| LLamaEmbed["llama-server (embed)\nnomic embeddings"]
         HTTPServer -->|"localhost:8188"| ComfyUIRuntime["ComfyUI"]
         HTTPServer -->|"localhost:8080"| SearXNG
@@ -212,7 +212,7 @@ stateDiagram-v2
 
     state "Guardrail server (8083) — judge/verify" as V {
         [*] --> guard_unloaded
-        guard_unloaded --> guard_loaded : ensure_guardrail_ready\n(MCP batch, L2/L3 verify)
+        guard_unloaded --> guard_loaded : ensure_guardrail_ready\n(MCP batch L2 + lazy E2B judge)
         guard_loaded --> guard_unloaded : 300s idle\n(VERIFY_IDLE_TIMEOUT)
     }
 ```
@@ -327,21 +327,30 @@ graph TD
     QueueLoop --> PauseCheck{"overheated (gpu only),\nram_evacuating, or image_active?"}
     PauseCheck -- Yes --> MarkWaiting["queued tasks → status waiting"]
     MarkWaiting --> PauseWait["cond.wait 5s"] --> QueueLoop
-    PauseCheck -- No --> PopTask["pop head → _current_task_ids[mode]"]
-    PopTask --> PostStart["event_post start\n(session, message, image, audio, user,\nclient_timestamp, research, no_tools,\nopenai_lane, _mcp, _resumed)"]
-    PostStart --> TaskDoneWait{"poll task status every 0.5s"}
+     PauseCheck -- No --> SesScan["first runnable entry?\n(skip entries whose session\nhas another live task — peer_review\nexempt; avoids same-session overlap)"]
+     SesScan -- "none runnable" --> LaneWait["cond.wait 5s"] --> QueueLoop
+     SesScan -- "found" --> PopTask["pop that entry → _current_task_ids[mode]"]
+     PopTask --> PostStart["event_post start\n(session, message, image, audio, user,\nclient_timestamp, research, no_tools,\nopenai_lane, _mcp, _resumed)"]
+     PostStart --> TaskDoneWait{"poll task status every 0.5s"}
     TaskDoneWait -- "done / error / requeued" --> Clear["_current_task_ids[mode]=None\nnotify_all"] --> QueueLoop
 
-    MCP["MCP gateway batches"] --> DBQ[("mcp_tasks SQLite table")] --> MW["_mcp_db_worker\n(polls → admits to the gpu/cpu lane\nwith the _mcp flag)"]
+    MCP["MCP gateway batches"] --> DBQ[("mcp_tasks SQLite table")] --> MW["_mcp_db_worker\n(L2-verify → admit to gpu/cpu lane\nwith the _mcp flag; declined is terminal)"]
 ```
 
 The human/agent lanes never wait behind each other. A third `_queue_worker`
 runs for the **guardrail lane** — it carries judge-eligible work (MCP-admitted
 tasks, self-chat theme-judge rounds) that executes on the guardrail server
-(:8083). MCP chat tasks arrive through the SQLite queue via `_mcp_db_worker`
-(routed onto the gpu lane by default, cpu when flagged) carrying `_mcp: true`;
-the **guardrail server** (:8083) is where their L2/L3 judge calls execute —
-generation stays on the gpu/cpu lane.
+(:8083). MCP single-message tasks arrive through the SQLite queue via
+`_mcp_db_worker`, which runs L2 first (`_run_mcp_l2`, after dequeue):
+a pass admits onto the gpu lane by default (cpu when flagged) carrying
+`_mcp: true`; a fail marks the row terminal `declined` (fail-closed,
+reported by `get_message_status`, never admitted). Queued pickup is FIFO
+(oldest first — a newer turn never jumps an older one). Identical resubmits
+while queued/working return the existing task_id (`mcp_task_find_pending`,
+10-min window) instead of duplicating. Batch items verify inline in
+`_run_batch`. The **guardrail server** (:8083) is where their L2 input calls
+execute (E2B lane default); L3 output judging runs on the GPU chat model —
+generation and verdicts share the gpu lane.
 
 Tasks requeued by an emergency RAM evacuation (`_evacuate_ram`) ride the same
 loop with two extra pieces of state: the task status becomes the **non-terminal
@@ -372,7 +381,7 @@ graph TD
     Simple -- No --> VGate{"research? openai_lane?\nagent-user on cpu?"}
     VGate -- "research (non-openai)" --> Critic2["run_verification_worker\n(features/critic.py):\nresearch citations / answer-quality\njudge with bounded re-runs\n→ then _finalize_task"]
     VGate -- "cpu agent-user" --> Peer["run_peer_review_worker\n(features/critic.py): full cross-agent\ncritique round — the peer (kaya↔kolpo\nmap) reviews the reply in a dedicated\nLLM round DIRECTLY on the cpu llama\nserver (bypasses the lane queue, which\nis blocked waiting on this very task)\n→ _judge_result → _finalize_task"]
-    VGate -- "else (UI gpu / openai_lane)" --> Final["_finalize_task:\n1. L3 output judge (features/judge.py):\nstrict pattern block + per-user judge;\nMCP lane (_mcp / guardrail) fail-closed,\nUI lane fail-open\n2. append msg, save sessions,\nstatus done, refresh idle stamp"]
+     VGate -- "else (UI gpu / openai_lane)" --> Final["_finalize_task:\n1. L3 output judge (features/judge.py):\nstrict pattern block + GPU chat-model verdict;\nMCP lane (_mcp / guardrail) fail-closed,\nUI lane fail-open\n2. append msg, save sessions,\nstatus done, refresh idle stamp"]
     LLMOK -- Yes --> SubmitTools["append assistant msg,\npending_tools = N,\nsubmit to lane's _tool_pools"]
 
     EvDispatch -- "llm_err" --> LLMErr{"cpu lane & image_active?\n(round killed by render eviction)"}
@@ -489,7 +498,7 @@ FluidSynth (per-voice soundfonts, multi-pass
 + PCM mix) → WAV; numpy-synth fallback"]
     Choose -- tool_details --> TD["return full TOOLS_DETAILED docs
 (warms tool_docs cache per user)"]
-    Choose -- "<server>__<tool>\n(mcp_client.py)" --> MCT["mcp_manager.is_mcp_tool →\ndispatch_mcp_tool (asyncio bridge,\nmcp_config.json server, 8k-char cap)"]
+    Choose -- "<server>__<tool>\n(mcp_client.py)" --> MCT["mcp_manager.is_mcp_tool →\n_server-side SSRF gate on\nbrowser__browser_navigate →\ndispatch_mcp_tool (asyncio bridge,\nmcp_config.json server, 8k-char cap)"]
     Choose -- unknown --> Unk["error: unknown tool"]
     Search & Fetch & Img & GMusic & Loc & RF & RI & UC & MT & TT & TD & MCT & Unk --> Post["event tool_ok / tool_err"]
 ```
@@ -504,6 +513,33 @@ client's asyncio loop (8k-char result cap). A repo yields no search results
 until indexed once via `index_repository`; the graph persists under
 `~/.cache/codebase-memory-mcp/`. The OpenAI lane pins `no_tools: true`, so only
 UI/agent-lane tasks ever see these tools.
+
+Outbound servers (`mcp_config.json`): `codebase-search` (code graph) plus a
+headed Playwright `browser` (same `@playwright/mcp` the editors use —
+`browser__browser_navigate` + `browser__browser_evaluate(innerText)`), which
+is the fallback when `fetch_page` hits a bot-block (403/405/429/captcha):
+the fetch error steers the model to navigate-then-read. Navigations pass a
+server-side SSRF gate (no loopback/LAN/metadata/`*.local`, refused during
+image renders); successful reads persist exactly like direct fetches (a
+`fetch_page`-shaped `_search_details` entry with `via: browser` so citation
+verification treats them as grounded, plus a `page_put` on cache miss).
+`generate_music` pre-validates LLM-written scores (`render_score(strict=True)`):
+a broken score is refused with its errors before FluidSynth runs — no partial
+player, no render cost — while machine-generated scores stay lenient.
+
+### 11.5 Image models (`models.json` style defs → ComfyUI)
+
+- **`z_image`** — NEW image generation only: `z_image_turbo_bf16` UNet
+  (~8 steps) + Qwen3-4B CLIP, ~5–6 min/render on the 4 GB card.
+- **`krea2_edit`** — THE edit model (default for `edit_image`): UNet
+  **`krea2_turbo-Q4_K_M.gguf`** + Qwen3-VL CLIP + `krea2_identity_edit`
+  LoRA, 10-step Turbo, ~10 min/render. Identity-preserving instruction
+  edits; plain-text negatives (no second grounded encode).
+- **`flux_kontext`** — instruction-edit fallback: `flux1-kontext-dev-Q3_K_S`
+  (20 steps). Different model family from Krea — not a Krea variant.
+- **Dormant:** `krea2_turbo-Q3_K_S.gguf` sits unreferenced in
+  `ComfyUI/models/unet/` (smaller/faster than Q4_K_M at a quality cost;
+  switch `krea2_edit.unet` to try it).
 
 ### 11.6 Music generation (features/music/)
 
@@ -610,16 +646,16 @@ long research rounds run to completion by design (HARDENING.md §5).
 
 ```mermaid
 graph TD
-    In["User / agent / MCP input"] --> L1{"L1 pattern guard\n(server/input_guard.py, patterns from\nprompts/surface_attacks/, Fernet-optional;\nmatching is lowercase + diacritic-strip only —\nno fullwidth/zero-width handling, and the\ninjection check uses raw lower() without _normalize)"}
+    In["User / agent / MCP input"] --> L1{"L1 pattern guard\n(server/input_guard.py, patterns from\nprompts/surface_attacks/, Fernet-optional;\nlowercase + diacritic-strip matching\n(all checks via _normalize)"}
     L1 -- "is_jailbreak_attempt /\nis_harmful_request" --> Block1["refuse (MCP gateway pre-batch;\nguardrail lane)"]
-    L1 -- pass --> L2{"L2 input LLM judge\n(mcp_gateway._run_llm_verify\n→ judge.py → guardrail :8083,\nfail-closed: judge down = blocked)"}
+    L1 -- pass --> L2{"L2 input LLM judge — ASYNC for\nsingle messages (orchestration._run_mcp_l2\nin the DB worker, after dequeue;\njudge.py → guardrail :8083, fail-closed).\nsend_chat_message returns task_id\nimmediately; declined lands on the row.\nBatch items verify inline in _run_batch."}
     L2 -- harmful --> Block2["refuse before generation"]
     L2 -- pass --> Gen["generation (lanes as above)"]
     Gen --> L3{"L3 output judge\n(orchestration._finalize_task:\nis_mcp_lane = mode 'guardrail'\nor task flagged _mcp)"}
-    L3 --> Strict["is_strict_output_blocked reply"]
-    L3 --> Judge["features/judge.mcp_output_judge\n(guardrail :8083, per-user judge model)"]
+    L3 --> Strict["is_strict_output_blocked reply\n(<5-char patterns need word\nboundaries: 'cum' must not match\n'document'; compounds covered\nby longer entries e.g. 'cumshot')"]
+    L3 --> Judge["features/judge.mcp_output_judge\n(GPU chat model, all lanes;\n5xx → 1 breather + retry)"]
     Strict & Judge --> Lane{"lane?"}
-    Lane -- "MCP (_mcp / guardrail)" --> FC["fail-closed: mark failed, drop output,\nmcp_task_update LEVEL 3 bookkeeping"]
+    Lane -- "MCP (_mcp / guardrail)" --> FC["fail-closed: task terminates\n(status done + reply retained,\nLEVEL 3 FAILED bookkeeping)"]
     Lane -- "UI" --> FO["fail-open: deliver + record note"]
     Gen -->|"research answers"| Critic["features/critic.py:\neach (Author, Venue, Year) [url] citation\nexistence-probed (direct fetch → bot-block\n→ search) + re-fetched, LLM-checked;\n<70/100 quality or missing cites →\nre-schedule ≤ 2× (judge prompts)"]
     RAM["RAM guard: every judge POST\n(judge.py _judge_completion +\nmcp_gateway._run_llm_verify) holds\nwhile a ComfyUI render is active —\njudge.wait_until_render_safe\n(600s cap + 30s cooldown) — so a\njudge model load can never collide\nwith image generation"]
@@ -627,8 +663,10 @@ graph TD
     Judge -.-> RAM
 ```
 
-All judge LLM calls share one choke point (`judge._judge_completion`) and one
-judge server (:8083). UI-lane extras beyond L3: the answer-quality judge (⚖
+Judge LLM calls funnel through two choke points: input/classify verdicts via
+`judge._judge_completion` on the guardrail server (:8083, E2B lane default),
+and content/output verdicts via `judge._gpu_verdict_post` on the resident GPU
+chat model (all lanes, zero model churn). UI-lane extras beyond L3: the answer-quality judge (⚖
 confidence chip, `llm_verify_answer_quality`) and the research citation judge
 run via `run_verification_worker` with bounded re-runs; the former
 input-request judge (pre-generation "request NN%" chip) was removed — its
@@ -715,6 +753,17 @@ prompts passed. The L2 verdict path itself is fail-closed and working as
 designed; benign code-debugging workloads hitting `LEVEL 2 LLM VERIFICATION
 FAILED` are a judge-prompt/model-precision issue, not an infra failure
 (check the `[guardrail][L2] raw verdict:` log line to distinguish).
+
+**Session-serialized pickup** — the lane worker starts the first queue
+entry whose session has no other live task (`working`/`parked`, any lane;
+`_peer_review` children exempt so the parent can't deadlock). Same-session
+overlap is how interleaved researches poisoned each other (one task's rounds
+reading another task's turns + tool outputs as their own); queued same-session
+turns simply wait. Research parking likewise never preempts for a
+same-session waiter (parking for your own queued turn would park-loop).
+Every `_reschedule` steering note restates the task's original ask verbatim
+(bare "rewrite it" is unresolvable across turns) and byte-identical notes
+are never appended twice.
 
 **Confidence-gated restart ("start from scratch")** — research and UI
 generation answers whose verification outcome lands below the confidence bar

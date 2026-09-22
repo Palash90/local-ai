@@ -23,6 +23,7 @@ All pattern/prompt files live in a configurable ``SURFACE_ATTACKS_DIR``
 (outside this repo) and are read via :mod:`server.features.surface_loader`.
 """
 
+import re
 import unicodedata
 
 from server.features.surface_loader import _get_patterns, _get_prompt
@@ -70,7 +71,7 @@ def _safety_frame():
 
 
 def is_jailbreak_attempt(message: str) -> bool:
-    msg_lower = (message or "").lower()
+    msg_lower = _normalize(message)
     return any(pattern in msg_lower for pattern in _injection_patterns())
 
 
@@ -110,9 +111,23 @@ def is_strict_output_blocked(text: str) -> bool:
     suicide, murder, illegal content, AND prompt/input/system-prompt leaking.
     Intentionally aggressive — false positives are acceptable because the
     downstream LLM judge is the final arbiter.
+
+    Short patterns (<5 chars: porn/cum/gore/flay) match on word boundaries
+    only — raw substrings false-positive inside ordinary words ('cum' in
+    "document"/"curriculum", 'gore' in "category"). Longer patterns keep
+    substring semantics; compounds stay covered by their own longer entries
+    (e.g. 'cumshot').
     """
     txt = _normalize(text)
-    return any(pattern in txt for pattern in _strict_output_patterns())
+    for pattern in _strict_output_patterns():
+        if not pattern:
+            continue
+        if len(pattern) < 5:
+            if re.search(r"\b" + re.escape(pattern) + r"\b", txt):
+                return True
+        elif pattern in txt:
+            return True
+    return False
 
 
 def wrap_user_message(user_message: str) -> str:

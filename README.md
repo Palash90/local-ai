@@ -64,7 +64,7 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 | 8000 | MCP gateway | in-process thread of chat-webui | FastMCP + OAuth; `MCP_USER` token auth (plus an outbound `start_mcp_client` thread for external MCP servers) |
 | 8079 | llama-server (CPU) | lazy / `restart_servers` | self-chat agents, 32K ctx, RAM-backed |
 | 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI, 32K ctx (`GPU_CTX_SIZE_26B`, MoE profile below), VRAM-backed |
-| 8083 | llama-server (guardrail) | lazy by MCP gateway / judge, skipped when external | small verify model, idle-unloads after 300s; or remote judges via `GUARD_LLM_BASE` (tablet Ollama) |
+| 8083 | llama-server (guardrail) | lazy on first L2, then resident (`KEEP_GUARDRAIL_RESIDENT=1`) | E2B input-judge model; tablet/remote judging removed (`GUARDRAIL_EXTERNAL=0`) |
 | 8084 | llama-server (embed) | lazy by chat-webui / `restart_servers` | serves `/embedding` (nomic); vector layer of `page_cache` |
 | 8080 | SearXNG | docker / systemd | web search backend; `setup.sh` binds `127.0.0.1:8080`, `docker-compose.yaml` binds `8080:8080` (all interfaces) — bind to localhost if you don't need LAN-wide search |
 | 8188 | ComfyUI | lazy on image request | image generation; recycled after renders only when RAM is below headroom (else reused warm; `COMFYUI_RECYCLE_AFTER_RENDER=0` to disable) |
@@ -80,12 +80,12 @@ cd ~/git/local-ai
 bash setup.sh
 
 # 2. Post-processing — download your models (setup.sh does NOT download them)
-#    LLM (chat):   put GGUFs into ~/local-ai-files/my-models/
+#    LLM (chat):   put GGUFs into $BASE_MODELS_DIR (see .env; the local dir is
+#                  ~/local-ai-files/models/)
 #                  model.json holds "gpu" (chat UI) and "cpu" (self-chat
 #                  agents) model ids — edit if you use other models
-#                  (the guardrail judge is MODEL_ID_GUARDRAIL locally,
-#                  GUARD_LLM_MODEL when judges are remote — see .env)
-#    Embeddings:   nomic-embed-text-v1.5.Q8_0 into ~/local-ai-files/my-models/
+#                  (the guardrail L2 judge is MODEL_ID_GUARDRAIL — see .env)
+#    Embeddings:   nomic-embed-text-v1.5.Q8_0 into $BASE_MODELS_DIR
 #                  (served on :8084 for the page_cache vector layer)
 #    Image (z_image): copy these into ~/local-ai/ComfyUI/models/:
 #      diffusion_models/z_image_turbo_bf16.safetensors
@@ -129,29 +129,27 @@ embed server starts on its own eager thread) and starts ComfyUI on demand. If yo
 prefer to run the services manually:
 
 ```bash
-# GPU llama-server — interactive chat UI users (VRAM-backed, 32K MoE context;
-# canonical flags live in server/config.py LLAMA_SERVER_ARGS, this block tracks it)
+# GPU llama-server — interactive chat UI users (VRAM-backed; canonical flags
+# live in server/config.py LLAMA_SERVER_ARGS, this block tracks it)
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 127.0.0.1 --port 8081 \
-    --models-dir ~/local-ai-files/my-models/ \
-    --jinja -ngl 35 --n-cpu-moe 28 -fa on --ctx-size 32768 \
-    -ctk q4_0 -ctv q4_0 --no-mmproj-offload --ctx-checkpoints 1 \
-    -t 8 -tb 8 -b 2048 -ub 512 --timeout 3600 \
-    --reasoning-budget 2048 \
-    --reasoning-budget-message "Reasoning limit reached, summarize final answer." \
+    --models-dir $BASE_MODELS_DIR \
+    --jinja -ngl 99 -fa on --ctx-size 24576 \
+    -ctk q8_0 -ctv q8_0 --no-mmproj-offload \
+    -t 8 -tb 8 -ub 512 --timeout 3600 \
     --cache-reuse 256 --slot-save-path ~/local-ai-files/kv-slots \
-    --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0.05
+    --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0.05 --parallel 1
 
 # CPU llama-server — automated self-chat agents (RAM-backed, concurrent)
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 127.0.0.1 --port 8079 \
-    --models-dir ~/local-ai-files/my-models/ \
+    --models-dir $BASE_MODELS_DIR \
     --jinja --n-gpu-layers 0 -fa off --ctx-size 32768 \
     -ctk q8_0 --no-mmproj-offload --device none \
-    -t 4 -tb 4 --cache-reuse 256 \
+    -t 4 -tb 4 -b 2048 -ub 512 --cache-reuse 256 \
     --reasoning-budget 1024 \
     --reasoning-budget-message "Reasoning limit reached, summarize final answer." \
-    --slot-save-path ~/local-ai-files/kv-slots \
+    --slot-save-path ~/local-ai-files/kv-slots --parallel 1 \
     --temp 1.0 --top-p 0.95 --top-k 64 --min-p 0.0 --repeat-penalty 1.0
 
 # Embedding llama-server — nomic vectors for page_cache (CPU, 2048 ctx)
@@ -299,7 +297,8 @@ local-ai/
 
 The data dir (`~/local-ai-files/`, shared into the container) holds: `model.json`,
 `models.json`, `sys_prompt.txt`, `sessions/`, `shares.json`, `contexts/<user>.txt`,
-`my-models/` (GGUFs), `ComfyUI/{input,output}`, `uploads/`, `kv-slots/`,
+`models/` (GGUFs, via `$BASE_MODELS_DIR`), `ComfyUI/{input,output}`,
+`uploads/`, `kv-slots/`,
 `stories/`, `pensieve.db` (archived conversation blocks), `local_ai.db` (unified
 SQLite: `tasks`, `theme_log`, `mcp_batches` + `mcp_batch_items`, `mcp_tasks`,
 `user_judges`, `_db_meta`; WAL mode; one-time migration renames legacy
@@ -390,9 +389,14 @@ A FastMCP (streamable HTTP) server **in-process with chat-webui** (started by th
 `get_batch_status`, `get_batch_results`, `submit_batch_results`, `get_image`.
 
 Batches queue into SQLite (`batches_db.py` + `mcp_tasks_db.py`), drain through
-`_batch_worker` → the gpu/cpu lane (flagged `_mcp`), and run **LEVEL 2 (input) / LEVEL 3
-(output)** LLM verification on the dedicated guardrail llama-server (:8083,
-lazy-start, 300s idle-unload). `MCP_USER` owns the acting identity. Batch limits:
+`_batch_worker` → the gpu/cpu lane (flagged `_mcp`). Verification split:
+**LEVEL 2 (input)** LLM verification runs on the dedicated guardrail
+llama-server (:8083, E2B lane default, lazy-start then resident) — for single
+messages it runs in the DB worker *after* dequeue, so `send_chat_message`
+returns a `task_id` immediately and a declined verdict lands on the row
+(`declined` status, terminal; identical resubmits return the existing
+task_id); **LEVEL 3 (output)** verdicts run on the resident GPU chat model
+for every lane. `MCP_USER` owns the acting identity. Batch limits:
 max 50 items, 2400s per item, 15s poll cadence, keep last 50, 3 retries;
 `wait_hint` is 60s (research) / 30s (tools) / 20s (plain), re-poll no faster than
 every 15–20s. Note the gateway exposes chat/batch tools only — `web_search` /

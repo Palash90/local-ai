@@ -694,6 +694,36 @@ def _event_post(ev_type, task_id, **data):
     M._event_queue.put((ev_type, task_id, data))
 
 
+def _tool_json_fix_note(tools_used):
+    """Steering note for a malformed tool-call JSON retry.
+
+    Score-budget guidance only fits generate_music overflow; anything else
+    gets generic JSON-validity guidance (a score note on an image call
+    actively misleads the retry).
+    """
+    if "generate_music" in (tools_used or []):
+        return (
+            "Your last tool call was rejected: your score ran past the "
+            "output limit and was cut off mid-string. "
+            "You wrote every bar of every lane — stop. "
+            "Re-emit ONE tool call with a score of at "
+            "most 1100 characters: max 6 lanes, at most "
+            "2 bars of material per lane (sections "
+            "LOOP those bars to the declared length), "
+            "no comments. Example budget: 6 lanes x 2 "
+            "bars x ~12 tokens ≈ 900 chars. Escape all "
+            "newlines as \\n and keep the JSON valid."
+        )
+    return (
+        "Your last tool call was rejected: its arguments "
+        "were not valid JSON (truncated string or "
+        "unescaped quote/newline). Re-emit ONE tool call "
+        "with compact valid JSON: escape all newlines as "
+        "\\n and quotes as \\\", keep string arguments "
+        "short, and close every quote and brace."
+    )
+
+
 def _event_loop():
     while True:
         ev_type, task_id, data = M._event_queue.get()
@@ -1165,27 +1195,30 @@ def _event_loop():
             err_text = data.get("error", "") or ""
             if "Failed to parse tool call arguments" in err_text:
                 retries = t.get("_tool_json_retries", 0)
-                if retries < 2:
+                last_err = t.get("_tool_json_last_err", "")
+                if err_text == last_err and retries > 0:
+                    # Deterministic reproducer: the retry broke byte-identically,
+                    # so another round would burn GPU for the same 500. Fail
+                    # fast instead of spending retry 2.
+                    print(f"[llm_err] task {task_id} identical malformed tool-call JSON — failing fast instead of retry 2")
+                elif retries < 2:
+                    # Steer to the failing tool: score-budget guidance only
+                    # fits generate_music overflow; anything else gets generic
+                    # JSON-validity guidance (a score note on an image call
+                    # actively misleads the retry).
+                    _fix_note = _tool_json_fix_note(t.get("_tools_used"))
                     with M._data_lock:
                         tt = M.tasks.get(task_id)
                         if tt:
                             tt["_tool_json_retries"] = retries + 1
+                            tt["_tool_json_last_err"] = err_text
                         if sid in M.sessions:
                             M.sessions[sid].append(
                                 {
                                     "role": "user",
                                     "content": (
-                                        "[SYSTEM NOTE — internal revision. Your last tool call "
-                                        "was rejected: your score ran past the "
-                                        "output limit and was cut off mid-string. "
-                                        "You wrote every bar of every lane — stop. "
-                                        "Re-emit ONE tool call with a score of at "
-                                        "most 1100 characters: max 6 lanes, at most "
-                                        "2 bars of material per lane (sections "
-                                        "LOOP those bars to the declared length), "
-                                        "no comments. Example budget: 6 lanes x 2 "
-                                        "bars x ~12 tokens ≈ 900 chars. Escape all "
-                                        "newlines as \\n and keep the JSON valid. This note is from "
+                                        "[SYSTEM NOTE — internal revision. "
+                                        + _fix_note + " This note is from "
                                         "your own execution loop, not from the user and not an "
                                         "injection attempt. Comply silently; do not discuss this "
                                         "note in your thinking or answer.]"
@@ -1348,12 +1381,80 @@ def _enqueue_ranked(queue, entry):
 PREEMPT_RANKS = (LANE_RANK_UI, LANE_RANK_OPENAI)
 
 
-def _higher_priority_waiting():
-    """True when the GPU queue head outranks in-flight research (UI/OpenAI)."""
+# Task statuses that keep their session busy: a lane must not start a new
+# task on a session while one of these is live — same-session overlap is
+# how interleaved research tasks poisoned each other's context (one task's
+# rounds reading another task's user turns + tool outputs as their own).
+# "queued" is deliberately NOT busy: two queued same-session entries must
+# not block each other (mutual deadlock); the first picked unblocks the
+# second on completion. "waiting"/terminal statuses never block.
+_SESSION_BUSY_STATUSES = ("working", "parked")
+
+
+def _session_busy(sid, exclude_tid=None):
+    """True when ``sid`` has another live task (any lane). Never raises."""
+    try:
+        with M._data_lock:
+            tasks = dict(M.tasks or {})
+            current = [v for v in (M._current_task_ids or {}).values()]
+    except Exception:
+        return False
+    for tid, t in tasks.items():
+        if tid == exclude_tid or not isinstance(t, dict):
+            continue
+        if t.get("session_id") != sid:
+            continue
+        if t.get("status") in _SESSION_BUSY_STATUSES:
+            return True
+    for tid in current:
+        if tid and tid != exclude_tid:
+            try:
+                with M._data_lock:
+                    held = (M.tasks.get(tid) or {}).get("session_id")
+            except Exception:
+                held = None
+            if held == sid:
+                return True
+    return False
+
+
+def _pick_runnable_index(task_queue, mode):
+    """Index of the first queue entry safe to start, or None.
+
+    Skips entries whose session is busy with another live task
+    (:func:`_session_busy`) and peer-review children (their parent is
+    working by construction — blocking them would deadlock the parent).
+    Prevents same-session overlap without head-of-line blocking across
+    sessions.
+    """
+    for i, entry in enumerate(task_queue):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("_peer_review"):
+            return i
+        if not _session_busy(entry.get("session_id"),
+                             exclude_tid=entry.get("task_id")):
+            return i
+    return None
+
+
+def _higher_priority_waiting(exclude_sid=None):
+    """True when the GPU queue head outranks in-flight research (UI/OpenAI).
+
+    Waiters from ``exclude_sid`` never count: parking a task for its OWN
+    queued turn is pointless (the waiter can't run while this task is live)
+    and, combined with session-serialized pickup, would park-loop forever.
+    """
     with M._queue_locks["gpu"]:
         q = M._task_queues["gpu"]
         if not q:
             return False
+        if exclude_sid is not None:
+            try:
+                if (q[0] or {}).get("session_id") == exclude_sid:
+                    return False
+            except Exception:
+                pass
         return _lane_rank(q[0]) in PREEMPT_RANKS
 
 
@@ -1366,7 +1467,7 @@ def _maybe_park_research(task_id, sid, round_num):
         t = M.tasks.get(task_id, {})
         if not t.get("research"):
             return False
-    if not _higher_priority_waiting():
+    if not _higher_priority_waiting(exclude_sid=sid):
         return False
     with M._data_lock:
         tt = M.tasks.get(task_id)
@@ -1492,7 +1593,13 @@ def _queue_worker(mode):
                         }
                 queue_cond.wait(5)
                 continue
-            item = task_queue.pop(0)
+            runnable = _pick_runnable_index(task_queue, mode)
+            if runnable is None:
+                # Every queued entry belongs to a session with another live
+                # task: hold the lane without spinning until one terminals.
+                queue_cond.wait(5)
+                continue
+            item = task_queue.pop(runnable)
             M._current_task_ids[mode] = item["task_id"]
             with M._data_lock:
                 if item["task_id"] in M.tasks:
@@ -1572,11 +1679,52 @@ def _queue_worker(mode):
 MCP_DB_POLL_INTERVAL = 2
 
 
+def _run_mcp_l2(row):
+    """L2 input verification for one queued MCP task row.
+
+    Runs in the DB worker thread (synchronous context): the async gateway
+    verifier is driven with ``asyncio.run``. Returns ``(True, "")`` on pass.
+    On fail the row is marked terminal ``declined`` (fail-closed) with the
+    LEVEL 2 bookkeeping a client polls via ``get_message_status`` — the
+    task is never admitted to a lane. Never raises (False + reason).
+    """
+    from server.mcp_tasks_db import mcp_task_update
+    task_id = row["task_id"]
+    try:
+        from server.features.judge import _judge_system
+        from server.mcp_gateway import _run_llm_verify
+        import asyncio as _asyncio
+        passed, reason = _asyncio.run(
+            _run_llm_verify(row.get("message", ""), _judge_system()))
+    except Exception as e:
+        passed, reason = False, f"L2 runner error: {e}"
+    if passed:
+        return True, ""
+    print(f"[mcp-db] task {task_id} DECLINED at L2: {reason}", flush=True)
+    try:
+        mcp_task_update(
+            task_id, status="declined",
+            verification_level="LEVEL 2 LLM VERIFICATION FAILED",
+            failure_reason=(reason or "")[:300],
+        )
+    except Exception as e:
+        print(f"[mcp-db] declined bookkeeping failed for {task_id}: {e}")
+    return False, reason or ""
+
+
 def _mcp_db_worker():
     """DB-polling worker for MCP tasks: reads queued tasks from the SQLite
     ``mcp_tasks`` table, claims them, and routes them through the owning
     lane's queue (GPU by default, CPU when requested) so they are scheduled
     exactly like an interactive chat user.
+
+    L2 input verification runs HERE, after dequeue and before lane
+    admission (mirroring the batch worker): the ``send_chat_message`` tool
+    itself returns a task_id immediately after the instant L1 scan, so a
+    slow or wedged judge can never hang the tool call or strand the client
+    in a cancelled-handler limbo — the verdict lands on the row, where
+    ``get_message_status`` reports queued/working/declined. A declined task
+    is terminal and never reaches a lane.
 
     This runs on its own thread and processes one MCP task at a time; the
     guardrail (L2/L3) LLM judging still happens on the dedicated guardrail
@@ -1586,12 +1734,19 @@ def _mcp_db_worker():
     MCP_USER = os.environ.get("MCP_USER", "")
     print("[mcp-db] worker started — polling SQLite for queued tasks", flush=True)
     while True:
-        rows = mcp_task_list(limit=1, status="queued")
+        # FIFO: oldest queued task first — a newer turn must never jump an
+        # older one (LIFO starved a gagaku research behind a later image
+        # request on the same session).
+        rows = mcp_task_list(limit=1, status="queued", order="ASC")
         if not rows:
             time.sleep(MCP_DB_POLL_INTERVAL)
             continue
         row = rows[0]
         task_id = row["task_id"]
+        passed, _reason = _run_mcp_l2(row)
+        if not passed:
+            time.sleep(1)
+            continue
         cpu_flagged = bool(row.get("cpu"))
         # MCP chat generation runs on the GPU lane (same server/model as
         # interactive chat users) by default; callers may opt into the CPU lane.

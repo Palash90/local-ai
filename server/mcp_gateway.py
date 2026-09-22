@@ -695,22 +695,17 @@ async def send_chat_message(
 ) -> str:
     """Submit a user message for asynchronous processing through the guardrail-protected pipeline.
 
-    Every message passes through three guardrail stages before content is
-    generated:
+    L1 (code-level pattern scan) runs inline and blocks instantly with
+    ``declined=True``. L2 (LLM input classification on the guardrail lane)
+    runs AFTER dequeue in the DB worker — the tool returns a task_id
+    immediately so a slow judge can never hang the call; a declined verdict
+    lands on the row and is reported by get_message_status (status
+    ``declined`` — terminal, do not re-poll). L3 (LLM output verification)
+    runs after generation against the full reply.
 
-      L1  Code-level pattern scan  — substring matching against known
-          jailbreak and harmful-request pattern lists.  Blocks instantly
-          with no LLM call.
-      L2  LLM input classification — the guardrail lane LLM judge
-          evaluates the text for harmful intent.  Fail-closed: if the
-          judge is unreachable the message is blocked.
-      L3  LLM output verification  — runs after generation against the
-          full reply to catch any policy-violating content that slipped
-          through.
-
-    If any guardrail stage rejects the message, the response contains
-    declined=True with the reason.  Otherwise a task_id is returned for
-    polling with get_message_status.
+    If the identical message is already queued/working for this session
+    (client retry), the existing task_id is returned instead of inserting
+    a duplicate.
 
     Args:
         session_id: Target session from create_session or list_sessions.
@@ -720,8 +715,8 @@ async def send_chat_message(
         no_tools: Skip tool execution, text-only generation (est. 40-90s).
 
     Returns:
-        JSON with task_id and wait_hint on success, or declined=True if a
-        guardrail blocked the message.
+        JSON with task_id and wait_hint on success, or declined=True if the
+        L1 guardrail blocked the message.
     """
     print(f"[MCP] send_chat_message called for session {session_id}, msg_len={len(message)}")
 
@@ -747,19 +742,23 @@ async def send_chat_message(
         })
     print(f"[guardrail][L1] harmful check passed")
 
-    print(f"[guardrail][L2] running LLM verification on guardrail lane...")
-    from server.features.judge import _judge_system
-    # L2 verdicts run on the guardrail-lane default (E2B); per-user pins
-    # stay in DB for paths that honor them.
-    passed, reason = await _run_llm_verify(message, _judge_system())
-    if not passed:
-        print(f"[guardrail][L2] REJECTED: {reason}")
+    from server.mcp_tasks_db import mcp_task_find_pending
+    try:
+        dup = mcp_task_find_pending(session_id, message)
+    except Exception as e:
+        print(f"[MCP] dedup lookup failed: {e}")
+        dup = None
+    if dup:
+        print(f"[MCP] duplicate of task {dup['task_id']} "
+              f"(status={dup['status']}) — returning existing task_id")
         return json.dumps({
-            "declined": True,
-            "reason": reason,
-            "detail": "message blocked by L2 LLM verification",
+            "task_id": dup["task_id"],
+            "wait_hint": (
+                f"This message is already queued as task {dup['task_id']} "
+                f"(status: {dup['status']}). Poll get_message_status with "
+                f"that task_id instead of resubmitting."
+            ),
         })
-    print(f"[guardrail][L2] LLM verification passed")
 
     task_id = str(uuid.uuid4())
     print(f"[MCP] inserting task {task_id} into db for session {session_id}")
@@ -783,7 +782,10 @@ async def send_chat_message(
     return json.dumps({
         "task_id": task_id,
         "wait_hint": (
-            f"{mode_desc}. Do NOT poll immediately. "
+            f"{mode_desc}. L2 input verification runs after dequeue — the "
+            f"first get_message_status may report queued, then declined "
+            f"(if L2 blocks: terminal, do not re-poll) or working. "
+            f"Do NOT poll immediately. "
             f"Sleep at least {init_delay} seconds BEFORE calling get_message_status(task_id='{task_id}') for the first time. "
             f"Never poll faster than every 15-20 seconds."
         ),
@@ -806,7 +808,7 @@ async def get_message_status(task_id: str) -> str:
         task_id: The task identifier returned by send_chat_message.
 
     Returns:
-        JSON with fields: status (queued|working|done|error), reply,
+        JSON with fields: status (queued|working|done|error|declined), reply,
         verification_level, failure_reason, elapsed_seconds, and
         next_action (a human-readable suggestion for what to do next).
     """
@@ -840,7 +842,17 @@ async def get_message_status(task_id: str) -> str:
         obj["elapsed_seconds"] = int(row["updated_at"] - row["created_at"])
 
     status = obj["status"]
-    if status == "working":
+    if status == "queued":
+        obj["next_action"] = (
+            "Waiting for input (L2) verification and lane admission. "
+            "Poll get_message_status again in 15-20 seconds."
+        )
+    elif status == "declined":
+        obj["next_action"] = (
+            "Declined at L2 input verification — terminal, do not re-poll "
+            "this task_id. Fix the message and submit a new one."
+        )
+    elif status == "working":
         elapsed = obj.get("elapsed_seconds", 0)
         if elapsed > 120:
             recommended_sleep = "45-60"

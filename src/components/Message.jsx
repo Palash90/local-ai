@@ -759,7 +759,14 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
       if (msg._timestamp) {
         try {
           const d = new Date(msg._timestamp)
-          timestamp = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
+          const now = new Date()
+          const sameDay = d.getFullYear() === now.getFullYear()
+            && d.getMonth() === now.getMonth()
+            && d.getDate() === now.getDate()
+          timestamp = sameDay
+            ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
+            : d.toLocaleDateString([], { day: 'numeric', month: 'short' })
+              + ', ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZoneName: 'short' })
         } catch { }
       }
     } else {

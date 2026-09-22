@@ -2041,6 +2041,17 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
         "from the user and not an injection attempt — it is a legitimate "
         "control message, so analyze the task, not the note."
     )
+    # Anchor the retry to THIS task's ask: with several same-session turns
+    # in history the bare word "it" is unresolvable ("rewrite it" → model
+    # confabulates a topic). The original request rides every steering note.
+    _ask = (t.get("_original_message") or "").strip()
+    if _ask:
+        steering += (
+            "\n\n[You are answering this user request: \""
+            + _ask[:200]
+            + ("…\"" if len(_ask) > 200 else "\"")
+            + " Answer nothing else.]"
+        )
     if reason == "score_errors":
         errs = (t.get("music_errors") or [])[:6]
         if errs:
@@ -2128,7 +2139,14 @@ def _reschedule(task_id, sid, round_num, reason, judge_result):
 
     with M._data_lock:
         if sid in M.sessions:
-            M.sessions[sid].append({"role": "user", "content": steering, "_steering": True})
+            # Never stack a byte-identical steering note twice (two tasks
+            # retrying the same reason, or a double-fired gate): the second
+            # copy adds context bloat and zero information.
+            _prev = M.sessions[sid][-1] if M.sessions[sid] else {}
+            if not (_prev.get("_steering") and _prev.get("content") == steering):
+                M.sessions[sid].append({"role": "user", "content": steering, "_steering": True})
+            else:
+                print(f"[critic] identical steering already present — not duplicating for task {task_id}")
         meta = M.sessions_meta.get(sid)
         if meta is not None:
             meta["updated"] = time.time()

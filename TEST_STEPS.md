@@ -227,6 +227,12 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   re-run with `[MELODY santoor …]` headers; bare `E3:maj7ar` →
   `score_errors` steering containing the corrected `C3:min7ar w` form;
   explicit-solo single lane stays exempt.
+- Session isolation (unit: same file): two queued same-session tasks → the
+  second waits (`_pick_runnable_index` skips it, other sessions proceed);
+  `_peer_review` children bypass; parking never preempts for a same-session
+  waiter; every steering note quotes the original ask; identical steering
+  never appended twice. Regression case: interleaved Brindavani-Sarang +
+  Chinese-music researches must each report only their own topic.
 - Pre-render validation (unit: `server/features/music/tests/test_music.py`):
   `render_score(strict=True)` on a broken LLM score refuses with errors and
   renders nothing; clean scores render; default (arranged/showcase) stays
@@ -240,6 +246,10 @@ Also verify **`track_theme` is agent-only**: `TOOLS_HUMAN` strips it — a human
   generation token budget and llama.cpp 500s the tool call (`Failed to parse
   tool call arguments`); the server steers (shorten + valid JSON) and retries
   the round max 2× (`[llm_err] ... malformed tool-call JSON — re-scheduling`).
+  Steering matches the failing tool (score-budget text only for
+  `generate_music`; generic JSON-validity text otherwise), and a
+  byte-identical second failure fails fast instead of burning retry 2.
+  Queued MCP pickup is FIFO (oldest first).
 - Song form: the DSL doc mandates INTRO → VERSE → BRIDGE → OUTRO with each
   phase doing its job (sparse tease / motif / contrast with second-voice
   lead / cadence+thinning); a fresh render's `@section` grid must contain all

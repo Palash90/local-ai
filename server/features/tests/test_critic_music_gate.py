@@ -980,3 +980,134 @@ def test_length_math_steering_has_numbers(stub_state):
     assert "LENGTH MATH" in steering
     assert "60" in steering and "90" in steering and "29.83" in steering
     assert "round(60 × 90 ÷ 240) = 22" in steering or "= 22" in steering or "= 23" in steering
+
+
+def _orch_ns(monkeypatch, **over):
+    import threading
+    import server.features.state as st
+    import server.features.orchestration as orch
+    base = {
+        "_data_lock": threading.RLock(),
+        "tasks": {},
+        "sessions": {},
+        "sessions_meta": {},
+        "_task_queues": {"gpu": [], "cpu": [], "guardrail": []},
+        "_current_task_ids": {"gpu": None, "cpu": None, "guardrail": None},
+    }
+    base.update(over)
+    ep = types.SimpleNamespace(**base)
+    monkeypatch.setattr(st._Registry, "entrypoint", ep)
+    return orch, ep
+
+
+def test_session_busy_statuses(monkeypatch):
+    import threading
+    import server.features.state as st
+    import server.features.orchestration as orch
+    tasks = {
+        "w1": {"session_id": "s1", "status": "working"},
+        "p1": {"session_id": "s2", "status": "parked"},
+        "q1": {"session_id": "s3", "status": "queued"},
+        "d1": {"session_id": "s4", "status": "done"},
+    }
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks,
+        _current_task_ids={"gpu": None, "cpu": None, "guardrail": None})
+    try:
+        assert orch._session_busy("s1") is True
+        assert orch._session_busy("s2") is True
+        assert orch._session_busy("s3") is False  # queued alone never blocks
+        assert orch._session_busy("s4") is False
+        assert orch._session_busy("s1", exclude_tid="w1") is False
+        assert orch._session_busy("nope") is False
+    finally:
+        pass
+
+
+def test_pick_runnable_skips_busy_session(monkeypatch):
+    import threading
+    import server.features.state as st
+    import server.features.orchestration as orch
+    tasks = {"w1": {"session_id": "s1", "status": "working"}}
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks,
+        _current_task_ids={"gpu": "w1", "cpu": None, "guardrail": None})
+    try:
+        q = [
+            {"task_id": "t-same", "session_id": "s1"},
+            {"task_id": "t-other", "session_id": "s2"},
+        ]
+        assert orch._pick_runnable_index(q, "gpu") == 1
+        # Peer-review children bypass (parent works by construction).
+        q2 = [{"task_id": "t-peer", "session_id": "s1", "_peer_review": True}]
+        assert orch._pick_runnable_index(q2, "gpu") == 0
+        # All blocked → None (lane holds instead of spinning).
+        assert orch._pick_runnable_index(
+            [{"task_id": "t-same", "session_id": "s1"}], "gpu") is None
+    finally:
+        pass
+
+
+def test_higher_priority_ignores_same_session_waiter(monkeypatch):
+    import threading
+    import server.features.state as st
+    import server.features.orchestration as orch
+    import server.features.llm as _llm
+    q = [{"task_id": "w", "session_id": "s1"}]
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks={},
+        _task_queues={"gpu": q}, _queue_locks={"gpu": threading.RLock()})
+    # Head rank: UI. Same session → must not preempt (park-loop guard).
+    monkeypatch.setattr(orch, "_lane_rank", lambda item: orch.LANE_RANK_UI)
+    try:
+        assert orch._higher_priority_waiting(exclude_sid="s1") is False
+        assert orch._higher_priority_waiting(exclude_sid="s2") is True
+        assert orch._higher_priority_waiting() is True
+    finally:
+        pass
+
+
+def test_steering_carries_original_ask(stub_state):
+    import threading
+    import server.features.state as st
+    import server.features.critic as cr
+    tasks = {"t": {"_original_message": "Perform a research on Raga X",
+                   "music_duration": 0}}
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks,
+        sessions={"s1": []}, sessions_meta={"s1": {}},
+        set_status=lambda *a, **k: None,
+        save_sessions=lambda: None,
+        _start_llm_round=lambda *a, **k: None,
+    )
+    try:
+        cr._reschedule("t", "s1", 0, "citations", None)
+    finally:
+        pass
+    notes = [m for m in tasks and st._Registry.entrypoint.sessions["s1"]
+             if m.get("_steering")]
+    assert len(notes) == 1
+    assert "Perform a research on Raga X" in notes[0]["content"]
+
+
+def test_identical_steering_not_duplicated(stub_state):
+    import threading
+    import server.features.state as st
+    import server.features.critic as cr
+    tasks = {"t": {"_original_message": "ask",
+                   "music_duration": 0}}
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks,
+        sessions={"s1": []}, sessions_meta={"s1": {}},
+        set_status=lambda *a, **k: None,
+        save_sessions=lambda: None,
+        _start_llm_round=lambda *a, **k: None,
+    )
+    try:
+        cr._reschedule("t", "s1", 0, "citations", None)
+        cr._reschedule("t", "s1", 0, "citations", None)
+    finally:
+        pass
+    notes = [m for m in st._Registry.entrypoint.sessions["s1"]
+             if m.get("_steering")]
+    assert len(notes) == 1
