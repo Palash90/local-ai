@@ -1111,3 +1111,62 @@ def test_identical_steering_not_duplicated(stub_state):
     notes = [m for m in st._Registry.entrypoint.sessions["s1"]
              if m.get("_steering")]
     assert len(notes) == 1
+
+
+def test_second_chance_skips_spent_next_reason(stub_state):
+    from server.features.critic import _retry_decision
+    from server.features import state as st
+    import threading, types
+    # research_structure spent AND nothing else actionable: must finalize,
+    # not retry the same spent reason (self-requeue churn).
+    tasks = {"t": {"music_file": "x.wav",
+                   "music_url": "/music/x.wav",
+                   "music_duration": 60.0,
+                   "music_score": ("[MELODY piano vol=80]\nC4 q E4 q G4 q G4 q |\n"
+                                   "[HARMONY epiano vol=70]\nC3:maj7 w |\n"),
+                   "music_levels": [
+                       {"instrument": "piano", "name": "MELODY"},
+                       {"instrument": "epiano", "name": "HARMONY"},
+                   ],
+                   "_mismatch_counts": {"research_structure": 1},
+                   "_mismatch_done": 1,
+                   "_original_message": "compose something"}}
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    try:
+        action, reason = _retry_decision(
+            "t", None, "research_structure", "Here!",
+            _ctx=("s1", "compose something"))
+    finally:
+        pass
+    assert action == "finalize"
+
+
+def test_second_chance_no_retry_on_spent_fallback(stub_state):
+    from server.features.critic import _retry_decision
+    from server.features import state as st
+    import threading, types
+    # Only "variation" fires and it is already spent: the deferred fallback
+    # hands it back, but retrying must NOT happen — finalize instead.
+    score = ("[MELODY piano vol=80]\nC4 q C4 q C4 q C4 q |\n"
+             "[HARMONY epiano vol=70]\nC3:maj7 w |\n")
+    tasks = {"t": {"music_file": "x.wav",
+                   "music_url": "/music/x.wav",
+                   "music_duration": 60.0,
+                   "music_score": score,
+                   "music_levels": [
+                       {"instrument": "piano", "name": "MELODY"},
+                       {"instrument": "epiano", "name": "HARMONY"},
+                   ],
+                   "_mismatch_counts": {"variation": 1},
+                   "_mismatch_done": 1,
+                   "_original_message": "compose something"}}
+    st._Registry.entrypoint = types.SimpleNamespace(
+        _data_lock=threading.RLock(), tasks=tasks, sessions={})
+    try:
+        action, reason = _retry_decision(
+            "t", None, "variation", "Here!",
+            _ctx=("s1", "compose something"))
+    finally:
+        pass
+    assert action == "finalize" and reason == "variation"

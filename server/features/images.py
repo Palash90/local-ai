@@ -78,6 +78,24 @@ EDIT_MAX_SIDE = 1536
 # genuine failures still short-circuit fast via render_error.
 COMFYUI_RENDER_TIMEOUT_S = 900
 
+# ComfyUI history-poll distress thresholds: consecutive unreachable polls
+# before attempting a respawn / giving up. A healthy-but-busy server still
+# answers /history, so consecutive failures mean the process is gone.
+_COMFYUI_RESPAWN_AFTER_FAILS = 10
+_COMFYUI_MAX_RESPAWNS = 2
+_COMFYUI_GIVEUP_AFTER_FAILS = 30
+
+
+def _comfyui_poll_distress(history_fails, respawns):
+    """Next step when a /history poll fails: "ok" (keep polling),
+    "respawn" (re-ensure then fail the task so the next round re-calls
+    fresh — the queued prompt died with the old process), or "fail"."""
+    if history_fails >= _COMFYUI_RESPAWN_AFTER_FAILS and respawns < _COMFYUI_MAX_RESPAWNS:
+        return "respawn"
+    if history_fails >= _COMFYUI_GIVEUP_AFTER_FAILS:
+        return "fail"
+    return "ok"
+
 # Weight files each image model needs, as cfg-key -> candidate ComfyUI
 # model subdirs (CLIP loaders resolve both clip/ and text_encoders/).
 _IMAGE_MODEL_FILES = {
@@ -273,6 +291,38 @@ def free_comfyui_vram():
     return False
 
 
+# Prompt-submission retries: a freshly (re)started ComfyUI answers /prompt
+# health checks while still initializing multi-GB weights, then drops the
+# real submission. Retry connection-level failures a few times before
+# giving up — a dropped submit otherwise fails the whole render silently.
+_COMFYUI_SUBMIT_RETRIES = 3
+_COMFYUI_SUBMIT_RETRY_SLEEP_S = 15
+
+
+def _submit_comfyui_prompt(workflow, task_id):
+    """POST a workflow to ComfyUI, tolerating boot-window connection drops.
+
+    Returns the parsed response dict. Raises the last exception after
+    ``_COMFYUI_SUBMIT_RETRIES`` failed attempts (each failure is logged —
+    the previous code swallowed the submit exception entirely, leaving
+    "Healthy" followed by nothing).
+    """
+    last_err = None
+    for attempt in range(1, _COMFYUI_SUBMIT_RETRIES + 1):
+        try:
+            r = requests.post(
+                f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
+            )
+            return r.json()
+        except Exception as e:
+            last_err = e
+            print(f"[image] ComfyUI prompt submit failed for task {task_id} "
+                  f"(attempt {attempt}/{_COMFYUI_SUBMIT_RETRIES}): {e}")
+            if attempt < _COMFYUI_SUBMIT_RETRIES:
+                time.sleep(_COMFYUI_SUBMIT_RETRY_SLEEP_S)
+    raise RuntimeError(f"ComfyUI prompt submission failed: {last_err}")
+
+
 def generate_image(
     prompt, task_id, negative_prompt="", model="z_image", aspect_ratio="landscape"
 ):
@@ -410,10 +460,7 @@ def generate_image(
     p_short = prompt[:200] + ("..." if len(prompt) > 200 else "")
     M.set_status(task_id, f"Generating image ({model})... Prompt: {p_short}")
     try:
-        r = requests.post(
-            f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
-        )
-        data = r.json()
+        data = _submit_comfyui_prompt(workflow, task_id)
 
         if "error" in data:
             # Surface node-level validation detail: ComfyUI's top-level
@@ -441,6 +488,8 @@ def generate_image(
             prompt_id = data["prompt_id"]
             found_file = None
             render_error = None
+            _history_fails = 0
+            _respawns = 0
             for _poll in range(COMFYUI_RENDER_TIMEOUT_S):
                 time.sleep(1)
                 if _poll and _poll % 60 == 0:
@@ -488,33 +537,61 @@ def generate_image(
                         if found_file:
                             break
                 except Exception:
-                    pass
+                    # History unreachable — ComfyUI may have died mid-render
+                    # (it OOMs loading multi-GB staged weights). Don't burn
+                    # the full 900s polling a dead endpoint: re-ensure once,
+                    # then fail fast so the next round re-calls fresh (the
+                    # queued prompt died with the old process).
+                    _history_fails += 1
+                    _step = _comfyui_poll_distress(_history_fails, _respawns)
+                    if _step == "respawn":
+                        _respawns += 1
+                        _history_fails = 0
+                        print(
+                            f"[generate_image] ComfyUI unreachable for task "
+                            f"{task_id} — re-ensuring (respawn {_respawns}/2)"
+                        )
+                        try:
+                            M.ensure_comfyui_running()
+                        except Exception as e:
+                            print(f"[generate_image] re-ensure failed: {e}")
+                        render_error = (
+                            "ComfyUI restarted mid-render; the queued prompt "
+                            "was lost — resubmit the generate_image call"
+                        )
+                        break
+                    elif _step == "fail":
+                        render_error = (
+                            "ComfyUI unreachable for 30s and respawns "
+                            "exhausted — render host is down"
+                        )
+                        break
             if found_file:
-                with M._data_lock:
-                    cancelled = bool(
-                        M.tasks.get(task_id, {}).get("status") == "cancelled"
-                    )
-                if cancelled:
-                    try:
-                        if os.path.exists(found_file):
-                            os.remove(found_file)
-                            print(
-                                f"[image] Deleted orphaned image for cancelled task {task_id}: {found_file}"
-                            )
-                    except OSError:
-                        pass
-                    result = json.dumps({"error": "Cancelled — session was deleted"})
-                else:
-                    M.tasks[task_id]["image_file"] = M._output_rel(found_file)
-                    M.set_status(task_id, f"Image saved as {found_file}")
-                    print(f"[generate_image] SUCCESS: {found_file}")  # DEBUG
-                    result = json.dumps(
-                        {
-                            "prompt_id": prompt_id,
-                            "file": found_file,
-                            "rel": M._output_rel(found_file),
-                        }
-                    )
+                    with M._data_lock:
+                        cancelled = bool(
+                            M.tasks.get(task_id, {}).get("status") == "cancelled"
+                        )
+                    if cancelled:
+                        try:
+                            if os.path.exists(found_file):
+                                os.remove(found_file)
+                                print(
+                                    f"[image] Deleted orphaned image for cancelled task {task_id}: {found_file}"
+                                )
+                        except OSError:
+                            pass
+                        result = json.dumps({"error": "Cancelled — session was deleted"})
+                    else:
+                        M.tasks[task_id]["image_file"] = M._output_rel(found_file)
+                        M.set_status(task_id, f"Image saved as {found_file}")
+                        print(f"[generate_image] SUCCESS: {found_file}")  # DEBUG
+                        result = json.dumps(
+                            {
+                                "prompt_id": prompt_id,
+                                "file": found_file,
+                                "rel": M._output_rel(found_file),
+                            }
+                        )
             else:
                 print(
                     f"[generate_image] TIMEOUT for task {task_id} after {COMFYUI_RENDER_TIMEOUT_S}s"
@@ -524,6 +601,8 @@ def generate_image(
                 else:
                     result = json.dumps({"error": "Image generation timeout"})
     except Exception as e:
+        import traceback as _tb
+        print(f"[generate_image] UNHANDLED for task {task_id}: {e}\n{_tb.format_exc()}")
         result = json.dumps({"error": str(e)})
     finally:
         M.set_status(task_id, "Freeing image generation VRAM...")
@@ -958,10 +1037,7 @@ def edit_image(
             + ",".join(f"{k}:{v.get('class_type')}" for k, v in workflow.items()),
             flush=True,
         )
-        r = requests.post(
-            f"{M.COMFYUI_URL}/prompt", json={"prompt": workflow}, timeout=120
-        )
-        data = r.json()
+        data = _submit_comfyui_prompt(workflow, task_id)
 
         if "error" in data:
             node_errors = data.get("node_errors")
@@ -985,6 +1061,8 @@ def edit_image(
             prompt_id = data["prompt_id"]
             found_file = None
             render_error = None
+            _history_fails = 0
+            _respawns = 0
             for _poll in range(COMFYUI_RENDER_TIMEOUT_S):
                 time.sleep(1)
                 if _poll and _poll % 60 == 0:
@@ -1029,7 +1107,32 @@ def edit_image(
                         if found_file:
                             break
                 except Exception:
-                    pass
+                    # Same dead-endpoint guard as generate_image: re-ensure
+                    # once, then fail fast so the next round re-calls fresh.
+                    _history_fails += 1
+                    _step = _comfyui_poll_distress(_history_fails, _respawns)
+                    if _step == "respawn":
+                        _respawns += 1
+                        _history_fails = 0
+                        print(
+                            f"[edit_image] ComfyUI unreachable for task "
+                            f"{task_id} — re-ensuring (respawn {_respawns}/2)"
+                        )
+                        try:
+                            M.ensure_comfyui_running()
+                        except Exception as e:
+                            print(f"[edit_image] re-ensure failed: {e}")
+                        render_error = (
+                            "ComfyUI restarted mid-render; the queued prompt "
+                            "was lost — resubmit the edit_image call"
+                        )
+                        break
+                    elif _step == "fail":
+                        render_error = (
+                            "ComfyUI unreachable for 30s and respawns "
+                            "exhausted — render host is down"
+                        )
+                        break
 
             if found_file:
                 with M._data_lock:

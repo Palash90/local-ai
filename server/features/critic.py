@@ -1923,9 +1923,18 @@ def _retry_decision(task_id, judge_result, mismatch_reason, answer=None,
             except Exception:
                 _nxt = None
             if _nxt:
-                print(f"[critic] {mismatch_reason} budget spent — retrying "
-                      f"next actionable mismatch '{_nxt}' for task {task_id}")
-                return "retry", _nxt
+                # The deferred fallback may hand back an already-spent
+                # reason when nothing else fires — retrying it would churn
+                # against the same wall (observed: research_structure
+                # re-queued on its own exhaustion). Only retry when the
+                # next reason still has budget.
+                _nlim = 2 if _nxt == "score_errors" else 1
+                _ndone = (_counts or {}).get(_nxt, 0) if isinstance(_counts, dict) else mismatch_done
+                if _ndone < _nlim:
+                    print(f"[critic] {mismatch_reason} budget spent — retrying "
+                          f"next actionable mismatch '{_nxt}' for task {task_id}")
+                    return "retry", _nxt
+                print(f"[critic] next mismatch '{_nxt}' also spent — finalizing task {task_id}")
         if mismatch_reason == "score_errors":
             return "finalize", "score_errors_giveup"
         return "finalize", mismatch_reason

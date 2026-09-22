@@ -85,3 +85,64 @@ def test_maybe_unload_unloads_unkept_lane(monkeypatch):
     assert images._maybe_unload_lane("gpu", "image") is True
     assert images._maybe_unload_lane("guardrail", "image") is True
     assert unloaded == ["gpu", "guardrail"]
+
+
+def test_comfyui_poll_distress_thresholds():
+    import server.features.images as images
+    d = images._comfyui_poll_distress
+    assert d(0, 0) == "ok"
+    assert d(9, 0) == "ok"
+    assert d(10, 0) == "respawn"
+    assert d(25, 1) == "respawn"
+    assert d(10, 2) == "ok"  # respawns spent: keep polling, don't churn
+    assert d(29, 2) == "ok"
+    assert d(30, 2) == "fail"
+    assert images._COMFYUI_MAX_RESPAWNS == 2
+
+
+def test_submit_retries_boot_window_then_raises(monkeypatch):
+    import requests as _rq
+    import server.features.images as images
+    import types as _t
+    monkeypatch.setattr(
+        images, "M",
+        _t.SimpleNamespace(COMFYUI_URL="http://127.0.0.1:8188"),
+    )
+    calls = []
+
+    class _Resp:
+        def json(self):
+            return {"prompt_id": "abc"}
+
+    def flaky_post(*a, **k):
+        calls.append(1)
+        if len(calls) < 3:
+            raise ConnectionError("booting")
+        return _Resp()
+
+    monkeypatch.setattr(_rq, "post", flaky_post)
+    import time as _tm
+    monkeypatch.setattr(_tm, "sleep", lambda s: None)
+    out = images._submit_comfyui_prompt({"a": 1}, "t1")
+    assert out == {"prompt_id": "abc"}
+    assert len(calls) == 3
+
+
+def test_submit_gives_up_with_logged_error(monkeypatch):
+    import requests as _rq
+    import server.features.images as images
+    import types as _t
+    monkeypatch.setattr(
+        images, "M",
+        _t.SimpleNamespace(COMFYUI_URL="http://127.0.0.1:8188"),
+    )
+
+    def dead_post(*a, **k):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(_rq, "post", dead_post)
+    import time as _tm
+    monkeypatch.setattr(_tm, "sleep", lambda s: None)
+    import pytest as _pt
+    with _pt.raises(RuntimeError, match="prompt submission failed"):
+        images._submit_comfyui_prompt({"a": 1}, "t1")
