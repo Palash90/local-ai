@@ -13,3 +13,4 @@ repomix-output.xml
 # Headed Playwright MCP run artifacts (snapshots/console logs)
 .playwright-mcp/
 e2e/reports/
+.coverage

@@ -499,6 +499,21 @@ With a browser (or headed test) authenticated via SSO:
 
 ---
 
+## K. Automated coverage (no browser SSO needed unless noted)
+
+- **pytest** (`python -m pytest server/features/tests -q --import-mode=importlib`,
+  ~340 tests): context compaction/trim (incl. no-mutation invariant + honest
+  compaction counter), tasks_db CRUD/isolation/reminders, TTS word boundaries,
+  artifact anaphora gates, LLM load fast-path + retry, unload drain, residency,
+  sampling router, music (125), pensieve, guardrail/MCP L2, image workflows.
+- **e2e smoke** (`npm run e2e`, headed Chromium + SSO): smoke, crud, attach,
+  guardrails, robustness, speech, tools, share, tasks, memory.
+- **e2e full** (`npm run e2e:full`, + `--mcp-bearer` for MCP steps): research,
+  media (incl. artifact reuse), music, concurrency.
+- Known env-sensitive: research needs a >15-min budget while GPU-lane judges
+  share the single worker (critic timeouts); speech needs audible-capable
+  Chromium; share needs same-box run for the unauthenticated fetch.
+
 ## Suggested execution order
 1. Pre-flight restart (§0, incl. FORCE_GPU_LANE check)
 2. A (OpenAI — validates the VS Code work; fail fast here)

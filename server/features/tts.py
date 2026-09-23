@@ -593,7 +593,21 @@ def tts_synthesize(raw_text, voice="", max_chars=TTS_MAX_CHARS, cleaner=markdown
             key = hashlib.sha256(f"piper:{tag}:{chunk}".encode("utf-8")).hexdigest()
             part = _tts_cache_get(key)
             if part is None:
-                wav_bytes, words = synthesize_piper_wav(tag, chunk)
+                # Piper's onnxruntime pool starves under CPU contention
+                # (llama prefill threads): synthesis can stall indefinitely
+                # with no error. Bound it so /api/tts fails fast (500) and
+                # the UI can report instead of hanging forever. The stuck
+                # worker is left to finish; the lock serializes retries.
+                import concurrent.futures as _fut
+                _timeout = int(os.environ.get("PIPER_SYNTH_TIMEOUT", "240"))
+                with _fut.ThreadPoolExecutor(max_workers=1) as _ex:
+                    _f = _ex.submit(synthesize_piper_wav, tag, chunk)
+                    try:
+                        wav_bytes, words = _f.result(timeout=_timeout)
+                    except _fut.TimeoutError:
+                        raise TimeoutError(
+                            f"Piper synthesis stalled over {_timeout}s "
+                            f"(CPU contention?) for {len(chunk)} chars")
                 part = wav_bytes
                 _tts_cache_put(key, part)
                 # Words saved per-chunk; adjust to absolute offsets.

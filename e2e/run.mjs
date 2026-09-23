@@ -45,8 +45,18 @@ const SUITES = [
   './suite-attach.mjs',
   './suite-guardrails.mjs',
   './suite-robustness.mjs',
+  './suite-speech.mjs',
+  './suite-tools.mjs',
+  './suite-share.mjs',
+  './suite-tasks.mjs',
+  './suite-memory.mjs',
   './suite-research.mjs',
   './suite-media.mjs',
+  './suite-music.mjs',
+  './suite-concurrency.mjs',
+  './suite-lightbox.mjs',
+  './suite-modelbar.mjs',
+  './suite-editimage.mjs',
 ];
 
 async function launchBrowser() {

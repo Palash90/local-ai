@@ -499,8 +499,14 @@ def prepare_context_for_llm(sid, messages, mode="gpu"):
     with M._effective_contexts_lock:
         M._effective_contexts[sid] = context
     try:
-        meta = M.sessions_meta.setdefault(sid, {})
-        meta["compactions"] = int(meta.get("compactions", 0) or 0) + 1
+        # Count only real compactions: if the summarizer failed,
+        # compact_messages_copy returns the list unchanged (no
+        # "[Compressed context]" block) and the counter must not move.
+        if any(isinstance(m, dict) and isinstance(m.get("content"), str)
+               and "[Compressed context]" in m["content"]
+               for m in compacted):
+            meta = M.sessions_meta.setdefault(sid, {})
+            meta["compactions"] = int(meta.get("compactions", 0) or 0) + 1
     except Exception:
         pass
     return context

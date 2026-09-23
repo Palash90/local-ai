@@ -52,4 +52,40 @@ export async function run(page, ctx, opts) {
   } else {
     ctx.step('disk check skipped (no E2E_IMAGE_DIR)', true, '');
   }
+
+  // --- artifact propagation: "show that image again" must re-attach the
+  // SAME url without rendering a new file (finalize carry-over, not regen).
+  if (!card) {
+    ctx.step('reuse skipped (no render card)', true, '');
+    return;
+  }
+  const firstUrl = (await bodyText(page)).match(/(\/output\/[^\s)"']+\.png|\/api\/[^\s)"']+)/i)?.[1] || '';
+  let newestBefore = 0;
+  if (opts.imageDir && fs.existsSync(opts.imageDir)) {
+    newestBefore = fs.readdirSync(opts.imageDir)
+      .filter(f => f.endsWith('.png'))
+      .reduce((m, f) => Math.max(m, fs.statSync(path.join(opts.imageDir, f)).mtimeMs), 0);
+  }
+  await page.locator('#msg-input').fill(
+    'e2e media reuse: show that image again, no need to regenerate');
+  await clickText(page, 'Send');
+  const reDeadline = Date.now() + 8 * 60 * 1000;
+  let sameUrl = false;
+  while (Date.now() < reDeadline) {
+    await page.waitForTimeout(30000);
+    const body = await bodyText(page);
+    const tail = body.slice(body.lastIndexOf('e2e media reuse'));
+    if (firstUrl && tail.includes(firstUrl)) { sameUrl = true; break; }
+  }
+  ctx.step('reuse re-attaches same artifact url', sameUrl, firstUrl || 'no url captured');
+  if (opts.imageDir && fs.existsSync(opts.imageDir)) {
+    const newestAfter = fs.readdirSync(opts.imageDir)
+      .filter(f => f.endsWith('.png'))
+      .reduce((m, f) => Math.max(m, fs.statSync(path.join(opts.imageDir, f)).mtimeMs), 0);
+    ctx.step('reuse renders no new file', newestAfter <= newestBefore + 1000,
+      `before=${new Date(newestBefore).toISOString()} after=${new Date(newestAfter).toISOString()}`);
+  } else {
+    ctx.step('reuse disk check skipped (no E2E_IMAGE_DIR)', true, '');
+  }
+  await page.screenshot({ path: 'reports/shot-media-reuse.png' }).catch(() => {});
 }

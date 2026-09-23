@@ -14,8 +14,15 @@ guardrails, robustness (concurrency/cancel/reload), media renders.
 | `suite-attach.mjs` | smoke | PNG preview, unknown-ext confirm dialog, audio-unsupported documents current behavior, vision round-trip |
 | `suite-guardrails.mjs` | smoke | UI extraction probe leaks nothing; MCP L1 declines inline; MCP dedup collapses rapid resubmits |
 | `suite-robustness.mjs` | smoke | concurrent sends surface progress UI; Stop freezes output; reload rehydrates |
+| `suite-speech.mjs` | smoke | TTS read-aloud reaches speaking state; pause works (word timings are API-only — no highlight UI exists) |
+| `suite-tools.mjs` | smoke | web-search round surfaces the 🔍 search status tag |
+| `suite-share.mjs` | smoke | message share modal yields a public link that loads unauthenticated |
+| `suite-tasks.mjs` | smoke | task add → complete → delete → still gone after reload |
+| `suite-memory.mjs` | smoke | nonce-word store + recall across turns; MCP user-context shape when bearer present |
 | `suite-research.mjs` | full | citations + verification trail + topical purity (~15 min) |
-| `suite-media.mjs` | full | image card in chat + fresh valid PNG on disk (~10–20 min) |
+| `suite-media.mjs` | full | image card in chat + fresh valid PNG on disk (~10–20 min) + artifact reuse ("show that image again" re-attaches same URL, renders no new file) |
+| `suite-music.mjs` | full | model-composed clip renders an `<audio>` card (~10 min) |
+| `suite-concurrency.mjs` | full | session B completes while A streams; long answer finishes; chat completes during/after image render (~15+ min) |
 
 ## Run
 
