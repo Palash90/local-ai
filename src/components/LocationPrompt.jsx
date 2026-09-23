@@ -8,7 +8,7 @@ export default function LocationPrompt({ onAllow, onDeny, error }) {
             {error || "Polu's AI Assistant can use your location to provide location-aware responses and search results. You can change this anytime in your browser settings."}
         </div>
         <div id="location-actions">
-          <button id="location-deny-btn" onClick={onDeny}>Deny</button>
+          <button id="location-deny-btn" onClick={onDeny}>Continue without location</button>
           <button id="location-allow-btn" onClick={onAllow} disabled={error && error.includes('blocked')}>Allow</button>
         </div>
       </div>

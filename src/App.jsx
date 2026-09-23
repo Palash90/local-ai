@@ -365,21 +365,30 @@ export default function App() {
 
   function handleLocationAllow() {
     const tid = locationTaskId
-    navigator.geolocation.getCurrentPosition(
-      pos => {
-        setShowLocationPrompt(false)
-        setLocationTaskId(null)
-        api.sendLocation(pos.coords.latitude, pos.coords.longitude, tid)
-      },
-      err => {
-        if (err.code === 1) {
-          setLocationError('Location access is blocked in your browser. Please enable it in browser settings and try again.')
-        } else {
-          setLocationError('Could not get location: ' + err.message + '. Try again or click Deny.')
-        }
-      },
-      { timeout: 10000, enableHighAccuracy: false }
-    )
+    // Desktop Chromium resolves position via the network location provider
+    // (googleapis geolocate), which can 400/stall with no WiFi data — so use
+    // a cached fix when available, allow time, and retry once on timeout
+    // instead of stranding the popup on the first failure.
+    const geoOpts = { timeout: 20000, maximumAge: 600000, enableHighAccuracy: false }
+    let retried = false
+    const onFail = (err) => {
+      if (err && err.code === 3 && !retried) {
+        retried = true
+        navigator.geolocation.getCurrentPosition(onOk, onFail, geoOpts)
+        return
+      }
+      if (err && err.code === 1) {
+        setLocationError('Location access is blocked in your browser. Please enable it in browser settings and try again.')
+      } else {
+        setLocationError('Could not get location' + (err && err.message ? ': ' + err.message : '') + '. You can retry Allow or continue without location.')
+      }
+    }
+    const onOk = (pos) => {
+      setShowLocationPrompt(false)
+      setLocationTaskId(null)
+      api.sendLocation(pos.coords.latitude, pos.coords.longitude, tid)
+    }
+    navigator.geolocation.getCurrentPosition(onOk, onFail, geoOpts)
   }
 
   function handleLocationDeny() {
