@@ -502,10 +502,12 @@ With a browser (or headed test) authenticated via SSO:
 ## K. Automated coverage (no browser SSO needed unless noted)
 
 - **pytest** (`python -m pytest server/features/tests -q --import-mode=importlib`,
-  ~340 tests): context compaction/trim (incl. no-mutation invariant + honest
-  compaction counter), tasks_db CRUD/isolation/reminders, TTS word boundaries,
+  374 tests): context compaction/trim (incl. no-mutation invariant + honest
+  compaction counter), tasks_db/themes_db CRUD/isolation, TTS word boundaries,
   artifact anaphora gates, LLM load fast-path + retry, unload drain, residency,
-  sampling router, music (125), pensieve, guardrail/MCP L2, image workflows.
+  sampling router, music (125), pensieve, guardrail/MCP L2 (+image), image
+  workflows, API edges (register-agent/leaving/logout), file routes, tts-words,
+  showcase page, markdown RBAC, self-chat config, navigate gate.
 - **e2e smoke** (`npm run e2e`, headed Chromium + SSO): smoke, crud, attach,
   guardrails, robustness, speech, tools, share, tasks, memory.
 - **e2e full** (`npm run e2e:full`, + `--mcp-bearer` for MCP steps): research,

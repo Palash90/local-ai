@@ -875,44 +875,54 @@ def _evacuate_ram():
     M._ram_evacuating = False
 
 
+def _thermal_step():
+    """One thermal-monitor iteration (extracted for tests; the loop sleeps).
+
+    Reads GPU temp, flips the overheated latch with hysteresis, and — when
+    overheated and the GPU lane is idle — sheds load (unload chat model or
+    free ComfyUI VRAM) plus the RAM-evacuation check.
+    """
+    temp = M.get_gpu_temp()
+    with M._data_lock:
+        M._gpu_temp = temp
+        if temp is not None and temp >= M.TEMP_THRESHOLD_ON:
+            if not M._overheated:
+                print(
+                    f"[thermal] GPU {temp}°C >= {M.TEMP_THRESHOLD_ON}°C, OVERHEATED"
+                )
+                M._overheated = True
+        elif M._overheated and (temp is None or temp <= M.TEMP_THRESHOLD_OFF):
+            print(f"[thermal] GPU {temp}°C <= {M.TEMP_THRESHOLD_OFF}°C, resumed")
+            M._overheated = False
+
+    if M._overheated:
+        # Only the GPU lane's business matters here — unloading the GPU
+        # chat model / freeing ComfyUI VRAM should not be held up by an
+        # unrelated self-chat agent task running on the CPU lane.
+        with M._queue_locks["gpu"]:
+            busy = M._current_task_ids["gpu"] is not None
+        if not busy:
+            with M._data_lock:
+                ms = M.model_status
+                img_active = M._image_active
+            if ms == "chat_loaded":
+                print("[thermal] Overheated — unloading GPU chat model")
+                M.unload_llama_model("gpu")
+            elif img_active:
+                print("[thermal] Overheated — freeing ComfyUI VRAM")
+                M.free_comfyui_vram()
+
+    if not M._ram_evacuating:
+        ram = M.get_ram_usage()
+        if ram is not None and ram >= M.RAM_EVAC_THRESHOLD:
+            print(f"[ram] RAM used {ram:.0f}% >= {M.RAM_EVAC_THRESHOLD}%")
+            M._evacuate_ram()
+
+
 def _thermal_monitor():
     while True:
         time.sleep(10)
-        temp = M.get_gpu_temp()
-        with M._data_lock:
-            M._gpu_temp = temp
-            if temp is not None and temp >= M.TEMP_THRESHOLD_ON:
-                if not M._overheated:
-                    print(
-                        f"[thermal] GPU {temp}°C >= {M.TEMP_THRESHOLD_ON}°C, OVERHEATED"
-                    )
-                    M._overheated = True
-            elif M._overheated and (temp is None or temp <= M.TEMP_THRESHOLD_OFF):
-                print(f"[thermal] GPU {temp}°C <= {M.TEMP_THRESHOLD_OFF}°C, resumed")
-                M._overheated = False
-
-        if M._overheated:
-            # Only the GPU lane's business matters here — unloading the GPU
-            # chat model / freeing ComfyUI VRAM should not be held up by an
-            # unrelated self-chat agent task running on the CPU lane.
-            with M._queue_locks["gpu"]:
-                busy = M._current_task_ids["gpu"] is not None
-            if not busy:
-                with M._data_lock:
-                    ms = M.model_status
-                    img_active = M._image_active
-                if ms == "chat_loaded":
-                    print("[thermal] Overheated — unloading GPU chat model")
-                    M.unload_llama_model("gpu")
-                elif img_active:
-                    print("[thermal] Overheated — freeing ComfyUI VRAM")
-                    M.free_comfyui_vram()
-
-        if not M._ram_evacuating:
-            ram = M.get_ram_usage()
-            if ram is not None and ram >= M.RAM_EVAC_THRESHOLD:
-                print(f"[ram] RAM used {ram:.0f}% >= {M.RAM_EVAC_THRESHOLD}%")
-                M._evacuate_ram()
+        _thermal_step()
 
 
 def _periodic_cpu_kv_save_loop():

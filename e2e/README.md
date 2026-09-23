@@ -23,6 +23,12 @@ guardrails, robustness (concurrency/cancel/reload), media renders.
 | `suite-media.mjs` | full | image card in chat + fresh valid PNG on disk (~10–20 min) + artifact reuse ("show that image again" re-attaches same URL, renders no new file) |
 | `suite-music.mjs` | full | model-composed clip renders an `<audio>` card (~10 min) |
 | `suite-concurrency.mjs` | full | session B completes while A streams; long answer finishes; chat completes during/after image render (~15+ min) |
+| `suite-lightbox.mjs` | smoke | attached image opens fullscreen overlay; history-back dismisses |
+| `suite-modelbar.mjs` | smoke | model dot/label/donut render; label cross-checked vs model-status API |
+| `suite-editimage.mjs` | full | attached-photo edit renders a new image card (~20 min) |
+| `suite-sharespanel.mjs` | smoke | shares tab lists share; revoke removes row; purged snapshot API 404s |
+| `suite-reminders.mjs` | smoke | due reminder shows ⏰ badge; cleanup via UI delete |
+| `suite-location.mjs` | smoke | CDP-granted geolocation: popup appears, Allow resolves with no error, answer names city |
 
 ## Run
 

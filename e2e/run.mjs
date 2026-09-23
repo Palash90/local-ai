@@ -33,7 +33,12 @@ const TIER = args.tier || 'smoke';
 const CDP = args.cdp || 'http://127.0.0.1:9333';
 const APP_URL = args['app-url'] || 'https://home.palashkantikundu.in/ai';
 const MCP_URL = args['mcp-url'] || 'http://127.0.0.1:8000/mcp';
-const MCP_BEARER = args['mcp-bearer'] || process.env.MCP_BEARER || '';
+const MCP_BEARER = args['mcp-bearer'] || process.env.MCP_BEARER ||
+  (args['mcp-bearer-file'] && fs.existsSync(args['mcp-bearer-file'])
+    ? fs.readFileSync(args['mcp-bearer-file'], 'utf-8').trim() : '');
+const OPENAI_KEY = args['openai-key'] || process.env.OPENAI_API_KEY ||
+  (args['openai-key-file'] && fs.existsSync(args['openai-key-file'])
+    ? fs.readFileSync(args['openai-key-file'], 'utf-8').trim() : '');
 const SESSION_DIR = args['session-dir'] || '/home/palash/local-ai-files/session';
 const IMAGE_DIR = args['image-dir'] || '/home/palash/local-ai-files/ComfyUI/output/palash';
 const IMAGE_PATH = args['image-path'] || '';
@@ -57,6 +62,13 @@ const SUITES = [
   './suite-lightbox.mjs',
   './suite-modelbar.mjs',
   './suite-editimage.mjs',
+  './suite-sharespanel.mjs',
+  './suite-reminders.mjs',
+  './suite-location.mjs',
+  './suite-mcpbatch.mjs',
+  './suite-openai.mjs',
+  './suite-markdown.mjs',
+  './suite-overload.mjs',
 ];
 
 async function launchBrowser() {
@@ -93,6 +105,10 @@ async function main() {
     imageDir: fs.existsSync(IMAGE_DIR) ? IMAGE_DIR : '',
     imagePath: IMAGE_PATH && fs.existsSync(IMAGE_PATH) ? IMAGE_PATH : '',
     home: withHome,
+    // Secrets stay in files/env — logged only as present/absent, never values.
+    hasMcpBearer: MCP_BEARER.length > 0,
+    openaiKey: OPENAI_KEY,
+    hasOpenaiKey: OPENAI_KEY.length > 0,
   };
 
   const results = [];

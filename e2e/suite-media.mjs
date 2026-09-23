@@ -24,16 +24,25 @@ export async function run(page, ctx, opts) {
   const sentAt = Date.now();
   ctx.step('image request sent', true, '');
 
+  // Completed-card detection only: the transient "Generating image…"
+  // status text matches /image/i and used to fake a card before the render
+  // finished (then the disk check correctly found nothing). Require the
+  // rendered <img> in DOM, or an /output/*.png reference in the transcript.
   const deadline = sentAt + 20 * 60 * 1000;
-  let card = false;
+  let card = '';
   while (Date.now() < deadline) {
-    await page.waitForTimeout(60000);
-    const body = await bodyText(page);
-    const idx = body.lastIndexOf('e2e media probe');
-    const tail = idx >= 0 ? body.slice(idx) : '';
-    if (/\.png|\/output\/|player|image/i.test(tail) && tail.length > 400) { card = true; break; }
+    await page.waitForTimeout(30000);
+    card = await page.evaluate(() => {
+      if (document.querySelectorAll('.image-wrap img').length > 0) return 'dom-img';
+      const body = document.body.innerText || '';
+      const idx = body.lastIndexOf('e2e media probe');
+      const tail = idx >= 0 ? body.slice(idx) : '';
+      if (/\/output\/[^\s)"']+\.png/i.test(tail)) return 'transcript-url';
+      return '';
+    });
+    if (card) break;
   }
-  ctx.step('image card/player surfaces in chat', card, '');
+  ctx.step('image card/player surfaces in chat', card !== '', card);
   await page.screenshot({ path: 'reports/shot-media.png' }).catch(() => {});
 
   if (opts.imageDir && fs.existsSync(opts.imageDir)) {

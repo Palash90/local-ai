@@ -20,12 +20,15 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` passed (evidence linked) · 
 - [x] U04 upload — image attaches to composer
   (evidence: e2e suite-attach live PASS 2026-09-22, reports/shot-attach.png)
 - [ ] U05 image lightbox — attachment opens/closes
-- [ ] U06 location prompt — geolocation request flow
-  (note 2026-09-23: Allow-path hardened — cached fix, 20s timeout, retry once,
-  deny relabeled "Continue without location"; desktop Chromium geolocate can
-  400 with no WiFi data, popup now degrades instead of stranding)
+- [x] U06 location prompt — geolocation request flow
+  (evidence: e2e suite-location live PASS 2026-09-23 — CDP-granted Kolkata
+  fix, popup → Allow → city named, no stranding. Allow-path also hardened:
+  cached fix, 20s timeout, retry once, deny relabeled "Continue without
+  location")
 - [ ] U07 ModelBar + OverloadWarning — status widgets render
-- [ ] U08 shares panel — snapshot list, open, purge
+- [x] U08 shares panel — snapshot list, open, purge
+  (evidence: e2e suite-sharespanel live PASS 2026-09-23 — row listed,
+  revoked, purged snapshot API 404s)
 - [x] U09 TaskPanel — tasks/reminders visible and operable
   (evidence: e2e suite-tasks live PASS 2026-09-23 — add → complete → delete
   → gone after reload, reports/shot-tasks.png)
@@ -33,13 +36,13 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` passed (evidence linked) · 
   (evidence: e2e suite-robustness live PASS 2026-09-23 — Stop freeze +
   Queue second-send, reports/shot-cancelled.png)
 - [ ] U11 image edit e2e — photo edit renders and attaches (slow: ~10 min)
-- [ ] U12 TTS speak buttons + word sync
-  (e2e suite-speech written; live run 2026-09-23 BLOCKED by env: Piper
-  onnxruntime pool starves under CPU contention — standalone synth 2s, but
-  in-server call hung with zero output. Mitigated with PIPER_SYNTH_TIMEOUT
-  (fail-fast 500 instead of infinite hang). Re-run needed on idle CPU.
-  Confirmed: word timings are API-only, no highlight UI exists — pytest
-  test_tts_words.py covers the data side)
+- [x] U12 TTS speak buttons + word sync
+  (evidence: e2e suite-speech live PASS 2026-09-23 — speaking class + pause.
+  Root cause of the earlier fail was test-side, not app: 5s polls missed a
+  ~2s clip (handler proven live via /api/tts fetch spy). Suite now uses a
+  longer reply, 500ms polls, and an Audio.play spy. Confirmed: word timings
+  are API-only, no highlight UI exists — pytest test_tts_words.py covers
+  the data side)
 - [x] U13 session memory recall — nonce word stored + recalled across turns
   (evidence: e2e suite-memory live PASS 2026-09-23, reports/shot-memory.png)
 - [x] U14 music clip card — composed track renders `<audio>` player
@@ -47,8 +50,11 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` passed (evidence linked) · 
 - [x] U15 concurrency — B completes while A streams; chat survives render
   (evidence: e2e suite-concurrency live PASS 2026-09-23,
   reports/shot-concurrency.png)
-- [ ] U16 artifact reuse — "show that image again" re-attaches same URL
-  (e2e appended to suite-media, pending live run)
+- [x] U16 artifact reuse — "show that image again" re-attaches same URL
+  (evidence: e2e suite-media live PASS 2026-09-23 — same /output/ URL
+  re-attached, no new file rendered. Also fixed a suite bug: the old card
+  regex matched the transient "Generating image…" status, faking a card
+  before render finished — now requires .image-wrap img or /output/*.png)
 - [x] U17 tool status tags — search 🔍 tag during web rounds
   (evidence: e2e suite-tools live PASS 2026-09-23; tag window is seconds —
   suite polls at 500ms and falls back to session-file evidence)
@@ -63,9 +69,12 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` passed (evidence linked) · 
 
 ## Shares / public (`/s/`, mixed auth)
 
-- [~] U20 public share view renders without login
-  (e2e suite-share written — shares a reply, fetches the link
-  unauthenticated; pending live run)
+- [x] U20 public share view renders without login
+  (evidence: e2e suite-share live PASS 2026-09-23 — public link → HTTP 200)
+- [x] U21 purged share 404s
+  (evidence: e2e suite-sharespanel live PASS 2026-09-23 — snapshot API → 404)
+- [x] U26 reminders — due ⏰ badge renders, task cleanup works
+  (evidence: e2e suite-reminders live PASS 2026-09-23)
 - [ ] U21 purged share 404s
 
 ## Markdown hosting (`:3002`, RBAC)
@@ -90,3 +99,5 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` passed (evidence linked) · 
 - 2026-09-22: smoke tier 5/7 — crud/attach/guardrails PASS; smoke FAIL (`frag is not defined`, suite typo), robustness FAIL (Send-button race vs Queue UI).
 - 2026-09-23: fixed smoke typo + robustness Queue/Stop selectors; headed runs — smoke, robustness, crud, tasks, memory, music, concurrency ALL PASS. research FAIL: pipeline completes (~4k-char cited report) but GPU-lane critic timeouts push it past the 15-min budget. pytest +14 (compaction ×6 incl. a real counter bugfix, tasks_db ×4, tts_words ×4). Shares: U20 partially covered by suite-share (pending live run).
 - 2026-09-23 (batch 2+3): pytest +28 (navigate-gate/themes ×8, api-edges ×6, mcp-image ×4, markdown-RBAC ×4, selfchat-config ×6) incl. a real compactions-counter bugfix (earlier turn); handler harness (fake rfile/wfile) unlocks Phase-2 api.py coverage. e2e: lightbox/modelbar/editimage/share/tools ALL PASS live (tools needed 500ms tag polling + session-file fallback; share needed .value not innerText). speech BLOCKED on Piper-under-contention hang (fail-fast added). U20 now covered live (public link → 200).
+- 2026-09-23 (batch 4+5): pytest +24 (batch4-api ×8: extract/upload/tts-words/showcase/arranged; full sweep 381 pass + 1 pre-existing music-fixture fail). scripts/check_authentik.sh HEALTHY live. e2e: sharespanel (U08+U21), reminders (U26), location (U06) ALL PASS live — revoke needed confirm auto-accept; purged check targets snapshot API (SPA shell always 200s); location fix verified end-to-end. TEST_STEPS §K + README + tracker updated (25 suites, 374 pytest).
+- 2026-09-23 (close-out): openai suite PASS live (auth matrix + OPENAI-OK completion; earlier 500s were CUDA-OOM from .env GPU_CTX_SIZE=32768 on the E4B profile — reverted to 24576, router respawned, E4B loaded). speech PASS (suite bug: 5s polls missed ~2s clip; fixed with longer reply + 500ms polls + Audio.play spy). media PASS incl. artifact reuse (suite bug: card regex matched transient status text; fixed to require rendered img). thermal latch pytest ×7 (extracted _thermal_step for testability). pytest total 392 collected. Bearer/key files at /tmp/mcp-bearer + /tmp/openai-key (600) for future runs.

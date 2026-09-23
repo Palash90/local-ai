@@ -1312,12 +1312,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 traceback.print_exc()
                 self.send_json({"error": str(e)}, status=500)
         elif self.path == "/api/tts-words":
-            user = get_current_user(self.headers)
-            if not user:
-                self.send_json({"error": "Unauthorized"}, status=401)
-                return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
+            user = get_current_user(self.headers)
+            if not user:
+                # Internal loopback (markdown_hosting story words): shared
+                # token in body, same pattern as /api/internal/tts.
+                from server.config import TTS_INTERNAL_TOKEN
+                import hashlib as _hashlib2
+                try:
+                    _lip = self.client_address[0]
+                except Exception:
+                    _lip = ""
+                _tok = body.get("token", "")
+                _ok = (
+                    bool(TTS_INTERNAL_TOKEN)
+                    and _lip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+                    and bool(_tok)
+                    and _hashlib2.sha256(_tok.encode()).hexdigest()
+                    == _hashlib2.sha256(TTS_INTERNAL_TOKEN.encode()).hexdigest()
+                )
+                if not _ok:
+                    self.send_json({"error": "Unauthorized"}, status=401)
+                    return
             raw_text = body.get("text", "")
             if not raw_text:
                 self.send_json({"error": "No text provided"}, status=400)
