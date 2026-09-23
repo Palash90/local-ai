@@ -21,7 +21,16 @@ export async function run(page, ctx) {
   const echo = await bodyText(page);
   if (!echo.includes('e2e concurrent one')) throw new Error('first send never echoed');
   await page.locator('#msg-input').fill('e2e concurrent two: say beta');
-  await clickText(page, 'Send');
+  // While round one streams, the composer button reads "Queue" (not "Send");
+  // if round one already finished it is "Send" again. Click either.
+  const queuedAs = await page.evaluate(() => {
+    for (const b of document.querySelectorAll('button')) {
+      const t = (b.innerText || '').trim();
+      if (t === 'Queue' || t === 'Send') { b.click(); return t; }
+    }
+    return null;
+  });
+  if (!queuedAs) throw new Error('neither Queue nor Send button present for second send');
   await page.waitForTimeout(4000);
   let body = await bodyText(page);
   ctx.step('concurrent sends show progress UI',
@@ -29,7 +38,8 @@ export async function run(page, ctx) {
   await page.screenshot({ path: 'reports/shot-concurrent.png' }).catch(() => {});
 
   // --- Stop cancels the in-flight task: output must freeze ---
-  await clickText(page, 'Stop');
+  // (the button's innerText is "✕Stop" due to the icon span, so click by id)
+  await page.locator('#stop-btn').click();
   await page.waitForTimeout(3000);
   const tail1 = (await bodyText(page)).slice(-400);
   await page.waitForTimeout(10000);

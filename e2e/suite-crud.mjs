@@ -65,13 +65,17 @@ export async function run(page, ctx, opts) {
     if (d.type() === 'prompt') await d.accept(newName);
     else await d.accept();
   });
-  const renamed = await page.evaluate(() => {
-    const btns = [...document.querySelectorAll('button')]
-      .filter(b => (b.innerText || '').trim() === '✎');
-    if (!btns.length) return 'no-rename-buttons';
-    btns[0].click();
-    return 'clicked';
-  });
+  // Target the probe session's OWN row (btns[0] could rename an innocent session).
+  const renamed = await page.evaluate((needle) => {
+    for (const row of document.querySelectorAll('.session-item')) {
+      if (!((row.innerText || '').includes(needle))) continue;
+      const btn = [...row.querySelectorAll('button')]
+        .find(b => (b.innerText || '').trim() === '✎');
+      if (btn) { btn.click(); return 'clicked'; }
+    }
+    return 'row-not-found';
+  }, probe);
+  if (renamed !== 'clicked') throw new Error('probe session row not found for rename');
   await page.waitForTimeout(3000);
   body = await bodyText(page);
   ctx.step('rename visible in UI', body.includes(newName), renamed);
@@ -83,17 +87,25 @@ export async function run(page, ctx, opts) {
   }
 
   // --- delete the probe session (row-matched), reload, assert gone ---
-  await page.evaluate((needle) => {
+  const deleted = await page.evaluate((needle) => {
     for (const b of document.querySelectorAll('button')) {
       if ((b.innerText || '').trim() !== '🗑') continue;
       const row = b.closest('.session-item');
-      if (row && row.innerText.includes(needle)) { b.click(); return; }
+      if (row && row.innerText.includes(needle)) { b.click(); return 'clicked'; }
     }
-    // fallback: most-recent row (probe session was just created)
-    const first = document.querySelector('.session-item button');
-    if (first) first.click();
+    return 'row-not-found';
   }, probe);
-  await page.waitForTimeout(2500);
+  // No fallback: blindly deleting another row would nuke an innocent session
+  // AND leave the probe behind (the ghost-row flake).
+  if (deleted !== 'clicked') throw new Error('probe session row not found for delete');
+  // Wait for the delete round-trip to actually complete (confirm accepted,
+  // server delete + list refresh) instead of a fixed sleep: under load the
+  // single-threaded API server can take far longer than 2.5s, and reloading
+  // first aborts/reorders the DELETE → session still listed → ghost row.
+  await page.waitForFunction((needle) => {
+    const rows = [...document.querySelectorAll('.session-item')];
+    return !rows.some(r => ((r.innerText || '').includes(needle)));
+  }, probe, { timeout: 60000 });
   await page.reload();
   await page.waitForTimeout(5000);
   body = await bodyText(page);

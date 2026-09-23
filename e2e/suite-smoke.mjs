@@ -71,7 +71,7 @@ export async function run(page, ctx) {
     }, icon);
     await page.waitForTimeout(4000);
     const url = await page.url();
-    ctx.step(`nav dock ${icon} reaches ${frag}`, url.includes(frag), url);
+    ctx.step(`nav dock ${icon} reaches ${frags.join('|')}`, frags.some((frag) => url.includes(frag)), url);
   }
 
   // --- timestamps: time-today format present where rendered ---
