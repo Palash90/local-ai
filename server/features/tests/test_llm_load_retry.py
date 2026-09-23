@@ -67,12 +67,26 @@ def _install(monkeypatch, post_script, ready=True):
 
 
 def test_gpu_load_waits_vram_then_succeeds(monkeypatch):
-    calls, fake_m = _install(monkeypatch, [(200, "ok")], ready=True)
+    # ready=[False, ...]: fast path misses, normal load proceeds.
+    calls, fake_m = _install(monkeypatch, [(200, "ok")], ready=[False, True])
     assert llm.load_llama_model("gpu") is True
     assert calls["vram_wait"] == [(500, 60)]
     assert calls["post"] == 1
     assert fake_m.model_status == "chat_loaded"
     assert calls["restored"] == ["gpu"]
+
+
+def test_gpu_load_skips_everything_when_already_resident(monkeypatch):
+    # Fast path: ready on entry -> no VRAM wait, no POST, no KV restore.
+    calls, fake_m = _install(monkeypatch, [(200, "ok")], ready=True)
+    before = fake_m._last_llm_use
+    assert llm.load_llama_model("gpu") is True
+    assert calls["ready_calls"] == 1
+    assert calls["vram_wait"] == []
+    assert calls["post"] == 0
+    assert calls["restored"] == []
+    assert fake_m.model_status == "chat_loaded"
+    assert fake_m._last_llm_use >= before
 
 
 def test_gpu_load_retries_once_after_500(monkeypatch):
@@ -97,7 +111,17 @@ def test_gpu_load_gives_up_after_two_failures(monkeypatch):
 
 
 def test_cpu_load_never_waits_vram(monkeypatch):
-    calls, fake_m = _install(monkeypatch, [(200, "ok")], ready=True)
+    # ready=[False, ...]: fast path misses, normal CPU load proceeds.
+    calls, fake_m = _install(monkeypatch, [(200, "ok")], ready=[False, True])
     assert llm.load_llama_model("cpu") is True
     assert calls["vram_wait"] == []
+    assert calls["post"] == 1
+    assert fake_m._cpu_model_status == "chat_loaded"
+
+
+def test_cpu_load_skips_post_when_already_resident(monkeypatch):
+    calls, fake_m = _install(monkeypatch, [(200, "ok")], ready=True)
+    assert llm.load_llama_model("cpu") is True
+    assert calls["ready_calls"] == 1
+    assert calls["post"] == 0
     assert fake_m._cpu_model_status == "chat_loaded"

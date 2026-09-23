@@ -807,6 +807,27 @@ def load_llama_model(mode="gpu", model_id=None):
         model_id = (model_id or "").strip() or M.server_model_id(mode)
         base = M.server_base(mode)
 
+        # Fast path: the requested model is already loaded and serving —
+        # skip the VRAM wait, unload dance and POST entirely. (Previously
+        # every round paid a 60s _wait_vram_freed that can never pass while
+        # the model itself is resident, then a POST that 400s with "already
+        # running", before the fallback readiness check saved it.)
+        # No KV restore here: live KV is newer than any snapshot on disk.
+        if M.is_model_ready(base, model_id):
+            with M._data_lock:
+                if mode == "cpu":
+                    M._cpu_model_status = "chat_loaded"
+                    M._cpu_last_llm_use = time.time()
+                elif mode == "guardrail":
+                    M._guardrail_model_status = "chat_loaded"
+                    M._guardrail_last_llm_use = time.time()
+                    M._guardrail_loaded_model = model_id
+                else:
+                    M.model_status = "chat_loaded"
+                    M._last_llm_use = time.time()
+            print(f"[llama] {mode} model '{model_id}' already resident — skipping load")
+            return True
+
         if mode == "guardrail":
             # A different judge is resident (per-user swap): release it first
             # so two judges never stack on the CPU server. Equal id = no-op.

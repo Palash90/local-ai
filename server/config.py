@@ -470,6 +470,59 @@ LLAMA_ARGS_QWEN_38_27B = [
     "--parallel", "1"
 ]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GPU lane profile for gemma4-12b (12B dense, Q4_K_M, ~7GB).
+# Dense model: no --cpu-moe escape hatch, so the split is purely -ngl.
+# -ngl 20 puts ~1.5-2GB weights + q4 KV in VRAM (~2.5-3.5GB of 3.9 free
+# on the 4GB card); the rest lives in RAM. Tune via GPU_NGL_12B (sweep up
+# while loads succeed twice in a row). -ngl 99 OOMs (all ~7GB to VRAM).
+# ctx 32K via GPU_CTX_SIZE_12B. Reasoning budget mirrors the 26B profile:
+# thinking models spend hundreds of tokens in reasoning_content first.
+# ─────────────────────────────────────────────────────────────────────────────
+LLAMA_SERVER_ARGS_GEMMA4_12B = [
+    "--host", "127.0.0.1",
+    "--port", "8081",
+    "--models-dir", os.path.expanduser(BASE_MODELS_DIR),
+    "--jinja",
+
+    # GPU / VRAM split (dense partial offload).
+    "-ngl", os.environ.get("GPU_NGL_12B", "18"),
+    "-fa", "on",
+    "--ctx-size", os.environ.get("GPU_CTX_SIZE_12B", "32768"),
+    "-ctk", "q4_0",
+    "-ctv", "q4_0",
+    "--no-mmproj-offload",
+    "--ctx-checkpoints", "1",
+
+    # Threads & Batching
+    "-t", "8",
+    "-tb", "8",
+    "-b", "2048",
+    "-ub", "512",
+    "--timeout", "3600",
+
+    # Reasoning budget: cap thinking so tool-call JSON survives
+    # (same pattern as the 26B profile).
+    "--reasoning-budget", "2048",
+    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+
+    # Prompt-cache reuse: allow slots to reuse/shift cached prefix segments
+    # across multi-turn chats and tool rounds instead of re-prefilling.
+    "--cache-reuse", "256",
+
+    # KV-cache checkpointing: enables POST /slots/{id}?action=save|restore so
+    # the conversation KV survives model unload/reload cycles (image gen).
+    # The router passes this down to each loaded model instance.
+    "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
+
+    # Sampling Parameters
+    "--temp", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64",
+    "--min-p", "0.05",
+    "--parallel", "1"
+]
+
 LLAMA_SERVER_ARGS=LLAMA_SERVER_ARGS_E4B_BACKUP
 
 # Second set of llama-server arguments used when processing automated
@@ -528,6 +581,11 @@ LLAMA_BASE_GUARDRAIL = os.environ.get(
 ).rstrip("/")
 LLAMA_URL_GUARDRAIL = f"{LLAMA_BASE_GUARDRAIL}/v1/chat/completions"
 MODEL_ID_GUARDRAIL = "gemma-4-E2B-it-Q4_K_M"
+# Gemma 4 12B dense (Q4_K_M, ~7GB) — day-to-day code find-and-arrange lane.
+# Relative file path under BASE_MODELS_DIR; resolved by llama-server via
+# --models-dir. Must name the exact .gguf: a bare directory alias lets the
+# server auto-pick among siblings (observed: mtp draft grabbed instead).
+MODEL_ID_GEMMA4_12B = "gemma4-12b"
 MCP_USER = os.environ.get("MCP_USER", "")
 
 # ─────────────────────────────────────────────────────────────────────────────

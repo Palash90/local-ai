@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "e2e": "node e2e/run.mjs --tier=smoke",
+    "e2e:full": "node e2e/run.mjs --tier=full"
   },
   "dependencies": {
     "dompurify": "^3.4.12",
