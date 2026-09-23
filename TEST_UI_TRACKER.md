@@ -33,9 +33,12 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` passed (evidence linked) · 
   (evidence: e2e suite-robustness live PASS 2026-09-23 — Stop freeze +
   Queue second-send, reports/shot-cancelled.png)
 - [ ] U11 image edit e2e — photo edit renders and attaches (slow: ~10 min)
-- [~] U12 TTS speak buttons + word sync
-  (e2e suite-speech written, pending live run; confirmed 2026-09-23: word
-  timings are API-only, the UI has no highlight surface — pytest
+- [ ] U12 TTS speak buttons + word sync
+  (e2e suite-speech written; live run 2026-09-23 BLOCKED by env: Piper
+  onnxruntime pool starves under CPU contention — standalone synth 2s, but
+  in-server call hung with zero output. Mitigated with PIPER_SYNTH_TIMEOUT
+  (fail-fast 500 instead of infinite hang). Re-run needed on idle CPU.
+  Confirmed: word timings are API-only, no highlight UI exists — pytest
   test_tts_words.py covers the data side)
 - [x] U13 session memory recall — nonce word stored + recalled across turns
   (evidence: e2e suite-memory live PASS 2026-09-23, reports/shot-memory.png)
@@ -46,8 +49,17 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` passed (evidence linked) · 
   reports/shot-concurrency.png)
 - [ ] U16 artifact reuse — "show that image again" re-attaches same URL
   (e2e appended to suite-media, pending live run)
-- [~] U17 tool status tags — search 🔍 tag during web rounds
-  (e2e suite-tools written, pending live run)
+- [x] U17 tool status tags — search 🔍 tag during web rounds
+  (evidence: e2e suite-tools live PASS 2026-09-23; tag window is seconds —
+  suite polls at 500ms and falls back to session-file evidence)
+- [x] U22 image lightbox — preview opens overlay, history-back dismisses
+  (evidence: e2e suite-lightbox live PASS 2026-09-23, reports/shot-lightbox.png)
+- [x] U23 ModelBar widgets — dot/label/donut render, label matches API
+  (evidence: e2e suite-modelbar live PASS 2026-09-23)
+- [x] U24 photo edit render — attached-photo edit produces a new image card
+  (evidence: e2e suite-editimage live PASS 2026-09-23)
+- [x] U25 message share link — modal yields public URL loading unauthenticated
+  (evidence: e2e suite-share live PASS 2026-09-23, link returned HTTP 200)
 
 ## Shares / public (`/s/`, mixed auth)
 
@@ -77,3 +89,4 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` passed (evidence linked) · 
 - 2026-09-20: tracker created. Phase 0+1 (pytest 194, check_env, compile, parity) green. No browser runs yet — awaiting cookie paste + stack-up confirmation.
 - 2026-09-22: smoke tier 5/7 — crud/attach/guardrails PASS; smoke FAIL (`frag is not defined`, suite typo), robustness FAIL (Send-button race vs Queue UI).
 - 2026-09-23: fixed smoke typo + robustness Queue/Stop selectors; headed runs — smoke, robustness, crud, tasks, memory, music, concurrency ALL PASS. research FAIL: pipeline completes (~4k-char cited report) but GPU-lane critic timeouts push it past the 15-min budget. pytest +14 (compaction ×6 incl. a real counter bugfix, tasks_db ×4, tts_words ×4). Shares: U20 partially covered by suite-share (pending live run).
+- 2026-09-23 (batch 2+3): pytest +28 (navigate-gate/themes ×8, api-edges ×6, mcp-image ×4, markdown-RBAC ×4, selfchat-config ×6) incl. a real compactions-counter bugfix (earlier turn); handler harness (fake rfile/wfile) unlocks Phase-2 api.py coverage. e2e: lightbox/modelbar/editimage/share/tools ALL PASS live (tools needed 500ms tag polling + session-file fallback; share needed .value not innerText). speech BLOCKED on Piper-under-contention hang (fail-fast added). U20 now covered live (public link → 200).
