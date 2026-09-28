@@ -21,7 +21,7 @@ def _fake_m(monkeypatch, status=None, headroom=4000, recycled=None):
 
 def test_residency_snapshot_reports_loaded_lanes(monkeypatch):
     _fake_m(monkeypatch, {"gpu": "chat_loaded", "guardrail": "unloaded"})
-    assert images._lanes_loaded_for_reload() == (True, False)
+    assert images._lanes_loaded_for_reload() == (True, False, False)
 
 
 def test_residency_snapshot_defaults_to_reload_on_error(monkeypatch):
@@ -32,7 +32,7 @@ def test_residency_snapshot_defaults_to_reload_on_error(monkeypatch):
     monkeypatch.setattr(images, "M", Bad())
     # Fail-safe: a skipped reload breaks the next chat; a redundant one
     # costs seconds (idle loop re-unloads later).
-    assert images._lanes_loaded_for_reload() == (True, True)
+    assert images._lanes_loaded_for_reload() == (True, True, True)
 
 
 def test_recycle_skipped_when_headroom_ample(monkeypatch):

@@ -87,6 +87,8 @@ def mark_slot_kv_dirty(mode="gpu"):
 
 def _lane_model_status(mode):
     """Return the model status string for ``mode``."""
+    if mode == "26b":
+        return M._26b_model_status
     if mode == "cpu":
         return M._cpu_model_status
     if mode == "guardrail":
@@ -94,12 +96,12 @@ def _lane_model_status(mode):
     return M.model_status
 
 
-def _record_checkpoint(mode, filename, n_tokens, sid=None):
+def _record_checkpoint(mode, filename, n_tokens, sid=None, override=None):
     """Record a successful save into the per-lane and (when a sid is known)
     per-session checkpoint registries."""
     rec = {
         "file": filename,
-        "model": M.server_model_id(mode),
+        "model": M.server_model_id(mode, override),
         "ts": time.time(),
         "n_tokens": n_tokens,
     }
@@ -110,7 +112,7 @@ def _record_checkpoint(mode, filename, n_tokens, sid=None):
     return rec
 
 
-def _save_slot_to_disk(mode, sid, filename, record=True, timeout=180):
+def _save_slot_to_disk(mode, sid, filename, record=True, timeout=180, override=None):
     """POST /slots/0?action=save to snapshot the lane's live KV to ``filename``.
 
     ``timeout`` bounds how long we wait on a slot that is busy mid-batch:
@@ -124,7 +126,7 @@ def _save_slot_to_disk(mode, sid, filename, record=True, timeout=180):
             f"{M.server_base(mode)}/slots/0?action=save",
             # "model" is required in router mode: the parent picks the child
             # instance to proxy to from this field (the child itself ignores it).
-            json={"filename": filename, "model": M.server_model_id(mode)},
+            json={"filename": filename, "model": M.server_model_id(mode, override)},
             timeout=timeout,
         )
         if r.status_code == 200:
@@ -155,16 +157,17 @@ def _restore_slot_from_disk(mode, cp):
     filename = cp.get("file")
     if not filename:
         return False
+    override = cp.get("model")
     if not os.path.exists(os.path.join(M.LLAMA_SLOT_SAVE_DIR, filename)):
         with M._data_lock:
             M._slot_checkpoints.pop(mode, None)
         return False
-    if cp.get("model") != M.server_model_id(mode):
+    if cp.get("model") != M.server_model_id(mode, override):
         # Snapshot belongs to another model — restoring it would fail (or worse,
         # misload state), drop it silently.
         print(
             f"[llama] Dropping stale {mode} KV checkpoint "
-            f"(saved for '{cp.get('model')}', now '{M.server_model_id(mode)}')"
+            f"(saved for '{cp.get('model')}', now '{M.server_model_id(mode, override)}')"
         )
         with M._data_lock:
             M._slot_checkpoints.pop(mode, None)
@@ -173,7 +176,7 @@ def _restore_slot_from_disk(mode, cp):
         r = requests.post(
             f"{M.server_base(mode)}/slots/0?action=restore",
             # See save_slot_checkpoint: router mode routes by body "model".
-            json={"filename": filename, "model": M.server_model_id(mode)},
+            json={"filename": filename, "model": M.server_model_id(mode, override)},
             timeout=180,
         )
         if r.status_code == 200:
@@ -366,7 +369,9 @@ def task_mode(task_id):
     return M.SELF_CHAT_MODE if is_agent_user else "gpu"
 
 
-def server_base(mode):
+def server_base(mode, override=None):
+    if override or mode == "26b":
+        return M.LLAMA_BASE_26B
     if mode == "cpu":
         return M.LLAMA_BASE_CPU
     if mode == "guardrail":
@@ -376,7 +381,9 @@ def server_base(mode):
     return M.LLAMA_BASE
 
 
-def server_url(mode):
+def server_url(mode, override=None):
+    if override or mode == "26b":
+        return M.LLAMA_URL_26B
     if mode == "cpu":
         return M.LLAMA_URL_CPU
     if mode == "guardrail":
@@ -386,7 +393,11 @@ def server_url(mode):
     return M.LLAMA_URL
 
 
-def server_model_id(mode):
+def server_model_id(mode, override=None):
+    if override:
+        return override
+    if mode == "26b":
+        return M.MODEL_ID_OPENAI
     if mode == "cpu":
         return M.MODEL_ID_CPU or M.MODEL_ID
     if mode == "guardrail":
@@ -394,8 +405,10 @@ def server_model_id(mode):
     return M.MODEL_ID
 
 
-def server_status(mode):
+def server_status(mode, override=None):
     with M._data_lock:
+        if override or mode == "26b":
+            return M._26b_model_status
         if mode == "cpu":
             return M._cpu_model_status
         if mode == "guardrail":
@@ -403,7 +416,9 @@ def server_status(mode):
         return M.model_status
 
 
-def server_last_use(mode):
+def server_last_use(mode, override=None):
+    if override or mode == "26b":
+        return M._26b_last_llm_use
     if mode == "cpu":
         return M._cpu_last_llm_use
     if mode == "guardrail":
@@ -469,16 +484,25 @@ def is_model_ready(base, model_id):
 
     A model is considered ready when its status is ``"loaded"`` OR ``"ready"``:
     older llama.cpp builds report ``"ready"``, while mothership/``--models-dir``
-    builds report ``"loaded"``/``"unloaded"``. Treating ``"unloaded"``/anything
-    else as not-ready keeps this correct across both.
+    builds report ``"loaded"``/``"unloaded"``. An entry that matches by id but
+    carries NO status object (single-model servers) counts as resident: the
+    process only lists what it booted with. ``"unloaded"``/anything else
+    counts as not-ready.
     """
     try:
         r = requests.get(f"{base}/models", timeout=5)
         if r.status_code != 200:
             return False
-        for m in r.json().get("data", []):
-            if m.get("id") == model_id:
-                return (m.get("status") or {}).get("value") in _READY_STATES
+        data = r.json()
+        for m in data.get("data", []) + data.get("models", []):
+            mid = m.get("id") or m.get("name") or m.get("model")
+            if mid != model_id:
+                continue
+            st = (m.get("status") or {}).get("value")
+            if st is None:
+                return True
+            if st in _READY_STATES:
+                return True
     except Exception:
         pass
     return False
@@ -581,7 +605,7 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None, force=Fa
             # Status says unloaded, but VRAM might still be occupied if a
             # previous unload timed out before cudaFree completed. Check
             # nvidia-smi and force the unload POST if VRAM is still high.
-            if mode in ("gpu", "guardrail") and _is_vram_occupied():
+            if mode in ("gpu", "guardrail", "26b") and _is_vram_occupied():
                 print(f"[llama] {mode} status is unloaded but VRAM still occupied — forcing unload")
             else:
                 print(f"[llama] {mode} already unloaded — skipping")
@@ -595,6 +619,19 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None, force=Fa
             )
             return False
 
+        if mode == "26b":
+            # Single-model server: no /models/unload route either — stopping
+            # the process IS the unload (no other tenants). Checkpoint KV
+            # first so the next load can restore the session.
+            print(f"[llama] Stopping 26B server to release VRAM/RAM...")
+            save_slot_checkpoint(mode, timeout=kv_save_timeout if kv_save_timeout is not None else 180)
+            M.kill_llama_server("26b")
+            with M._data_lock:
+                M._26b_model_status = "unloaded"
+                M._26b_loaded_model = ""
+            _wait_vram_freed()
+            return True
+
         print(f"[llama] Requesting {mode} model unload from VRAM/RAM...")
         # Checkpoint the KV cache BEFORE it is destroyed by the unload, so the
         # post-image-gen (or post-idle) reload can restore it instead of
@@ -605,7 +642,9 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None, force=Fa
             save_slot_checkpoint(mode, timeout=kv_save_timeout if kv_save_timeout is not None else 180)
         
         with M._data_lock:
-            if mode == "cpu":
+            if mode == "26b":
+                M._26b_model_status = "unloading"
+            elif mode == "cpu":
                 M._cpu_model_status = "unloading"
             elif mode == "guardrail":
                 M._guardrail_model_status = "unloading"
@@ -616,9 +655,9 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None, force=Fa
         if mode == "guardrail":
             with M._data_lock:
                 loaded = M._guardrail_loaded_model
-            model_id = (model_id or "").strip() or loaded or M.server_model_id(mode)
+            model_id = (model_id or "").strip() or loaded or M.server_model_id(mode, model_id)
         else:
-            model_id = (model_id or "").strip() or M.server_model_id(mode)
+            model_id = (model_id or "").strip() or M.server_model_id(mode, model_id)
         max_attempts = 2
         for attempt in range(1, max_attempts + 1):
             print(f"[llama] Unload POST to {url} with model={model_id} (attempt {attempt}/{max_attempts})")
@@ -632,7 +671,10 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None, force=Fa
                 if r.status_code == 200:
                     print(f"[llama] {mode} model unloaded successfully")
                     with M._data_lock:
-                        if mode == "cpu":
+                        if mode == "26b":
+                            M._26b_model_status = "unloaded"
+                            M._26b_loaded_model = ""
+                        elif mode == "cpu":
                             M._cpu_model_status = "unloaded"
                         elif mode == "guardrail":
                             M._guardrail_model_status = "unloaded"
@@ -642,7 +684,7 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None, force=Fa
                     # The POST returns 200 before VRAM is actually freed
                     # (async cudaFree). Wait until nvidia-smi shows the
                     # memory has been released so ComfyUI can use it.
-                    if mode in ("gpu", "guardrail"):
+                    if mode in ("gpu", "guardrail", "26b"):
                         _wait_vram_freed()
                     return True
                 print(f"[llama] Unload failed: {r.status_code}")
@@ -659,7 +701,9 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None, force=Fa
         # Check real status if unload failed or erred out
         alive = M.is_llama_alive(M.server_base(mode))
         with M._data_lock:
-            if mode == "cpu":
+            if mode == "26b":
+                M._26b_model_status = "chat_loaded" if alive else "unloaded"
+            elif mode == "cpu":
                 M._cpu_model_status = "chat_loaded" if alive else "unloaded"
             elif mode == "guardrail":
                 M._guardrail_model_status = "chat_loaded" if alive else "unloaded"
@@ -787,7 +831,7 @@ def load_llama_model(mode="gpu", model_id=None):
     # starving it of VRAM and causing "VRAM grow failed". We busy-wait here
     # (not under _model_transition_lock) so the image path can still complete
     # and clear the flag without deadlocking.
-    if mode in ("gpu", "cpu", "guardrail"):
+    if mode in ("gpu", "cpu", "guardrail", "26b"):
         _wait_image_active_clear()
     with M._model_transition_lock:
         with M._data_lock:
@@ -795,7 +839,10 @@ def load_llama_model(mode="gpu", model_id=None):
             # running, its live KV is newer than any snapshot on disk.
             # Read status directly — server_status() would re-acquire _data_lock
             # (non-reentrant), causing a permanent deadlock.
-            if mode == "cpu":
+            if mode == "26b":
+                was_unloaded = M._26b_model_status == "unloaded"
+                M._26b_model_status = "loading"
+            elif mode == "cpu":
                 was_unloaded = M._cpu_model_status == "unloaded"
                 M._cpu_model_status = "loading"
             elif mode == "guardrail":
@@ -804,7 +851,7 @@ def load_llama_model(mode="gpu", model_id=None):
             else:
                 was_unloaded = M.model_status == "unloaded"
                 M.model_status = "loading"
-        model_id = (model_id or "").strip() or M.server_model_id(mode)
+            model_id = (model_id or "").strip() or M.server_model_id(mode, model_id)
         base = M.server_base(mode)
 
         # Fast path: the requested model is already loaded and serving —
@@ -815,7 +862,11 @@ def load_llama_model(mode="gpu", model_id=None):
         # No KV restore here: live KV is newer than any snapshot on disk.
         if M.is_model_ready(base, model_id):
             with M._data_lock:
-                if mode == "cpu":
+                if mode == "26b":
+                    M._26b_model_status = "chat_loaded"
+                    M._26b_last_llm_use = time.time()
+                    M._26b_loaded_model = model_id
+                elif mode == "cpu":
                     M._cpu_model_status = "chat_loaded"
                     M._cpu_last_llm_use = time.time()
                 elif mode == "guardrail":
@@ -827,6 +878,30 @@ def load_llama_model(mode="gpu", model_id=None):
                     M._last_llm_use = time.time()
             print(f"[llama] {mode} model '{model_id}' already resident — skipping load")
             return True
+
+        if mode == "26b":
+            # Single-model server: no /models/load route (404). The process
+            # boots with the model baked in - just poll readiness here.
+            # (Re)starts happen in _start_llm_round, which runs WITHOUT
+            # holding _model_transition_lock; restarting from inside load()
+            # self-deadlocks (non-reentrant lock, silent hang, wedges all
+            # lanes). E4B eviction (VRAM) is handled by the caller.
+            for i in range(24):
+                if M.is_model_ready(base, model_id):
+                    with M._data_lock:
+                        M._26b_model_status = "chat_loaded"
+                        M._26b_last_llm_use = time.time()
+                        M._26b_loaded_model = model_id
+                    print(f"[llama] 26b model ready (poll {i+1})")
+                    return True
+                if i % 6 == 5:
+                    print(f"[llama] 26B not ready yet (poll {i+1}/24)...")
+                time.sleep(5)
+            print(f"[llama] 26B model not ready after ~120s poll")
+            with M._data_lock:
+                M._26b_model_status = "unloaded"
+                M._26b_loaded_model = ""
+            return False
 
         if mode == "guardrail":
             # A different judge is resident (per-user swap): release it first
@@ -861,13 +936,13 @@ def load_llama_model(mode="gpu", model_id=None):
         # render can OOM during child init (observed: 231MB compute-buffer
         # alloc failed). Mirror the pre-render _wait_vram_freed gate.
         # Best-effort: proceed on timeout rather than block chat forever.
-        if mode in ("gpu", "guardrail"):
+        if mode in ("gpu", "guardrail", "26b"):
             _wait_vram_freed(threshold_mb=500, timeout=60)
         for load_attempt in (1, 2):
             if load_attempt > 1:
                 print(f"[llama] Retrying {mode} load in 10s (attempt {load_attempt}/2)...")
                 time.sleep(10)
-                if mode in ("gpu", "guardrail"):
+                if mode in ("gpu", "guardrail", "26b"):
                     _wait_vram_freed(threshold_mb=500, timeout=30)
             t_start = time.time()
             print(f"[llama] Sending load request for model '{model_id}' to {url}...")
@@ -884,7 +959,11 @@ def load_llama_model(mode="gpu", model_id=None):
                             t_ready = time.time() - t_start
                             print(f"[llama] {mode} model ready (attempt {i+1}, total {t_ready:.1f}s)")
                             with M._data_lock:
-                                if mode == "cpu":
+                                if mode == "26b":
+                                    M._26b_model_status = "chat_loaded"
+                                    M._26b_last_llm_use = time.time()
+                                    M._26b_loaded_model = model_id
+                                elif mode == "cpu":
                                     M._cpu_model_status = "chat_loaded"
                                     M._cpu_last_llm_use = time.time()
                                 elif mode == "guardrail":
@@ -915,7 +994,11 @@ def load_llama_model(mode="gpu", model_id=None):
             # actually ready rather than just assuming so.
             if M.is_model_ready(base, model_id):
                 with M._data_lock:
-                    if mode == "cpu":
+                    if mode == "26b":
+                        M._26b_model_status = "chat_loaded"
+                        M._26b_last_llm_use = time.time()
+                        M._26b_loaded_model = model_id
+                    elif mode == "cpu":
                         M._cpu_model_status = "chat_loaded"
                         M._cpu_last_llm_use = time.time()
                     elif mode == "guardrail":
@@ -930,7 +1013,10 @@ def load_llama_model(mode="gpu", model_id=None):
                 return True
 
         with M._data_lock:
-            if mode == "cpu":
+            if mode == "26b":
+                M._26b_model_status = "unloaded"
+                M._26b_loaded_model = ""
+            elif mode == "cpu":
                 M._cpu_model_status = "unloaded"
             elif mode == "guardrail":
                 M._guardrail_model_status = "unloaded"
@@ -1026,7 +1112,7 @@ def _is_simple_round(messages, task=None):
     return True
 
 
-def _route_sampling(mode, messages):
+def _route_sampling(mode, messages, override=None):
     """Classify the latest user message and return sampling overrides.
 
     One small classifier call against the CPU lane (fast E4B-class model),
@@ -1045,7 +1131,7 @@ def _route_sampling(mode, messages):
         r = requests.post(
             M.server_url("cpu"),
             json={
-                "model": M.server_model_id("cpu"),
+                "model": M.server_model_id("cpu", override),
                 "messages": [
                     {"role": "system", "content": M.SAMPLING_ROUTER_PROMPT},
                     {"role": "user", "content": text[:4000]},
@@ -1184,7 +1270,7 @@ def _openai_lane_wire_tools(client_tools, server_tools, server_tool_mode, tool_f
     try:
         from server.config import OPENAI_LANE_SERVER_TOOL_NAMES
     except Exception:
-        OPENAI_LANE_SERVER_TOOL_NAMES = {"web_search", "fetch_page", "tool_details"}
+        OPENAI_LANE_SERVER_TOOL_NAMES = {"web_search", "fetch_page", "browser_fetch", "tool_details"}
     subset = [t for t in (server_tools or [])
               if isinstance(t, dict) and (t.get("function") or {}).get("name") in OPENAI_LANE_SERVER_TOOL_NAMES]
     if server_tool_mode == "only":
@@ -1294,6 +1380,10 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         with M._data_lock:
             sampling = M.tasks.get(task_id, {}).get("_sampling")
             task_scheduling = dict(M.tasks.get(task_id, {}) or {})
+            model_override = M.tasks.get(task_id, {}).get("model")
+            # Serving identity: 26B tasks run on the dedicated :8089 server;
+            # lane mode still owns context budgets/pools/priority above.
+            smode = "26b" if model_override else mode
         if sampling is None:
             if M.tasks.get(task_id, {}).get("openai_lane"):
                 sampling = M.SAMPLING_BUCKETS.get("code", {})
@@ -1303,12 +1393,12 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                 sampling = {}
                 print(f"[sampling-router] {mode}: simple round — skipping classifier")
             else:
-                sampling = _route_sampling(mode, messages) if round_num == 0 else {}
+                sampling = _route_sampling(mode, messages, model_override) if round_num == 0 else {}
             with M._data_lock:
                 if task_id in M.tasks:
                     M.tasks[task_id]["_sampling"] = sampling
         payload = {
-            "model": M.server_model_id(mode),
+            "model": M.server_model_id(mode, model_override),
             "messages": messages,
             "tools": _openai_lane_wire_tools(
                 client_tools, wire_tools, server_tool_mode, tool_free),
@@ -1324,11 +1414,11 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         # chat session keeps its own KV cache. Best-effort and fail-open.
         generation_start = time.monotonic()
         try:
-            sync_session_slot(mode, sid)
+            sync_session_slot(smode, sid)
         except Exception as e:
             print(f"[llama] sync_session_slot failed ({e}) — continuing without KV swap")
-        M.mark_slot_kv_dirty(mode)
-        _mark_chat_generating(mode, True)
+        M.mark_slot_kv_dirty(smode)
+        _mark_chat_generating(smode, True)
         if mode == "gpu":
             try:
                 _dbg = []
@@ -1349,13 +1439,13 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                 print(f"[llm_payload] debug error: {_e}", flush=True)
         r = None
         try:
-            r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
+            r = requests.post(M.server_url(smode), json=payload, stream=True, timeout=600)
             if r.status_code == 400 and "exceed_context_size" in (r.text or ""):
                 print(f"[llm_round] task {task_id} hit exceed_context_size — emergency trim + one retry", flush=True)
                 r.close()
                 messages = _emergency_context_trim(messages)
                 payload["messages"] = messages
-                r = requests.post(M.server_url(mode), json=payload, stream=True, timeout=600)
+                r = requests.post(M.server_url(smode), json=payload, stream=True, timeout=600)
             if r.status_code != 200:
                 err_body = r.text[:500] if r.text else f"HTTP {r.status_code}"
                 raise RuntimeError(f"LLM server returned {r.status_code}: {err_body}")
@@ -1427,7 +1517,7 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                                 if fn.get("arguments"):
                                     existing["function"]["arguments"] += fn["arguments"]
         finally:
-            _mark_chat_generating(mode, False)
+            _mark_chat_generating(smode, False)
         # Clear the active-stream reference so the task dict no longer
         # holds a dangling response object.
         with M._data_lock:
@@ -1514,10 +1604,19 @@ def _start_llm_round(task_id, sid, round_num):
     mode = M.task_mode(task_id)
     with M._data_lock:
         task = M.tasks.get(task_id, {})
+    # 26B tasks (Extended / Research-26B / OpenAI lane) are served by the
+    # dedicated :8089 server; the lane mode still owns queueing, pools and
+    # priority. smode selects the serving identity for every server call.
+    smode = "26b" if task.get("model") else mode
     if not task.get("skip_ensure_llama"):
-        M.ensure_llama_server(mode)
+        M.ensure_llama_server(mode, task.get("model"))
+    # NOTE: read status via direct attribute access — server_status() takes
+    # _data_lock itself, and this lock is non-reentrant (same-thread
+    # re-acquire deadlocks the event loop permanently with no traceback).
     with M._data_lock:
-        if mode == "cpu":
+        if smode == "26b":
+            ms = M._26b_model_status
+        elif mode == "cpu":
             ms = M._cpu_model_status
         elif mode == "guardrail":
             ms = M._guardrail_model_status
@@ -1525,8 +1624,27 @@ def _start_llm_round(task_id, sid, round_num):
             ms = M.model_status
     if ms != "chat_loaded":
         if task.get("skip_ensure_llama"):
-            print(f"[llm_round] skip_ensure_llama=True but model not loaded on {mode} — loading anyway to avoid failure")
-        M.load_llama_model(mode)
+            print(f"[llm_round] skip_ensure_llama=True but model not loaded on {smode} — loading anyway to avoid failure")
+        if smode == "26b":
+            # 4GB VRAM holds one model: evict resident E4B before 26B loads.
+            # Probe actual server state, not process-local status (status
+            # resets on app restart while servers keep serving).
+            if is_model_ready(server_base("gpu"), server_model_id("gpu")):
+                print(f"[llm_round] evicting GPU model for 26B task {task_id}")
+                M.unload_llama_model("gpu")
+        elif mode == "gpu" and is_model_ready(
+            server_base("26b"), M.MODEL_ID_OPENAI
+        ):
+            print(f"[llm_round] evicting resident 26B for GPU task {task_id}")
+            M.unload_llama_model("26b")
+        if smode == "26b" and not is_model_ready(
+            server_base("26b"), task.get("model") or M.MODEL_ID_OPENAI
+        ):
+            # Runs WITHOUT _model_transition_lock held (unlike load()), so
+            # the restart's internal locking is safe here.
+            print(f"[llm_round] 26B not ready for task {task_id} — restarting server...")
+            M.restart_llama_server("26b")
+        M.load_llama_model(smode, model_id=task.get("model"))
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:

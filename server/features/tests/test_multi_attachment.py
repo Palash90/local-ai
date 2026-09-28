@@ -18,6 +18,7 @@ def _fake_m(monkeypatch, tasks, sessions=None, music_dir="/nonexistent"):
         sessions_meta={},
         MUSIC_DIR=music_dir,
         task_mode=lambda tid: "gpu",
+        server_model_id=lambda mode, override=None: override or "m",
         context_token_report=lambda sid, msgs: {},
         save_sessions=lambda: None,
     )

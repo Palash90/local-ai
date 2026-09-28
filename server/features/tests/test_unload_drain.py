@@ -50,7 +50,7 @@ def test_unload_force_bypasses_busy_check(monkeypatch):
         _chat_generating_by_lane={"gpu": 1},
         model_status="chat_loaded",
         server_base=lambda mode: "http://x:8081",
-        server_model_id=lambda mode: "m",
+        server_model_id=lambda mode, override=None: override or "m",
     )
     monkeypatch.setattr(
         llm, "requests", types.SimpleNamespace(post=lambda *a, **k: (posts.append(k), _Resp())[1])
@@ -69,7 +69,7 @@ def test_unload_idle_lane_still_unloads(monkeypatch):
         _chat_generating_by_lane={"gpu": 0},
         model_status="chat_loaded",
         server_base=lambda mode: "http://x:8081",
-        server_model_id=lambda mode: "m",
+        server_model_id=lambda mode, override=None: override or "m",
     )
     monkeypatch.setattr(
         llm, "requests", types.SimpleNamespace(post=lambda *a, **k: (posts.append(k), _Resp())[1])

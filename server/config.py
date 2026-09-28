@@ -19,6 +19,21 @@ LLAMA_URL = f"{LLAMA_BASE}/v1/chat/completions"
 LLAMA_BASE_CPU = "http://localhost:8079"
 LLAMA_URL_CPU = f"{LLAMA_BASE_CPU}/v1/chat/completions"
 
+# Dedicated standalone llama-server for the 26B MoE (Gemma4-26B-A4B).
+# Serves Extended / Research-26B / OpenAI-lane traffic so the :8081 router
+# keeps its full-offload E4B profile. Lazy-started on first 26B task, never
+# booted at startup (the box cannot hold both models resident comfortably).
+LLAMA_BASE_26B = os.environ.get("LLAMA_BASE_26B", "http://localhost:8089")
+LLAMA_URL_26B = f"{LLAMA_BASE_26B}/v1/chat/completions"
+# Exact .gguf for the standalone server. Override via env to swap quants
+# (e.g. IQ3_S) without a code edit.
+MODEL_FILE_26B = os.environ.get(
+    "MODEL_FILE_26B",
+    os.path.expanduser(
+        "~/local-ai-files/models/gemma4-26b/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+    ),
+)
+
 VENV_PYTHON = os.path.expanduser("~/local-ai/ComfyUI/venv/bin/python")
 COMFYUI_DIR = os.path.expanduser("~/local-ai/ComfyUI")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080/")
@@ -70,7 +85,7 @@ OPENAI_SERVER_TOOLS = os.environ.get("OPENAI_SERVER_TOOLS", "auto").strip().lowe
 # Server tools allowed on the OpenAI lane: search + fetch only. Image/music
 # (VRAM eviction stalls API responses), location (blocks 60s headless) and
 # files/memory/tasks (local state) stay UI-lane-only.
-OPENAI_LANE_SERVER_TOOL_NAMES = {"web_search", "fetch_page", "tool_details"}
+OPENAI_LANE_SERVER_TOOL_NAMES = {"web_search", "fetch_page", "browser_fetch", "tool_details"}
 
 # Max server-executed tool rounds per OpenAI-lane task before forcing a
 # text-only final round (ping-pong guard).
@@ -387,11 +402,12 @@ LLAMA_SERVER_ARGS_GEMMA4_26B = [
     # on the 4 GB card. 24 frees ~0.9 GB. Tune via GPU_NGL_26B (sweep up
     # while loads succeed twice in a row); full 30 needs the card to itself.
     "-ngl", os.environ.get("GPU_NGL_26B", "24"),
-    "--n-cpu-moe", "28",
+    "--n-cpu-moe", "30",
     "-fa", "on",
     "--ctx-size", os.environ.get("GPU_CTX_SIZE_26B", "32768"),
     "-ctk", "q4_0",
     "-ctv", "q4_0",
+    "--mlock",
     "--no-mmproj-offload",
     "--ctx-checkpoints", "1",
 
@@ -419,6 +435,52 @@ LLAMA_SERVER_ARGS_GEMMA4_26B = [
     "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
 
     # Sampling Parameters
+    "--temp", "1.0",
+    "--top-p", "0.95",
+    "--top-k", "64",
+    "--min-p", "0.05",
+    "--parallel", "1"
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone single-model server args for the 26B MoE (:8089). Mirrors
+# LLAMA_SERVER_ARGS_GEMMA4_26B load params verbatim (Sept-validated:
+# -ngl 24 + --n-cpu-moe 30 keeps experts in RAM, ~2.8GB VRAM) but runs as
+# its own single-model process instead of the :8081 router, so E4B keeps
+# full offload. --alias must equal MODEL_ID_OPENAI ("gemma4-26b") so the
+# "model" field in chat requests resolves to the loaded model.
+# ─────────────────────────────────────────────────────────────────────────────
+LLAMA_SERVER_ARGS_26B = [
+    "--host", "127.0.0.1",
+    "--port", "8089",
+    "--model", MODEL_FILE_26B,
+    "--alias", "gemma4-26b",
+    "--jinja",
+    "--chat-template-file", os.path.expanduser("~/local-ai-files/models/gemma4-26b/chat_template.jinja"),
+
+    "-ngl", os.environ.get("GPU_NGL_26B", "24"),
+    "--n-cpu-moe", "30",
+    "-fa", "on",
+    "--ctx-size", os.environ.get("GPU_CTX_SIZE_26B", "32768"),
+    "-ctk", "q4_0",
+    "-ctv", "q4_0",
+    "--mlock",
+    "--no-mmproj-offload",
+    "--ctx-checkpoints", "1",
+
+    "-t", "8",
+    "-tb", "8",
+    "-b", "2048",
+    "-ub", "512",
+    "--timeout", "3600",
+
+    "--reasoning-budget", "2048",
+    "--reasoning-budget-message", "Reasoning limit reached, summarize final answer.",
+
+    "--cache-reuse", "256",
+
+    "--slot-save-path", LLAMA_SLOT_SAVE_DIR,
+
     "--temp", "1.0",
     "--top-p", "0.95",
     "--top-k", "64",
@@ -586,6 +648,7 @@ MODEL_ID_GUARDRAIL = "gemma-4-E2B-it-Q4_K_M"
 # --models-dir. Must name the exact .gguf: a bare directory alias lets the
 # server auto-pick among siblings (observed: mtp draft grabbed instead).
 MODEL_ID_GEMMA4_12B = "gemma4-12b"
+MODEL_ID_OPENAI = "gemma4-26b"
 MCP_USER = os.environ.get("MCP_USER", "")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -799,7 +862,7 @@ TOOLS_DETAILED = [
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search. The results contain snippets only; if the snippets are insufficient to answer the question fully, follow up with fetch_page to read the full content of the relevant page. NEVER for questions about the user's own code, projects, or codebase — those must use the codebase-search tools. Results may be served from a recent cache; pass force_refresh=true only when you suspect the cached results are stale or the user explicitly asks to search again.",
+                "description": "Search the web for real-time/current information. Use this for weather, news, sports, stock prices, recent events, or any query where up-to-date data matters. Do NOT answer time-sensitive questions from memory — always search. The results contain snippets only; if the snippets are insufficient to answer the question fully, follow up with fetch_page to read the full content of the relevant page. If web_search returns empty twice, read a known documentation/article URL with browser_fetch (or browser__browser_navigate + browser__browser_evaluate) instead of a third search. NEVER for questions about the user's own code, projects, or codebase — those must use the codebase-search tools. Results may be served from a recent cache; pass force_refresh=true only when you suspect the cached results are stale or the user explicitly asks to search again.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -816,7 +879,7 @@ TOOLS_DETAILED = [
         "type": "function",
         "function": {
             "name": "fetch_page",
-            "description": "Fetch and read the full text content of a web page. Use this AFTER web_search when the search snippets are not enough to answer the question (e.g. you need details, data, or an article's body). Pass the full URL of the page to read. Long pages are returned one chunk at a time; if the result reports total_chunks greater than 1, call fetch_page again with chunk=2, 3, ... to read the rest. PDFs with no extractable text expose page_images rendered from the scanned pages.",
+                "description": "Fetch and read the full text content of a web page. Use this AFTER web_search when the search snippets are not enough to answer the question (e.g. you need details, data, or an article's body). If the fetch error reports a bot-block (403/429/captcha/Cloudflare), read the same URL with browser_fetch instead of retrying fetch_page. Pass the full URL of the page to read. Long pages are returned one chunk at a time; if the result reports total_chunks greater than 1, call fetch_page again with chunk=2, 3, ... to read the rest. PDFs with no extractable text expose page_images rendered from the scanned pages.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -827,6 +890,23 @@ TOOLS_DETAILED = [
                     "chunk": {
                         "type": "integer",
                         "description": "Which chunk of the page to read (1 = first). Omit to read the first chunk."
+                    }
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_fetch",
+            "description": "Read a web page through the headed browser (Chromium). Use this when web_search returns empty twice for a sub-question and you know a likely documentation/article URL, or when fetch_page fails with a bot-block (403/429/captcha/Cloudflare). One call navigates and returns the page innerText (up to ~24000 chars), persisted like a fetch_page result with via: browser so citations treat it as grounded. Same SSRF limits as fetch_page (public http/https only); refused during image renders.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full URL of the web page to open in the browser (must start with http:// or https://)."
                     }
                 },
                 "required": ["url"],
@@ -1457,7 +1537,7 @@ TOOLS_DETAILED = [
 
 # Hot-path tools whose FULL definitions always go out on the wire — the model
 # must never need a `tool_details` round-trip before using these.
-_FULL_DOCS_TOOLS = {"web_search", "fetch_page"}
+_FULL_DOCS_TOOLS = {"web_search", "fetch_page", "browser_fetch"}
 
 _TOOL_SHORT_DESC = {
     "web_search": (
@@ -1469,7 +1549,13 @@ _TOOL_SHORT_DESC = {
     ),
     "fetch_page": (
         "Read the full text of a web page by URL; long pages are chunked, "
-        "re-call with chunk=2, 3, ... for the rest."
+        "re-call with chunk=2, 3, ... for the rest. On bot-block errors use "
+        "browser_fetch for the same URL."
+    ),
+    "browser_fetch": (
+        "Read a page through the headed browser by URL (bot-block fallback; "
+        "also for empty-search entities with a known docs URL). One call; "
+        "result persists like fetch_page with via: browser."
     ),
     "generate_image": (
         "Generate/draw an image from a prompt. A style model MUST be chosen."

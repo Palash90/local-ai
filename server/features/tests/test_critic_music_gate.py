@@ -143,6 +143,7 @@ def test_finalize_decline_attaches_music_not_image(stub_state):
         _data_lock=threading.RLock(), tasks=tasks,
         sessions={"s1": []}, sessions_meta={},
         task_mode=lambda tid: "gpu",
+        server_model_id=lambda mode, override=None: override or "m",
         save_sessions=lambda: None,
         context_token_report=lambda sid, msgs: {},
     )
@@ -314,7 +315,7 @@ def test_quality_judge_same_model_grading(stub_state):
         tasks={"t": {"_original_message": "make a jingle", "_user": "zoe"}},
         sessions={},
         task_mode=lambda tid: "gpu",
-        server_model_id=lambda mode: "gemma4-e4b-q4",
+        server_model_id=lambda mode, override=None: override or "gemma4-e4b-q4",
     )
     try:
         jv = cr._judge_answer_quality("t", "some answer")

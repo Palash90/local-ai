@@ -286,8 +286,10 @@ def _screen_cached_payload(payload, query):
         screened["low_confidence"] = True
         screened["low_confidence_note"] = (
             "Cached search results did not contain enough credible sources for "
-            "this query. Do not fetch or cite the listed URLs; issue a fresh, "
-            "better-scoped web_search instead."
+            "this query. Do not fetch or cite the listed URLs; issue ONE fresh, "
+            "better-scoped web_search (fix spelling, fewer words) instead, or "
+            "open a known documentation URL with browser_fetch. "
+            "Otherwise answer UNSUPPORTED concisely without promising a next step."
         )
     return screened
 

@@ -19,7 +19,7 @@ def _fake_m(monkeypatch):
 
     fake_m = types.SimpleNamespace(
         server_url=lambda mode: f"http://127.0.0.1:lane-{mode}",
-        server_model_id=lambda mode: f"model-{mode}",
+        server_model_id=lambda mode, override=None: override or f"model-{mode}",
         SAMPLING_ROUTER_PROMPT="classify",
         SAMPLING_BUCKETS={"chat": {"temperature": 1.0}},
         SAMPLING_ROUTER_TIMEOUT=5,

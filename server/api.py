@@ -35,6 +35,7 @@ from server.config import (
     IMG_PATH,
     KNOWN_AGENT_USERS,
     MCP_USER,
+    MODEL_ID_OPENAI,
     MUSIC_DIR,
     MUSIC_SHOWCASE_DIR,
     SELF_CHAT_MODE,
@@ -1112,6 +1113,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 "client_timestamp": body.get("client_timestamp"),
                 "research": bool(body.get("research")),
                 "cpu": bool(body.get("cpu")) and bool(body.get("research")),
+                # Research auto-selects Extended (both run the 26B model).
+                "extended": bool(body.get("extended")) or bool(body.get("research")),
                 "no_tools": bool(body.get("no_tools")),
                 # Canonical character identity for pipeline-authored stories.
                 # Pinned into image-generation prompts so the same person is
@@ -1154,6 +1157,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # Test-time override: never admit anything to the CPU lane.
                 mode = "gpu"
             entry["mode"] = mode
+            if entry["research"] or entry["extended"]:
+                entry["model"] = MODEL_ID_OPENAI
             with _data_lock:
                 tasks[task_id] = {
                     "status": "queued",

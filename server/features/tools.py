@@ -293,12 +293,27 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
                     search_payload = json.loads(result)
                     t.setdefault("_search_details", []).append(search_payload)
                     # An empty low-confidence search cannot provide evidence.
-                    # Prevent a research model from issuing dozens of variant
-                    # searches and appending the same failure until context is
-                    # exhausted; the next LLM round must answer unsupported.
+                    # Allow ONE retry with a reformulated query (the note
+                    # tells the model to retry once); only cut tools after
+                    # the second consecutive empty so a single SearXNG miss
+                    # (e.g. a niche entity like "acodex terminal") doesn't
+                    # dead-end into a promised-but-impossible "next step".
+                    # Research mode keeps the original immediate cut to avoid
+                    # dozens of variant searches exhausting context.
                     if search_payload.get("low_confidence") and not search_payload.get("results"):
-                        t["no_tools"] = True
-                        t["_search_exhausted"] = True
+                        if t.get("research"):
+                            t["no_tools"] = True
+                            t["_search_exhausted"] = True
+                        else:
+                            empties = int(t.get("_search_empty_count", 0) or 0) + 1
+                            t["_search_empty_count"] = empties
+                            t["_search_exhausted"] = True
+                            if empties >= 2:
+                                t["no_tools"] = True
+                    elif search_payload.get("results"):
+                        # A productive search breaks the consecutive-empty
+                        # streak so a later unrelated miss gets its own retry.
+                        t["_search_empty_count"] = 0
                 except Exception:
                     pass
         llm_result = (
@@ -348,6 +363,104 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             f"Page content fetched from URL '{args.get('url')}'. "
             f"Use this content to answer the user's question accurately. "
             f"If the content is insufficient or was truncated, you may fetch another page or fall back to the search results:\n\n{result}"
+        )
+        M._event_post(
+            "tool_ok",
+            task_id,
+            tc_id=tc["id"],
+            result=llm_result,
+            sid=sid,
+            round=round_num,
+            tool_index=tool_index,
+        )
+
+    elif tool_name == "browser_fetch":
+        # One-hop headed-browser read: navigate + innerText evaluate behind a
+        # single tool call so the small chat model doesn't have to discover
+        # the raw two-step Playwright pair. Same SSRF gate as a raw navigate
+        # (refused for loopback/LAN/metadata and during image renders) and
+        # the same fetch_page-shaped persistence (via: browser) so citation
+        # verification treats it as grounded. Best-effort: never raises.
+        url = (args.get("url", "") or "").strip() if isinstance(args, dict) else ""
+        M.set_status(task_id, f"Opening page in browser: {url}...")
+        gate_err = _browser_navigate_gate("browser__browser_navigate", {"url": url})
+        if gate_err:
+            print(f"[browser-fetch] refused {url}: {gate_err}")
+            result = json.dumps({"url": url, "error": gate_err})
+        elif not mcp_manager.is_mcp_tool("browser__browser_navigate") or not mcp_manager.is_mcp_tool("browser__browser_evaluate"):
+            result = json.dumps({
+                "url": url,
+                "error": "Browser automation is unavailable (browser MCP not connected). Fall back to search results or fetch_page.",
+            })
+        else:
+            try:
+                nav = dispatch_mcp_tool("browser__browser_navigate", {"url": url})
+                _browser_note_result(task_id, "browser__browser_navigate", {"url": url}, nav)
+                if not isinstance(nav, str) or "Page URL:" not in nav:
+                    result = json.dumps({
+                        "url": url,
+                        "error": f"Browser navigation did not confirm the page: {(nav or '')[:300]}",
+                    })
+                else:
+                    ev = dispatch_mcp_tool(
+                        "browser__browser_evaluate",
+                        {"function": "() => document.body.innerText.slice(0,24000)"},
+                    )
+                    _browser_note_result(
+                        task_id, "browser__browser_evaluate",
+                        {"function": "() => document.body.innerText.slice(0,24000)"}, ev,
+                    )
+                    text = _browser_extract_evaluate_text(ev)
+                    if not text:
+                        result = json.dumps({
+                            "url": url,
+                            "error": f"Browser opened the page but returned no readable text: {(ev or '')[:300]}",
+                        })
+                    else:
+                        with M._data_lock:
+                            t = M.tasks.get(task_id)
+                            title = (t.get("_browser_title") or "") if t else ""
+                        result = json.dumps({
+                            "url": url,
+                            "title": title,
+                            "content": text[:_BROWSER_TEXT_CAP],
+                            "via": "browser",
+                        })
+            except Exception as e:
+                print(f"[browser-fetch] Unhandled exception for task {task_id}: {e}")
+                result = json.dumps({"url": url, "error": f"Browser fetch failed: {e}"})
+        print(f"[browser-fetch] Result for task {task_id}: {result[:300]}...")  # DEBUG
+        with M._data_lock:
+            t = M.tasks.get(task_id)
+            if t:
+                t.setdefault("_tools_used", []).append(tool_name)
+                # _browser_note_result already persisted a fetch_page-shaped
+                # entry on success; record an error entry here only when it
+                # didn't (navigation/evaluate failure) for diagnostics.
+                try:
+                    res = json.loads(result)
+                    details = t.setdefault("_search_details", [])
+                    if res.get("error") and not any(
+                        isinstance(d, dict) and d.get("url") == (res.get("url") or url)
+                        and d.get("via") == "browser" for d in details
+                    ):
+                        details.append(
+                            {
+                                "tool": "fetch_page",
+                                "url": res.get("url", url),
+                                "title": "",
+                                "content": "",
+                                "error": res.get("error", ""),
+                                "via": "browser",
+                                "retrieved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                            }
+                        )
+                except Exception:
+                    pass
+        llm_result = (
+            f"Page content opened in the browser from URL '{url}'. "
+            f"Use this content to answer the user's question accurately. "
+            f"Cite the page URL for claims it supports:\n\n{result}"
         )
         M._event_post(
             "tool_ok",

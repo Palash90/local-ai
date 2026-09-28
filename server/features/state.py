@@ -208,6 +208,12 @@ _guardrail_last_llm_use = time.time()
 # loaded id lets a repeated request for the same judge skip the reload churn.
 _guardrail_loaded_model = ""
 
+# Dedicated 26B MoE server (:8089). Own status/idle tracking so the GPU
+# lane (E4B) and the 26B server unload independently.
+_26b_model_status = "unloaded"
+_26b_last_llm_use = time.time()
+_26b_loaded_model = ""
+
 # Number of LLM inference calls currently generating on any lane. Mirrors
 # ``image_active``: while a chat/judge is actively streaming tokens into VRAM
 # we must NOT unload the model or load ComfyUI's models (the reverse of the

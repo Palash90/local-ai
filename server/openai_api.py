@@ -21,6 +21,7 @@ from server.config import (
     LLAMA_BASE_CPU,
     MODEL_ID,
     MODEL_ID_CPU,
+    MODEL_ID_OPENAI,
     OPENAI_API_KEY,
     OPENAI_SERVER_TOOLS,
 )
@@ -427,6 +428,7 @@ def handle_chat_completions(handler):
         "server_tool_mode": server_tool_mode,
         "openai_lane": True,
         "mode": mode,
+        "model": MODEL_ID_OPENAI,
         "skip_ensure_llama": True,
     }
 
@@ -532,7 +534,7 @@ def handle_chat_completions(handler):
         try:
             from server.config import OPENAI_LANE_SERVER_TOOL_NAMES as _SRV_NAMES
         except Exception:
-            _SRV_NAMES = {"web_search", "fetch_page", "tool_details"}
+            _SRV_NAMES = {"web_search", "fetch_page", "browser_fetch", "tool_details"}
         tool_calls = [tc for tc in tool_calls
                       if ((tc.get("function") or {}).get("name") not in _SRV_NAMES)]
         if not tool_calls:

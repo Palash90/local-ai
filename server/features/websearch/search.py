@@ -342,6 +342,57 @@ def _rescoped_query(query):
     return " ".join(sorted(toks, key=str.lower)) if toks else (query or "")
 
 
+# Filler action verbs stripped ONLY for the second-variant retry below (the
+# main query keeps them — "start" can matter for services). Lets "how to
+# start acodex terminal" retry as "acodex terminal": _rescoped_query alone
+# returns the sorted content tokens, which usually equals the already-tried
+# fallback re-run, so the retry is skipped as identical and never fires
+# (observed: zero "[web_search] retry" lines for the acodex failures).
+_RETRY_VERB_DROP = {
+    "start", "starts", "starting", "started", "run", "runs", "running",
+    "open", "opens", "opening", "opened", "launch", "launching", "begin",
+    "begins", "use", "using", "used", "get", "getting", "make", "making",
+    "create", "creating", "install", "installing", "setup", "show",
+    "showing",
+}
+
+
+def _retry_variant_query(clean_query):
+    """Second-chance retry query: content words minus filler action verbs.
+
+    Returns "" when fewer than two distinctive tokens remain. Always
+    genuinely different from both the raw query and _rescoped_query output
+    for verb-led how-to queries.
+    """
+    toks = _query_tokens(_sanitize_query(clean_query)) - _RETRY_VERB_DROP
+    return " ".join(sorted(toks, key=str.lower)) if len(toks) >= 2 else ""
+
+
+def _live_variant_results(variant_q, query, current_location):
+    """One paced SearXNG fetch + scrub for a retry variant.
+
+    Returns the scrubbed (not relevance-filtered) result list; the caller
+    applies relevance so empty-vs-credible accounting stays in one place.
+    """
+    _pace_outbound_request()
+    params = {"q": variant_q, "format": "json"}
+    _apply_location_scoping(variant_q, current_location, params)
+    cats = _pick_categories(variant_q)
+    if cats:
+        params["categories"] = cats
+    rr = requests.get(M.SEARXNG_URL, params=params, timeout=10)
+    rr.raise_for_status()
+    out = [
+        {
+            "title": x.get("title", ""),
+            "url": x.get("url", ""),
+            "snippet": x.get("content", "") or x.get("snippet", ""),
+        }
+        for x in rr.json().get("results", [])[:WEB_SEARCH_RESULT_LIMIT]
+    ]
+    return scrub_search_results(out, query=query)
+
+
 def _apply_location_scoping(clean_query, current_location, params):
     """Fold location/geo into SearXNG params (language hint, place qualifier)."""
     lang = _region_language(clean_query, current_location)
@@ -471,18 +522,41 @@ def web_search(query, current_time=None, current_location=None,
             payload.pop("fallback_fetch_url", None)
             payload.pop("fallback_fetch_note", None)
             payload["low_confidence"] = True
-            payload["low_confidence_note"] = (
-                "This search FAILED to find any result credibly matching the "
-                "query (fewer than two results survived relevance screening; "
-                "the set may even be empty). Treat every listed URL as "
-                "UNRELIABLE and off-topic: do NOT fetch any of them, do NOT "
-                "summarize them, and do NOT build an answer around them (e.g. "
-                "do not pivot to Real Madrid for a traffic question just "
-                "because it is the only returned link). State the sub-answer "
-                "as UNSUPPORTED and issue a fresh web_search with a clearer, "
-                "better-scoped query instead of improvising or latching onto "
-                "an irrelevant source."
-            )
+            if results:
+                # Thin but non-empty: every survivor passed BOTH the lexical
+                # and semantic gates, so the top hit is worth verifying (it
+                # carried the acodex-terminal answer with a single GitHub
+                # survivor at 0.70). Snippets alone are still untrusted.
+                payload["low_confidence_note"] = (
+                    "Only a thin set survived relevance screening (fewer than "
+                    "two credible results). Do NOT summarize from the snippets "
+                    "alone: verify by reading the most relevant listed URL "
+                    "with fetch_page (or browser_fetch if the fetch reports "
+                    "a bot-block) before citing it. If the read fails or does "
+                    "not support the claim, state the sub-answer as "
+                    "UNSUPPORTED and issue ONE fresh web_search with a "
+                    "clearer query instead of improvising."
+                )
+            else:
+                payload["low_confidence_note"] = (
+                    "This search FAILED to find any result credibly matching the "
+                    "query (fewer than two results survived relevance screening; "
+                    "the set may even be empty). Treat every listed URL as "
+                    "UNRELIABLE and off-topic: do NOT fetch any of them, do NOT "
+                    "summarize them, and do NOT build an answer around them (e.g. "
+                    "do not pivot to Real Madrid for a traffic question just "
+                    "because it is the only returned link). You still have tools: "
+                    "issue ONE fresh web_search with a clearer, better-scoped "
+                    "query (fix spelling, drop filler verbs like 'how to run', "
+                    "keep product tokens like 'acodex terminal'); if that also "
+                    "returns empty and you know a likely documentation URL for "
+                    "the entity, you may open it with browser_fetch(url) "
+                    "(one call; falls back to browser__browser_navigate + "
+                    "browser__browser_evaluate of document.body.innerText) "
+                    "instead of searching a third "
+                    "time. Otherwise state the sub-answer as UNSUPPORTED "
+                    "concisely — do NOT promise a 'next step' without issuing it."
+                )
         if error:
             payload["error"] = error
         return payload
@@ -594,6 +668,7 @@ def web_search(query, current_time=None, current_location=None,
                 formatted = google_results
                 low_confidence = google_low_confidence
     retried = False
+    retry_q = ""
     if (low_confidence or not formatted) and formatted is not None:
         # Deterministic server-side retry: the small chat model often promises
         # a "refined search" but never issues it. Re-run once with the
@@ -606,23 +681,9 @@ def web_search(query, current_time=None, current_location=None,
             (fallback_params.get("q") or "").lower(),
         ):
             try:
-                _pace_outbound_request()
-                retry_params = {"q": retry_q, "format": "json"}
-                _apply_location_scoping(retry_q, current_location, retry_params)
-                retry_cats = _pick_categories(retry_q)
-                if retry_cats:
-                    retry_params["categories"] = retry_cats
-                rr = requests.get(M.SEARXNG_URL, params=retry_params, timeout=10)
-                rr.raise_for_status()
-                retry_formatted = [
-                    {
-                        "title": x.get("title", ""),
-                        "url": x.get("url", ""),
-                        "snippet": x.get("content", "") or x.get("snippet", ""),
-                    }
-                    for x in rr.json().get("results", [])[:WEB_SEARCH_RESULT_LIMIT]
-                ]
-                retry_formatted = scrub_search_results(retry_formatted, query=query)
+                retry_formatted = _live_variant_results(
+                    retry_q, query, current_location
+                )
                 if retry_formatted:
                     retry_formatted, retry_low = relevance.filter_relevance(
                         retry_formatted, query
@@ -636,6 +697,35 @@ def web_search(query, current_time=None, current_location=None,
                 )
             except Exception as e:
                 print(f"[web_search] retry failed: {e}")
+    if (low_confidence or not formatted) and not retried and formatted is not None:
+        # Second variant: the rescoped retry above is usually identical to the
+        # already-attempted fallback re-run, so it self-skips. Drop filler
+        # action verbs for a genuinely different query ("how to start acodex
+        # terminal" -> "acodex terminal") and try once more.
+        variant_q = _retry_variant_query(clean_query)
+        if variant_q and variant_q.lower() not in (
+            clean_query.lower(),
+            norm_query,
+            (fallback_params.get("q") or "").lower(),
+            (retry_q or "").lower(),
+        ):
+            try:
+                var_formatted = _live_variant_results(
+                    variant_q, query, current_location
+                )
+                if var_formatted:
+                    var_formatted, var_low = relevance.filter_relevance(
+                        var_formatted, query
+                    )
+                    if var_formatted:
+                        formatted = var_formatted
+                        low_confidence = var_low
+                        retried = True
+                print(
+                    f"[web_search] variant retry {variant_q!r} -> {len(formatted)} results"
+                )
+            except Exception as e:
+                print(f"[web_search] variant retry failed: {e}")
     payload = _respond(formatted, low_confidence=low_confidence)
     if retried:
         payload["retried"] = True

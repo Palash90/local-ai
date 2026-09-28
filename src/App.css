@@ -1010,6 +1010,39 @@ a.page-modal-url:hover {
   to { transform: rotate(360deg); }
 }
 
+@keyframes boot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.75; transform: scale(0.97); }
+}
+
+/* ---- Boot splash (post-SSO, pre-check-auth) ---- */
+#boot-splash {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: #0f0f1a;
+}
+
+#boot-logo {
+  width: 72px;
+  height: 72px;
+  animation: boot-pulse 1.6s ease-in-out infinite;
+}
+
+#boot-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #e0e0e0;
+}
+
+#boot-sub {
+  font-size: 13px;
+  color: #9a9ab0;
+}
+
 .status-box {
   border: 1px solid #2a2a3e;
   border-radius: 8px;

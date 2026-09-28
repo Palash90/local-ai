@@ -29,6 +29,7 @@ export default function InputBar({ onSend, onCancel, hasPending, sessionId }) {
   const [text, setText] = useState('')
   const [research, setResearch] = useState(false)
   const [cpu, setCpu] = useState(false)
+  const [extended, setExtended] = useState(false)
   const [attachedImage, setAttachedImage] = useState(null)
   const [attachedFile, setAttachedFile] = useState(null)
   const [attachedFileUrl, setAttachedFileUrl] = useState(null)
@@ -37,6 +38,7 @@ export default function InputBar({ onSend, onCancel, hasPending, sessionId }) {
   useEffect(() => {
     setResearch(false)
     setCpu(false)
+    setExtended(false)
   }, [sessionId])
   const textareaRef = useRef(null)
   const imagePreviewRef = useRef(null)
@@ -148,7 +150,7 @@ export default function InputBar({ onSend, onCancel, hasPending, sessionId }) {
       finalText = '[FILE: ' + attachedFileUrl + '](' + attachedFile + ')\n\n' + (msg || 'See attached file above.')
     }
     try {
-      await onSend(finalText, attachedImage, research, cpu)
+      await onSend(finalText, attachedImage, research, cpu, extended)
     } finally {
       sendingRef.current = false
     }
@@ -194,6 +196,8 @@ export default function InputBar({ onSend, onCancel, hasPending, sessionId }) {
   function handleResearchChange(e) {
     const checked = e.target.checked
     setResearch(checked)
+    // Research auto-selects Extended (both run the 26B model).
+    setExtended(checked ? true : extended)
     if (!checked) setCpu(false)
   }
 
@@ -226,6 +230,10 @@ export default function InputBar({ onSend, onCancel, hasPending, sessionId }) {
         <label id="cpu-toggle" className={research ? '' : 'disabled'} title={research ? "Run the research on the CPU-backed server instead of the GPU." : "Only available with Research mode."}>
           <input type="checkbox" checked={cpu} disabled={!research} onChange={e => setCpu(e.target.checked)} />
           CPU
+        </label>
+        <label id="extended-toggle" className={research ? 'disabled' : ''} title={research ? "Auto-selected by Research mode (26B model)." : "Extended mode — uses the larger Gemma4 26B model for this request."}>
+          <input type="checkbox" checked={extended} disabled={research} onChange={e => setExtended(e.target.checked)} />
+          Extended
         </label>
       </div>
       {hasPending && (

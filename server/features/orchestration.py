@@ -115,7 +115,7 @@ def _is_openai_lane_server_tool(tc):
     try:
         names = M.OPENAI_LANE_SERVER_TOOL_NAMES
     except Exception:
-        names = {"web_search", "fetch_page", "tool_details"}
+        names = {"web_search", "fetch_page", "browser_fetch", "tool_details"}
     try:
         return ((tc.get("function") or {}).get("name") in names)
     except Exception:
@@ -414,6 +414,9 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         verification = t.get("_verification")
         verification_duration = t.get("_verification_duration")
         judge_result = t.get("_judge_result")
+        task_model = t.get("model")
+        task_extended = bool(t.get("extended"))
+        task_cpu = bool(t.get("cpu"))
     image_url = f"/output/{image_filename}" if image_filename and attach_image else None
     gen_prompt = gen_prompt if attach_image else None
     image_model = image_model if attach_image else None
@@ -547,6 +550,7 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
     )
     if search_details and "**Sources" not in msg_content:
         msg_content = msg_content.rstrip() + _source_footer(search_details)
+    mode = M.task_mode(task_id)
     msg_entry = {
         "role": "assistant",
         "content": msg_content,
@@ -564,6 +568,9 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
         "_search_details": search_details,
         "_artifacts": artifacts,
         "_research": bool(t.get("research")),
+        "_extended": task_extended,
+        "_cpu": task_cpu,
+        "_model": M.server_model_id(mode, task_model),
         "_elapsed_ms": elapsed_ms,
     }
     if source_timestamp:
@@ -574,7 +581,6 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
     confidence = (judge_result or {}).get("quality")
     if isinstance(confidence, int):
         msg_entry["_confidence"] = confidence
-    mode = M.task_mode(task_id)
     with M._data_lock:
         if sid in M.sessions:
             M.sessions[sid].append(msg_entry)
@@ -587,6 +593,8 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
             M._cpu_last_llm_use = time.time()
         elif mode == "guardrail":
             M._guardrail_last_llm_use = time.time()
+        if task_model:
+            M._26b_last_llm_use = time.time()
     M.save_sessions()
     with M._data_lock:
         if task_id in M.tasks:
@@ -611,6 +619,9 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
                 "_search_details": search_details,
                 "_artifacts": artifacts,
                 "_elapsed_ms": elapsed_ms,
+                "_model": M.server_model_id(mode, task_model),
+                "_extended": task_extended,
+                "_cpu": task_cpu,
                 "timings": task_timings,
                 "reasoning": reasoning,
             }
@@ -763,8 +774,10 @@ def _event_loop():
                     or bool(t.get("_peer_review")),
                     "research": bool(data.get("research")),
                     "cpu": bool(data.get("cpu")),
+                    "extended": bool(data.get("extended")),
                     "no_tools": bool(data.get("no_tools")),
                     "openai_lane": bool(data.get("openai_lane")),
+                    "model": data.get("model"),
                     "client_tools": list(data.get("client_tools") or []),
                     "client_tool_choice": data.get("client_tool_choice") or "none",
                     "_started_at": t.get("_started_at"),
@@ -826,6 +839,9 @@ def _event_loop():
                     M._guardrail_last_llm_use = time.time()
                 else:
                     M._last_llm_use = time.time()
+                _tt = M.tasks.get(task_id)
+                if _tt and _tt.get("model"):
+                    M._26b_last_llm_use = time.time()
             if msg.get("tool_calls"):
                 with M._data_lock:
                     tt = M.tasks.get(task_id)
@@ -1103,11 +1119,13 @@ def _event_loop():
                         body,
                         mode,
                     )
-                elif mode == "gpu" and not t.get("openai_lane"):
+                elif mode == "gpu" and not t.get("openai_lane") and not t.get("model"):
                     # Interactive UI (GPU) answers go through the same final-
                     # answer quality gate + bounded re-run as research (see
                     # critic.run_verification_worker), so every UI reply is
                     # judged against the user's request before it is finalized.
+                    # Skipped for model-override tasks (26B): judging them on
+                    # E4B would swap the 26B model out just to judge.
                     # But short, low-stakes turns (a one-line answer to a short
                     # question) skip the extra quality-judge LLM inference and
                     # finalize immediately — the deterministic pattern blockers
@@ -1634,6 +1652,8 @@ def _queue_worker(mode):
             client_timestamp=item.get("client_timestamp"),
             research=item.get("research"),
             cpu=item.get("cpu"),
+            extended=item.get("extended"),
+            model=item.get("model"),
             no_tools=item.get("no_tools"),
             openai_lane=item.get("openai_lane"),
             client_tools=item.get("client_tools"),

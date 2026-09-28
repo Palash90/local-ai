@@ -22,6 +22,7 @@ def _M(temp, **over):
         TEMP_THRESHOLD_OFF=75,
         RAM_EVAC_THRESHOLD=95,
         model_status="chat_loaded",
+        _26b_model_status="unloaded",
         unload_llama_model=lambda mode: calls.append(("unload", mode)),
         free_comfyui_vram=lambda: calls.append(("free",)),
         _evacuate_ram=lambda: calls.append(("evac",)),

@@ -47,7 +47,7 @@ def _install(monkeypatch, post_script, ready=True):
             (threshold_mb, timeout)) or True)
     monkeypatch.setattr("time.sleep", lambda s: calls["sleeps"].append(s))
     fake_m = types.SimpleNamespace(
-        server_model_id=lambda mode: "mid-" + mode,
+        server_model_id=lambda mode, override=None: override or ("mid-" + mode),
         server_base=lambda mode: "http://x/",
         is_model_ready=fake_ready,
         _model_transition_lock=threading.Lock(),

@@ -229,7 +229,7 @@ export default function App() {
   }
 
   // ---- Chat / Send ----
-  async function handleSend(text, image, research, cpu) {
+  async function handleSend(text, image, research, cpu, extended) {
     if (!currentSessionId) return
     const taskSid = currentSessionId
     setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
@@ -237,7 +237,7 @@ export default function App() {
     const userMsg = { role: 'user', content: text || '\uD83D\uDCC4 file', _timestamp: new Date().toISOString() }
 
     try {
-      const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined, undefined, research, cpu)
+      const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined, undefined, research, cpu, extended)
       const taskId = data.task_id
 
       // /api/chat returns the task_id immediately; the PendingMessage below then
@@ -428,6 +428,24 @@ export default function App() {
           setPublicShareToken(null)
         }}
       />
+    )
+  }
+
+  if (!authChecked && !publicShareToken) {
+    return (
+      <div id="boot-splash">
+        <svg id="boot-logo" viewBox="0 0 64 64" aria-hidden="true">
+          <rect x="2" y="2" width="60" height="60" rx="14" fill="#1a1a2e" />
+          <rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="#8b7cff" strokeWidth="2.5" />
+          <path d="M14 18 h36 a6 6 0 0 1 6 6 v14 a6 6 0 0 1 -6 6 H28 l-9 8 v-8 h-5 a6 6 0 0 1 -6 -6 V24 a6 6 0 0 1 6 -6 z" fill="#8b7cff" />
+          <rect x="21" y="32" width="4" height="6" rx="2" fill="#1a1a2e" />
+          <rect x="28" y="29" width="4" height="12" rx="2" fill="#1a1a2e" />
+          <path d="M44 22 l2.2 5.8 5.8 2.2 -5.8 2.2 -2.2 5.8 -2.2 -5.8 -5.8 -2.2 5.8 -2.2 z" fill="#e8f1ff" />
+          <circle cx="35" cy="27" r="2.4" fill="#60a5fa" />
+        </svg>
+        <div id="boot-title">Polu&apos;s AI Assistant</div>
+        <div id="boot-sub">Loading…</div>
+      </div>
     )
   }
 

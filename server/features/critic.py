@@ -918,11 +918,11 @@ _STEERING_HINTS = {
 }
 
 
-def _critic_completion(system, user, mode="gpu", max_tokens=2048):
+def _critic_completion(system, user, mode="gpu", max_tokens=2048, override=None):
     """Secondary, non-streamed, low-temperature LLM call. Retries once and
     never raises — returns None only when the model itself is unreachable."""
     payload = {
-        "model": M.server_model_id(mode),
+        "model": M.server_model_id(mode, override),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -1172,7 +1172,7 @@ def _fetch_source(url, max_chars=6000):
     }
 
 
-def _verify_source(cit, src, mode):
+def _verify_source(cit, src, mode, override=None):
     """Single critic call for one citation. Returns (verdict, failed)."""
     if not (src and src.get("ok")):
         return {
@@ -1199,7 +1199,7 @@ def _verify_source(cit, src, mode):
         f"FETCHED SOURCE (title: {src.get('title', '')}):\n"
         f"{body[:M.VERIFY_FETCH_CHARS]}"
     )
-    text = _critic_completion(_VERIFY_SYSTEM, user, mode)
+    text = _critic_completion(_VERIFY_SYSTEM, user, mode, override=override)
     if text is None:
         return None, True
     verdict = _parse_verdict(text)
@@ -1386,10 +1386,12 @@ def _judge_research_answer(task_id, answer):
         t = M.tasks.get(task_id) or {}
         user_input = t.get("_original_message", "")
         user = t.get("_user", "")
+        task_override = t.get("model")
     try:
         result = llm_verify_research_answer(
             user_input, answer,
             model_id=resolve_judge_model(user or ""),
+            override=task_override,
         )
     except Exception as e:
         print(f"[critic] research-answer judge call failed: {e}")
@@ -2298,7 +2300,7 @@ def _parse_peer_verdict(text):
     return verdict, confidence, notes
 
 
-def run_peer_review_worker(task_id, sid, answer, body, mode="cpu"):
+def run_peer_review_worker(task_id, sid, answer, body, mode="cpu", override=None):
     """Full cross-agent critique round for background agent replies (Kaya↔Kolpo).
 
     The peer agent reviews the reply as a dedicated LLM round on the CPU
@@ -2346,7 +2348,7 @@ def run_peer_review_worker(task_id, sid, answer, body, mode="cpu"):
         try:
             base = M.server_base("cpu")
             payload = {
-                "model": M.server_model_id("cpu"),
+                "model": M.server_model_id("cpu", override),
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7,
                 "max_tokens": 1024,

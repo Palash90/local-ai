@@ -342,7 +342,7 @@ def generate_image(
     # chat model (or let ComfyUI load its own) while a chat round mid-inference.
     # Only the gpu/guardrail lanes contend for VRAM; the cpu lane is evicted
     # instead (immediately, mid-round tasks requeue and resume after the render).
-    M._wait_chat_generating_clear(lanes=("gpu", "guardrail"))
+    M._wait_chat_generating_clear(lanes=("gpu", "guardrail", "26b"))
     # Flag image generation NOW (before the unload below) so the chat pipeline's
     # load_llama_model — which may run concurrently when the same task's next LLM
     # round fires — blocks until ComfyUI is done. _image_active is a dedicated
@@ -367,21 +367,24 @@ def generate_image(
     # must not be pointlessly loaded into RAM after every render). Lanes
     # pinned resident (KEEP_*_RESIDENT / external guardrail) are left alone
     # and need no reload either.
-    gpu_was_loaded, guard_was_loaded = _lanes_loaded_for_reload()
+    gpu_was_loaded, guard_was_loaded, b26_was_loaded = _lanes_loaded_for_reload()
     gpu_unloaded_here = _maybe_unload_lane("gpu", "image") if gpu_was_loaded else False
     print(f"[image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
     guard_unloaded_here = _maybe_unload_lane("guardrail", "image") if guard_was_loaded else False
+    # The 26B server also holds VRAM (~2.8GB) — evict it for the render too.
+    b26_unloaded_here = _maybe_unload_lane("26b", "image") if b26_was_loaded else False
     # Verify unload actually freed VRAM — poll only lanes we unloaded here.
     for _wait in range(10):
         gpu_ms = M.server_status("gpu")
         guard_ms = M.server_status("guardrail")
+        b26_ms = M.server_status("26b")
         if (not gpu_unloaded_here or gpu_ms == "unloaded") and (
             not guard_unloaded_here or guard_ms == "unloaded"
-        ):
+        ) and (not b26_unloaded_here or b26_ms == "unloaded"):
             break
-        print(f"[image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms})...")
+        print(f"[image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms}, 26b={b26_ms})...")
         time.sleep(2)
-    print(f"[image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}")
+    print(f"[image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}, 26B status: {M.server_status('26b')}")
     # ComfyUI also needs RAM, and the cpu lane's ~9 GB gemma4-12b is the
     # biggest other consumer. Evict it (KV checkpointed, RAM verified) so the
     # render never trips the whole-box RAM evacuation.
@@ -631,6 +634,12 @@ def generate_image(
             print("[image] Guardrail lane left resident — no reload needed", flush=True)
         else:
             print("[image] Guardrail lane was idle before render — leaving unloaded", flush=True)
+        if b26_unloaded_here:
+            M.load_llama_model("26b")
+        elif b26_was_loaded:
+            print("[image] 26B server left resident — no reload needed", flush=True)
+        else:
+            print("[image] 26B server was idle before render — leaving unloaded", flush=True)
     return result
 
 
@@ -709,7 +718,7 @@ def edit_image(
     M.set_status(task_id, "Freeing VRAM for image editing...")
     # Wait for any active GPU/guardrail LLM inference to finish before taking
     # over the GPU (mirror of generate_image — cpu lane is evicted, not waited).
-    M._wait_chat_generating_clear(lanes=("gpu", "guardrail"))
+    M._wait_chat_generating_clear(lanes=("gpu", "guardrail", "26b"))
     # Flag image editing NOW (before the unload) so a concurrent chat round that
     # calls load_llama_model blocks until ComfyUI is done (same reasoning as
     # generate_image). Without it the GPU model can be reloaded into VRAM right
@@ -722,21 +731,23 @@ def edit_image(
     print(f"[edit_image] Calling unload_llama_model(gpu), current status: {M.server_status('gpu')}")
     # Snapshot residency for the post-render reload gate below (same pattern
     # as generate_image): only lanes unloaded here get reloaded.
-    gpu_was_loaded, guard_was_loaded = _lanes_loaded_for_reload()
+    gpu_was_loaded, guard_was_loaded, b26_was_loaded = _lanes_loaded_for_reload()
     gpu_unloaded_here = _maybe_unload_lane("gpu", "edit_image") if gpu_was_loaded else False
     print(f"[edit_image] Calling unload_llama_model(guardrail), current status: {M.server_status('guardrail')}")
     guard_unloaded_here = _maybe_unload_lane("guardrail", "edit_image") if guard_was_loaded else False
+    b26_unloaded_here = _maybe_unload_lane("26b", "edit_image") if b26_was_loaded else False
     # Verify unload actually freed VRAM — poll only lanes we unloaded here.
     for _wait in range(10):
         gpu_ms = M.server_status("gpu")
         guard_ms = M.server_status("guardrail")
+        b26_ms = M.server_status("26b")
         if (not gpu_unloaded_here or gpu_ms == "unloaded") and (
             not guard_unloaded_here or guard_ms == "unloaded"
-        ):
+        ) and (not b26_unloaded_here or b26_ms == "unloaded"):
             break
-        print(f"[edit_image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms})...")
+        print(f"[edit_image] Waiting for unload (gpu={gpu_ms}, guardrail={guard_ms}, 26b={b26_ms})...")
         time.sleep(2)
-    print(f"[edit_image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}")
+    print(f"[edit_image] GPU status after unload: {M.server_status('gpu')}, Guardrail status: {M.server_status('guardrail')}, 26B status: {M.server_status('26b')}")
     # Same eviction as generate_image: free the cpu lane's RAM for ComfyUI.
     evict_cpu_model_for_image()
 
@@ -1196,6 +1207,12 @@ def edit_image(
             print("[edit_image] Guardrail lane left resident — no reload needed", flush=True)
         else:
             print("[edit_image] Guardrail lane was idle before render — leaving unloaded", flush=True)
+        if b26_unloaded_here:
+            M.load_llama_model("26b")
+        elif b26_was_loaded:
+            print("[edit_image] 26B server left resident — no reload needed", flush=True)
+        else:
+            print("[edit_image] 26B server was idle before render — leaving unloaded", flush=True)
 
     return result
 
@@ -1383,7 +1400,11 @@ def _lanes_loaded_for_reload():
         guard_was = M.server_status("guardrail") == "chat_loaded"
     except Exception:
         guard_was = True
-    return gpu_was, guard_was
+    try:
+        b26_was = M.server_status("26b") == "chat_loaded"
+    except Exception:
+        b26_was = True
+    return gpu_was, guard_was, b26_was
 
 
 def _recycle_after_render(tool_name):

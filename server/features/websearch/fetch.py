@@ -444,10 +444,10 @@ def _browser_fallback_hint(exc_text):
         return ""
     return (
         " The site is bot-blocking direct fetches — open it with the "
-        "browser automation tools instead: call "
-        "browser__browser_navigate with {\"url\": \"<this page URL>\"}, "
+        "browser instead: call browser_fetch with {\"url\": \"<this page URL>\"} "
+        "(or browser__browser_navigate with {\"url\": \"<this page URL>\"}, "
         "then browser__browser_evaluate with {\"function\": "
-        "\"() => document.body.innerText.slice(0,8000)\"} and use the "
+        "\"() => document.body.innerText.slice(0,8000)\"}) and use the "
         "returned page text."
     )
 

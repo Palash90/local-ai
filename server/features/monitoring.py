@@ -22,7 +22,7 @@ from server.config import IMAGE_RENDER_RAM_HEADROOM_MB
 from server.config import CPU_KV_SAVE_INTERVAL_SECONDS
 from server.features.state import M
 
-_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8083", "embed": "8084"}
+_LLAMA_PORTS = {"gpu": "8081", "cpu": "8079", "guardrail": "8083", "embed": "8084", "26b": "8089"}
 
 # Minimum RAM that must actually be freed after a CPU idle-unload before we
 # stop waiting. An async/dropped unload can return 200 without the ~9 GB model
@@ -161,8 +161,13 @@ def kill_comfyui():
     subprocess.run(["pkill", "-f", "comfy_main.py.*lowvram"], capture_output=True)
 
 
-def _start_llama_process(args, mode="gpu"):
-    """Launch a llama-server with the given argument list and wait for health."""
+def _start_llama_process(args, mode="gpu", boot_timeout=120):
+    """Launch a llama-server with the given argument list and wait for health.
+
+    ``boot_timeout`` bounds the wait: the 17GB 26B cold boot (mmap + mlock
+    under RAM pressure) can take several minutes, while lanes boot in
+    seconds — a short shared deadline kills healthy-but-slow boots and the
+    retry then races the victim (port conflict, VRAM contention)."""
     base = M.server_base(mode)
     log_dir = os.path.expanduser("~/local-ai-files")
     llm_log = open(os.path.join(log_dir, f"{mode}-llama-server.log"), "a")
@@ -172,7 +177,7 @@ def _start_llama_process(args, mode="gpu"):
         stderr=llm_log,
         start_new_session=True,
     )
-    deadline = time.time() + 120
+    deadline = time.time() + boot_timeout
     while time.time() < deadline:
         time.sleep(2)
         try:
@@ -182,7 +187,7 @@ def _start_llama_process(args, mode="gpu"):
                 return True
         except Exception:
             pass
-    print(f"[restart] llama-server ({mode}) did not respond within 2 minutes — killing")
+    print(f"[restart] llama-server ({mode}) did not respond within {boot_timeout}s — killing")
     M.kill_llama_server(mode)
     return False
 
@@ -197,11 +202,25 @@ def restart_llama_server(mode):
     if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
         print("[guardrail] external judge — skipping local restart", flush=True)
         return
+    # Serialize restarts against model loads/unloads: concurrent restarts
+    # (two tasks ensuring at once) interleave kill/start and murder each
+    # other's booting server (observed: 26B boot killed mid-load by a racing
+    # retry). Load/unload already hold this lock, so this also orders a
+    # restart behind an in-flight load instead of racing it.
+    with M._model_transition_lock:
+        _restart_llama_server_locked(mode)
+
+
+def _restart_llama_server_locked(mode):
+    """Restart body: caller must hold ``M._model_transition_lock``."""
     print(f"[llama] Restarting llama-server ({mode})")
     M.kill_llama_server(mode)
     time.sleep(1)
     with M._data_lock:
-        if mode == "cpu":
+        if mode == "26b":
+            M._26b_model_status = "unloaded"
+            M._26b_loaded_model = ""
+        elif mode == "cpu":
             M._cpu_model_status = "unloaded"
         elif mode == "guardrail":
             M._guardrail_model_status = "unloaded"
@@ -213,18 +232,23 @@ def restart_llama_server(mode):
         "cpu": M.LLAMA_SERVER_ARGS_CPU,
         "guardrail": M.LLAMA_SERVER_ARGS_GUARDRAIL,
         "embed": M.LLAMA_SERVER_ARGS_EMBED,
+        "26b": M.LLAMA_SERVER_ARGS_26B,
     }[mode]
-    _start_llama_process(args, mode)
+    # 17GB cold boot needs room: 120s kills healthy-but-slow 26B boots.
+    _start_llama_process(args, mode, boot_timeout=600 if mode == "26b" else 120)
 
 
-def ensure_llama_server(mode):
+def ensure_llama_server(mode, override=None):
     if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
         return
-    base = M.server_base(mode)
+    # 26B tasks are served by the dedicated :8089 server; lane mode only
+    # selected the task's queue.
+    smode = "26b" if override else mode
+    base = M.server_base(smode)
     if M.is_llama_alive(base):
         return
-    print(f"[llama] {mode} llama-server not reachable — starting...")
-    restart_llama_server(mode)
+    print(f"[llama] {smode} llama-server not reachable — starting...")
+    restart_llama_server(smode)
 
 
 _embed_ready_lock = threading.Lock()
@@ -410,7 +434,9 @@ def _ensure_llama_server_for_task(task_id):
         if task_id not in M.tasks:
             return
     mode = M.task_mode(task_id)
-    M.ensure_llama_server(mode)
+    with M._data_lock:
+        override = (M.tasks.get(task_id) or {}).get("model")
+    M.ensure_llama_server(mode, override)
 
 
 def _cpu_lane_needed():
@@ -473,6 +499,8 @@ def restart_servers():
         M._cpu_model_status = "unloaded"
         M._guardrail_model_status = "unloaded"
         M._guardrail_loaded_model = ""
+        M._26b_model_status = "unloaded"
+        M._26b_loaded_model = ""
     _start_llama_process(M.LLAMA_SERVER_ARGS, "gpu")
     if _cpu_lane_needed():
         _start_llama_process(M.LLAMA_SERVER_ARGS_CPU, "cpu")
@@ -797,6 +825,41 @@ def _idle_unload_loop():
                 )
                 _diag_next[mode] = time.time() + 60
 
+        # Dedicated 26B server: no lane queue of its own (a 26B round always
+        # belongs to a gpu/cpu lane task), so busy = lane activity or any
+        # streaming round; idle from its own last-use clock. Same 300s as gpu.
+        with M._queue_locks["gpu"]:
+            lanes_active = (
+                len(M._task_queues["gpu"]) > 0
+                or M._current_task_ids["gpu"] is not None
+            )
+        with M._queue_locks["cpu"]:
+            lanes_active = lanes_active or (
+                len(M._task_queues["cpu"]) > 0
+                or M._current_task_ids["cpu"] is not None
+            )
+        ms26 = M.server_status("26b")
+        if ms26 != "chat_loaded" and M.is_model_ready(
+            M.server_base("26b"), M.MODEL_ID_OPENAI
+        ):
+            # Orphaned by an app restart (status reset, model still serving):
+            # adopt the real state so idle-unload below can release it.
+            with M._data_lock:
+                M._26b_model_status = "chat_loaded"
+                M._26b_loaded_model = M.MODEL_ID_OPENAI
+            ms26 = "chat_loaded"
+        idle26 = time.time() - M.server_last_use("26b")
+        if (
+            ms26 == "chat_loaded"
+            and idle26 > 300
+            and not (lanes_active or any_streaming)
+        ):
+            print(
+                f"[idle] No 26b LLM activity for {idle26:.0f}s (>300s), releasing model weights...",
+                flush=True,
+            )
+            M.unload_llama_model("26b")
+
 
 def _reminder_loop():
     # Poll frequently; this loop is log-only and never consumes reminders.
@@ -840,6 +903,8 @@ def _evacuate_ram():
                             "client_timestamp": t.get("_client_timestamp"),
                             "research": bool(t.get("research")),
                             "cpu": bool(t.get("cpu")),
+                            "extended": bool(t.get("extended")),
+                            "model": t.get("model"),
                             "no_tools": bool(t.get("no_tools")),
                             "openai_lane": bool(t.get("openai_lane")),
                             "skip_ensure_llama": bool(t.get("skip_ensure_llama")),
@@ -908,7 +973,16 @@ def _thermal_step():
             if ms == "chat_loaded":
                 print("[thermal] Overheated — unloading GPU chat model")
                 M.unload_llama_model("gpu")
-            elif img_active:
+                unloaded_any = True
+            else:
+                unloaded_any = False
+            with M._data_lock:
+                ms26 = M._26b_model_status
+            if ms26 == "chat_loaded":
+                print("[thermal] Overheated — unloading 26B model")
+                M.unload_llama_model("26b")
+                unloaded_any = True
+            if not unloaded_any and img_active:
                 print("[thermal] Overheated — freeing ComfyUI VRAM")
                 M.free_comfyui_vram()
 

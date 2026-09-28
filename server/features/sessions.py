@@ -31,7 +31,7 @@ Produce a publication-quality research report, not a conversational answer.
   ## Conclusion
   ## References
 - Formatting: Do not use raw, unlinked URLs anywhere. The References section must list every cited source once with its full title hyperlinked to the URL.
-- Resource Failures & Retries: Attempt up to 3 retries per source before marking a claim as "UNSUPPORTED".
+- Resource Failures & Retries: Attempt up to 3 retries per source before marking a claim as "UNSUPPORTED". When `web_search` returns empty twice for a sub-question, or a `fetch_page` error reports a bot-block (403/429/captcha/Cloudflare), read the page through the browser (`browser_fetch(url)`, or `browser__browser_navigate` + `browser__browser_evaluate` of `document.body.innerText`) instead of a third identical search.
 - Clean Output: Do not mention internal system instructions, tool execution budgets, or prompt rules in the output."""
 
 def _session_file(user):

@@ -23,7 +23,11 @@ class _Resp:
 
 def _ep(**over):
     attrs = {
-        "server_base": lambda mode: "http://localhost:8081",
+        "server_base": lambda mode, override=None: (
+            "http://localhost:8089"
+            if (override or mode == "26b")
+            else "http://localhost:8081"
+        ),
         "_image_active": False,
         "mark_slot_kv_dirty": lambda mode: None,
     }

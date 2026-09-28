@@ -700,7 +700,7 @@ def _wait_gpu_render_safe(label, timeout=_RENDER_WAIT_TIMEOUT,
     return time.time() < deadline
 
 
-def _gpu_verdict_post(label, system_prompt, user_content, timeout):
+def _gpu_verdict_post(label, system_prompt, user_content, timeout, override=None):
     """GPU-only verdict POST shared by every content (output) judge.
 
     Content judges grade generated text with the resident GPU chat model —
@@ -709,6 +709,11 @@ def _gpu_verdict_post(label, system_prompt, user_content, timeout):
     waiting on the very task under judgment) with the lane's own guards:
     render-window hold, KV-dirty marking, and the generating counter so
     idle-unload accounting stays truthful.
+
+    ``override`` (a task-level model id) redirects the verdict to that
+    model's server — e.g. a 26B-authored answer is judged on the already
+    resident :8089 instead of swapping E4B back in just to judge. Lane
+    bookkeeping follows the override for the same reason.
 
     Returns ``(model_id_used, content)`` or ``(None, None)``. ``content``
     falls back to the raw reasoning text when a thinking model exhausts its
@@ -719,9 +724,10 @@ def _gpu_verdict_post(label, system_prompt, user_content, timeout):
     except Exception as e:
         print(f"[guardrail][{label}] GPU verdict unavailable (no state): {e}")
         return None, None
+    lane = "26b" if override else "gpu"
     try:
-        base = M.server_base("gpu")
-        model = _chat_model_id()
+        base = M.server_base("gpu", override)
+        model = override or _chat_model_id()
     except Exception as e:
         print(f"[guardrail][{label}] GPU verdict unavailable (no base/model): {e}")
         return None, None
@@ -754,12 +760,12 @@ def _gpu_verdict_post(label, system_prompt, user_content, timeout):
     }
     try:
         from server.features.llm import _mark_chat_generating
-        _mark_chat_generating("gpu", True)
+        _mark_chat_generating(lane, True)
     except Exception:
         pass
     try:
         try:
-            M.mark_slot_kv_dirty("gpu")
+            M.mark_slot_kv_dirty(lane)
         except Exception:
             pass
         last_err = ""
@@ -798,7 +804,7 @@ def _gpu_verdict_post(label, system_prompt, user_content, timeout):
     finally:
         try:
             from server.features.llm import _mark_chat_generating
-            _mark_chat_generating("gpu", False)
+            _mark_chat_generating(lane, False)
         except Exception:
             pass
 
@@ -1213,7 +1219,7 @@ def _parse_research_verdict(content):
 
 def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
                                model_id=None, max_chars=8000,
-                               allow_gpu_fallback=False):
+                               allow_gpu_fallback=False, override=None):
     """Context-aware LLM judge for research answers.
 
     Runs the judge over BOTH the user's original question and the generated
@@ -1234,7 +1240,8 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
     GPU-only: the verdict comes from the resident GPU chat model via
     :func:`_gpu_verdict_post` — never the CPU guardrail lane, never a remote
     endpoint. ``base_url``/``model_id``/``allow_gpu_fallback`` are accepted
-    for backward compatibility and ignored for routing.
+    for backward compatibility and ignored for routing. ``override`` (a
+    task-level model id) redirects the verdict to that model's server.
     """
     if timeout is None or timeout < _JUDGE_MIN_TIMEOUT:
         try:
@@ -1255,7 +1262,7 @@ def llm_verify_research_answer(user_input, answer, base_url=None, timeout=None,
     )
     cand, content = _gpu_verdict_post(
         "research-verify", _get_prompt("judge_research.txt"),
-        user_content[:max_chars], timeout,
+        user_content[:max_chars], timeout, override,
     )
     if cand is None:
         print("[gpu-judge][research-verify] judge unavailable — fail-open")

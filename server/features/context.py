@@ -135,9 +135,9 @@ def trim_messages_for_context(messages, mode="gpu"):
     return _hard_truncate_messages(trimmed, budget)
 
 
-def _summarize_with_llm(text, mode="gpu"):
+def _summarize_with_llm(text, mode="gpu", override=None):
     payload = {
-        "model": M.server_model_id(mode),
+        "model": M.server_model_id(mode, override),
         "messages": [
             {
                 "role": "system",

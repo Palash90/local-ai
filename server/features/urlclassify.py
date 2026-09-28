@@ -103,6 +103,32 @@ _AD_NETWORK_HOSTS = (
 _SHOP_HOST_LABELS = ("shop", "store", "shopping", "boutique", "market")
 _SHOP_TLDS = ("shop", "store", "boutique")
 
+# Hosts whose single-segment / query-identified paths are content pages, not
+# section fronts: video watch pages ("/watch?v=…", "/shorts/…") and
+# StackExchange-style question pages ("/q/<id>", "/questions/<id>/…").
+# Without this, the "single clean segment" and "structural segment 'q'"
+# rules evict the best result for niche queries (observed: the only
+# AcodeX-terminal tutorial, a youtube watch URL, dropped as landing).
+_VIDEO_WATCH_HOSTS = ("youtube.com", "youtu.be", "vimeo.com")
+_VIDEO_WATCH_PATHS = ("watch", "shorts", "live", "embed", "clip")
+_QA_HOSTS = (
+    "stackoverflow.com", "superuser.com", "serverfault.com",
+    "askubuntu.com", "stackapps.com", "mathoverflow.net",
+)
+
+
+def _is_qa_question_page(host, segs):
+    """True for StackExchange-style question URLs (/q/<id>, /questions/<id>)."""
+    if not (
+        host in _QA_HOSTS
+        or host.endswith(".stackexchange.com")
+    ):
+        return False
+    if len(segs) >= 2 and segs[0].lower() in ("q", "questions"):
+        return segs[1].split(".")[0].isdigit()
+    return False
+
+
 # URL patterns that mark product-list/product-detail or reference pages:
 # an Amazon/Walmart product "dp/item" page, a dictionary entry, a stock
 # symbol lookup, or a company-profile page. NOTE: bare numeric article IDs
@@ -195,6 +221,7 @@ def _landing_reason(url):
     """
     try:
         parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
         path = parsed.path or "/"
     except (ValueError, AttributeError):
         return None
@@ -207,6 +234,17 @@ def _landing_reason(url):
     ad = _ad_reason(url)
     if ad:
         return f"ad URL ({ad})"
+    # Video watch pages and Q&A question pages are single articles, even
+    # though their paths look like bare/structural segments.
+    if segs and (
+        host in _VIDEO_WATCH_HOSTS
+        or host.endswith(".youtube.com")
+    ) and segs[0].lower() in _VIDEO_WATCH_PATHS:
+        return None
+    if host == "youtu.be":
+        return None
+    if _is_qa_question_page(host, segs):
+        return None
     first = segs[0].split(".")[0].lower()
     if _LANDING_SEGMENT_RE.match(first):
         return f"landing segment '{first}'"
