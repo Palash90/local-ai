@@ -23,6 +23,7 @@ from server.config import (
     MODEL_ID_CPU,
     MODEL_ID_OPENAI,
     OPENAI_API_KEY,
+    OPENAI_MAX_CONTEXT_TOKENS,
     OPENAI_SERVER_TOOLS,
 )
 from server.features.state import M
@@ -189,6 +190,27 @@ def _get_api_session(sid):
         return M.sessions[sid]
 
 
+def _SYSTEM_REMINDER_RE():
+    import re as _re
+    return _re.compile(r"<system-reminder>.*?</system-reminder>", _re.IGNORECASE | _re.DOTALL)
+
+
+def _split_reminders(text):
+    """Split `<system-reminder>` blocks out of a user text.
+
+    Returns (clean_text, [reminders]). Harness (opencode) injects plan-mode
+    and other meta instructions as user content; left in place, the model
+    answers *about the reminder* instead of the task (observed 2026-09-30:
+    1265-char prompt echo). Callers demote reminders to role=system so they
+    constrain without hijacking. Pure function.
+    """
+    if not isinstance(text, str) or "<system-reminder" not in text.lower():
+        return text, []
+    reminders = _SYSTEM_REMINDER_RE().findall(text)
+    clean = _SYSTEM_REMINDER_RE().sub("", text).strip()
+    return clean, [r.strip() for r in reminders if r.strip()]
+
+
 def _messages_to_session(messages):
     """Convert an OpenAI messages array into session-format entries.
 
@@ -213,11 +235,141 @@ def _messages_to_session(messages):
         elif role == "system":
             entry["content"] = content or ""
         else:
-            # user message — may be a string or an array of content parts
-            entry["content"] = content or ""
+            # user message — may be a string or an array of content parts.
+            # Demote <system-reminder> blocks to their own system entries:
+            # the harness sends plan-mode/meta instructions as user text and
+            # the model otherwise answers about the reminder, not the task.
+            if isinstance(content, str):
+                clean, reminders = _split_reminders(content)
+                for r in reminders:
+                    entries.append({"role": "system", "content": r})
+                entry["content"] = clean
+            elif isinstance(content, list):
+                new_parts = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        clean, reminders = _split_reminders(part.get("text", ""))
+                        for r in reminders:
+                            entries.append({"role": "system", "content": r})
+                        if clean:
+                            new_parts.append({**part, "text": clean})
+                    else:
+                        new_parts.append(part)
+                entry["content"] = new_parts
 
         entries.append(entry)
     return entries
+
+
+def _openai_context_check(messages):
+    """Return ``(ok, estimated, limit)`` for an OpenAI-lane request.
+
+    Pure estimator wrapper (separated for unit tests): True when the
+    request fits ``OPENAI_MAX_CONTEXT_TOKENS``. Estimation failures
+    fail OPEN (admit) — a missed estimate only costs the same hang the
+    cap exists to prevent, while a false reject would break valid calls.
+    """
+    try:
+        estimated = M.estimate_tokens(messages)
+    except Exception:
+        return True, 0, OPENAI_MAX_CONTEXT_TOKENS
+    return estimated <= OPENAI_MAX_CONTEXT_TOKENS, estimated, OPENAI_MAX_CONTEXT_TOKENS
+
+
+_ERROR_STATUS_RE = None  # compiled lazily below to keep import light
+_ERROR_KEYWORD_RE = None
+
+
+def _tool_call_url(tc):
+    """Extract the requested URL from a client tool call (or "" if none).
+
+    Handles OpenAI function-call shape (JSON ``arguments`` with a ``url``
+    key) with a regex fallback for raw-URL argument strings.
+    """
+    if not isinstance(tc, dict):
+        return ""
+    fn = tc.get("function") or {}
+    args = fn.get("arguments", "") or ""
+    try:
+        import json as _json
+
+        data = _json.loads(args) if isinstance(args, str) else args
+        if isinstance(data, dict) and data.get("url"):
+            return str(data.get("url"))
+    except Exception:
+        pass
+    if isinstance(args, str):
+        import re as _re
+
+        m = _re.search(r"https?://[^\s\"'<>]+", args)
+        if m:
+            return m.group(0)
+    return ""
+def _failed_fetch_urls(history_entries):
+    """URLs whose client-tool fetch already failed once in this history.
+
+    1-strike rule: a 404/403/420 (any HTTP 4xx really) never heals itself,
+    so the model must NOT request the URL again — it must move on
+    (web_search for the right page, or answer from context). Returns the
+    dead URLs in first-seen order, deduped. Pure function (unit-tested).
+    """
+    global _ERROR_STATUS_RE, _ERROR_KEYWORD_RE
+    import re as _re
+
+    if _ERROR_STATUS_RE is None:
+        _ERROR_STATUS_RE = _re.compile(
+            r"non[\s-]*2xx|status\s*code|4\d\d"
+        )
+        _ERROR_KEYWORD_RE = _re.compile(
+            r"fail|forbidden|not found|rate.?limit|enhance your calm|"
+            r"error|refused|timeout|unreachable",
+            _re.IGNORECASE,
+        )
+    # Map tool_call id -> requested URL for the in-flight client calls.
+    pending = {}
+    for entry in history_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        for tc in entry.get("tool_calls") or []:
+            url = _tool_call_url(tc)
+            if url and isinstance(tc, dict) and tc.get("id"):
+                pending[tc.get("id")] = url
+    dead = []
+    for entry in history_entries or []:
+        if not isinstance(entry, dict) or entry.get("role") != "tool":
+            continue
+        url = pending.pop(entry.get("tool_call_id", ""), "")
+        if not url:
+            continue
+        text = entry.get("content", "") or ""
+        text = text if isinstance(text, str) else str(text)
+        if _ERROR_STATUS_RE.search(text):
+            is_error = True
+        else:
+            is_error = len(text) < 500 and bool(_ERROR_KEYWORD_RE.search(text))
+        if is_error and url not in dead:
+            dead.append(url)
+    return dead
+
+
+def _strip_dead_tool_calls(tool_calls, session_messages):
+    """Split response tool calls into (live, dropped_dead_urls).
+
+    Enforcement half of the fetch loop-breaker: the admission-time steering
+    note is advisory and stubborn models ignore it, so dead-URL calls are
+    removed here — at the response boundary, before the client ever sees
+    another doomed fetch. Pure function (unit-tested).
+    """
+    live = list(tool_calls or [])
+    if not live:
+        return [], []
+    dead = set(_failed_fetch_urls(session_messages))
+    if not dead:
+        return live, []
+    kept = [tc for tc in live if _tool_call_url(tc) not in dead]
+    dropped = sorted({u for tc in live
+                      for u in [_tool_call_url(tc)] if u in dead})
+    return kept, dropped
 
 
 def _poll_task(task_id, timeout_s=3600, status_callback=None, keepalive_interval=10):
@@ -245,7 +397,12 @@ def _poll_task(task_id, timeout_s=3600, status_callback=None, keepalive_interval
                 print(f"[poll] Task {task_id} status changed: {last_status} → {status}, message={message}")
             if status_callback:
                 try:
-                    status_callback(status, message)
+                    # A False return means "client is gone, stop polling"
+                    # (SSE write failed). Abort instead of pinging a dead
+                    # socket every 10s for up to 3600s (66x Broken pipe
+                    # spam on 2026-09-30).
+                    if status_callback(status, message) is False:
+                        return {"status": "cancelled", "error": "Client disconnected"}
                 except Exception as e:
                     print(f"[poll] Status callback error: {e}")
             last_ping = now
@@ -359,6 +516,17 @@ def handle_chat_completions(handler):
         )
         return
 
+    # Context cap: fail fast with 413 instead of hanging through a prefill
+    # no client outwaits. Runs before any session/task state is created.
+    _ctx_ok, _ctx_est, _ctx_lim = _openai_context_check(messages)
+    if not _ctx_ok:
+        print(f"[openai_api] context cap: estimated {_ctx_est} tokens > limit {_ctx_lim} — rejecting")
+        handler.send_json(
+            {"error": {"message": f"Context too large: estimated {_ctx_est} tokens exceeds the OpenAI lane limit of {_ctx_lim}. Trim history, compact the conversation, or retry with fewer messages.", "type": "invalid_request_error"}},
+            status=413,
+        )
+        return
+
     # Extract the text content from the last user message (may be multimodal)
     last_user = messages[last_user_idx]
     user_content = last_user.get("content", "")
@@ -405,6 +573,37 @@ def handle_chat_completions(handler):
     if history_entries:
         with M._data_lock:
             M.sessions[session_id] = history_entries
+
+    # Loop-breaker: a fetch that 404/403/420'd once will never heal — tell
+    # the model to move on instead of re-requesting the dead URL forever
+    # (each retry burns a full multi-minute prefill). Fail-open: steering
+    # only, never blocks.
+    _dead_urls = _failed_fetch_urls(history_entries)
+    if _dead_urls:
+        _listed = ", ".join(_dead_urls[:5])
+        print(f"[openai_api] loop-breaker: {len(_dead_urls)} dead fetch URL(s) — steering off: {_listed}")
+        with M._data_lock:
+            M.sessions[session_id].append({
+                "role": "user",
+                "content": (
+                    "[SYSTEM NOTE — fetch loop-breaker. The following URL(s) "
+                    "already failed with an HTTP client error and will not "
+                    "recover — do NOT request them again via any fetch tool: "
+                    f"{_listed}. Move on: use web_search to find the correct "
+                    "page, or answer from the context you already have. "
+                    "This note is from your own execution loop, not the user."
+                ),
+            })
+
+    # The last user message may itself carry <system-reminder> blocks
+    # (opencode plan-mode). Same demotion: reminders become system entries
+    # in the session, the queued prompt stays the clean task text.
+    _clean_user_text, _user_reminders = _split_reminders(user_text)
+    if _user_reminders:
+        with M._data_lock:
+            for r in _user_reminders:
+                M.sessions[session_id].append({"role": "system", "content": r})
+        user_text = _clean_user_text if _clean_user_text else user_text
 
     # ── Determine lane mode ─────────────────────────────────────────────
     # API users go to the GPU lane like interactive UI users.
@@ -471,6 +670,8 @@ def handle_chat_completions(handler):
         handler.send_header("X-Accel-Buffering", "no")
         handler.end_headers()
 
+        _dead_logged = {"once": False}
+
         def write_sse(raw_line):
             """Write one raw SSE line/frame; return False if the client is gone."""
             try:
@@ -478,7 +679,11 @@ def handle_chat_completions(handler):
                 handler.wfile.flush()
                 return True
             except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                print(f"[openai_api] Task {task_id} client disconnected: {e}")
+                # Log once per task — the old code logged every 10s ping
+                # (66x for one 11-min orphan on 2026-09-30).
+                if not _dead_logged["once"]:
+                    print(f"[openai_api] Task {task_id} client disconnected: {e} — aborting poll")
+                    _dead_logged["once"] = True
                 return False
 
         # Send the role chunk immediately so clients register the stream as started.
@@ -486,12 +691,32 @@ def handle_chat_completions(handler):
 
         def status_ping(status, message):
             if status == "done":
-                return
+                return True
             # SSE comment line (":" prefix) — ignored by JSON/data parsers but
             # still counts as "bytes received" to reset the client's idle timer.
-            write_sse(f": {status} — {message}\n\n")
+            # Propagate write failure so _poll_task aborts the orphan poll.
+            return write_sse(f": {status} — {message}\n\n")
 
         result = _poll_task(task_id, timeout_s=3600, status_callback=status_ping)
+        if result.get("status") == "cancelled" and result.get("error") == "Client disconnected":
+            # Free the single-slot lane: mark cancelled + close the active
+            # LLM stream so the retry behind it can proceed.
+            try:
+                with M._data_lock:
+                    t = M.tasks.get(task_id)
+                    if t and t.get("status") not in ("done", "error", "cancelled"):
+                        t["status"] = "cancelled"
+                        t["message"] = "Client disconnected"
+                    stream = M._active_streams.pop(task_id, None)
+                if stream:
+                    try:
+                        stream.close()
+                        stream.raw.close()
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[openai_api] Task {task_id} orphan-cancel failed: {e}")
+            return
     else:
         result = _poll_task(task_id, timeout_s=3600)
 
@@ -539,6 +764,29 @@ def handle_chat_completions(handler):
                       if ((tc.get("function") or {}).get("name") not in _SRV_NAMES)]
         if not tool_calls:
             tool_calls = None
+        else:
+            # Dead-URL enforcement (loop-breaker part 2): the admission
+            # steering note is advisory and stubborn models ignore it, so
+            # strip calls to already-failed URLs here — the client never
+            # receives another doomed fetch.
+            with M._data_lock:
+                _sess = list(M.sessions.get(sid, []))
+            tool_calls, _dropped = _strip_dead_tool_calls(tool_calls, _sess)
+            if _dropped:
+                print(f"[openai_api] loop-breaker: dropping {len(_dropped)} dead-URL tool call(s) for task {task_id}: {', '.join(_dropped[:3])}")
+            if not tool_calls:
+                tool_calls = None
+                if not response_text:
+                    # Model asked ONLY for dead URLs: answer in text so the
+                    # client gets progress instead of a zero-call handoff
+                    # it treats as retry-with-same.
+                    response_text = (
+                        "I could not fetch the requested page(s) — each "
+                        f"already failed with an HTTP client error: {', '.join(_dropped[:5])}. "
+                        "Those URLs will not recover, so I did not retry them. "
+                        "Please provide a working URL, or ask me to search "
+                        "for the correct page."
+                    )
 
     print(f"[openai_api] Task {task_id} response_len={len(response_text)}, tool_calls={len(tool_calls) if tool_calls else 0}" + (f": {_toolcall_summary(tool_calls)}" if tool_calls else ""))
 

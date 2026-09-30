@@ -662,8 +662,10 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
   const [message, setMessage] = useState(pending.message || 'Thinking...')
   const [reasoning, setReasoning] = useState(pending.reasoning || '')
   const [reasoningOpen, setReasoningOpen] = useState(true)
+  const [detail, setDetail] = useState('')
   const resolvedRef = useRef(false)
   const locationNotifiedRef = useRef(false)
+  const t0Ref = useRef(Date.now())
 
   useEffect(() => {
     const iv = setInterval(async () => {
@@ -692,6 +694,19 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
       if (selectingRef && selectingRef.current) return
       setMessage(st.message || 'Working...')
       if (st.reasoning) setReasoning(prev => prev === st.reasoning ? prev : st.reasoning)
+      // Live progress: phase + round + elapsed, so long generations never
+      // look stalled. All fields already ride the status payload.
+      const parts = []
+      const phase = {
+        llm_waiting: 'Thinking',
+        critic_running: 'Verifying',
+        tools_running: 'Using tools',
+        client_tool_calls_pending: 'Confirming tools',
+      }[st._state]
+      if (phase) parts.push(phase)
+      if (st._round != null) parts.push(`round ${st._round}`)
+      parts.push(`${Math.max(0, Math.round((Date.now() - t0Ref.current) / 1000))}s`)
+      setDetail(parts.join(' · '))
     }, 3000)
     return () => clearInterval(iv)
   }, [pending, onResolved, onLocationNeeded, selectingRef])
@@ -710,6 +725,7 @@ function PendingMessage({ pending, onImageOpen, onResolved, onLocationNeeded, se
       <div className={`msg bot`}>
         <div className="msg-content">
           <StatusBox message={message} />
+          {detail && <div className="pending-detail">{detail}</div>}
           <ReasoningBlock text={reasoning} open={reasoningOpen} onToggle={setReasoningOpen} />
         </div>
       </div>
@@ -889,8 +905,17 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
 
   if (role === 'user' && !text && !imageUrl && !userImg && !genPrompt) return null
 
+  // Request/response tint by flag combination (4 combos): normal chat,
+  // extended chat, research on GPU, research on CPU. Subtle left-border
+  // accent; unknown/legacy messages keep the default look.
+  const comboClass = (() => {
+    if (msg._research) return msg._cpu ? 'combo-research-cpu' : 'combo-research-gpu';
+    if (msg._extended) return 'combo-extended';
+    return '';
+  })();
+
   return (
-    <div className={`msg ${role}`} ref={elRef}>
+    <div className={`msg ${role}${comboClass ? ' ' + comboClass : ''}`} ref={elRef}>
       {timestamp && <span className="msg-timestamp">{timestamp}</span>}
       <div className="msg-header">
         {role === 'user' && msg._research && (
@@ -913,6 +938,13 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
                 className={`tool-badge ${t === 'web_search' ? 'search' : t === 'generate_image' ? 'image' : t === 'edit_image' ? 'edit' : t === 'fetch_page' ? 'fetch' : t === 'generate_music' ? 'music' : ''}`}
                 onMouseEnter={() => t === 'web_search' && searchDetails.length > 0 && showPopup(i)}
                 onMouseLeave={hidePopup}
+                onClick={() => {
+                  // Touch devices have no hover: tap toggles the card.
+                  // (Desktop hover path above is unaffected.)
+                  if (t === 'web_search' && searchDetails.length > 0) {
+                    setPopupVisible(popupVisible === i ? null : i)
+                  }
+                }}
               >
                 {t === 'web_search' ? 'Web Search' : t === 'generate_image' ? `Image Gen${imageModel ? ' (' + imageModel + ')' : ''}` : t === 'edit_image' ? 'Edit Image' : t === 'fetch_page' ? (fetchDetail?.url ? 'Fetched Page · ' + hostnameFromUrl(fetchDetail.url) : 'Fetched Page') : t === 'generate_music' ? 'Music' : t}
                 {isFetch && fetchDetail && (
@@ -989,6 +1021,19 @@ function Message({ msg, pending, sessionId, msgIndex, hideSpeak, hideMeta, onIma
           <em>(No response text generated)</em>
         </div>
       ) : null}
+      {role === 'bot' && !hideMeta && (msg._research || msg._extended || msg._cpu) && (
+        <div className="msg-flags">
+          {msg._research && (
+            <span className="tool-badge research flag-letter" title="Generated with Research mode on">R</span>
+          )}
+          {msg._cpu && (
+            <span className="tool-badge cpu flag-letter" title="Generated on the CPU-backed server">C</span>
+          )}
+          {msg._extended && (
+            <span className="tool-badge extended flag-letter" title="Generated with Extended mode (larger model)">E</span>
+          )}
+        </div>
+      )}
       {pageModal && createPortal(
         <div className="page-modal-overlay" onClick={() => setPageModal(null)}>
           <div className="page-modal" onClick={e => e.stopPropagation()}>

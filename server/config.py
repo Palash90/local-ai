@@ -91,6 +91,22 @@ OPENAI_LANE_SERVER_TOOL_NAMES = {"web_search", "fetch_page", "browser_fetch", "t
 # text-only final round (ping-pong guard).
 OPENAI_LANE_MAX_SERVER_ROUNDS = int(os.environ.get("OPENAI_LANE_MAX_SERVER_ROUNDS", "3"))
 
+# Max estimated input tokens per OpenAI-lane request. Beyond this the 26B
+# CPU-offloaded prefill takes longer than any client waits (observed: ~18k
+# tokens = 5+ min to first token, then client disconnects and retries the
+# same doomed prefill). Over-budget requests fail fast with HTTP 413 naming
+# the size and limit instead of hanging. Must stay under the 32k lane ctx
+# with headroom left for thinking budget + answer.
+OPENAI_MAX_CONTEXT_TOKENS = int(os.environ.get("OPENAI_MAX_CONTEXT_TOKENS", "24000"))
+
+# First-token deadline (seconds) for OpenAI-lane rounds. A huge prefill on
+# the CPU-offloaded MoE can take longer than any API client waits; without a
+# bound the server grinds silently, the client disconnects, retries the same
+# doomed prefill, and lane/slot time burns for nothing. On breach the round
+# errors fast with a clear message instead. UI tasks have no client timeout
+# (they poll), so the watchdog applies to the OpenAI lane only.
+TTFT_TIMEOUT_SECONDS = int(os.environ.get("TTFT_TIMEOUT_SECONDS", "600"))
+
 # Search-rewrite (option b): a client fetch call whose URL is a search-engine
 # results page (e.g. opencode's webfetch of google.com/search?q=...) is
 # rewritten in-lane to web_search and executed server-side instead of being
@@ -102,6 +118,11 @@ OPENAI_LANE_SEARCH_REWRITE = os.environ.get("OPENAI_LANE_SEARCH_REWRITE", "auto"
 OPENAI_LANE_FETCH_ALIASES = {"webfetch", "fetch", "fetch_url", "web_fetch", "read_url"}
 
 REASONING_BUDGET = int(os.environ.get("REASONING_BUDGET", "1024"))
+# Plain (non-research) 26B chats get a smaller thinking budget: a 4-line
+# poem should not burn the same 1024-token chain-of-thought as a Raga-class
+# research report (~1.5 min of CPU-MoE decode per round just thinking).
+# Research tasks keep the full REASONING_BUDGET. Tune without code edit.
+REASONING_BUDGET_26B = int(os.environ.get("REASONING_BUDGET_26B", "512"))
 # The judge lane emits one short verdict per call, but judges are thinking
 # models: a 2048-token reasoning budget means a worst case of ~3 minutes of
 # CPU decode per verdict — far past the judge timeout, so research-verify

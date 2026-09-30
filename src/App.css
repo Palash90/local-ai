@@ -346,6 +346,36 @@ html, body {
   opacity: 1;
 }
 
+/* ---- Chat bubble tails (left for assistant, right for user) ----
+   Rotated squares sharing the bubble's own background/border, so the tail
+   reads as part of the bubble rather than a pasted-on triangle. */
+.msg.bot::after,
+.msg.user::after {
+  content: '';
+  position: absolute;
+  bottom: 6px;
+  width: 12px;
+  height: 12px;
+  transform: rotate(45deg);
+}
+
+.msg.bot::after {
+  left: -6px;
+  background: rgba(42, 42, 62, 0.9);
+  border-left: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom-left-radius: 3px;
+}
+
+.msg.user::after {
+  right: -6px;
+  background: #39466f;
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom-right-radius: 3px;
+  box-shadow: 2px 2px 6px rgba(45, 58, 94, 0.3);
+}
+
 .user {
   background: linear-gradient(135deg, #2d3a5e, #3a4a7a);
   align-self: flex-end;
@@ -859,6 +889,67 @@ html, body {
   color: #5eead4;
 }
 
+.tool-badge.cpu {
+  background: rgba(120, 72, 20, 0.6);
+  color: #fbbf24;
+}
+
+.tool-badge.extended {
+  background: rgba(76, 29, 149, 0.6);
+  color: #c4b5fd;
+}
+
+/* ---- Per-reply flag footer (bottom-left of assistant messages) ---- */
+.msg-flags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Single-letter flag chips (R/C/E): tighter pill than word badges. */
+.tool-badge.flag-letter {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* ---- Message tint by flag combination (subtle 3px left accent) ----
+   Normal chat: default look (no class). Extended: violet. Research on
+   GPU: teal. Research on CPU: amber. Padding compensates the border so
+   bubble width never shifts. */
+.msg.combo-extended,
+.msg.combo-research-gpu,
+.msg.combo-research-cpu {
+  border-left: 3px solid transparent;
+  padding-left: 15px;
+}
+
+.msg.combo-extended {
+  border-left-color: rgba(196, 181, 253, 0.45);
+}
+
+.msg.combo-research-gpu {
+  border-left-color: rgba(94, 234, 212, 0.45);
+}
+
+.msg.combo-research-cpu {
+  border-left-color: rgba(251, 191, 36, 0.45);
+}
+
+/* ---- Live input tint: mirrors the 4 combos as toggles change ---- */
+#input-bar.combo-extended #msg-input {
+  border-color: rgba(196, 181, 253, 0.45);
+}
+
+#input-bar.combo-research-gpu #msg-input {
+  border-color: rgba(94, 234, 212, 0.45);
+}
+
+#input-bar.combo-research-cpu #msg-input {
+  border-color: rgba(251, 191, 36, 0.45);
+}
+
 .fetch-info-btn {
   background: none;
   border: 1px solid rgba(167, 139, 250, 0.4);
@@ -1005,6 +1096,24 @@ a.page-modal-url:hover {
   text-decoration: underline;
 }
 
+/* ---- Search popup on small screens: bottom sheet ----
+   The card is absolutely anchored to its badge, which can push it off
+   the right edge on narrow viewports. Dock it instead. */
+@media (max-width: 480px) {
+  .search-popup {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    top: auto;
+    bottom: 96px;
+    min-width: 0;
+    max-width: none;
+    max-height: 46vh;
+    overflow-y: auto;
+    z-index: 200;
+  }
+}
+
 /* ---- Status Box ---- */
 @keyframes spin {
   to { transform: rotate(360deg); }
@@ -1078,6 +1187,14 @@ a.page-modal-url:hover {
 
 .status-box .status-text {
   color: #e2e8f0;
+}
+
+/* Pending-task live progress (phase · round · elapsed). */
+.pending-detail {
+  font-size: 11px;
+  color: #888;
+  margin-top: 6px;
+  letter-spacing: .3px;
 }
 
 .status-box[data-state="thinking"] { border-color: #334155; }

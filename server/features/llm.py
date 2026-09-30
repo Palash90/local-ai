@@ -29,7 +29,7 @@ from server.mcp_client import mcp_manager
 # Rotating KV-checkpoint filename per lane (slot 0 is the only slot — both
 # servers run with the default --parallel 1). Kept constant so each
 # save overwrites the previous snapshot instead of filling the disk.
-_SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv", "guardrail": "guardrail_slot0.kv"}
+_SLOT_CHECKPOINT_FILES = {"gpu": "gpu_slot0.kv", "cpu": "cpu_slot0.kv", "guardrail": "guardrail_slot0.kv", "26b": "26b_slot0.kv"}
 
 # Serializes per-session KV save/restore per lane. Only slot 0 exists on each
 # server, so concurrent swap calls (the CPU lane runs up to CPU_PARALLEL_SLOTS
@@ -38,6 +38,7 @@ _SLOT_KV_LOCKS = {
     "gpu": threading.Lock(),
     "cpu": threading.Lock(),
     "guardrail": threading.Lock(),
+    "26b": threading.Lock(),
 }
 _SLOT_KV_FALLBACK_LOCK = threading.Lock()
 
@@ -131,6 +132,11 @@ def _save_slot_to_disk(mode, sid, filename, record=True, timeout=180, override=N
         )
         if r.status_code == 200:
             n_tokens = r.json().get("n_tokens", 0)
+            if not n_tokens:
+                # Empty slot — nothing worth snapshotting. Don't record it:
+                # 0-token checkpoints pollute the registry and spam the log
+                # (11x "checkpointed (0 tokens)" on 2026-09-30).
+                return True, 0
             if record:
                 _record_checkpoint(mode, filename, n_tokens, sid=sid)
                 with M._data_lock:
@@ -226,6 +232,13 @@ def sync_session_slot(mode, sid):
     mode = mode or "gpu"
     sid = (sid or "").strip()
     if not sid:
+        return
+    if sid.startswith("api_"):
+        # Stateless OpenAI lane: every request mints a fresh api_<uuid>
+        # session, so per-session snapshots can never hit — each call saved
+        # an empty (0-token) slot and restored nothing, churning
+        # gpu_slot0_sess_*.kv files for no benefit. The server's own
+        # --cache-reuse prefix cache handles repeated prefixes; skip ours.
         return
     if _lane_resident_sid(mode) == sid:
         # Same session owns the slot — nothing to do.
@@ -1257,6 +1270,39 @@ def _append_turn_context(messages, task_id, user, tool_free, mode="gpu"):
     return out + [{"role": "user", "content": wrapped}]
 
 
+def _strip_tool_descriptions(tools, max_len=200):
+    """Shrink tool schemas to fit the context budget (client tools only).
+
+    Keeps `name` and full `parameters` (execution correctness untouched);
+    truncates human-readable `description` prose to ~max_len chars. Server
+    tools are returned untouched. Returns (new_tools, saved_chars). Pure.
+    """
+    if not tools:
+        return tools, 0
+    try:
+        from server.config import OPENAI_LANE_SERVER_TOOL_NAMES
+    except Exception:
+        OPENAI_LANE_SERVER_TOOL_NAMES = {"web_search", "fetch_page", "browser_fetch", "tool_details"}
+    out, saved = [], 0
+    for t in tools:
+        if not isinstance(t, dict) or "function" not in t:
+            out.append(t)
+            continue
+        fn = t.get("function") or {}
+        if fn.get("name") in OPENAI_LANE_SERVER_TOOL_NAMES:
+            out.append(t)
+            continue
+        desc = fn.get("description")
+        if isinstance(desc, str) and len(desc) > max_len:
+            cut = desc[:max_len].rsplit(" ", 1)[0] or desc[:max_len]
+            cut += "…"
+            saved += len(desc) - len(cut)
+            out.append({**t, "function": {**fn, "description": cut}})
+        else:
+            out.append(t)
+    return out, saved
+
+
 def _openai_lane_wire_tools(client_tools, server_tools, server_tool_mode, tool_free):
     """Build the `tools` array for the llama-server payload.
 
@@ -1326,6 +1372,7 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             client_tools = list(M.tasks.get(task_id, {}).get("client_tools") or [])
             client_tool_choice = M.tasks.get(task_id, {}).get("client_tool_choice") or "none"
             server_tool_mode = (M.tasks.get(task_id, {}).get("server_tool_mode") or "never").strip().lower()
+            task_openai_lane = bool(M.tasks.get(task_id, {}).get("openai_lane"))
         # Hybrid OpenAI lane: server search/fetch tools ride alongside
         # client tools (server-first execution in orchestration). On chat
         # lanes server_tool_mode is unset -> "never" -> legacy behavior.
@@ -1405,10 +1452,47 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             "tool_choice": _openai_lane_tool_choice(
                 client_tools, client_tool_choice, server_tool_mode, tool_free),
             "max_tokens": M.MAX_OUTPUT_TOKENS,
-            "reasoning_budget_tokens": M.REASONING_BUDGET,
+            # 26B reasoning split: research keeps the full budget (deep
+            # reports need it); plain Extended chats get the smaller 26B
+            # budget so short answers don't pay minutes of thought.
+            "reasoning_budget_tokens": (
+                M.REASONING_BUDGET_26B
+                if (model_override and not task_scheduling.get("research"))
+                else M.REASONING_BUDGET
+            ),
         }
         payload.update(sampling or {})
         payload["stream"] = True
+        # Final guard with the REAL wire tools: estimate_tokens() only adds
+        # the static TOOLS_TOKEN_COST, but the OpenAI lane merges 52+
+        # opencode client schemas (~20K tokens uncounted → est 14445 vs
+        # real 36753 on 2026-09-30). Hard-truncate before POST so we fail
+        # by trimming, never by 10-min prefill → 400.
+        try:
+            from server.features.context import (
+                estimate_tools_tokens as _est_tools,
+                _hard_truncate_messages as _hard_trunc,
+            )
+            _budget = M.prompt_token_budget(mode)
+            _full = M.estimate_tokens(messages, include_tools=False) + _est_tools(payload.get("tools"))
+            if _full > _budget:
+                # Lever 1 (client tools only): strip description prose first.
+                # Names + parameters stay intact, so calls still validate.
+                # Observed 2026-10-01: guard 31368 -> 29294 still 2x over
+                # budget 14848 — content truncation cannot fix tool bloat.
+                _stripped, _saved = _strip_tool_descriptions(payload.get("tools"))
+                if _saved > 0:
+                    payload["tools"] = _stripped
+                    _full_s = M.estimate_tokens(messages, include_tools=False) + _est_tools(payload.get("tools"))
+                    print(f"[context] tool-desc strip: {_full} -> {_full_s} (saved ~{_saved} chars, budget {_budget})", flush=True)
+                    _full = _full_s
+            if _full > _budget:
+                messages = _hard_trunc(messages, _budget - _est_tools(payload.get("tools")))
+                payload["messages"] = messages
+                _full2 = M.estimate_tokens(messages, include_tools=False) + _est_tools(payload.get("tools"))
+                print(f"[context] wire-tools guard: {_full} -> {_full2} (budget {_budget})", flush=True)
+        except Exception as e:
+            print(f"[context] wire-tools guard skipped: {e}", flush=True)
         # Re-point slot 0 at this session's KV (save the previous resident
         # session, restore this one) before the prompt is evaluated, so each
         # chat session keeps its own KV cache. Best-effort and fail-open.
@@ -1459,6 +1543,35 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             content_buf = ""
             tool_calls_map = {}
             aborted = False
+            ttft_expired = False
+            # TTFT watchdog (OpenAI lane only): close a silent stream past
+            # the deadline so a doomed prefill fails fast instead of
+            # grinding until the client gives up. UI tasks poll, so they
+            # are exempt.
+            if task_openai_lane:
+                try:
+                    _ttft_secs = int(getattr(M, "TTFT_TIMEOUT_SECONDS", 600))
+                except Exception:
+                    _ttft_secs = 600
+
+                def _ttft_watch():
+                    import time as _t
+
+                    _t.sleep(max(1, _ttft_secs))
+                    try:
+                        with M._data_lock:
+                            _st = (M.tasks.get(task_id) or {}).get("_ttft_seen")
+                            _rr = M._active_streams.get(task_id)
+                        if not _st and _rr is not None:
+                            try:
+                                _rr.close()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                _th = threading.Thread(target=_ttft_watch, daemon=True)
+                _th.start()
             with M._data_lock:
                 prev_reasoning = M.tasks.get(task_id, {}).get("reasoning", "")
             for line in r.iter_lines(decode_unicode=True):
@@ -1488,11 +1601,18 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                     with M._data_lock:
                         if task_id in M.tasks:
                             M.tasks[task_id]["reasoning"] = prev_reasoning + reasoning_buf
+                            M.tasks[task_id]["_ttft_seen"] = True
                 c = delta.get("content")
                 if c:
                     content_buf += c
+                    with M._data_lock:
+                        if task_id in M.tasks:
+                            M.tasks[task_id]["_ttft_seen"] = True
                 tc_list = delta.get("tool_calls")
                 if tc_list:
+                    with M._data_lock:
+                        if task_id in M.tasks:
+                            M.tasks[task_id]["_ttft_seen"] = True
                     for tc in tc_list:
                         idx = tc.get("index", 0)
                         if idx not in tool_calls_map:
@@ -1535,6 +1655,18 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
             flush=True,
         )
         print(f"[llm_round] Round {round_num} done: reasoning_buf={len(reasoning_buf)} chars, content_buf={len(content_buf)} chars, tool_calls={len(tool_calls_map)}")  # DEBUG
+        if not aborted and task_openai_lane and not reasoning_buf and not content_buf and not tool_calls_map:
+            with M._data_lock:
+                _seen = bool((M.tasks.get(task_id) or {}).get("_ttft_seen"))
+            if not _seen:
+                try:
+                    _lim = int(getattr(M, "TTFT_TIMEOUT_SECONDS", 600))
+                except Exception:
+                    _lim = 600
+                raise RuntimeError(
+                    f"First token timeout after {_lim}s on the OpenAI lane — "
+                    "prefill exceeded client patience. Trim context or retry with fewer messages."
+                )
         if not aborted:
             msg = {
                 "role": "assistant",
@@ -1608,7 +1740,11 @@ def _start_llm_round(task_id, sid, round_num):
     # dedicated :8089 server; the lane mode still owns queueing, pools and
     # priority. smode selects the serving identity for every server call.
     smode = "26b" if task.get("model") else mode
-    if not task.get("skip_ensure_llama"):
+    # skip_ensure_llama (OpenAI lane) skips the boot wait on the assumption
+    # the target server is always up — true for :8081, false for the lazy
+    # :8089. Override tasks always ensure: without it a cold 26B server
+    # guarantees round failure.
+    if not task.get("skip_ensure_llama") or task.get("model"):
         M.ensure_llama_server(mode, task.get("model"))
     # NOTE: read status via direct attribute access — server_status() takes
     # _data_lock itself, and this lock is non-reentrant (same-thread

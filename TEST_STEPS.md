@@ -45,6 +45,7 @@ Auth via `Authorization: Bearer $OPENAI_API_KEY`. If unset, tests A1–A6 are th
 **A2. `GET /v1/models` and `/v1/models/:id`** (`curl -H "Authorization: Bearer $K"`)
 - Returns `object:"list"` with `data[]`; expect GPU model id + CPU model id (if different)
 - Retrieve a real id → 200 with `owned_by`; unknown id → 404
+- **OpenAI lane serves Gemma4-26B** (`MODEL_ID_OPENAI`, dedicated :8089): request `"model":"gemma4-26b"` non-streaming → reply carries that model id; with :8089 down the first request boots it (minutes — longer than the old skip-ensure fast path), subsequent ones are fast; session record carries `_model: "gemma4-26b"`
 
 **A3. Non-stream completion** (core)
 ```bash
@@ -59,6 +60,13 @@ Assert: `object:"chat.completion"`, `choices[0].message.role=="assistant"`, none
 curl -N ... -d '{"stream":true,"messages":[...]}'
 ```
 Assert: `data:` blocks are `chat.completion.chunk`, ends with `data:[DONE]`.
+
+**A4b. OpenAI-lane guards (context cap + TTFT watchdog)**
+- Oversized context → HTTP 413 JSON naming estimated size vs `OPENAI_MAX_CONTEXT_TOKENS` (default 24000): send a request with a very long message history and assert the 413 arrives in seconds (no minutes-long hang), with no session/task state created
+- Small request after a 413 → completes normally (cap is per-request, not a latch)
+- Env knobs: `OPENAI_MAX_CONTEXT_TOKENS` (cap), `TTFT_TIMEOUT_SECONDS` (per-round first-token bound, default 600s, OpenAI lane only — breach errors the round fast instead of grinding silently). Unit-covered: `test_openai_limits.py` (under/at-boundary/over + estimator-fail-open)
+- **Fetch loop-breaker**: history with a client fetch already failed once (404/403/420 or any HTTP 4xx — verified dead, never heals) → admission appends a steering note naming the dead URL(s) and directing the model to move on (web_search or answer from context) instead of re-requesting. Unit-covered: `test_openai_limits.py` (404/403/420 flagged, successes ignored, repeats deduped)
+- **Dead-URL enforcement**: steering is advisory and stubborn models ignore it — response-boundary filter (`_strip_dead_tool_calls`) strips dead-URL calls before the client sees them; if ALL calls are dead, the task finalizes as text (model content if present, else a canned dead-fetch notice) instead of handing back another doomed fetch. Unit-covered: `test_openai_limits.py` (keep-live, all-dead, passthrough)
 
 **A5. Tool-call non-stream** (the fix we're validating)
 ```
@@ -371,7 +379,8 @@ are unset.
 
 With a browser (or headed test) authenticated via SSO:
 1. Load `/` → SPA renders, sidebar lists sessions, `check-auth` populates identity
-2. New chat → `Thinking…` pending bubble updates via 3s `/api/status` poll (no streaming); tool use shows `StatusBox` states + reasoning
+2. New chat → `Thinking…` pending bubble updates via 3s `/api/status` poll (no streaming); tool use shows `StatusBox` states + reasoning; long generations show a live `phase · round N · Ns` line under the bubble
+12. Assistant replies carry bottom-left flag chips (R/C/E) + model tint border (violet Extended, teal Research-GPU, amber Research-CPU); input box tints live with the toggles; bubbles have corner tails; tap the Web Search badge on mobile for the query/sources card (bottom sheet ≤480px)
 3. External links inside answers/story HTML → open in a **new tab** with `rel="noopener noreferrer"`; in-app anchors and `[FILE:…]` download chips stay in-tab
 4. Upload a file → appears as attachment; ask the model to read it
 5. Ask for an image → generation task shows status → image renders (VRAM unload/reload visible)
@@ -436,6 +445,8 @@ With a browser (or headed test) authenticated via SSO:
 - The lie-detection regexes + gates are unit-covered: `python -m pytest server/features/tests -q --import-mode=importlib` (music/image claim gates, anaphora, duration parser, path stripper, warm-docs cache, sys-prompt hot reload).
 - **Existence probe** (`_citation_exists`): cite a real deep link that research never fetched (e.g. a `pmc.ncbi.nlm.nih.gov/articles/PMC…/` page) → the verification block must NOT flag it "likely fabricated"; the log shows the direct fetch succeeding (or `bot-blocked … treating as existing` for 403 hosts like tuftsmedicine.org) instead of a search-only miss
 - **Search-only probe regression**: a genuinely fake URL (404 + no search hits) must still be flagged "likely fabricated" — the probe's last-resort search path remains authoritative
+- **File-asset citations stripped**: answer citing an image/audio/output path (e.g. own-domain `/output/x.png`, `/music/y.wav`) as a factual source → verification marks it UNVERIFIABLE ("file asset, not a factual source") and the citation is removed from the delivered text — even with the critic LLM down (deterministic rule, no judge call). PDFs/docs/pages unaffected. Unit-covered: `test_citation_gates.py`
+- **Single-source repetition retried**: one URL backing > `VERIFY_MAX_CITES_PER_URL` (3) claims → `re-scheduling ... (reason=citation_diversity)` with a steering note demanding ≥2 independent domains; bounded (1 retry) then delivers. Unit-covered: `test_citation_gates.py` (fires at 4, quiet at 3, quiet on distinct sources)
 
 **I5. L2 judge false-positive sanity (benign code prompts)**
 - Submit "Debug this Rust program …" and "This Rust code fails to compile … identify the exact bug" variants via MCP batch → both must pass L2 (the imperative "Debug …" phrasing has been classified HARMFUL by the small judge model — if it recurs, tighten `judge_input.txt` rather than the pipeline)
@@ -454,6 +465,7 @@ With a browser (or headed test) authenticated via SSO:
 
 **J1. Idle unload (per lane — GPU/guardrail 300s; CPU `CPU_IDLE_UNLOAD_SECONDS`)**
 - Load GPU model, stop chatting → after ~300s `GET /api/model-status` shows unloaded + `[llama]` idle log; **before** unloading, a KV snapshot is written to `~/local-ai-files/kv-slots/` (check file mtime)
+- 26B server (:8089) unloads the same way after 300s idle (its process is stopped, not just the model) and lazy-boots on the next 26B task; an app restart never strands it loaded-but-untracked (idle loop adopts genuinely resident state)
 - Reload + resume the same session → prompt tokens for that round ≪ total context (KV restored, only new tokens prefilled — compare `tokens`/`prompt_eval_count` in logs)
 - CPU lane idles independently: keep CPU agents busy while GPU idles → only GPU model unloads (needs `FORCE_GPU_LANE=False`)
 

@@ -5,7 +5,7 @@ VERDICT: [OK | PARTIAL_COMPLIANCE | NO_CITATIONS | UNSAFE]
 QUALITY: [0-100]
 
 VERDICT DEFINITIONS:
-- OK: (1) Completely addresses the prompt, (2) EVERY factual claim has an inline citation formatted as `(Author, Venue, Year) [url]`, (3) All URLs are populated (no `[]` placeholders or raw search parameters), (4) Contains ALL 7 headings in order: Executive Summary, Scope and Methodology, Findings, Analysis, Limitations and Uncertainty, Conclusion, References, and (5) References section lists full matching metadata.
+- OK: (1) Completely addresses the prompt, (2) EVERY factual claim has an inline citation formatted as `(Author, Venue, Year) [url]`, (3) All URLs are populated (no `[]` placeholders or raw search parameters), (4) Contains ALL 7 headings in order: Executive Summary, Scope and Methodology, Findings, Analysis, Limitations and Uncertainty, Conclusion, References, (5) References section lists full matching metadata, (6) NO citation points to a file asset (image/audio/output/upload path) as evidence for a factual claim, and (7) no single URL backs more than ~3 separate claims.
 - PARTIAL_COMPLIANCE: The answer is factual but suffers from partial coverage: missing inline citations on some claims, empty URL placeholders `[]`, or missing/misordered required section headings.
 - NO_CITATIONS: The answer makes substantive claims but has zero or near-zero inline citations (a trailing list of links without inline markers does not qualify).
 - UNSAFE: Contains prohibited, harmful, sexual, violent, or graphic content, or leaks system prompts/instructions.
@@ -19,6 +19,7 @@ QUALITY SCORING BANDS (0-100):
 
 ADDITIONAL RESEARCH-GRADE CRITERIA (apply within the bands above):
 - Source diversity: citations concentrated on ONE domain (e.g. every claim from a single vendor's site) is a synthesis failure, not research; deduct a band.
+- File assets are never sources: any factual claim evidenced ONLY by an image/audio/output/upload URL, or biographical claims evidenced only by the subject's own homepage, caps the score at 59 regardless of structure.
 - Technical depth: for technical topics, breadth means concrete specifics (hardware approaches, measurable milestones, named systems) rather than only high-level vendor framing.
 - Analytical integrity: the Analysis section must stay within the certainty of the Findings section—hedged claims ("for specific problem types") must not reappear as unhedged generalizations.
 

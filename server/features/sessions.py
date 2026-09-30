@@ -245,6 +245,11 @@ def _prepare_session(
         t = M.tasks.get(task_id)
         if t:
             user = t.get("_user", "")
+            task_extended = bool(t.get("extended"))
+            task_cpu = bool(t.get("cpu"))
+        else:
+            task_extended = False
+            task_cpu = False
         meta = M.sessions_meta.get(sid, {})
         extra_prompts = meta.get("system_prompts", [])
         context_tokens = meta.get("context_tokens", {})
@@ -343,6 +348,8 @@ def _prepare_session(
                 "content": content,
                 "_timestamp": datetime.now().isoformat(),
                 "_research": bool(M.tasks.get(task_id, {}).get("research")),
+                "_extended": task_extended,
+                "_cpu": task_cpu,
             }
         )
         if M.sessions_meta[sid]["name"] in ("New Chat", ""):

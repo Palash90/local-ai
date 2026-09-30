@@ -201,8 +201,12 @@ export default function InputBar({ onSend, onCancel, hasPending, sessionId }) {
     if (!checked) setCpu(false)
   }
 
+  // Live tint: the input bar reflects the active flag combination the
+  // moment a toggle changes (same 4 combos as rendered messages below).
+  const inputCombo = research ? (cpu ? 'combo-research-cpu' : 'combo-research-gpu') : (extended ? 'combo-extended' : '')
+
   return (
-    <div id="input-bar">
+    <div id="input-bar" className={inputCombo}>
       <button id="attach-btn" onClick={() => fileInputRef.current?.click()}>+</button>
       <input type="file" id="file-input" ref={fileInputRef} onChange={handleFile} />
       <img id="image-preview" ref={imagePreviewRef} />

@@ -234,7 +234,7 @@ export default function App() {
     const taskSid = currentSessionId
     setLoadingSessions(prev => ({ ...prev, [taskSid]: (prev[taskSid] || 0) + 1 }))
 
-    const userMsg = { role: 'user', content: text || '\uD83D\uDCC4 file', _timestamp: new Date().toISOString() }
+    const userMsg = { role: 'user', content: text || '\uD83D\uDCC4 file', _timestamp: new Date().toISOString(), _research: !!research, _extended: !!extended, _cpu: !!cpu }
 
     try {
       const data = await api.sendMessage(currentSessionId, text || '', image || undefined, undefined, undefined, research, cpu, extended)

@@ -19,6 +19,7 @@ export async function run(page, ctx) {
       msgInput: has('#msg-input'),
       researchToggle: has('#research-toggle input'),
       cpuToggle: has('#cpu-toggle input'),
+      extendedToggle: has('#extended-toggle input'),
       sendBtn: [...document.querySelectorAll('button')]
         .filter(b => (b.innerText || '').trim() === 'Send').length,
       renameBtns: [...document.querySelectorAll('button')]
@@ -32,6 +33,7 @@ export async function run(page, ctx) {
   ctx.step('controls: sidebar/new-chat/attach/input/toggles/send present',
     census.sidebarToggle > 0 && census.newChat > 0 && census.attach > 0 &&
     census.msgInput > 0 && census.researchToggle > 0 && census.cpuToggle > 0 &&
+    census.extendedToggle > 0 &&
     census.sendBtn > 0, JSON.stringify({ ...census, renameBtns: 'n/a', deleteBtns: 'n/a' }));
   ctx.step('controls: session rename/delete buttons exist', census.renameBtns > 0 && census.deleteBtns > 0, '');
 
@@ -58,6 +60,39 @@ export async function run(page, ctx) {
   ctx.step('CPU toggle disabled without Research', gated.cpuDisabledInitially === true, '');
   ctx.step('CPU toggle checks with Research', gated.cpuCheckedWithResearch === true, '');
   ctx.step('unchecking Research clears CPU', gated.cpuAfterResearchOff === false, '');
+
+  // --- extended toggle: standalone + research auto-select + input tint ---
+  const ext = await page.evaluate(() => {
+    const out = {};
+    const r = document.querySelector('#research-toggle input');
+    const c = document.querySelector('#cpu-toggle input');
+    const e = document.querySelector('#extended-toggle input');
+    const bar = () => document.querySelector('#input-bar').className;
+    out.enabledInitially = !e.disabled;
+    e.click();
+    out.checksStandalone = e.checked;
+    out.tintExtended = bar().includes('combo-extended');
+    e.click();
+    out.tintCleared = !bar().includes('combo-');
+    r.click();
+    out.autoCheckedWithResearch = e.checked;
+    out.disabledWithResearch = e.disabled;
+    c.click();
+    out.tintResearchCpu = bar().includes('combo-research-cpu');
+    c.click();
+    out.tintResearchGpu = bar().includes('combo-research-gpu');
+    r.click();
+    out.enabledAfterResearchOff = !document.querySelector('#extended-toggle input').disabled;
+    return out;
+  });
+  ctx.step('Extended toggle enabled without Research', ext.enabledInitially === true, '');
+  ctx.step('Extended toggle checks standalone', ext.checksStandalone === true, '');
+  ctx.step('input tints combo-extended live', ext.tintExtended === true, '');
+  ctx.step('input tint clears on untoggle', ext.tintCleared === true, '');
+  ctx.step('Research auto-selects Extended (disabled)', ext.autoCheckedWithResearch === true && ext.disabledWithResearch === true, '');
+  ctx.step('input tints combo-research-cpu live', ext.tintResearchCpu === true, '');
+  ctx.step('input tints combo-research-gpu live', ext.tintResearchGpu === true, '');
+  ctx.step('Extended re-enabled after Research off', ext.enabledAfterResearchOff === true, '');
 
   // --- nav dock: all six destinations resolve ---
   // NOTE: ☁️ (Nextcloud) uses its own OIDC flow — landing on its SSO

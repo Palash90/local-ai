@@ -58,7 +58,31 @@ def _text_tokens(s):
             short = sum(1 for w in words if len(w) <= 3)
             if short / len(words) > 0.6:
                 ascii_div = 2
+        # JSON/tool-search blobs (brackets, quotes, URLs, punctuation-dense)
+        # tokenize far denser than prose: observed 38K-char tool message +
+        # 52 client tool schemas estimated 14445 but server counted 36753
+        # (~2.5x). Punctuation-heavy text → /2.
+        if ascii_div == 4:
+            punct = sum(1 for c in s if c in '{}[]"():;,<>=|\\/_-')
+            if punct / max(1, ascii_chars) > 0.12:
+                ascii_div = 2
     return int(ascii_chars / ascii_div + wide_chars + other_chars / 2) + 1
+
+
+def estimate_tools_tokens(tools):
+    """Token estimate for the actual wire `tools` array.
+
+    estimate_tokens() only adds the static TOOLS_TOKEN_COST (built-in
+    tools). The OpenAI lane merges 52+ client tools from opencode, each
+    with a JSON schema — ~20K tokens completely uncounted (14445 est vs
+    36753 real on 2026-09-30). Count the real payload instead.
+    """
+    if not tools:
+        return 0
+    try:
+        return _text_tokens(json.dumps(tools))
+    except Exception:
+        return 0
 
 
 def estimate_tokens(messages, include_tools=True):
@@ -136,6 +160,16 @@ def trim_messages_for_context(messages, mode="gpu"):
 
 
 def _summarize_with_llm(text, mode="gpu", override=None):
+    # Same serving-identity discipline as critic._critic_completion: ensure
+    # and load before POSTing, or compaction silently no-ops whenever its
+    # lane model isn't resident. Lock-free caller context required.
+    smode = "26b" if override else mode
+    try:
+        M.ensure_llama_server(mode, override)
+        M.load_llama_model(smode, model_id=override)
+    except Exception as e:
+        print(f"[compact] lane ensure/load failed (mode={mode}): {e}")
+        return None
     payload = {
         "model": M.server_model_id(mode, override),
         "messages": [
@@ -150,8 +184,8 @@ def _summarize_with_llm(text, mode="gpu", override=None):
         "stream": False,
     }
     try:
-        M.mark_slot_kv_dirty(mode)
-        r = requests.post(M.server_url(mode), json=payload, timeout=120)
+        M.mark_slot_kv_dirty(smode)
+        r = requests.post(M.server_url(smode), json=payload, timeout=120)
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
     except Exception as e:

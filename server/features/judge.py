@@ -250,6 +250,15 @@ def _strict_judge_system():
     return _get_prompt("judge_strict.txt")
 
 
+def _26b_model_id():
+    """Authoring model id of the 26B lane (judge override allowlist)."""
+    try:
+        from server.features.state import M
+        return M.MODEL_ID_OPENAI or "gemma4-26b"
+    except Exception:
+        return "gemma4-26b"
+
+
 def _chat_model_id():
     """Model id the chat pipeline itself uses (from server/config.py)."""
     try:
@@ -1114,8 +1123,10 @@ def mcp_output_judge(text, timeout=None, fail_closed=True, model_id=None,
 
     GPU-only: the verdict comes from the resident GPU chat model via
     :func:`_gpu_verdict_post` — never the CPU guardrail lane, never a remote
-    endpoint. ``model_id``/``allow_gpu_fallback`` are accepted for backward
-    compatibility and ignored for routing.
+    endpoint. ``model_id`` redirects the verdict to that model's server
+    (e.g. a 26B-authored answer is judged on the already-resident :8089
+    instead of :8081, whose E4B is unloaded while 26B holds the GPU —
+    that mismatch caused HTTP 500 "failed to load" on 2026-09-30).
 
     The text is truncated to 6000 chars before judging to stay within the
     judge model's context window while still covering the bulk of the output.
@@ -1141,10 +1152,15 @@ def mcp_output_judge(text, timeout=None, fail_closed=True, model_id=None,
     cand, content = _gpu_verdict_post(
         "strict-output-judge", _strict_judge_system(), text[:6000],
         timeout,
+        # Honor the authoring model only for GPU-resident chat servers
+        # (26B → :8089). Guardrail/CPU model ids (E2B) must never pull the
+        # judge off the GPU lane — hence the allowlist, not passthrough.
+        override=model_id if (model_id or "") == _26b_model_id() else None,
     )
     if cand is None:
         print(
-            "[gpu-judge][strict-output-judge] judge unavailable — BLOCKED (fail-closed)"
+            "[gpu-judge][strict-output-judge] judge unavailable — "
+            f"{'BLOCKED (fail-closed)' if fail_closed else 'ALLOWED (fail-open, UI lane)'}"
         )
         return fail_closed
     verdict = _parse_strict_verdict(content)

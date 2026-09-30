@@ -815,10 +815,16 @@ def _idle_unload_loop():
             if not image_active and idle > timeout and _diag_next.get(mode, 0.0) <= time.time():
                 if queue_active:
                     reason = f"blocked: task still running ({tid_running!r})"
-                elif ms != "chat_loaded":
-                    reason = f"blocked: status={ms!r} (not chat_loaded)"
-                else:
+                elif ms in ("loading", "unloading"):
+                    reason = f"blocked: status={ms!r} (transitional)"
+                elif ms == "chat_loaded":
                     reason = f"unknown: idle={idle:.0f}s status={ms!r}"
+                else:
+                    # Already unloaded — the desired end state, nothing to
+                    # diagnose. Logging it every 60s spammed the log for
+                    # 6+ hours on 2026-09-30 ("blocked: status='unloaded'").
+                    _diag_next[mode] = time.time() + 60
+                    continue
                 print(
                     f"[idle] {mode} idle {idle:.0f}s > {timeout}s but not unloaded — {reason}",
                     flush=True,

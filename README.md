@@ -63,13 +63,46 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 | 3002 | markdown hosting (stories) | `restart_services.sh` (uvicorn) | FastAPI app, role-gated collections |
 | 8000 | MCP gateway | in-process thread of chat-webui | FastMCP + OAuth; `MCP_USER` token auth (plus an outbound `start_mcp_client` thread for external MCP servers) |
 | 8079 | llama-server (CPU) | lazy / `restart_servers` | self-chat agents, 32K ctx, RAM-backed |
-| 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI, 32K ctx (`GPU_CTX_SIZE_26B`, MoE profile below), VRAM-backed |
+| 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI (E4B), 24K ctx, VRAM-backed (full offload) |
+| 8089 | llama-server (26B) | lazy on first 26B task, never at boot | Gemma4-26B-A4B MoE (`-ngl 24` + `--cpu-moe`, experts in RAM), 32K ctx; serves OpenAI lane, Research and Extended requests |
 | 8083 | llama-server (guardrail) | lazy on first L2, then resident (`KEEP_GUARDRAIL_RESIDENT=1`) | E2B input-judge model; tablet/remote judging removed (`GUARDRAIL_EXTERNAL=0`) |
 | 8084 | llama-server (embed) | lazy by chat-webui / `restart_servers` | serves `/embedding` (nomic); vector layer of `page_cache` |
 | 8080 | SearXNG | docker / systemd | web search backend; `setup.sh` binds `127.0.0.1:8080`, `docker-compose.yaml` binds `8080:8080` (all interfaces) — bind to localhost if you don't need LAN-wide search |
 | 8188 | ComfyUI | lazy on image request | image generation; recycled after renders only when RAM is below headroom (else reused warm; `COMFYUI_RECYCLE_AFTER_RENDER=0` to disable) |
 | 9000 | code host | `restart_services.sh` | `code_host.py` (lives outside this repo) |
 | 9010 | Authentik proxy outpost | docker | nginx `auth_request` upstream |
+
+## Model routing
+
+Lanes (`gpu` / `cpu` / `guardrail`) own queueing only. The model is resolved
+per task via a `"model"` override; without one each lane uses its default
+(`model.json` for gpu/cpu, E2B for guardrail):
+
+| Request | Model | Server |
+|---|---|---|
+| Normal chat | `gemma4-e4b-q4` | :8081 |
+| OpenAI lane (`/v1/*`) | `gemma4-26b` | :8089 |
+| Research (either lane; auto-selects Extended) | `gemma4-26b` | :8089 |
+| Extended toggle (either lane) | `gemma4-26b` | :8089 |
+| Guardrail / judges | `gemma-4-E2B-it-Q4_K_M` | :8083 (or `GUARD_LLM_BASE` when external) |
+
+Every finalized assistant reply persists `_model`, `_extended`, `_cpu` and
+`_research` (user messages carry `_research`/`_extended`/`_cpu` too), rendered
+as flag chips bottom-left in the chat UI. Messages are also tinted by flag
+combination (subtle left-border accent, mirrored live on the input box):
+normal chat (default), Extended (violet), Research on GPU (teal), Research
+on CPU (amber). Research verification judges on the task's own model (no E4B
+swap just to judge).
+
+### OpenAI-lane limits
+
+The 26B runs CPU-offloaded (~60 tok/s prefill), so huge contexts outlast
+any API client: requests estimating over `OPENAI_MAX_CONTEXT_TOKENS`
+(default 24000, env-tunable) fail fast with HTTP 413 naming size vs limit
+instead of hanging; per-round first-token waits are bounded by
+`TTFT_TIMEOUT_SECONDS` (default 600s, env-tunable) with a clear error.
+Keep client contexts compact and set client timeouts above expected prefill
+(roughly 1 min per 4k tokens).
 
 ## Quick Start — Host OS
 

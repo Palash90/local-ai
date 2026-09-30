@@ -795,6 +795,14 @@ _STEERING_HINTS = {
         "new final answer where EVERY factual or claim-bearing sentence carries "
         "an inline citation of the form (Author, Venue, Year) [url]."
     ),
+    "citation_diversity": (
+        "Your previous draft leaned on too few sources — one URL backed "
+        "several separate claims. Produce a new final answer where every "
+        "claim cluster is supported by at least two INDEPENDENT fetched "
+        "sources on different domains. File assets (images, audio, output "
+        "paths) and the subject's own homepage do not count as sources for "
+        "factual claims. Cite each as (Author, Venue, Year) [url]."
+    ),
     "quality": (
         "Your previous draft was rejected for low research quality. Produce a "
         "new final answer that completely and accurately addresses the user's "
@@ -921,6 +929,18 @@ _STEERING_HINTS = {
 def _critic_completion(system, user, mode="gpu", max_tokens=2048, override=None):
     """Secondary, non-streamed, low-temperature LLM call. Retries once and
     never raises — returns None only when the model itself is unreachable."""
+    # Serving identity first: without ensure+load this blind-POSTs at
+    # whatever happens to be resident (connection refused on a lazy lane
+    # that never booted, or a 500 when another model holds the server).
+    # Must run lock-free (callers are worker threads, never under
+    # _model_transition_lock) — load() takes that lock internally.
+    smode = "26b" if override else mode
+    try:
+        M.ensure_llama_server(mode, override)
+        M.load_llama_model(smode, model_id=override)
+    except Exception as e:
+        print(f"[critic] lane ensure/load failed (mode={mode}): {e}")
+        return None
     payload = {
         "model": M.server_model_id(mode, override),
         "messages": [
@@ -934,8 +954,8 @@ def _critic_completion(system, user, mode="gpu", max_tokens=2048, override=None)
     last_err = None
     for attempt in range(2):
         try:
-            M.mark_slot_kv_dirty(mode)
-            r = requests.post(M.server_url(mode), json=payload, timeout=120)
+            M.mark_slot_kv_dirty(smode)
+            r = requests.post(M.server_url(smode), json=payload, timeout=120)
             r.raise_for_status()
             msg = r.json()["choices"][0]["message"] or {}
             content = msg.get("content")
@@ -1093,6 +1113,35 @@ def _is_search_endpoint(url):
     except Exception:
         pass
     return False
+
+
+_FILE_ASSET_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico",
+    ".mp3", ".wav", ".ogg", ".flac", ".mp4", ".webm", ".mid", ".midi",
+})
+_FILE_ASSET_PATHS = ("/output/", "/music/", "/uploads/")
+
+
+def _is_file_asset(url):
+    """Return True for file-asset URLs, which can never support a factual claim.
+
+    Covers own-domain artifact paths (generated images, music renders,
+    uploads) and media extensions anywhere. A research answer citing a
+    ``.png`` or ``/music/*.wav`` as a biographical/factual source is the
+    hallucination pattern this guards: the file exists, so existence checks
+    pass, but it evidences nothing. Documents (.pdf/.txt/.md/.html) are
+    deliberately NOT matched — those are legitimate sources.
+    """
+    try:
+        from urllib.parse import urlsplit
+        import os as _os
+
+        path = (urlsplit(url or "").path or "").lower()
+        if any(seg in path for seg in _FILE_ASSET_PATHS):
+            return True
+        return _os.path.splitext(path)[1] in _FILE_ASSET_EXTS
+    except Exception:
+        return False
 
 
 def _retrieved_urls(task_id):
@@ -1388,10 +1437,15 @@ def _judge_research_answer(task_id, answer):
         user = t.get("_user", "")
         task_override = t.get("model")
     try:
+        # Override tasks verify on their own (often busy) server: bound the
+        # wait well below the 240s default so slot contention fails open
+        # fast instead of stalling verification for minutes.
+        _verify_timeout = 90 if task_override else None
         result = llm_verify_research_answer(
             user_input, answer,
             model_id=resolve_judge_model(user or ""),
             override=task_override,
+            timeout=_verify_timeout,
         )
     except Exception as e:
         print(f"[critic] research-answer judge call failed: {e}")
@@ -1562,6 +1616,11 @@ def run_verification(task_id, sid, answer, mode="gpu"):
             pre_action, pre_note = "UNVERIFIABLE", (
                 "search endpoint is navigation, not a fetched source page"
             )
+        elif _is_file_asset(cit["url"]):
+            pre_action, pre_note = "UNVERIFIABLE", (
+                "file asset (image/audio/output path) cannot support a "
+                "factual claim — citation removed"
+            )
         elif cit["url"] not in retrieved:
             if not _citation_exists(cit["url"]):
                 pre_action, pre_note = "UNVERIFIABLE", (
@@ -1698,6 +1757,17 @@ def _requirement_mismatch(task_id, sid, user_input, answer, _skip=()):
         positions = [headings.index(name) for name in _RESEARCH_HEADINGS]
         if positions != sorted(positions):
             return "research_structure"
+        # Deterministic diversity gate (no judge call): one URL backing many
+        # separate claims is synthesis failure even when every URL exists.
+        # Mirrors the VERIFY_MAX_CITES_PER_URL threshold the verification
+        # trail already reports as an advisory note.
+        from collections import Counter as _Counter
+        _use = _Counter()
+        for _m in _META_RE.finditer(_CODE_FENCE_RE.sub("", answer or "")):
+            _use[_m.group("url").rstrip(".,;:]")] += 1
+        _limit = int(getattr(M, "VERIFY_MAX_CITES_PER_URL", 3))
+        if _use and max(_use.values()) > _limit:
+            return "citation_diversity"
     referenced = _referenced_artifacts(user_input)
     has_image = bool(image_file) or (
         "image" in referenced and bool(_prior_artifact(sid, "_image_url"))

@@ -16,8 +16,8 @@ Three kinds of scarce resource, protected by three mechanisms:
 
 | Resource | Consumers | Guard |
 |---|---|---|
-| **GPU VRAM** | GPU lane (UI users), guardrail lane (judge/L2-L3), ComfyUI renders | `_wait_chat_generating_clear(lanes=("gpu","guardrail"))` + `_image_active` gate |
-| **System RAM** | CPU lane's gemma4-e4b-q4 (QAT, RAM-backed), ComfyUI models, KV slots | `_evacuate_ram` (95 %) + render-time CPU eviction |
+| **GPU VRAM** | GPU lane (UI users), guardrail lane (judge/L2-L3), 26B server (:8089, ~2.8 GB), ComfyUI renders | `_wait_chat_generating_clear(lanes=("gpu","guardrail","26b"))` + `_image_active` gate; cross-model eviction before loads (one resident at a time) |
+| **System RAM** | CPU lane's gemma4-e4b-q4 (QAT, RAM-backed), 26B MoE experts (~15 GB, `--cpu-moe`), ComfyUI models, KV slots | `_evacuate_ram` (95 %) + render-time CPU eviction; 26B idle-unloads after 300 s |
 | **Rest of the box** | thermal state, whole-box RAM % | `_thermal_monitor`, `_evacuate_ram` |
 
 Lanes are otherwise independent workers (`_queue_worker` per lane, own

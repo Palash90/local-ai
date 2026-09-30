@@ -661,11 +661,11 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
             # to a "screened" note so the reply is still delivered.
             if is_mcp_lane:
                 judge_verdict = mcp_output_judge(
-                    reply_text, fail_closed=True,
+                    reply_text, fail_closed=True, model_id=task_model,
                 )
             else:
                 judge_verdict = mcp_output_judge(
-                    reply_text, fail_closed=False,
+                    reply_text, fail_closed=False, model_id=task_model,
                 )
             blocked = blocked or bool(judge_verdict)
         if blocked:

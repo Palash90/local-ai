@@ -9,7 +9,7 @@ guardrails, robustness (concurrency/cancel/reload), media renders.
 
 | File | Tier | What it proves |
 |---|---|---|
-| `suite-smoke.mjs` | smoke | 77-control census, sidebar cycle, Research↔CPU gating, all 6 nav-dock destinations, timestamps |
+| `suite-smoke.mjs` | smoke | 77-control census, sidebar cycle, Research↔CPU gating, Extended toggle gating + live input tint, all 6 nav-dock destinations, timestamps |
 | `suite-crud.mjs` | smoke | create → chat → rename (UI **and** server file) → delete → gone after reload |
 | `suite-attach.mjs` | smoke | PNG preview, unknown-ext confirm dialog, audio-unsupported documents current behavior, vision round-trip |
 | `suite-guardrails.mjs` | smoke | UI extraction probe leaks nothing; MCP L1 declines inline; MCP dedup collapses rapid resubmits |
