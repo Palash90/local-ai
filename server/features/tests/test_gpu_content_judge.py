@@ -178,8 +178,10 @@ def test_strict_judge_fail_closed_when_gpu_down(monkeypatch):
     import requests
     monkeypatch.setattr(requests, "post", fake_post)
     assert judge.mcp_output_judge("anything", timeout=5) is True
+    # Fail-open outage is None (distinct from SAFE=False) so the
+    # pre-delivery gate can deliver with an unverified note.
     assert judge.mcp_output_judge("anything", timeout=5,
-                                  fail_closed=False) is False
+                                  fail_closed=False) is None
 
 
 def test_quality_judge_ignores_exclusion_and_remote(monkeypatch):

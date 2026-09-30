@@ -238,17 +238,61 @@ def _restart_llama_server_locked(mode):
     _start_llama_process(args, mode, boot_timeout=600 if mode == "26b" else 120)
 
 
+def _wait_vram_below(threshold_mb, timeout_s):
+    """Poll nvidia-smi until used VRAM drops below ``threshold_mb``.
+
+    Local copy of the llm.py waiter (kept here to avoid an llm↔monitoring
+    import cycle). Returns True when headroom exists, False on timeout —
+    callers must treat False as "do not boot", never proceed anyway.
+    """
+    print(f"[llama] waiting for VRAM below {threshold_mb}MB (timeout {timeout_s}s)")
+    for _ in range(int(timeout_s)):
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            used_mb = int(r.stdout.strip().split("\n")[0])
+            if used_mb < threshold_mb:
+                print(f"[llama] VRAM at {used_mb}MB — headroom OK")
+                return True
+        except Exception as e:
+            print(f"[llama] nvidia-smi check failed: {e}")
+        time.sleep(1)
+    print(f"[llama] VRAM still above {threshold_mb}MB after {timeout_s}s — refusing boot")
+    return False
+
+
+# 26B boot headroom: the load requests a ~1.4GB chunk; booting into
+# E4B-held VRAM OOMs (cudaMalloc failed, :8089 exits, task hangs).
+# Hardcoded first; .env-tunable after one observation round.
+_26B_BOOT_VRAM_MAX_USED_MB = 1000
+_26B_BOOT_VRAM_WAIT_S = 120
+
+
 def ensure_llama_server(mode, override=None):
+    """Ensure the lane server is up; True when serving, False when the caller
+    must fail fast instead of proceeding (currently only the 26B VRAM gate
+    returns False — every other path returns True, preserving old behavior
+    for callers that ignore the return value)."""
     if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
-        return
+        return True
     # 26B tasks are served by the dedicated :8089 server; lane mode only
     # selected the task's queue.
     smode = "26b" if override else mode
     base = M.server_base(smode)
     if M.is_llama_alive(base):
-        return
+        return True
     print(f"[llama] {smode} llama-server not reachable — starting...")
+    if smode == "26b":
+        # Door-B gate: never boot into occupied VRAM. The eviction-branch
+        # gate (R1, llm.py) never runs when :8089 is fully down, because
+        # this ensure fires first — every ungated boot here raced E4B-held
+        # VRAM into a cudaMalloc OOM (observed 2026-09-30).
+        if not _wait_vram_below(_26B_BOOT_VRAM_MAX_USED_MB, _26B_BOOT_VRAM_WAIT_S):
+            return False
     restart_llama_server(smode)
+    return True
 
 
 _embed_ready_lock = threading.Lock()

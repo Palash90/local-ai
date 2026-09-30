@@ -479,8 +479,8 @@ LLAMA_SERVER_ARGS_26B = [
     "--jinja",
     "--chat-template-file", os.path.expanduser("~/local-ai-files/models/gemma4-26b/chat_template.jinja"),
 
-    "-ngl", os.environ.get("GPU_NGL_26B", "24"),
-    "--n-cpu-moe", "30",
+    "-ngl", os.environ.get("GPU_NGL_26B", "28"),
+    "--n-cpu-moe", "28",
     "-fa", "on",
     "--ctx-size", os.environ.get("GPU_CTX_SIZE_26B", "32768"),
     "-ctk", "q4_0",

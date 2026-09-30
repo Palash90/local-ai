@@ -1115,8 +1115,11 @@ def mcp_output_judge(text, timeout=None, fail_closed=True, model_id=None,
                      allow_gpu_fallback=False):
     """Final end-of-pipe strict judge for ALL MCP outputs.
 
-    Return True if the text must be BLOCKED.  This function is the absolute
-    last line of defence: it is called after pattern scans and the existing
+    Return True if the text must be BLOCKED, False if SAFE, or None when
+    the judge itself is unavailable AND ``fail_closed`` is False (fail-open
+    lanes use None to deliver with an unverified note). With the default
+    ``fail_closed=True`` an outage returns True (BLOCKED). This function is
+    the absolute last line of defence: it is called after pattern scans and the existing
     output judge, and covers ALL prohibited categories plus prompt/input
     leaking.  ``fail_closed`` defaults to True — if the judge model is down
     or errors, the output is BLOCKED.
@@ -1160,9 +1163,13 @@ def mcp_output_judge(text, timeout=None, fail_closed=True, model_id=None,
     if cand is None:
         print(
             "[gpu-judge][strict-output-judge] judge unavailable — "
-            f"{'BLOCKED (fail-closed)' if fail_closed else 'ALLOWED (fail-open, UI lane)'}"
+            f"{'BLOCKED (fail-closed)' if fail_closed else 'UNVERIFIED (fail-open, UI lane)'}"
         )
-        return fail_closed
+        # Fail-open callers get None (distinct from SAFE=False) so the
+        # pre-delivery gate can deliver with an unverified note instead of
+        # silently treating an outage as a clean verdict. Fail-closed
+        # callers (MCP gateway default) still get True.
+        return True if fail_closed else None
     verdict = _parse_strict_verdict(content)
     print(
         f"[gpu-judge][strict-output-judge] model={cand} "

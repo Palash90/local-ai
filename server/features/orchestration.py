@@ -551,6 +551,82 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
     if search_details and "**Sources" not in msg_content:
         msg_content = msg_content.rstrip() + _source_footer(search_details)
     mode = M.task_mode(task_id)
+    # ── L3 pre-delivery gate ──────────────────────────────────────────
+    # The verdict is computed BEFORE the reply is appended to the session
+    # or marked done: BLOCKED replies are substituted, never delivered.
+    # (Previously L3 ran post-delivery as audit-only annotation.)
+    is_mcp_lane = (mode == "guardrail") or bool(t.get("_mcp"))
+    _l3_blocked = False
+    _l3_unverified = False
+    _l3_mcp_failed = None  # None = no MCP bookkeeping needed
+    try:
+        from server.input_guard import is_strict_output_blocked
+        from server.features.judge import mcp_output_judge
+
+        reply_text = msg_content or ""
+        print(f"[L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}, lane={'guardrail/MCP' if is_mcp_lane else 'UI'}, judge=gpu-chat-model (pre-delivery)")
+        print(f"[L3] msg_content={reply_text}")
+
+        print(f"[L3] checking strict output blocks")
+        blocked = is_strict_output_blocked(reply_text)
+        if not blocked and reply_text.strip():
+            # LLM strict judge for EVERY non-empty reply (no simple-turn
+            # skip): fail-closed on MCP lane, fail-open on UI lane.
+            if is_mcp_lane:
+                blocked = bool(mcp_output_judge(
+                    reply_text, fail_closed=True, model_id=task_model,
+                ))
+            else:
+                verdict = mcp_output_judge(
+                    reply_text, fail_closed=False, model_id=task_model,
+                )
+                if verdict is None:
+                    # Judge unavailable (distinct from SAFE): deliver with
+                    # an unverified note (locked fail-open policy).
+                    _l3_unverified = True
+                else:
+                    blocked = bool(verdict)
+        if blocked:
+            # Full original stays server-side only (logged above for audit);
+            # it is NEVER appended to the session or task response.
+            print(f"[L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
+            if is_mcp_lane:
+                _l3_mcp_failed = True
+            else:
+                msg_content = (
+                    "I can't provide that response."
+                )
+                # Withhold this turn's renders: a refused text must not
+                # carry freshly generated media.
+                image_url = None
+                images = []
+                gen_prompt = None
+                image_model = None
+                music_url = None
+                music_stream_url = None
+                tracks = []
+                music_score = None
+                music_levels = None
+                _l3_blocked = True
+        else:
+            print(f"[L3] PASSED: output approved by strict filter")
+            if is_mcp_lane:
+                _l3_mcp_failed = False
+    except Exception as e:
+        print(f"[L3] error during output verification: {e}")
+        if is_mcp_lane:
+            M._set_task_error(task_id, f"L3 output verification failed: {e}", sid)
+            return
+        _l3_unverified = True
+    if _l3_unverified:
+        _screened = {"url": "", "meta": None, "action": "SCREENED",
+                     "note": "L3 judge unavailable — delivered unverified (fail-open)"}
+        verification = [*verification, _screened] if verification is not None else [_screened]
+    _l3_verdict_note = None
+    if _l3_blocked:
+        _l3_verdict_note = "BLOCKED"
+    elif _l3_unverified:
+        _l3_verdict_note = "UNVERIFIED"
     msg_entry = {
         "role": "assistant",
         "content": msg_content,
@@ -630,75 +706,29 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
             if verification is not None:
                 M.tasks[task_id]["_verification"] = verification
                 M.tasks[task_id]["_verification_duration"] = verification_duration
-    is_mcp_lane = (mode == "guardrail") or bool(t.get("_mcp"))
-    # L3 post-processing output judge. Runs for EVERY generated task — including
-    # the interactive UI (GPU) lane, which previously skipped it entirely — on
-    # the resident GPU chat model (GPU-only content judging; never the CPU
-    # guardrail lane, never a remote endpoint). The
-    # guardrail/MCP lane stays fail-closed (blocked output = marked failed); the
-    # UI lane is fail-open (a judge outage must never drop a user's reply, so an
-    # unavailable judge lets the answer through with a recorded note).
-    try:
-        from server.input_guard import is_strict_output_blocked
-        from server.features.judge import mcp_output_judge
-
-        reply_text = msg_content or ""
-        print(f"[L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}, lane={'guardrail/MCP' if is_mcp_lane else 'UI'}, judge=gpu-chat-model")
-        print(f"[L3] msg_content={reply_text}")
-
-        print(f"[L3] checking strict output blocks")
-        blocked = is_strict_output_blocked(reply_text)
-        judge_verdict = None
-        # Simple UI turns already skipped the quality judge; skip the L3 LLM
-        # strict judge too, keeping only the fast deterministic pattern scan.
-        # Non-simple / MCP / guardrail lanes always run the LLM judge.
-        simple_lane_skip = (mode == "gpu" and not is_mcp_lane
-                            and M.is_simple_round_task(t)
-                            and not M.answer_claims_artifact(reply_text))
-        if not blocked and reply_text.strip() and not simple_lane_skip:
-            # LLM strict judge on the GPU chat model. On the guardrail/MCP
-            # lane it is fail-closed; on the UI lane a judge outage degrades
-            # to a "screened" note so the reply is still delivered.
-            if is_mcp_lane:
-                judge_verdict = mcp_output_judge(
-                    reply_text, fail_closed=True, model_id=task_model,
-                )
-            else:
-                judge_verdict = mcp_output_judge(
-                    reply_text, fail_closed=False, model_id=task_model,
-                )
-            blocked = blocked or bool(judge_verdict)
-        if blocked:
-            print(f"[L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
-            if is_mcp_lane:
-                from server.mcp_tasks_db import mcp_task_update
-                mcp_task_update(task_id, status="done", reply=reply_text,
-                              verification_level="LEVEL 3 OUTPUT VERIFICATION FAILED",
-                              failure_reason="Output blocked by strict filter")
-            else:
-                with M._data_lock:
-                    tt = M.tasks.get(task_id)
-                    if tt:
-                        tt["_l3_verdict"] = "BLOCKED"
-                        tt.setdefault("_verification", []).append(
-                            {"url": "", "meta": None,
-                             "action": "BLOCKED",
-                             "note": "L3 output judge flagged the reply as blocked"}
-                        )
-        else:
-            print(f"[L3] PASSED: output approved by strict filter")
-            if is_mcp_lane:
-                from server.mcp_tasks_db import mcp_task_update
-                mcp_task_update(task_id, status="done", reply=reply_text,
-                              verification_level="LEVEL 3 OUTPUT VERIFICATION PASSED")
-    except Exception as e:
-        print(f"[L3] error during output verification: {e}")
-        # MCP output verification is fail-closed. Do not publish a successful
-        # task when L3 could not produce a verdict, but do persist the terminal
-        # failure so the MCP client is not left polling a permanent "working"
-        # row.
-        if is_mcp_lane:
-            M._set_task_error(task_id, f"L3 output verification failed: {e}", sid)
+    # L3 verdict application. The verdict was computed PRE-delivery (see the
+    # gate above): this block only records bookkeeping. No second judge call
+    # happens here — judging twice would double latency and could disagree
+    # with the gate that already decided delivery.
+    if _l3_verdict_note:
+        print(f"[L3] applying pre-delivery verdict {_l3_verdict_note} for task {task_id}")
+        with M._data_lock:
+            tt = M.tasks.get(task_id)
+            if tt:
+                tt["_l3_verdict"] = _l3_verdict_note
+                if _l3_blocked:
+                    tt.setdefault("_verification", []).append(
+                        {"url": "", "meta": None,
+                         "action": "BLOCKED",
+                         "note": "L3 output judge blocked the reply pre-delivery; refusal substituted"}
+                    )
+    if _l3_mcp_failed is not None:
+        from server.mcp_tasks_db import mcp_task_update
+        # MCP contract unchanged: done + PASSED/FAILED with the reply
+        # retained for audit (fail-closed bookkeeping, not delivery).
+        mcp_task_update(task_id, status="done", reply=msg_content,
+                        verification_level="LEVEL 3 OUTPUT VERIFICATION " + ("FAILED" if _l3_mcp_failed else "PASSED"),
+                        **({"failure_reason": "Output blocked by strict filter"} if _l3_mcp_failed else {}))
 
 
 def _event_post(ev_type, task_id, **data):

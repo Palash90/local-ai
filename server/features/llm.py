@@ -1777,7 +1777,16 @@ def _start_llm_round(task_id, sid, round_num):
     # :8089. Override tasks always ensure: without it a cold 26B server
     # guarantees round failure.
     if not task.get("skip_ensure_llama") or task.get("model"):
-        M.ensure_llama_server(mode, task.get("model"))
+        # ensure returns False only when the 26B VRAM gate refuses the boot
+        # (Door B): fail the task fast instead of hanging behind a server
+        # that will never come up. All other lanes return True.
+        if M.ensure_llama_server(mode, task.get("model")) is False:
+            M._set_task_error(
+                task_id,
+                "Server busy: VRAM still held by the E4B lane after 120s; "
+                "retry shortly.",
+            )
+            return
     # NOTE: read status via direct attribute access — server_status() takes
     # _data_lock itself, and this lock is non-reentrant (same-thread
     # re-acquire deadlocks the event loop permanently with no traceback).
