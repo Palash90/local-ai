@@ -117,30 +117,125 @@ def estimate_tokens(messages, include_tools=True):
     return max(1, total)
 
 
+def _is_file_read_result(messages, idx):
+    """True when message idx is a file-read tool result (F1).
+
+    File contents (read-family calls carrying filePath/path/file args)
+    are truncated LAST — other oversized messages (search blobs, fetched
+    pages, long chat turns) are cut first. Pure.
+    """
+    try:
+        msg = messages[idx] if 0 <= idx < len(messages) else {}
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            return False
+        call_id = msg.get("tool_call_id")
+        if not call_id:
+            return False
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            for tc in m.get("tool_calls") or []:
+                if not isinstance(tc, dict) or tc.get("id") != call_id:
+                    continue
+                args = (tc.get("function") or {}).get("arguments", "")
+                try:
+                    data = json.loads(args) if isinstance(args, str) else args
+                except Exception:
+                    return False
+                if isinstance(data, dict) and any(
+                    isinstance(data.get(k), str) and data.get(k).strip()
+                    for k in ("filePath", "path", "file")
+                ):
+                    return True
+                return False
+    except Exception:
+        pass
+    return False
+
+
+def _tool_result_label(messages, idx):
+    """Best-effort label for a truncated tool result (F2).
+
+    Finds the assistant `tool_calls` entry whose id matches this tool
+    message's `tool_call_id` and returns a human label (file path or URL)
+    so the truncation marker names the casualty — the model can re-read
+    it instead of silently losing it. Returns "" when unknown. Pure.
+    """
+    try:
+        msg = messages[idx] if 0 <= idx < len(messages) else {}
+        call_id = msg.get("tool_call_id") if isinstance(msg, dict) else None
+        if not call_id:
+            return ""
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            for tc in m.get("tool_calls") or []:
+                if not isinstance(tc, dict) or tc.get("id") != call_id:
+                    continue
+                fn = tc.get("function") or {}
+                args = fn.get("arguments", "")
+                try:
+                    data = json.loads(args) if isinstance(args, str) else args
+                except Exception:
+                    data = {}
+                if isinstance(data, dict):
+                    for key in ("filePath", "path", "file", "url"):
+                        val = data.get(key)
+                        if isinstance(val, str) and val.strip():
+                            return val.strip()[:200]
+                return (fn.get("name") or "").strip()[:80]
+    except Exception:
+        pass
+    return ""
+
+
+# Minimum string length worth cutting: keep floor is 1000 chars, so
+# cutting anything shorter only bloats with markers. (F1)
+_TRUNC_MIN_CANDIDATE = 1000
+
+
 def _hard_truncate_messages(messages, budget):
     """Last-resort content truncation.
 
     Popping the oldest message stops helping when one huge message (e.g. a
     tool result carrying full page text) alone exceeds the budget. Halve the
     largest string content (keeping head and tail) until the estimate fits.
-    Works on copies — the stored session is never mutated.
+    File-read results are cut LAST (F1) — search blobs, fetched pages and
+    chat turns go first. The marker names truncated file reads (F2) so the
+    model can re-read them. Works on copies — the stored session is never
+    mutated.
     """
     msgs = list(messages)
     for _ in range(20):
         if estimate_tokens(msgs) <= budget:
             break
         biggest, size = None, 0
+        fallback, fallback_size = None, 0
         for i, msg in enumerate(msgs):
             c = msg.get("content")
-            if isinstance(c, str) and len(c) > size:
+            if not isinstance(c, str):
+                continue
+            if _is_file_read_result(msgs, i):
+                # Protected: cut only when nothing else can be cut.
+                if len(c) > fallback_size:
+                    fallback, fallback_size = i, len(c)
+            elif len(c) > size and len(c) > _TRUNC_MIN_CANDIDATE:
+                # Below the keep floor, cutting only bloats (keep >= 1000),
+                # so tiny messages are never cut candidates.
                 biggest, size = i, len(c)
+        if biggest is None:
+            biggest, size = fallback, fallback_size
         if biggest is None:
             break
         body = msgs[biggest]["content"]
         keep = max(1000, len(body) // 4)
-        trimmed_body = (
-            body[:keep] + "\n...[older tool output truncated]...\n" + body[-keep:]
+        label = _tool_result_label(msgs, biggest)
+        marker = (
+            f"\n...[truncated: {label} — re-read it with the read tool if needed]...\n"
+            if label
+            else "\n...[older tool output truncated]...\n"
         )
+        trimmed_body = body[:keep] + marker + body[-keep:]
         msgs[biggest] = {**msgs[biggest], "content": trimmed_body}
     return msgs
 

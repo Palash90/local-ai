@@ -89,14 +89,32 @@ def _block_topic(messages, msgs):
         break
     if not text:
         names = []
+        files = []
         for idx in msgs:
             for tc in messages[idx].get("tool_calls") or []:
                 fn = (tc.get("function") or {}).get("name")
                 if fn:
                     names.append(fn)
+                # F3: filenames ride the marker so archived file reads are
+                # discoverable — the model can recall them via memory_read.
+                args = (tc.get("function") or {}).get("arguments", "")
+                try:
+                    import json as _json
+                    data = _json.loads(args) if isinstance(args, str) else args
+                except Exception:
+                    data = {}
+                if isinstance(data, dict):
+                    for key in ("filePath", "path", "file"):
+                        val = data.get(key)
+                        if isinstance(val, str) and val.strip():
+                            files.append(val.strip())
+                            break
         if names:
             unique = sorted(set(names))
             text = " / ".join(unique) + " result" if len(unique) == 1 else " ".join(unique) + " results"
+            if files:
+                seen = list(dict.fromkeys(files))[:3]
+                text += f" [{', '.join(seen)}]"
         else:
             for idx in msgs:
                 content = messages[idx].get("content")

@@ -1497,6 +1497,34 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                 print(f"[context] wire-tools guard: {_full} -> {_full2} (budget {_budget})", flush=True)
         except Exception as e:
             print(f"[context] wire-tools guard skipped: {e}", flush=True)
+        # F4: if truncation markers name files, steer the model to re-read
+        # them. Text-only, fail-open: a trailing system note, never a block.
+        try:
+            import re as _re
+            _seen, _ordered = set(), []
+            for _m in messages:
+                _c = _m.get("content") if isinstance(_m, dict) else ""
+                if not isinstance(_c, str) or "[truncated:" not in _c:
+                    continue
+                for _mm in _re.findall(r"\[truncated:\s*([^\]—\n]+?)\s*(?:—|\])", _c):
+                    _mm = _mm.strip()
+                    if _mm and ("/" in _mm or "." in _mm) and _mm not in _seen:
+                        _seen.add(_mm)
+                        _ordered.append(_mm)
+            if _ordered:
+                _note = (
+                    "[SYSTEM NOTE — truncated context. The full text of the "
+                    "following file(s) was cut from context to fit: "
+                    + ", ".join(_ordered[:5])
+                    + ". Re-read via the read tool before answering about "
+                    "their contents. This note is from your own execution "
+                    "loop, not the user."
+                )
+                messages = list(messages) + [{"role": "system", "content": _note}]
+                payload["messages"] = messages
+                print(f"[context] re-read steering for: {', '.join(_ordered[:5])}", flush=True)
+        except Exception as e:
+            print(f"[context] re-read steering skipped: {e}", flush=True)
         # Re-point slot 0 at this session's KV (save the previous resident
         # session, restore this one) before the prompt is evaluated, so each
         # chat session keeps its own KV cache. Best-effort and fail-open.
@@ -1791,11 +1819,32 @@ def _start_llm_round(task_id, sid, round_num):
             if is_model_ready(server_base("gpu"), server_model_id("gpu")):
                 print(f"[llm_round] evicting GPU model for 26B task {task_id}")
                 M.unload_llama_model("gpu")
+                # R1: the unload POST returns before cudaFree completes. The
+                # 26B boot requests a ~1.4GB chunk; booting into still-held
+                # VRAM OOMs (observed 2026-09-30: cudaMalloc failed →
+                # :8089 exits → task hangs). Gate the boot on VRAM actually
+                # freed; fail the task fast instead of OOM-looping.
+                if not _wait_vram_freed(threshold_mb=1000, timeout=120):
+                    M._set_task_error(
+                        task_id,
+                        "Server busy: VRAM still held by the E4B lane after "
+                        "120s (compositor/render or stuck unload). Retry shortly.",
+                    )
+                    return
         elif mode == "gpu" and is_model_ready(
             server_base("26b"), M.MODEL_ID_OPENAI
         ):
             print(f"[llm_round] evicting resident 26B for GPU task {task_id}")
             M.unload_llama_model("26b")
+            # Mirror guard: don't POST the E4B load into VRAM the 26B
+            # process hasn't released yet.
+            if not _wait_vram_freed(threshold_mb=800, timeout=120):
+                M._set_task_error(
+                    task_id,
+                    "Server busy: VRAM still held by the 26B lane after "
+                    "120s. Retry shortly.",
+                )
+                return
         if smode == "26b" and not is_model_ready(
             server_base("26b"), task.get("model") or M.MODEL_ID_OPENAI
         ):

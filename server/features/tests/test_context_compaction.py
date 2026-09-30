@@ -119,3 +119,53 @@ def test_compact_copy_short_list_unchanged(entrypoint):
     msgs = _msgs(5)
     out = C.compact_messages_copy(msgs, keep_messages=6, mode="gpu")
     assert out == msgs
+
+
+def test_truncated_file_read_marker_names_file(entrypoint):
+    import json as _json
+    entrypoint.AUTO_COMPACT_THRESHOLD = 10 ** 9
+    entrypoint.prompt_token_budget = lambda mode: 50
+    big = "Z" * 5000
+    msgs = [
+        {"role": "assistant", "content": "reading",
+         "tool_calls": [{"id": "c1", "function": {
+             "name": "read",
+             "arguments": _json.dumps({"filePath": "/repo/server/x.py"})}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": big},
+    ]
+    snapshot = [dict(m) for m in msgs]
+    out = C._hard_truncate_messages(msgs, 50)
+    tool_out = [m for m in out if m.get("role") == "tool"][0]["content"]
+    assert "/repo/server/x.py" in tool_out
+    assert "re-read" in tool_out
+    # Stored session untouched.
+    assert msgs == snapshot
+
+
+def test_file_read_truncated_last(entrypoint):
+    import json as _json
+    entrypoint.AUTO_COMPACT_THRESHOLD = 10 ** 9
+    entrypoint.prompt_token_budget = lambda mode: 50
+    blob = "S" * 8000  # search blob: bigger than the file read
+    fileread = "F" * 5000
+    msgs = [
+        {"role": "assistant", "content": "x",
+         "tool_calls": [{"id": "w1", "function": {
+             "name": "web_search",
+             "arguments": _json.dumps({"query": "q"})}}]},
+        {"role": "tool", "tool_call_id": "w1", "content": blob},
+        {"role": "assistant", "content": "y",
+         "tool_calls": [{"id": "r1", "function": {
+             "name": "read",
+             "arguments": _json.dumps({"filePath": "/repo/keep.py"})}}]},
+        {"role": "tool", "tool_call_id": "r1", "content": fileread},
+    ]
+    out = C._hard_truncate_messages(msgs, 50)
+    by_role = {}
+    for m in out:
+        by_role.setdefault(m.get("tool_call_id", m.get("role")), []).append(m)
+    search_out = [m for m in out if m.get("tool_call_id") == "w1"][0]["content"]
+    file_out = [m for m in out if m.get("tool_call_id") == "r1"][0]["content"]
+    # Search blob got cut; file read survived intact until nothing else left.
+    assert "truncated" in search_out
+    assert file_out == fileread or "/repo/keep.py" in file_out
