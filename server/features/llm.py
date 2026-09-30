@@ -1386,13 +1386,17 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
         # DSL doc could push the real prompt past ctx and earn a 400 from
         # llama-server. Re-check with the block included and trim again.
         try:
-            budget = M.prompt_token_budget(mode)
+            # 26B tasks run on the :8089 server with its own ctx — budget
+            # them on the 26b lane, not gpu (E4B), so the hard trim moves
+            # with the hardware instead of pinning 26B at ~15K.
+            _blane = "26b" if M.tasks.get(task_id, {}).get("model") else mode
+            budget = M.prompt_token_budget(_blane)
             if M.estimate_tokens(messages, include_tools=True) > budget:
                 n_before = len(messages)
-                messages = M.trim_messages_for_context(messages, mode)
+                messages = M.trim_messages_for_context(messages, _blane)
                 print(
                     f"[context] post-docs trim: {n_before} -> {len(messages)} msgs "
-                    f"(est over budget {budget} on {mode})",
+                    f"(est over budget {budget} on {_blane})",
                     flush=True,
                 )
         except Exception as e:
@@ -1473,7 +1477,7 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                 estimate_tools_tokens as _est_tools,
                 _hard_truncate_messages as _hard_trunc,
             )
-            _budget = M.prompt_token_budget(mode)
+            _budget = M.prompt_token_budget(smode if smode == "26b" else mode)
             _full = M.estimate_tokens(messages, include_tools=False) + _est_tools(payload.get("tools"))
             if _full > _budget:
                 # Lever 1 (client tools only): strip description prose first.
@@ -1761,6 +1765,25 @@ def _start_llm_round(task_id, sid, round_num):
     if ms != "chat_loaded":
         if task.get("skip_ensure_llama"):
             print(f"[llm_round] skip_ensure_llama=True but model not loaded on {smode} — loading anyway to avoid failure")
+        if smode == "26b":
+            # Fail fast when the model file is missing: without this the
+            # task sits "working" through restart loops and a 600s POST
+            # timeout (observed 2026-09-30: swapped GGUF → eternal hang).
+            # Import locally: config values are read at call time so .env
+            # overrides (MODEL_FILE_26B) are always honored.
+            try:
+                from server.config import MODEL_FILE_26B as _m26
+                import os as _os
+                _m26 = _os.path.expanduser(_m26) if _m26 else ""
+                if not _m26 or not _os.path.exists(_m26):
+                    M._set_task_error(
+                        task_id,
+                        f"26B model file missing: {_m26 or '(unset)'}. "
+                        "Set MODEL_FILE_26B to the current GGUF path and restart.",
+                    )
+                    return
+            except Exception as _e:
+                print(f"[llm_round] 26b file check skipped: {_e}", flush=True)
         if smode == "26b":
             # 4GB VRAM holds one model: evict resident E4B before 26B loads.
             # Probe actual server state, not process-local status (status

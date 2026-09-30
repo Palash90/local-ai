@@ -638,6 +638,7 @@ def handle_chat_completions(handler):
             "session_id": session_id,
             "_queued_at": time.time(),
             "mode": mode,
+            "model": MODEL_ID_OPENAI,
             "_user": _API_USER,
         }
 

@@ -271,6 +271,10 @@ LANE_CTX_SIZES = {
     "gpu": MAX_INPUT_TOKENS,
     "cpu": int(os.environ.get("CPU_CTX_SIZE", "24576")),
     "guardrail": 8192,
+    # 26B standalone server (:8089) has its own --ctx-size, independent of
+    # the E4B gpu lane. Without this key 26B tasks budgeted as "gpu" and the
+    # hard trim held them at ~15K even when the server could hold 32K+.
+    "26b": int(os.environ.get("GPU_CTX_SIZE_26B", "32768")),
 }
 
 PROMPT_BUDGET_MARGIN = 1024
