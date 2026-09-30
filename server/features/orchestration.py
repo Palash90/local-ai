@@ -559,65 +559,74 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
     _l3_blocked = False
     _l3_unverified = False
     _l3_mcp_failed = None  # None = no MCP bookkeeping needed
-    try:
-        from server.input_guard import is_strict_output_blocked
-        from server.features.judge import mcp_output_judge
+    _l3_skipped_openai = bool(t.get("openai_lane")) and not is_mcp_lane
+    if _l3_skipped_openai:
+        # OpenAI lane: L3 skipped entirely (locked policy) — no pattern
+        # scan, no LLM verdict, no annotation. _mcp always wins: if both
+        # flags ever co-occur (admission guarantees they don't), the task
+        # is judged fail-closed. Output safety on the openai lane is the
+        # caller's job.
+        print(f"[L3] skipped (openai lane policy) for task {task_id}")
+    else:
+        try:
+            from server.input_guard import is_strict_output_blocked
+            from server.features.judge import mcp_output_judge
 
-        reply_text = msg_content or ""
-        print(f"[L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}, lane={'guardrail/MCP' if is_mcp_lane else 'UI'}, judge=gpu-chat-model (pre-delivery)")
-        print(f"[L3] msg_content={reply_text}")
+            reply_text = msg_content or ""
+            print(f"[L3] verifying output for task {task_id}, len={len(reply_text)}, image_file={image_filename}, lane={'guardrail/MCP' if is_mcp_lane else 'UI'}, judge=gpu-chat-model (pre-delivery)")
+            print(f"[L3] msg_content={reply_text}")
 
-        print(f"[L3] checking strict output blocks")
-        blocked = is_strict_output_blocked(reply_text)
-        if not blocked and reply_text.strip():
-            # LLM strict judge for EVERY non-empty reply (no simple-turn
-            # skip): fail-closed on MCP lane, fail-open on UI lane.
-            if is_mcp_lane:
-                blocked = bool(mcp_output_judge(
-                    reply_text, fail_closed=True, model_id=task_model,
-                ))
-            else:
-                verdict = mcp_output_judge(
-                    reply_text, fail_closed=False, model_id=task_model,
-                )
-                if verdict is None:
-                    # Judge unavailable (distinct from SAFE): deliver with
-                    # an unverified note (locked fail-open policy).
-                    _l3_unverified = True
+            print(f"[L3] checking strict output blocks")
+            blocked = is_strict_output_blocked(reply_text)
+            if not blocked and reply_text.strip():
+                # LLM strict judge for EVERY non-empty reply (no simple-turn
+                # skip): fail-closed on MCP lane, fail-open on UI lane.
+                if is_mcp_lane:
+                    blocked = bool(mcp_output_judge(
+                        reply_text, fail_closed=True, model_id=task_model,
+                    ))
                 else:
-                    blocked = bool(verdict)
-        if blocked:
-            # Full original stays server-side only (logged above for audit);
-            # it is NEVER appended to the session or task response.
-            print(f"[L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
-            if is_mcp_lane:
-                _l3_mcp_failed = True
+                    verdict = mcp_output_judge(
+                        reply_text, fail_closed=False, model_id=task_model,
+                    )
+                    if verdict is None:
+                        # Judge unavailable (distinct from SAFE): deliver with
+                        # an unverified note (locked fail-open policy).
+                        _l3_unverified = True
+                    else:
+                        blocked = bool(verdict)
+            if blocked:
+                # Full original stays server-side only (logged above for audit);
+                # it is NEVER appended to the session or task response.
+                print(f"[L3] BLOCKED: strict output filter triggered on text: {reply_text[:500]}")
+                if is_mcp_lane:
+                    _l3_mcp_failed = True
+                else:
+                    msg_content = (
+                        "I can't provide that response."
+                    )
+                    # Withhold this turn's renders: a refused text must not
+                    # carry freshly generated media.
+                    image_url = None
+                    images = []
+                    gen_prompt = None
+                    image_model = None
+                    music_url = None
+                    music_stream_url = None
+                    tracks = []
+                    music_score = None
+                    music_levels = None
+                    _l3_blocked = True
             else:
-                msg_content = (
-                    "I can't provide that response."
-                )
-                # Withhold this turn's renders: a refused text must not
-                # carry freshly generated media.
-                image_url = None
-                images = []
-                gen_prompt = None
-                image_model = None
-                music_url = None
-                music_stream_url = None
-                tracks = []
-                music_score = None
-                music_levels = None
-                _l3_blocked = True
-        else:
-            print(f"[L3] PASSED: output approved by strict filter")
+                print(f"[L3] PASSED: output approved by strict filter")
+                if is_mcp_lane:
+                    _l3_mcp_failed = False
+        except Exception as e:
+            print(f"[L3] error during output verification: {e}")
             if is_mcp_lane:
-                _l3_mcp_failed = False
-    except Exception as e:
-        print(f"[L3] error during output verification: {e}")
-        if is_mcp_lane:
-            M._set_task_error(task_id, f"L3 output verification failed: {e}", sid)
-            return
-        _l3_unverified = True
+                M._set_task_error(task_id, f"L3 output verification failed: {e}", sid)
+                return
+            _l3_unverified = True
     if _l3_unverified:
         _screened = {"url": "", "meta": None, "action": "SCREENED",
                      "note": "L3 judge unavailable — delivered unverified (fail-open)"}

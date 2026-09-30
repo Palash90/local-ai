@@ -139,3 +139,39 @@ class _Resp:
 
     def json(self):
         return self._payload
+
+
+def test_openai_lane_skips_l3_entirely(monkeypatch):
+    """OpenAI lane policy: no pattern scan, no LLM verdict, no annotation —
+    blockable text is delivered verbatim."""
+    import server.input_guard as ig
+    import server.features.judge as jd
+    calls = []
+    monkeypatch.setattr(ig, "is_strict_output_blocked",
+                        lambda text: calls.append("pattern") or True)
+    monkeypatch.setattr(jd, "mcp_output_judge",
+                        lambda *a, **k: calls.append("judge") or True)
+    tasks = _task(openai_lane=True)
+    _, sessions = _fake_m(monkeypatch, tasks)
+    orch._finalize_task("t1", "s1", "blockable words here", _body())
+    assert calls == []
+    assert sessions["s1"][0]["content"] == "blockable words here"
+    assert tasks["t1"]["response"] == "blockable words here"
+    assert "_l3_verdict" not in tasks["t1"]
+    assert all(v.get("action") != "BLOCKED"
+               for v in tasks["t1"].get("_verification", []))
+
+
+def test_openai_lane_never_cooccurs_with_mcp(monkeypatch):
+    """_mcp always wins: if both flags ever co-occur, the task is judged
+    fail-closed instead of silently skipping a lane that needed it."""
+    import server.mcp_tasks_db as db
+    tasks = _task(openai_lane=True, _mcp=True)
+    _, sessions = _fake_m(monkeypatch, tasks)
+    _mock_l3(monkeypatch, pattern=False, verdict=False)
+    seen = {}
+    monkeypatch.setattr(db, "mcp_task_update",
+                        lambda task_id, **kw: seen.update(kw))
+    orch._finalize_task("t1", "s1", "hi", _body())
+    assert seen.get("verification_level") == "LEVEL 3 OUTPUT VERIFICATION PASSED"
+    assert sessions["s1"][0]["content"] == "hi"
