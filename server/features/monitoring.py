@@ -145,6 +145,9 @@ def kill_llama_server(mode=None):
     if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
         print("[guardrail] external judge — skipping local kill", flush=True)
         return
+    if mode == "26b" and getattr(M, "LLAMA_26B_EXTERNAL", False):
+        print("[26b] external lane — skipping local kill", flush=True)
+        return
     if mode is None:
         subprocess.run(["pkill", "-f", "llama-server"], capture_output=True)
         time.sleep(1)
@@ -201,6 +204,9 @@ def restart_llama_server(mode):
     shadow nothing and waste RAM)."""
     if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
         print("[guardrail] external judge — skipping local restart", flush=True)
+        return
+    if mode == "26b" and getattr(M, "LLAMA_26B_EXTERNAL", False):
+        print("[26b] external lane — skipping local restart", flush=True)
         return
     # Serialize restarts against model loads/unloads: concurrent restarts
     # (two tasks ensuring at once) interleave kill/start and murder each
@@ -281,6 +287,12 @@ def ensure_llama_server(mode, override=None):
     # selected the task's queue.
     smode = "26b" if override else mode
     base = M.server_base(smode)
+    if smode == "26b" and getattr(M, "LLAMA_26B_EXTERNAL", False):
+        # Remote lane (big-boy): never spawn locally and never apply the
+        # local-VRAM boot gate (local nvidia-smi says nothing about the
+        # remote box). Health of the remote endpoint decides: False lets
+        # the caller fail fast instead of hanging behind a dead server.
+        return M.is_llama_alive(base)
     if M.is_llama_alive(base):
         return True
     print(f"[llama] {smode} llama-server not reachable — starting...")
@@ -878,6 +890,12 @@ def _idle_unload_loop():
         # Dedicated 26B server: no lane queue of its own (a 26B round always
         # belongs to a gpu/cpu lane task), so busy = lane activity or any
         # streaming round; idle from its own last-use clock. Same 300s as gpu.
+        # Skipped entirely while LLAMA_26B_EXTERNAL is set: the remote model
+        # is not ours to release (an idle-unload here would kill big-boy's
+        # serving model after 300s of local quiet). `continue` resumes the
+        # loop (this block sits at the end of the while-True body).
+        if getattr(M, "LLAMA_26B_EXTERNAL", False):
+            continue
         with M._queue_locks["gpu"]:
             lanes_active = (
                 len(M._task_queues["gpu"]) > 0
@@ -1028,7 +1046,9 @@ def _thermal_step():
                 unloaded_any = False
             with M._data_lock:
                 ms26 = M._26b_model_status
-            if ms26 == "chat_loaded":
+            if ms26 == "chat_loaded" and not getattr(M, "LLAMA_26B_EXTERNAL", False):
+                # External 26B lives on big-boy: local overheat is not its
+                # problem and must never release the remote model.
                 print("[thermal] Overheated — unloading 26B model")
                 M.unload_llama_model("26b")
                 unloaded_any = True

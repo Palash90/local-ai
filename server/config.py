@@ -699,6 +699,10 @@ def lane_keep_resident(mode):
         return KEEP_CPU_RESIDENT
     if mode == "guardrail":
         return KEEP_GUARDRAIL_RESIDENT or GUARDRAIL_EXTERNAL
+    if mode == "26b":
+        # External 26B needs no local VRAM choreography and is never managed
+        # locally (mirrors the guardrail line above).
+        return LLAMA_26B_EXTERNAL
     return False
 
 
@@ -734,6 +738,35 @@ elif _GUARDRAIL_EXTERNAL_ENV in ("0", "false", "no", "off"):
     GUARDRAIL_EXTERNAL = False
 else:
     GUARDRAIL_EXTERNAL = not _is_local_base(GUARD_LLM_BASE)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# External 26B lane (big-boy). Same contract as GUARDRAIL_EXTERNAL above:
+# pointing LLAMA_BASE_26B at another machine moves all 26B traffic
+# (Extended / Research-26B / OpenAI lane) there and disables every *local*
+# lifecycle operation for the 26B lane (start/restart, load/unload, idle-unload,
+# thermal-unload, image-choreography evict) — the remote endpoint manages its
+# own model. Auto-detected from LLAMA_BASE_26B unless LLAMA_26B_EXTERNAL is
+# set explicitly.
+# ─────────────────────────────────────────────────────────────────────────────
+def _is_local_host(url):
+    """True when ``url`` targets this box (any port). Port-agnostic sibling
+    of ``_is_local_base`` (which is guardrail/:8083-specific)."""
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(url).hostname or "").lower() in (
+            "localhost", "127.0.0.1", "::1",
+        )
+    except Exception:
+        return True
+
+
+_LLAMA_26B_EXTERNAL_ENV = os.environ.get("LLAMA_26B_EXTERNAL", "").strip().lower()
+if _LLAMA_26B_EXTERNAL_ENV in ("1", "true", "yes", "on"):
+    LLAMA_26B_EXTERNAL = True
+elif _LLAMA_26B_EXTERNAL_ENV in ("0", "false", "no", "off"):
+    LLAMA_26B_EXTERNAL = False
+else:
+    LLAMA_26B_EXTERNAL = not _is_local_host(LLAMA_BASE_26B)
 
 # Background agent peer review: who critiques whom for the full cross-agent
 # round on the CPU lane. Keys are agent usernames; a reply finalized by the

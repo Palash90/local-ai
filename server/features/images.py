@@ -1401,7 +1401,10 @@ def _lanes_loaded_for_reload():
     except Exception:
         guard_was = True
     try:
-        b26_was = M.server_status("26b") == "chat_loaded"
+        # External 26B (big-boy) holds no local VRAM: never evict or reload
+        # it around renders (lane_keep_resident already skips the unload;
+        # this keeps the reload gate honest too).
+        b26_was = False if getattr(M, "LLAMA_26B_EXTERNAL", False) else M.server_status("26b") == "chat_loaded"
     except Exception:
         b26_was = True
     return gpu_was, guard_was, b26_was

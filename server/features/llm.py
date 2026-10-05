@@ -611,6 +611,9 @@ def unload_llama_model(mode="gpu", model_id=None, kv_save_timeout=None, force=Fa
     if mode == "guardrail" and M.GUARDRAIL_EXTERNAL:
         print("[llama] guardrail is external — skipping local unload")
         return True
+    if mode == "26b" and getattr(M, "LLAMA_26B_EXTERNAL", False):
+        print("[llama] 26b is external — skipping local unload")
+        return True
     current_status = M.server_status(mode)
     print(f"[llama] unload_llama_model called: mode={mode}, current_status={current_status}")
     with M._model_transition_lock:
@@ -1781,11 +1784,18 @@ def _start_llm_round(task_id, sid, round_num):
         # (Door B): fail the task fast instead of hanging behind a server
         # that will never come up. All other lanes return True.
         if M.ensure_llama_server(mode, task.get("model")) is False:
-            M._set_task_error(
-                task_id,
-                "Server busy: VRAM still held by the E4B lane after 120s; "
-                "retry shortly.",
-            )
+            if smode == "26b" and getattr(M, "LLAMA_26B_EXTERNAL", False):
+                M._set_task_error(
+                    task_id,
+                    f"26B server unreachable at {M.server_base('26b')}; "
+                    "is big-boy's :8089 up?",
+                )
+            else:
+                M._set_task_error(
+                    task_id,
+                    "Server busy: VRAM still held by the E4B lane after 120s; "
+                    "retry shortly.",
+                )
             return
     # NOTE: read status via direct attribute access — server_status() takes
     # _data_lock itself, and this lock is non-reentrant (same-thread
@@ -1802,10 +1812,12 @@ def _start_llm_round(task_id, sid, round_num):
     if ms != "chat_loaded":
         if task.get("skip_ensure_llama"):
             print(f"[llm_round] skip_ensure_llama=True but model not loaded on {smode} — loading anyway to avoid failure")
-        if smode == "26b":
+        if smode == "26b" and not getattr(M, "LLAMA_26B_EXTERNAL", False):
             # Fail fast when the model file is missing: without this the
             # task sits "working" through restart loops and a 600s POST
             # timeout (observed 2026-09-30: swapped GGUF → eternal hang).
+            # Skipped for the external lane: the GGUF lives on big-boy,
+            # not on this box.
             # Import locally: config values are read at call time so .env
             # overrides (MODEL_FILE_26B) are always honored.
             try:
@@ -1821,8 +1833,10 @@ def _start_llm_round(task_id, sid, round_num):
                     return
             except Exception as _e:
                 print(f"[llm_round] 26b file check skipped: {_e}", flush=True)
-        if smode == "26b":
+        if smode == "26b" and not getattr(M, "LLAMA_26B_EXTERNAL", False):
             # 4GB VRAM holds one model: evict resident E4B before 26B loads.
+            # Skipped for the external lane: the 26B loads into big-boy's
+            # VRAM, so the local E4B must stay resident.
             # Probe actual server state, not process-local status (status
             # resets on app restart while servers keep serving).
             if is_model_ready(server_base("gpu"), server_model_id("gpu")):
@@ -1840,9 +1854,14 @@ def _start_llm_round(task_id, sid, round_num):
                         "120s (compositor/render or stuck unload). Retry shortly.",
                     )
                     return
-        elif mode == "gpu" and is_model_ready(
+        elif mode == "gpu" and not getattr(M, "LLAMA_26B_EXTERNAL", False) and is_model_ready(
             server_base("26b"), M.MODEL_ID_OPENAI
         ):
+            # Local 26B eviction for GPU tasks. Skipped for the external
+            # lane: the remote model holds no local VRAM, and unloading it
+            # would kill big-boy's serving model (unload is a no-op there
+            # anyway, but the VRAM wait below would then wrongly fail the
+            # GPU task against the resident local E4B).
             print(f"[llm_round] evicting resident 26B for GPU task {task_id}")
             M.unload_llama_model("26b")
             # Mirror guard: don't POST the E4B load into VRAM the 26B
@@ -1857,11 +1876,24 @@ def _start_llm_round(task_id, sid, round_num):
         if smode == "26b" and not is_model_ready(
             server_base("26b"), task.get("model") or M.MODEL_ID_OPENAI
         ):
+            if getattr(M, "LLAMA_26B_EXTERNAL", False):
+                # Remote lane: nothing local to restart or load (the remote
+                # standalone server manages its own model). Fail fast with
+                # a clear message instead of hanging the round.
+                M._set_task_error(
+                    task_id,
+                    f"26B model not ready on {M.server_base('26b')}; "
+                    "is big-boy's :8089 serving gemma4-26b?",
+                )
+                return
             # Runs WITHOUT _model_transition_lock held (unlike load()), so
             # the restart's internal locking is safe here.
             print(f"[llm_round] 26B not ready for task {task_id} — restarting server...")
             M.restart_llama_server("26b")
-        M.load_llama_model(smode, model_id=task.get("model"))
+        if not (smode == "26b" and getattr(M, "LLAMA_26B_EXTERNAL", False)):
+            # External lane: the remote standalone server manages its own
+            # model (always loaded at boot) — never POST /models/load at it.
+            M.load_llama_model(smode, model_id=task.get("model"))
     with M._data_lock:
         t = M.tasks.get(task_id)
         if not t:
