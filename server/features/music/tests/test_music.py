@@ -935,3 +935,46 @@ def test_lenient_default_still_renders_partial():
     res = json.loads(render_score(partial, 120, user="local"))
     assert res["ok"] is True, res
     assert any("missing a duration" in e for e in res.get("errors", []))
+
+
+def test_empty_fluid_env_falls_back_to_defaults(monkeypatch):
+    """Empty-string FLUID_* env (as check_env --fill-defaults materializes)
+    must behave like absent: real binary + soundfont, available() True.
+    Regression: empty values silently forced every render onto numpy beeps."""
+    import os
+    from server.features.music import fluid
+    monkeypatch.setenv("FLUIDSYNTH_BIN", "")
+    monkeypatch.setenv("FLUID_SOUNDFONT", "")
+    monkeypatch.setenv("FLUID_SOUNDFONT_MAP", "")
+    monkeypatch.setenv("FLUIDSYNTH_LIB", "")
+    fluid._map_cache = None
+    try:
+        assert fluid._candidate() == fluid._DEFAULT_BIN
+        assert fluid.soundfont_path() == fluid._DEFAULT_SF
+        assert fluid.available(), (
+            f"fluid toolchain unavailable: bin={fluid._candidate()!r} "
+            f"sf={fluid.soundfont_path()!r}")
+    finally:
+        fluid._map_cache = None
+
+
+def test_santoor_tanpura_renders_via_fluidsynth():
+    """Santoor + tanpura must render with real samples (engine fluidsynth),
+    never the numpy sine fallback that made them unrecognizable."""
+    import json
+    import pytest
+    from server.features.music import fluid
+    if not fluid.available():
+        pytest.skip("fluidsynth toolchain absent on this machine")
+    from server.features.music.render import render_score
+    score = ("@tempo 60\n"
+             "@section intro bars=2 energy=0.3\n"
+             "@section outro bars=2 energy=0.3\n"
+             "[MELODY santoor vol=84]\n"
+             "E4 h G4 h | C5 w |\n"
+             "[DRONE tanpura vol=75]\n"
+             "C2:5 w | G2:5 w |\n")
+    res = json.loads(render_score(score, 60, user="local"))
+    assert res["ok"] is True, res
+    assert res["engine"] == "fluidsynth", res
+    assert res.get("soundfonts"), res

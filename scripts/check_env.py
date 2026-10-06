@@ -212,7 +212,16 @@ def main():
                 with open(args.env, "a", encoding="utf-8") as f:
                     f.write(f"\n# ── synced from .env.example on {stamp} ──\n")
                     for k in missing:
-                        f.write(f"{k}={tmpl[k]}\n")
+                        if tmpl[k].strip() == "":
+                            # Empty template values sync as comments: a live
+                            # `KEY=` line shadows code defaults via
+                            # os.environ.get(key, default) (which returns ""
+                            # instead of the default) — that silently broke
+                            # fluidsynth rendering via FLUID_SOUNDFONT=.
+                            f.write(f"# {k}= (template default empty — "
+                                    f"uncomment to override)\n")
+                        else:
+                            f.write(f"{k}={tmpl[k]}\n")
                 for k in missing:
                     print(f"SYNC: appended {k} (template default)")
             else:

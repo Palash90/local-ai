@@ -74,11 +74,16 @@ def kit_file(kit):
 
 
 def _candidate():
-    return os.environ.get("FLUIDSYNTH_BIN", _DEFAULT_BIN)
+    # Empty-string env (e.g. `FLUIDSYNTH_BIN=` materialized by check_env
+    # --fill-defaults) must behave like "absent", not like a real path:
+    # os.environ.get(key, default) returns "" when the key exists empty,
+    # which made available() fail and silently downgraded every render to
+    # the numpy fallback (observed 2026-09-21 → 2026-10-07).
+    return os.environ.get("FLUIDSYNTH_BIN") or _DEFAULT_BIN
 
 
 def soundfont_path():
-    return os.environ.get("FLUID_SOUNDFONT", _DEFAULT_SF)
+    return os.environ.get("FLUID_SOUNDFONT") or _DEFAULT_SF
 
 
 def voice_soundfont_map():
@@ -135,7 +140,7 @@ def available():
 
 def _env():
     env = dict(os.environ)
-    lib = env.get("FLUIDSYNTH_LIB", _DEFAULT_LIB)
+    lib = env.get("FLUIDSYNTH_LIB") or _DEFAULT_LIB
     if os.path.isdir(lib):
         env["LD_LIBRARY_PATH"] = lib + os.pathsep + env.get("LD_LIBRARY_PATH", "")
     return env

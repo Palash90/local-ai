@@ -136,6 +136,13 @@ def render_score(score_text, tempo=120, title="music", user="local",
             soundfonts = sorted(os.path.basename(sf)
                                 for sf in fluid.plan(sections))
         else:
+            # Loud fallback: the numpy synth is sine beeps, not instruments.
+            # An empty/overridden FLUID_SOUNDFONT or FLUIDSYNTH_BIN once hid
+            # here for weeks — never go quiet about it again.
+            print(f"[music] WARNING: fluidsynth render failed "
+                  f"(bin={fluid._candidate()!r} sf={fluid.soundfont_path()!r})"
+                  f" — falling back to numpy beeps for {base}.wav",
+                  flush=True)
             engine = "numpy"
             pcm, sr = render_pcm(sections, tempo)
             with wave.open(base + ".wav", "wb") as w:
