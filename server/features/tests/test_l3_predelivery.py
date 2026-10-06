@@ -162,6 +162,44 @@ def test_openai_lane_skips_l3_entirely(monkeypatch):
                for v in tasks["t1"].get("_verification", []))
 
 
+def test_score_only_dump_never_blocks(monkeypatch):
+    """A pasted music-score draft (no prose) must not BLOCK: the prose-only
+    scan is empty, so neither the pattern filter nor the LLM judge runs."""
+    import server.input_guard as ig
+    import server.features.judge as jd
+    calls = []
+    monkeypatch.setattr(ig, "is_strict_output_blocked",
+                        lambda text: calls.append(("pattern", text)) or True)
+    monkeypatch.setattr(jd, "mcp_output_judge",
+                        lambda *a, **k: calls.append(("judge", a[0])) or True)
+    _, sessions = _fake_m(monkeypatch, _task())
+    score_dump = ('```json\n{"score": "[GENRE: Indian Ambient]\\n@intro\\n'
+                  '[ROLE drone instr: Tanpura]\\nC4:16\\n'
+                  '[ROLE melody instr: Bansuri]\\nC5:16", "tempo": 50}\n```')
+    orch._finalize_task("t1", "s1", score_dump, _body())
+    assert calls == []
+    assert sessions["s1"][0]["content"] == score_dump
+
+
+def test_prose_around_score_still_judged(monkeypatch):
+    """Prose stays judged even when a score block rides along."""
+    seen = {}
+    import server.input_guard as ig
+    import server.features.judge as jd
+    monkeypatch.setattr(ig, "is_strict_output_blocked", lambda text: False)
+    def fake_judge(text, timeout=None, fail_closed=True, model_id=None,
+                   allow_gpu_fallback=False):
+        seen["text"] = text
+        return False
+    monkeypatch.setattr(jd, "mcp_output_judge", fake_judge)
+    _, sessions = _fake_m(monkeypatch, _task())
+    orch._finalize_task("t1", "s1",
+                        "Here is your track:\n```json\n{\"score\": \"x\"}\n```",
+                        _body())
+    assert "Here is your track" in seen.get("text", "")
+    assert "score" not in seen.get("text", "")
+
+
 def test_openai_lane_never_cooccurs_with_mcp(monkeypatch):
     """_mcp always wins: if both flags ever co-occur, the task is judged
     fail-closed instead of silently skipping a lane that needed it."""

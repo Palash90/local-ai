@@ -241,7 +241,10 @@ def _parse_sections(text):
         if not m:
             continue
         name = m.group(1).lower()
-        attrs = {k.lower(): v for k, v in SECTION_ATTR_RE.findall(m.group(2))}
+        # The DSL doc writes the optional arg bracketed ([repeat=2]); strip
+        # the brackets so it parses instead of silently defaulting to 1.
+        attrs = {k.lower(): v for k, v in
+                 SECTION_ATTR_RE.findall(m.group(2).replace("[", " ").replace("]", " "))}
         try:
             nbars = max(1, int(attrs.get("bars", 8)))
         except ValueError:
@@ -495,6 +498,13 @@ def parse_score(text, tempo=120):
                 number = int(pval)
             elif pval and pval not in DRUM_STYLES and not _is_role(pval):
                 leftovers.append(attrs["prog"])
+            # The DSL doc allows kit as an attr ([RHYTHM kit=tabla]); honor
+            # it when it names a registered kit. Unknown kits (kit=soft)
+            # stay None — generic-kit rendering, no error, as before.
+            if kit is None:
+                kval = str(attrs.get("kit", "") or "").upper()
+                if kval in DRUM_STYLES and kval != "KIT":
+                    kit = kval
             drum = (kit is not None
                     or (role is not None and (
                         role in DRUM_SECTION_NAMES
@@ -512,6 +522,12 @@ def parse_score(text, tempo=120):
             name = role or instr or label
             for w in leftovers:
                 u = w.upper()
+                if u in ("ROLE", "INSTR", "INSTRUMENT"):
+                    errors.append(
+                        f"line {lineno}: {w!r} is a placeholder, not a lane word"
+                        " — use a real role (MELODY/HARMONY/BASS/RHYTHM/DRONE)"
+                        " plus a real instrument, e.g. [MELODY piano vol=80]")
+                    continue
                 near = difflib.get_close_matches(
                     u, sorted(set(PROGRAMS) | DRUM_STYLES | ROLE_WORDS), 1)
                 errors.append(
@@ -682,6 +698,17 @@ def parse_score(text, tempo=120):
                                     f"line {lineno}: {tok!r} missing a duration — "
                                     "every pitch needs w/h/q/e/s (e.g. "
                                     f"'{tok} q')")
+                        elif re.match(r"^[A-G][#b]?-?\d+:\d+!?$",
+                                       tok, re.IGNORECASE):
+                            # Hallucinated :velocity syntax ('C3:1 q') — no
+                            # such thing; the model fixates on this, so name
+                            # the fix explicitly instead of 'bad token'.
+                            errors.append(
+                                f"line {lineno}: {tok!r} uses a :velocity suffix"
+                                " that does not exist — write the pitch with"
+                                f" octave+duration ('{tok.split(':')[0]} q'),"
+                                " loud/soft via f/m/p/! suffix ('C4 q!') or"
+                                " lane mix via vol=NN")
                         elif re.match(r"^([SGMPDN])(\d+!?)$",
                                       tok, re.IGNORECASE):
                             # Swar syllable with an octave but no pitch

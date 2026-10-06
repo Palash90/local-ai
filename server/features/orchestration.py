@@ -70,6 +70,38 @@ def _source_footer(search_details):
     return "\n".join(lines)
 
 
+def _l3_prose_for_scan(text):
+    """Prose-only view of a reply for L3 safety scans.
+
+    The model sometimes pastes its music-score draft as visible text
+    (fenced ```json {"score": ...}``` or bare [ROLE ...]/@section lines)
+    instead of a structured generate_music call. That DSL must never be
+    judged as prose: instrument words and lane headers false-positive the
+    strict-output patterns and the LLM judge (observed: "Bansuri]" BLOCKED
+    a calming-music reply after a 229s round with tool_calls=0). Strip
+    fenced code blocks and score-ish lines; judge what remains. Returns ""
+    when nothing prose-like remains (caller must not BLOCK on that — the
+    empty/steering path owns score-only dumps, not the refusal substitute).
+    """
+    if not text:
+        return ""
+    s = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    out = []
+    for line in s.splitlines():
+        t = line.strip()
+        if not t:
+            continue
+        if t.startswith(("[GENRE", "[ROLE", "[MELODY", "[HARMONY",
+                          "[BASS", "[DRONE", "[RHYTHM", "[PERC",
+                          "[GUITAR", "@tempo", "@genre", "@mood",
+                          "@section", "@intro", "@main", "@outro")):
+            continue
+        if re.match(r"^[A-G][#b]?\d\s*:", t):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 def _image_bytes_b64(image):
     """Normalize an uploaded image to base64 bytes.
 
@@ -577,17 +609,21 @@ def _finalize_task(task_id, sid, msg_content, body, attach_image=True):
             print(f"[L3] msg_content={reply_text}")
 
             print(f"[L3] checking strict output blocks")
-            blocked = is_strict_output_blocked(reply_text)
-            if not blocked and reply_text.strip():
+            # Music-DSL text is not prose: scan the prose-only view so a
+            # pasted score draft can never BLOCK delivery (score-only dumps
+            # fall through to the empty/steering path, never the refusal).
+            scan_text = _l3_prose_for_scan(reply_text)
+            blocked = is_strict_output_blocked(scan_text) if scan_text.strip() else False
+            if not blocked and scan_text.strip():
                 # LLM strict judge for EVERY non-empty reply (no simple-turn
                 # skip): fail-closed on MCP lane, fail-open on UI lane.
                 if is_mcp_lane:
                     blocked = bool(mcp_output_judge(
-                        reply_text, fail_closed=True, model_id=task_model,
+                        scan_text, fail_closed=True, model_id=task_model,
                     ))
                 else:
                     verdict = mcp_output_judge(
-                        reply_text, fail_closed=False, model_id=task_model,
+                        scan_text, fail_closed=False, model_id=task_model,
                     )
                     if verdict is None:
                         # Judge unavailable (distinct from SAFE): deliver with

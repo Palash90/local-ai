@@ -1448,6 +1448,20 @@ def _llm_worker(task_id, sid, round_num, msgs, mode="gpu"):
                 print(f"[sampling-router] {mode}: simple round — skipping classifier")
             else:
                 sampling = _route_sampling(mode, messages, model_override) if round_num == 0 else {}
+                # Music rounds emit a precision artifact (score DSL), not
+                # prose: the creative bucket's temp-1.0 fixation loops
+                # (50x repeated guesses on the 26B lane) disappear under
+                # code sampling, which still writes fine prose.
+                try:
+                    from server.features import tool_docs as _td
+                    _t = M.tasks.get(task_id, {}) or {}
+                    if _td.music_directive(
+                            f"{_last_user_text(messages)}\n{_t.get('_original_message') or ''}",
+                            bool(_t.get("music_file") or _t.get("music_url"))):
+                        sampling = M.SAMPLING_BUCKETS.get("code", {})
+                        print(f"[sampling-router] {mode}: music round — pinning to code sampling")
+                except Exception as _e:
+                    print(f"[sampling-router] music pin skipped: {_e}")
             with M._data_lock:
                 if task_id in M.tasks:
                     M.tasks[task_id]["_sampling"] = sampling

@@ -1253,8 +1253,10 @@ TOOLS_DETAILED = [
             "description": (
                 "Compose music from a score DSL and return a playable WAV. Use "
                 "when the user asks to make/write/compose music, a melody, tune, "
-                "jingle or song. ALWAYS call tool_details('generate_music') first "
-                "to load the full language before writing a score. The result "
+                "jingle or song. If a <preloaded_tools> block or a prior "
+                "tool_details result already carries the generate_music docs, "
+                "compose directly from it; otherwise call "
+                "tool_details('generate_music') first. The result "
                 "carries a music_url the UI renders as audio player + download."
             ),
             "parameters": {
@@ -1617,8 +1619,9 @@ _TOOL_SHORT_DESC = {
     "generate_music": (
         "Compose music (genre/mood, song form, voice-led melody/harmony/bass/"
         "drums, multi-voice texture, dynamics) from a score DSL -> playable WAV. "
-        "Call tool_details('generate_music') for the full language (genres, "
-        "instruments, drums, cadence, fusion) before writing a score."
+        "If the full language is already preloaded this round, compose directly; "
+        "otherwise call tool_details('generate_music') first (genres, "
+        "instruments, drums, cadence, fusion)."
     ),
     "generate_music_arranged": (
         "Compose music by parameters (no notation): genre/mood/fusion/tempo/"
