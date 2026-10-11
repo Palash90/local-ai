@@ -59,17 +59,66 @@ DRY_RUN = False                    # True = print actions without executing
 # --------------------------------------------------------------------
 
 
-def run(cmd, dry_run, timeout=30):
+def _exec(cmd, dry_run, timeout=30, capture=False, label=""):
+    """Shared subprocess runner. Returns (rc, stderr_text)."""
+    prefix = f"{label} " if label else ""
     print(f"$ {' '.join(cmd)}", flush=True)
     if dry_run:
         print("(dry-run, not executed)", flush=True)
-        return 0
+        return 0, ""
     try:
+        if capture:
+            r = subprocess.run(cmd, timeout=timeout,
+                               capture_output=True, text=True)
+            return r.returncode, (r.stderr or "")
         r = subprocess.run(cmd, timeout=timeout)
-        return r.returncode
+        return r.returncode, ""
+    except subprocess.TimeoutExpired:
+        print(f"{prefix}client hung past {timeout}s (killed)", flush=True)
+        return 124, ""
     except Exception as e:  # noqa: BLE001
-        print(f"action failed: {e}", flush=True)
-        return 1
+        print(f"{prefix}action failed: {e}", flush=True)
+        return 1, ""
+
+
+def run(cmd, dry_run, timeout=30):
+    rc, _ = _exec(cmd, dry_run, timeout)
+    return rc
+
+
+def run_capture(cmd, dry_run, timeout=30, label=""):
+    """run() variant that captures output. Returns (rc, stderr_text)."""
+    return _exec(cmd, dry_run, timeout, capture=True, label=label)
+
+
+def power_back(dev):
+    """True if GPIO reads HIGH (mains present). None-safe."""
+    return dev is not None and bool(dev.value)
+
+
+def sleep_abortable(dev, seconds, abort_when=True):
+    """Sleep `seconds` in 1s chunks.
+
+    Returns True if aborted early because dev.value == abort_when,
+    False if the full wait elapsed. None-safe (never aborts).
+    """
+    for _ in range(int(seconds)):
+        time.sleep(1)
+        if dev is not None and bool(dev.value) == bool(abort_when):
+            return True
+    return False
+
+
+def ping_host(host, count=2, wait=2, timeout=15, label=""):
+    """Single ping probe. Returns True if host answers, False otherwise."""
+    prefix = f"{label} " if label else ""
+    try:
+        r = subprocess.run(["ping", f"-c{count}", f"-W{wait}", host],
+                           capture_output=True, timeout=timeout)
+        return r.returncode == 0
+    except Exception as e:  # noqa: BLE001
+        print(f"{prefix}ping error: {e}", flush=True)
+        return False
 
 
 def on_power_on(dry_run=DRY_RUN, dev=None):
@@ -83,14 +132,12 @@ def on_power_on(dry_run=DRY_RUN, dev=None):
     # Settle wait: let mains/PC stabilize before spinning up the HDD.
     # Sleep in 1s chunks so a fresh power-cut aborts promptly.
     print(f"waiting {HDD_WAKE_DELAY}s before HDD wake-up...", flush=True)
-    for _ in range(int(HDD_WAKE_DELAY)):
-        time.sleep(1)
-        if dev is not None and not dev.value:
-            print("power cut again during wake delay -> abort HDD wake-up",
-                  flush=True)
-            return False
+    if sleep_abortable(dev, HDD_WAKE_DELAY, abort_when=False):
+        print("power cut again during wake delay -> abort HDD wake-up",
+              flush=True)
+        return False
     # Quick GPIO guard right before touching the disk.
-    if dev is not None and not dev.value:
+    if dev is not None and not power_back(dev):
         print("GPIO LOW at HDD wake-up check -> abort", flush=True)
         return False
     print("GPIO HIGH confirmed -> waking HDD", flush=True)
@@ -107,26 +154,18 @@ def ssh_shutdown_once(dry_run=DRY_RUN):
     cmd = ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes",
            "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
            SSH_TARGET, SHUTDOWN_CMD]
-    print(f"$ {' '.join(cmd)}", flush=True)
-    if dry_run:
-        print("(dry-run, not executed)", flush=True)
-        return 0
-    try:
-        r = subprocess.run(cmd, timeout=SSH_CONNECT_TIMEOUT + 20,
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            lines = (r.stderr or "").strip().splitlines()
-            # BatchMode keeps it to ~1 line; log the last (most specific).
-            detail = lines[-1].strip() if lines else "(no stderr)"
-            print(f"[pc] ssh failed rc={r.returncode}: {detail}", flush=True)
-        return r.returncode
-    except subprocess.TimeoutExpired:
-        print(f"[pc] ssh client hung past {SSH_CONNECT_TIMEOUT + 20}s "
-              f"(killed)", flush=True)
-        return 124
-    except Exception as e:  # noqa: BLE001
-        print(f"[pc] action failed: {e}", flush=True)
-        return 1
+    rc, stderr = run_capture(cmd, dry_run,
+                             timeout=SSH_CONNECT_TIMEOUT + 20, label="[pc]")
+    if dry_run or rc == 0:
+        return rc
+    if rc == 124:
+        # Hang message already logged by run_capture with [pc] prefix.
+        return rc
+    lines = stderr.strip().splitlines()
+    # BatchMode keeps it to ~1 line; log the last (most specific).
+    detail = lines[-1].strip() if lines else "(no stderr)"
+    print(f"[pc] ssh failed rc={rc}: {detail}", flush=True)
+    return rc
 
 
 def wait_for_pc_link(dry_run=DRY_RUN, dev=None):
@@ -145,7 +184,7 @@ def wait_for_pc_link(dry_run=DRY_RUN, dev=None):
         return True
     deadline = time.monotonic() + LINK_WAIT_BUDGET
     while time.monotonic() < deadline:
-        if dev is not None and dev.value:
+        if power_back(dev):
             print("[pc] power returned while waiting for link -> abort",
                   flush=True)
             return False
@@ -312,7 +351,7 @@ def on_power_off(dry_run=DRY_RUN, dev=None):
     hdd_result = {}
 
     def _hdd_job():
-        if dev is not None and dev.value:
+        if power_back(dev):
             print("[hdd] power already back -> skip spindown", flush=True)
             hdd_result["ok"] = False
             return
@@ -335,7 +374,7 @@ def on_power_off(dry_run=DRY_RUN, dev=None):
                   flush=True)
         else:
             for attempt in range(1, SSH_RETRIES + 2):
-                if dev is not None and dev.value:
+                if power_back(dev):
                     print("[pc] power returned during shutdown retries -> abort",
                           flush=True)
                     break
@@ -350,16 +389,11 @@ def on_power_off(dry_run=DRY_RUN, dev=None):
                     break
                 print(f"[pc] retry {attempt}/{SSH_RETRIES} in {SSH_RETRY_DELAY}s",
                       flush=True)
-                for _ in range(int(SSH_RETRY_DELAY)):
-                    time.sleep(1)
-                    if dev is not None and dev.value:
-                        print("[pc] power returned during shutdown retries "
-                              "-> abort", flush=True)
-                        pc_ok = False
-                        break
-                else:
-                    continue
-                break
+                if sleep_abortable(dev, SSH_RETRY_DELAY, abort_when=True):
+                    print("[pc] power returned during shutdown retries "
+                          "-> abort", flush=True)
+                    pc_ok = False
+                    break
         if not pc_ok:
             print(f"[pc] shutdown FAILED after {attempts} attempt(s) "
                   f"(HDD job continues independently)", flush=True)
@@ -389,20 +423,12 @@ def boot_on_reconcile(dev, dry_run=DRY_RUN):
           flush=True)
     print(f"[boot-on] settling {BOOT_ON_SETTLE}s for network/disk "
           f"(abort if power cuts)...", flush=True)
-    for _ in range(int(BOOT_ON_SETTLE)):
-        time.sleep(1)
-        if not dev.value:
-            print("[boot-on] power cut during settle -> normal monitoring",
-                  flush=True)
-            return False
+    if sleep_abortable(dev, BOOT_ON_SETTLE, abort_when=False):
+        print("[boot-on] power cut during settle -> normal monitoring",
+              flush=True)
+        return False
     pc_host = SSH_TARGET.split("@")[-1]
-    try:
-        ping = subprocess.run(["ping", "-c2", "-W2", pc_host],
-                              capture_output=True, timeout=15)
-        pc_up = ping.returncode == 0
-    except Exception as e:  # noqa: BLE001
-        print(f"[boot-on] ping error: {e}", flush=True)
-        pc_up = False
+    pc_up = ping_host(pc_host, count=2, wait=2, label="[boot-on]")
     if pc_up:
         print("[boot-on] PC already up -> no etherwake needed", flush=True)
     else:
@@ -427,25 +453,17 @@ def boot_probe_and_act(dev, dry_run=DRY_RUN):
     print("[boot] started during power cut (GPIO LOW at boot)", flush=True)
     print(f"[boot] settling {BOOT_OFF_SETTLE}s for network/NTP/carrier "
           f"(abort if power returns)...", flush=True)
-    for _ in range(int(BOOT_OFF_SETTLE)):
-        time.sleep(1)
-        if dev.value:
-            print("[boot] power returned during settle -> normal monitoring",
-                  flush=True)
-            return False
-    if dev.value:
+    if sleep_abortable(dev, BOOT_OFF_SETTLE, abort_when=True):
+        print("[boot] power returned during settle -> normal monitoring",
+              flush=True)
+        return False
+    if power_back(dev):
         print("[boot] power back at settle end -> normal monitoring",
               flush=True)
         return False
     print("[boot] power still OUT, probing PC...", flush=True)
     pc_host = SSH_TARGET.split("@")[-1]
-    try:
-        ping = subprocess.run(["ping", "-c2", f"-W{PC_PING_TIMEOUT}", pc_host],
-                              capture_output=True, timeout=15)
-        pc_up = ping.returncode == 0
-    except Exception as e:  # noqa: BLE001
-        print(f"[boot] ping error: {e}", flush=True)
-        pc_up = False
+    pc_up = ping_host(pc_host, count=2, wait=PC_PING_TIMEOUT, label="[boot]")
     if not pc_up:
         print("[boot] PC not answering (off/unreachable) -> nothing to do, "
               "monitoring", flush=True)
