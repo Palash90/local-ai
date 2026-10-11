@@ -466,18 +466,21 @@ def model_allows_trailing_system(mode="gpu"):
     return not _strict_system_order(mode)
 
 
-def is_llama_alive(base=None):
+def is_llama_alive(base=None, timeout=5):
     """True when the llama-server at ``base`` answers /health.
 
     Defaults to the GPU server so existing callers keep working. In router
     mode /health only reports that the router process is up, not that any
     particular model is actually loaded and serving — use
     :func:`is_model_ready` to check a specific model's state.
+
+    ``timeout`` is per-attempt seconds: remote lanes (big-boy over WiFi/mDNS)
+    need more than the localhost default.
     """
     if base is None:
         base = M.LLAMA_BASE
     try:
-        r = requests.get(f"{base}/health", timeout=5)
+        r = requests.get(f"{base}/health", timeout=timeout)
         return r.status_code == 200
     except Exception:
         return False
@@ -1799,12 +1802,17 @@ def _start_llm_round(task_id, sid, round_num):
         # that will never come up. All other lanes return True.
         if M.ensure_llama_server(mode, task.get("model")) is False:
             if smode == "26b" and getattr(M, "LLAMA_26B_EXTERNAL", False):
+                print(f"[llm_round] task {task_id}: 26B remote unreachable "
+                      f"at {M.server_base('26b')} after retries — failing task fast",
+                      flush=True)
                 M._set_task_error(
                     task_id,
                     f"26B server unreachable at {M.server_base('26b')}; "
                     "is big-boy's :8089 up?",
                 )
             else:
+                print(f"[llm_round] task {task_id}: 26B VRAM gate refused boot — failing task fast",
+                      flush=True)
                 M._set_task_error(
                     task_id,
                     "Server busy: VRAM still held by the E4B lane after 120s; "

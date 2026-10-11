@@ -2288,3 +2288,36 @@ input[type=file] {
   color: #f85149;
   font-style: italic;
 }
+
+/* Failed (unsent) message bubble: user text kept + error + resend/dismiss */
+.failed-send-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.failed-send-error {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid #7a2e2e;
+  border-radius: 8px;
+  background: rgba(248, 81, 73, 0.08);
+  color: #f0883e;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.failed-send-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+.failed-send-actions button {
+  border: 1px solid var(--border, #30363d);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 5px 12px;
+}
+.failed-send-actions button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}

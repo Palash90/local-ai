@@ -82,7 +82,12 @@ def build_midi(sections, tempo=120, ppq=480, tail_beats=3, lanes=None,
                 vel = 82
             if e.get("vel") is not None:
                 vel = e["vel"]
-            else:
+            elif not drum:
+                vel = _energy_vel(vel, energy)
+            if drum:
+                # Drum hits carry explicit stroke velocities, which used to
+                # bypass section energy entirely (verse thumped like chorus).
+                # Scale, don't replace: stroke character × song dynamics.
                 vel = _energy_vel(vel, energy)
             # legato: let melodic notes breathe (release just before next onset)
             for ni, p in enumerate(mids):

@@ -292,7 +292,18 @@ def ensure_llama_server(mode, override=None):
         # local-VRAM boot gate (local nvidia-smi says nothing about the
         # remote box). Health of the remote endpoint decides: False lets
         # the caller fail fast instead of hanging behind a dead server.
-        return M.is_llama_alive(base)
+        # Retry: the first touch after idle routinely loses to ARP refresh,
+        # mDNS re-resolution, WiFi power-save wake or a swap-stalled host
+        # (observed: first-after-break extended tasks erroring while the
+        # immediate retry succeeds). One instant probe failure must not
+        # kill the task.
+        for _attempt in range(3):
+            if M.is_llama_alive(base, timeout=10):
+                return True
+            time.sleep(5)
+        print(f"[llama] 26b remote {base} unreachable after 3 health probes — failing task fast",
+              flush=True)
+        return False
     if M.is_llama_alive(base):
         return True
     print(f"[llama] {smode} llama-server not reachable — starting...")

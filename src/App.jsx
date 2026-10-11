@@ -24,11 +24,15 @@ export default function App() {
   const [currentSessionId, setCurrentSessionId] = useState(null)
   const [messages, setMessages] = useState([])
   const [pendingMessages, setPendingMessages] = useState({})
+  // Sends that reached a terminal failure (task error, unknown/not_found
+  // after a server restart, or a failed POST): shown as an inline error
+  // bubble with one-click resend instead of vanishing silently.
+  const [failedSends, setFailedSends] = useState({})
   const [tokenEstimate, setTokenEstimate] = useState(0)
   const [contextCompressed, setContextCompressed] = useState(false)
   const [rawTokenEstimate, setRawTokenEstimate] = useState(0)
   const [compactions, setCompactions] = useState(0)
-  const [maxContext, setMaxContext] = useState(24576)
+  const [maxContext, setMaxContext] = useState(32768)
   const [modelStatus, setModelStatus] = useState('unloaded')
   const [modelTps, setModelTps] = useState(null)
   const [overheated, setOverheated] = useState(false)
@@ -252,8 +256,17 @@ export default function App() {
       stored.push({ task_id: taskId, sid: taskSid })
       setStoredPending(stored)
     } catch (err) {
-      // Don't append a synthetic error pair locally — keep our array in sync
-      // with whatever the server actually persisted.
+      // The send itself failed (server down/restarting, queue full): keep
+      // the text on screen as a failed send with resend instead of dropping
+      // it silently — otherwise a first-after-idle message just vanishes.
+      setFailedSends(prev => ({
+        ...prev,
+        [`local-${Date.now()}`]: {
+          sessionId: taskSid, text: text || '', research: !!research,
+          cpu: !!cpu, extended: !!extended,
+          error: (err && err.message) || 'Could not reach the server.',
+        },
+      }))
       loadSessionMessages(taskSid)
     }
 
@@ -292,6 +305,26 @@ export default function App() {
       if (st.session_name != null && st.session_id) {
         setSessions(prev => prev.map(s => s.session_id === st.session_id ? { ...s, name: st.session_name } : s))
       }
+    } else if (st.status === 'error' || st.status === 'unknown' || st.status === 'not_found') {
+      // Failed sends stay visible with their error + one-click resend.
+      // 'unknown'/'not_found' means the server restarted before the task
+      // ran (in-memory task lost) — the message was never processed.
+      const um = pending._userMsg || {}
+      const errText = st.status === 'error'
+        ? (st.error || st.message || 'The server failed to process this message.')
+        : 'The server restarted before processing this message — it was not sent.'
+      setFailedSends(prev => ({
+        ...prev,
+        [taskId]: {
+          sessionId: pending.sessionId,
+          text: typeof um.content === 'string' ? um.content : '',
+          research: !!um._research, cpu: !!um._cpu, extended: !!um._extended,
+          error: errText,
+        },
+      }))
+      if (pending.sessionId === sessionRef.current) {
+        loadSessionMessages(pending.sessionId)
+      }
     } else {
       if (pending.sessionId === sessionRef.current) {
         // Same index-desync reasoning as the success path above.
@@ -306,6 +339,26 @@ export default function App() {
     setShowLocationPrompt(true)
     setLocationTaskId(taskId)
     setLocationError(null)
+  }, [])
+
+  const resendFailed = useCallback((key) => {
+    setFailedSends(prev => {
+      const entry = prev[key]
+      if (!entry) return prev
+      const next = { ...prev }
+      delete next[key]
+      // Resend with the original flags (research/extended/cpu).
+      handleSend(entry.text, undefined, entry.research, entry.cpu, entry.extended)
+      return next
+    })
+  }, [])
+
+  const dismissFailed = useCallback((key) => {
+    setFailedSends(prev => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
   }, [])
 
   const closeLightbox = useCallback(() => setLightboxSrc(null), [])
@@ -503,11 +556,14 @@ export default function App() {
           <ChatArea
             messages={messages}
             pendingMessages={pendingMessages}
+            failedSends={failedSends}
             currentSessionId={currentSessionId}
             onImageOpen={setLightboxSrc}
             selectingRef={selectingRef}
             onPendingResolved={handlePendingResolved}
             onLocationNeeded={handleLocationNeeded}
+            onResendFailed={resendFailed}
+            onDismissFailed={dismissFailed}
           />
           <InputBar
               onSend={handleSend}

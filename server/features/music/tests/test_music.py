@@ -505,7 +505,14 @@ def test_dsl_doc_sections_and_example_bars():
         for spec in [s.strip() for s in line.split("|")]:
             if not spec or not pair_re.fullmatch(spec):
                 continue
-            lane = ("[RHYTHM tabla]" if not re.search(r"\d+:", spec)
+            # Lane the bar by vocabulary: bol lines belong on tabla,
+            # everything else (notes/chords) on epiano — melodic pairs
+            # like 'D2 w' are bass-voice examples, not tabla lines, and
+            # pitches in a drum lane are now a loud error (sub-bass mud
+            # through the kit map), so mislaning them here would lie.
+            lane = ("[RHYTHM tabla]"
+                    if re.search(r"\b(BD|SN|HH|OH|CR|RD|CLV|CONG|DHA|DHIN|"
+                                 r"NA|TIN|GHE|TA|KA)\b", spec)
                     else "[HARMONY epiano]")
             _, errs, _ = parse_score(lane + "\n" + spec + " |", 120)
             assert not errs, (spec[:60], errs[:2])
@@ -978,3 +985,122 @@ def test_santoor_tanpura_renders_via_fluidsynth():
     assert res["ok"] is True, res
     assert res["engine"] == "fluidsynth", res
     assert res.get("soundfonts"), res
+
+
+def test_comma_separated_notes_parse():
+    """Prose-habit commas ('C4 q, E4 q') are separators, not errors —
+    E4B writes them; refusing every token burned whole tasks."""
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score(
+        "[MELODY santoor vol=85]\nC4 q, E4 q, G4 q, C5 h |\n"
+        "[RHYTHM tabla]\nDHA q, TIN q, TA q, GHE q |", 120)
+    assert not errs, errs
+    assert sum(len(s["events"]) for s in secs) == 8
+
+
+def test_colon_beats_accepted():
+    """'C4:16' = 16 beats, 'R:8' = 8 rests: the model's natural beats
+    dialect parses instead of burning refusal rounds."""
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score(
+        "[MELODY santoor]\nC4:16 | R:8 C5:8 |\n", 60)
+    assert not errs, errs
+    evs = secs[0]["events"]
+    assert [e["dur"] for e in evs] == [16.0, 8.0, 8.0]
+    assert evs[1]["type"] == "rest"
+
+
+def test_colon_beats_letter_wins_conflict():
+    """'C4:2 w': documented letter-duration wins over the digits."""
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score("[MELODY piano]\nC4:2 w |", 120)
+    assert not errs, errs
+    assert secs[0]["events"][0]["dur"] == 4.0
+
+
+def test_digit_chord_qualities_still_chords():
+    """Backward compat: C4:5/G2:7 stay chords, never beats."""
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score("[HARMONY piano]\nC4:5 w | G2:7 w |", 120)
+    assert not errs, errs
+    assert all(e["type"] == "chord" for e in secs[0]["events"])
+
+
+def test_pitch_in_drum_lane_fails_loud():
+    """'D1 q' in [RHYTHM tabla] must refuse (it rendered sub-bass mud
+    through the kit map: MIDI 26 far outside Tabla.sf2's 60-82)."""
+    from server.features.music.parse import parse_score
+    _, errs, _ = parse_score("[RHYTHM tabla]\nD1 q D1 q |", 120)
+    assert errs, "pitch-rhythm accepted silently"
+    assert any("DRUMS" in e for e in errs), errs
+
+
+def test_normative_grammar_conformance():
+    """Every example in the NORMATIVE GRAMMAR block must parse exactly as
+    documented — the spec mirrors the parser, or the block is a lie."""
+    from server.features.music.parse import parse_score
+    # legal forms: (score fragment, expected event type/durs or lane count)
+    secs, errs, _ = parse_score(
+        "@tempo 60\n@section intro bars=2 energy=0.3\n"
+        "[MELODY santoor vol=85]\nC4 q C4q E4 h. |\n"
+        "[DRONE tanpura]\nC2:5 w | R:4 C2:5 w |\n"
+        "[RHYTHM tabla]\nDHA q DHIN e |\n"
+        "[HARMONY piano]\nC3:maj7 w | C3:min7 ar w |\n", 60)
+    assert not errs, errs
+    durs = [e["dur"] for e in secs[0]["events"]]
+    assert durs == [1.0, 1.0, 3.0], durs
+    # illegal forms: each must produce at least one error
+    for bad in ["Intro:\n", "--- DRONE ---\n", "[MELODY piano]\nD minor q |\n",
+                "[MELODY piano]\nGq |\n", "[MELODY piano]\nC5 |\n",
+                "[RHYTHM tabla]\nD1 q |\n",
+                "[HARMONY piano]\nC4 q ; E4 q |\n"]:
+        _, errs, _ = parse_score(bad, 120)
+        assert errs, f"accepted but grammar forbids: {bad!r}"
+
+
+def test_bol_colon_beats():
+    """'DHA:4' = DHA for 4 beats; 'DHA:4 w' lets the letter win.
+    Bols can never be chords, so no quality carve-out here."""
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score("[RHYTHM tabla]\nDHA:4 TIN:2 |\n", 120)
+    assert not errs, errs
+    assert [e["dur"] for e in secs[0]["events"]] == [4.0, 2.0]
+    secs, errs, _ = parse_score("[RHYTHM tabla]\nDHA:4 w |\n", 120)
+    assert not errs, errs
+    assert secs[0]["events"][0]["dur"] == 4.0
+
+
+def test_drum_default_vol_sits_under_band():
+    from server.features.music.parse import parse_score
+    secs, errs, _ = parse_score("[RHYTHM]\nBD q SN q |\n", 120)
+    assert not errs, errs
+    assert secs[0]["vol"] == 70
+
+
+def test_generic_drums_route_to_punchier_kit():
+    import os
+    from server.features.music import fluid
+    ms = os.path.join(os.path.expanduser("~/local-ai-files/music/soundfonts"),
+                      "MuseScore_General.sf3")
+    if not os.path.isfile(ms):
+        import pytest
+        pytest.skip("MuseScore_General.sf3 absent")
+    fluid._map_cache = None
+    try:
+        assert fluid.voice_soundfont_map().get("drum") == ms
+    finally:
+        fluid._map_cache = None
+
+
+def test_drum_velocities_follow_section_energy():
+    from server.features.music.parse import parse_score
+    from server.features.music.midi_out import build_midi
+    score = ("@section verse bars=4 energy=0.4\n@section chorus bars=4 energy=0.95\n"
+             "[RHYTHM]\nBD q SN q BD q SN q |\n")
+    secs, errs, _ = parse_score(score, 120)
+    assert not errs, errs
+    _ = build_midi(secs, 120)
+    vels = [e["vel"] for e in secs[0]["events"] if e["type"] == "note"]
+    assert vels, "no drum notes parsed"
+    # dynamics rotation + energy scaling: not all identical (was: metronome)
+    assert len(set(vels)) > 1, vels[:8]

@@ -218,8 +218,14 @@ def music_directive(user_text, delivered=False):
         "[music-directive] The user has asked you to generate music this turn. "
         "You MUST call generate_music: if its documentation is not already in "
         "context, call tool_details(\"generate_music\") first, then compose a "
-        "valid score per the DSL. Never describe or claim music without a "
-        "successful generate_music result in this conversation."
+        "valid score per the DSL. HARD LIMITS (a longer score is cut off and "
+        "the whole call fails): total score under 1100 characters, at most 4 "
+        "lanes, at most 2 bars of material per lane — the @section grid "
+        "loops them to full length, so NEVER write out every bar. Minimal "
+        "valid shape: @tempo 60, @section lines, one [MELODY santoor] lane "
+        "with 'C4 q' notes, one [DRONE tanpura] lane with 'C2:5 w', one "
+        "[RHYTHM tabla] lane with 'DHA q'. Never describe or claim music "
+        "without a successful generate_music result in this conversation."
     )
 
 

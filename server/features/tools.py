@@ -179,7 +179,34 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
     try:
         args = json.loads(tc["function"]["arguments"])
     except Exception:
-        args = {}
+        args = None
+    if args is None:
+        if tool_name == "generate_music":
+            # Score ran past the output limit mid-string (unterminated
+            # JSON). Degrading to {} once produced a featureless
+            # "no notes parsed" with no errors to fix on, and the re-emit
+            # loop then died on a deterministic llama-server 500.
+            # Recover the score instead — deterministic, bounded.
+            from server.features.music.salvage import salvage_music_args
+            args = salvage_music_args(tc["function"].get("arguments", ""))
+            if args is None:
+                result = json.dumps({
+                    "ok": False,
+                    "error": "your score was cut off by the output limit "
+                             "and could not be salvaged — stop rewriting "
+                             "the score; call generate_music_arranged with "
+                             "genre/mood (e.g. genre=indian_classical, "
+                             "mood=calm) instead.",
+                    "errors": []})
+                M._event_post(
+                    "tool_ok", task_id, tc_id=tc.get("id", ""),
+                    result=result, sid=sid, round=round_num,
+                    tool_index=tool_index)
+                return
+            print(f"[generate_music] salvaged truncated tool-call args "
+                  f"for task {task_id}: score {len(args['score'])} chars")
+        else:
+            args = {}
 
     with M._data_lock:
         tu = list(M.tasks.get(task_id, {}).get("_tools_used", []))
@@ -494,10 +521,47 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
             res = json.loads(result)
         except Exception:
             res = {"ok": False, "error": "bad render result"}
+        if res.get("ok") and args.get("_salvaged"):
+            from server.features.music.salvage import SALVAGE_MAX_CHARS
+            res["note"] = (
+                "your score was cut off by the output limit and was "
+                f"salvaged to {len(args.get('score', ''))} chars before "
+                "rendering — it played fine, do NOT resend the score, "
+                "just reply to the user now. Next time keep the ENTIRE "
+                f"score under {SALVAGE_MAX_CHARS} characters.")
+            result = json.dumps(res)
         with M._data_lock:
             te = M.tasks.get(task_id)
             if te:
                 te["music_errors"] = [str(x) for x in (res.get("errors") or [])][:20]
+        if not res.get("ok") and tool_name == "generate_music":
+            # Escape hatch: repeated strict refusals mean the model is
+            # thrashing on DSL grammar (observed: 10 burned rounds). After
+            # the 2nd refusal, redirect to generate_music_arranged — enum
+            # params, no notation, always renders. Success resets the count.
+            with M._data_lock:
+                te = M.tasks.get(task_id)
+                n = (te.get("_music_refusals", 0) + 1) if te else 1
+                if te:
+                    te["_music_refusals"] = n
+            if n >= 2:
+                try:
+                    rej = json.loads(result)
+                except Exception:
+                    rej = {"ok": False, "error": result}
+                rej["error"] = (
+                    rej.get("error", "")
+                    + f" [refusal {n} this task] STOP writing score DSL — "
+                    "switch to generate_music_arranged with genre/mood "
+                    "(e.g. genre=indian_classical, mood=calm) and optional "
+                    "fusion/tempo/lead/bars. It arranges server-side and "
+                    "always renders; do not call generate_music again.")
+                result = json.dumps(rej)
+        elif res.get("ok") and tool_name == "generate_music":
+            with M._data_lock:
+                te = M.tasks.get(task_id)
+                if te:
+                    te["_music_refusals"] = 0
         if res.get("ok"):
             music_url = res.get("music_url", "")
             rel = music_url[len("/music/"):] if music_url.startswith("/music/") else None
@@ -632,8 +696,16 @@ def _dispatch_tool(task_id, sid, tc, image_b64, round_num, tool_index):
 
     elif tool_name == "generate_image":
         if has_generated_image:
+            with M._data_lock:
+                _t = M.tasks.get(task_id, {})
+                _rel = _t.get("image_file", "")
+            _url = f"/output/{_rel}" if _rel else "/output/<already-generated>"
             result = json.dumps(
-                {"error": "Image generation limit reached for this prompt."}
+                {"error": "Image generation limit reached for this task "
+                          "(1 image per task). Do not call generate_image again — "
+                          f"an image was already rendered at {_url}. "
+                          "Present it to the user now in your final answer "
+                          f"with [Image: {_url}] and no further tool calls."}
             )
             M._event_post(
                 "tool_ok",

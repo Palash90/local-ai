@@ -257,10 +257,11 @@ _users_cache = None
 _users_cache_time = 0
 
 # Context / token budget constants.
-# The interactive UI chat runs on the GPU llama-server, which is launched with
-# --ctx-size 24576 (24K). Keep this in sync with server/config.py so the UI's
-# context meter and the /api/model-status payload reflect the real budget.
-MAX_INPUT_TOKENS = int(os.environ.get("MAX_INPUT_TOKENS", "24576"))
+# All chat lanes run 32768 (32K). Keep this in sync with server/config.py so
+# the UI's context meter and the /api/model-status payload reflect the real
+# budget. The guardrail lane stays 8192: it only runs small judge prompts
+# (512/1024 budgets) on a --ctx-size 16384 --parallel 2 server (8K/slot).
+MAX_INPUT_TOKENS = int(os.environ.get("MAX_INPUT_TOKENS", "32768"))
 AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 
 # Hard llama-server context PER SLOT (keep in sync with the "--ctx-size" /
@@ -269,7 +270,7 @@ AUTO_COMPACT_THRESHOLD = int(MAX_INPUT_TOKENS * 0.7)
 # n_slots=4 / n_ctx_slot=32768, the guardrail lane runs --parallel 2).
 LANE_CTX_SIZES = {
     "gpu": MAX_INPUT_TOKENS,
-    "cpu": int(os.environ.get("CPU_CTX_SIZE", "24576")),
+    "cpu": int(os.environ.get("CPU_CTX_SIZE", "32768")),
     "guardrail": 8192,
     # 26B standalone server (:8089) has its own --ctx-size, independent of
     # the E4B gpu lane. Without this key 26B tasks budgeted as "gpu" and the

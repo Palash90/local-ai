@@ -63,7 +63,7 @@ other services (`server/mcp_gateway.py`, `markdown_hosting.py`, `self-chat.py`,
 | 3002 | markdown hosting (stories) | `restart_services.sh` (uvicorn) | FastAPI app, role-gated collections |
 | 8000 | MCP gateway | in-process thread of chat-webui | FastMCP + OAuth; `MCP_USER` token auth (plus an outbound `start_mcp_client` thread for external MCP servers) |
 | 8079 | llama-server (CPU) | lazy / `restart_servers` | self-chat agents, 32K ctx, RAM-backed |
-| 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI (E4B), 24K ctx, VRAM-backed (full offload) |
+| 8081 | llama-server (GPU) | lazy / `restart_servers` | interactive UI (E4B), 32K ctx, VRAM-backed (full offload) |
 | 8089 | llama-server (26B) | lazy on first 26B task, never at boot | Gemma4-26B-A4B MoE (`-ngl 24` + `--cpu-moe`, experts in RAM), 32K ctx; serves OpenAI lane, Research and Extended requests |
 | 8083 | llama-server (guardrail) | lazy on first L2, then resident (`KEEP_GUARDRAIL_RESIDENT=1`) | E2B input-judge model; tablet/remote judging removed (`GUARDRAIL_EXTERNAL=0`) |
 | 8084 | llama-server (embed) | lazy by chat-webui / `restart_servers` | serves `/embedding` (nomic); vector layer of `page_cache` |
@@ -167,7 +167,7 @@ prefer to run the services manually:
 ~/local-ai/llama.cpp/build/bin/llama-server \
     --host 127.0.0.1 --port 8081 \
     --models-dir $BASE_MODELS_DIR \
-    --jinja -ngl 99 -fa on --ctx-size 24576 \
+    --jinja -ngl 99 -fa on --ctx-size 32768 \
     -ctk q8_0 -ctv q8_0 --no-mmproj-offload \
     -t 8 -tb 8 -ub 512 --timeout 3600 \
     --cache-reuse 256 --slot-save-path ~/local-ai-files/kv-slots \

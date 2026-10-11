@@ -119,10 +119,15 @@ OPENAI_LANE_FETCH_ALIASES = {"webfetch", "fetch", "fetch_url", "web_fetch", "rea
 
 REASONING_BUDGET = int(os.environ.get("REASONING_BUDGET", "1024"))
 # Plain (non-research) 26B chats get a smaller thinking budget: a 4-line
-# poem should not burn the same 1024-token chain-of-thought as a Raga-class
-# research report (~1.5 min of CPU-MoE decode per round just thinking).
+# poem should not burn the same research-sized chain-of-thought as a
+# Raga-class report (~1.5 min of CPU-MoE decode per round just thinking).
 # Research tasks keep the full REASONING_BUDGET. Tune without code edit.
-REASONING_BUDGET_26B = int(os.environ.get("REASONING_BUDGET_26B", "512"))
+# 512 (was) exhausted mid-thought on multi-round tool tasks: the budget
+# message cut reasoning off, the model kept thinking — in the CONTENT
+# channel — and the user received 14K chars of raw monologue as the
+# answer (2026-10-07, music task 718bb0db). 1024 matches the non-26B
+# lane and still keeps worst-case chat latency bounded.
+REASONING_BUDGET_26B = int(os.environ.get("REASONING_BUDGET_26B", "1024"))
 # The judge lane emits one short verdict per call, but judges are thinking
 # models: a 2048-token reasoning budget means a worst case of ~3 minutes of
 # CPU decode per verdict — far past the judge timeout, so research-verify
@@ -361,7 +366,7 @@ LLAMA_SERVER_ARGS_E4B_BACKUP = [
     # GPU / VRAM & Performance
     "-ngl", LLAMA_GEMMA_NGL,
     "-fa", "on",
-    "--ctx-size", os.environ.get("GPU_CTX_SIZE", "24576"),  # bounded for 4 GB VRAM
+    "--ctx-size", os.environ.get("GPU_CTX_SIZE", "32768"),  # 32K unified ctx (watch VRAM on 4 GB cards)
     "-ctk", "q8_0",
     "-ctv", "q8_0", # If you really need a very big context on VRAM, can make it q8_0
     "--no-mmproj-offload",
@@ -1660,12 +1665,14 @@ _TOOL_SHORT_DESC = {
 
 # ── Arranger-parameter pipeline gate ────────────────────────────────────────
 # generate_music_arranged (enum-only params → random_score contract → same
-# render + gates as the freeform path) ships DISABLED by default: the current
-# freeform-DSL path stays the default until the arranged pipeline is evaluated
-# on bigger models. Flip to 1 and restart to try it; `make music` keeps using
+# render + gates as the freeform path) ships ENABLED by default: it is the
+# escape hatch when the freeform-DSL path thrashes (observed: 10 refused
+# rounds on hallucinated syntax). The freeform path is still tried first;
+# the tools.py refusal counter redirects there after 2 refusals. Set
+# MUSIC_ARRANGER_PARAMS=0 to go freeform-only; `make music` keeps using
 # the arranger with catalog defaults either way.
 MUSIC_ARRANGER_PARAMS = os.environ.get(
-    "MUSIC_ARRANGER_PARAMS", "0").strip().lower() in ("1", "true", "yes", "on")
+    "MUSIC_ARRANGER_PARAMS", "1").strip().lower() in ("1", "true", "yes", "on")
 # ── Hot-swappable music DSL doc ─────────────────────────────────────────────
 # The generate_music score-DSL documentation is calibration surface: it must
 # be editable and picked up WITHOUT a restart while we tune it. The file is

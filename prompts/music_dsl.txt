@@ -1,8 +1,33 @@
 Score DSL. A score has THREE axes: GENRE (sound world), song FORM (@section), and instrument LANES ([ROLE instr]); plus TEXTURE (how many voices play together over time).
 
-HARD BUDGET: the complete score MUST fit in ~1100 characters. Scores longer
-than this are cut off mid-string and the render FAILS — a score that fits
-beats one that dies. Achieve length with LOOP SEMANTICS (write 2-3 SHORT
+NORMATIVE GRAMMAR (if any prose below disagrees with this block, THIS BLOCK WINS — it mirrors the parser exactly):
+  score    := directive* lane+
+  directive:= '@tempo' INT(20-300) | '@section' (NAME 'bars=' INT | NAME ':' INT (',' NAME ':' INT)*) ['energy=' FLOAT] ['repeat=' INT]
+             | '@genre' NAME | '@mood' NAME        # @genre/@mood color only; form comes from @section
+                                                  # both section styles legal: '@section intro bars=4' or '@section intro:4, main:12'
+  lane     := header noteline*
+  header   := '[' WORD+ ATTR* ']' ['v' INT]       # ONE header per voice for the WHOLE piece, never repeated
+  WORD     := ROLE | INSTR | KIT | PROG            # any order; ROLE is MELODY/MELODY2/HARMONY/PAD/BASS/RHYTHM/DRONE/...
+  ATTR     := 'vol=' 0-100 | 'kit=' KITNAME | 'prog=' INT
+  VOL      := 'v' INT ('v8' = 80; 2-3 digits literal, 'v85' = 85)  # legal after a header or between notes
+  noteline := (TOKEN | VOL | '|')+                 # '|' closes a 4-beat bar; short bars rest-pad, long bars spill
+  TOKEN    := PITCH [WS] DUR                        # 'C4 q' (space optional: 'C4q' works). Commas ignored if present
+            | PITCH ':' BEATS                       # 'C4:8' = C4 for 8 beats; 'R:4' = 4 beats rest
+            | CHORD [ARP] WS DUR                    # 'C3:maj7 w', 'C3:min7 ar w' (rolled across DUR)
+            | BOL WS DUR | BOL ':' BEATS           # drum lanes ONLY: 'DHA q', 'BD e', 'DHA:4' (bols/pitches never mix per lane)
+  PITCH    := [A-G]('#'|'b')? OCTAVE               # octave REQUIRED: 'C4', never bare 'C' or Swar syllables
+  DUR      := 'w'(4) | 'h'(2) | 'q'(1) | 'e'(.5) | 's'(.25) ['.']  # dotted x1.5; EVERY token needs one
+  BEATS    := INT (not 5/56/7/9 — those stay chords: 'C4:5' = power chord, 'G2:7' = seventh)
+  REST     := 'R' WS DUR
+  '#' starts a comment to end-of-line (whitespace before '#' required so F#4 is safe).
+  ILLEGAL (always rejected): bare labels ('Intro:'), decoration without '#' ('--- DRONE ---'), ';', prose ('D minor'),
+  Swar syllables as tokens, octave-less pitches ('Gq'), duration-less tokens ('C5', 'DHA'), pitches in drum lanes ('D1 q').
+
+HARD BUDGET: the complete score MUST fit in ~1100 characters. The server
+enforces a hard gate at 1400 characters — bigger scores are refused (and
+scores cut off by the output limit are salvaged server-side, so you can
+lose material you never got to close). A score longer than this risks
+both fates — a score that fits beats one that dies. Achieve length with LOOP SEMANTICS (write 2-3 SHORT
 vamps — a verse vamp, a chorus lift, a bridge contrast — and let sections
 loop them), NEVER by writing out every bar. 4-6 lanes max. If a render is
 rejected for length, cut material (not variation) and re-emit.
@@ -129,7 +154,7 @@ all work; extra role words are ignored. Descriptive adjectives (soft, loud,
 quiet, solo) are ignored — put dynamics in vol=, not in words. Genuinely
 unknown words are reported and must be fixed. ROLE any name (MELODY, HARMONY, BASS, RHYTHM/PERC). Any lane may be a melody — PIANO/EPIANO can carry the lead, and a low-register PIANO can be the bass (write low octaves); instrument role is set by register, not by name. INSTRUMENT alias includes world voices: PIANO EPIANO RHODES ORGAN CELESTA MUSICBOX GUITAR NYLON EGUITAR BASS EBASS SLAP FRETLESS VIOLIN VIOLA CELLO CONTRABASS STRINGS SYNTHSTRINGS CHOIR FLUTE OBOE CLARINET SAX TRUMPET TROMBONE FRENCHHORN HARP PAD SYNTH LEAD | BASSGUITAR PICKBASS SYNTHBASS | SITAR VEENA SAROD TAMBRA EKTARA BANJO UKULELE SHAMISEN KOTO GUZHENG YANGQIN SANTOOR DULCIMER KALIMBA MBIRA SHAKUHACHI BANSURI DIZI OCARINA PANFLUTE BAGPIPE FIDDL SHANAI SHEHNAI SARANGI OUD STEELDRUM, or prog=NN (GM). vol=NN lane mix 0-100 (good defaults). ONE LANE PER VOICE — declare each [HEADER] exactly once for the whole piece; a voice silent in some phases gets 'R w |' bars there, never a second header (repeated headers create ghost lanes that stack and loop over each other). Percussion lane = role RHYTHM/DRUMS/PERC* (channel 9). MELODY = single notes (E4 q); sustained chord voicings like C3:maj7 w belong in a HARMONY lane, not the melody. WINDS ARE MONOPHONIC — sax/trumpet/flute/bansuri/shakuhachi play single-note lines (unison octaves allowed), never block chords; chords go to piano/epiano/rhodes/guitar/pad/strings. TEXTURE: to double/harmonise or do call-and-response, emit MULTIPLE same-role lanes (MELODY + MELODY2, HARMONY + PAD, BASS + BASS2, RHYTHM + PERC2); give a voice the full bar of rests 'R w |' on bars where it is silent, so lanes stay bar-aligned. LEAD-SHARING (MELODY + MELODY2): two melody lanes means the song has TWO voices — trade the lead per section or per phrase (MELODY sings the verse and ANSWERS under MELODY2's chorus, or alternate 2-bar calls); each voice must carry lead material for a real share of the piece (≥40% of the bars). One lane playing every bar while the other sprinkles 2 notes per section is a solo with a fly, not a duet. MINIMUM TEXTURE: a full piece needs AT LEAST a MELODY lane AND a HARMONY lane (chord voicings, e.g. [HARMONY epiano vol=72] with C3:maj7/G3:7 tokens — never melody alone). Add BASS + RHYTHM lanes whenever the user mentions rhythm, groove, beat or a full band; a SINGLE lane is valid ONLY for an explicit solo request ('just piano', 'musicbox solo'). Max 8 lanes.
 
-EVENTS (space-separated; '|' = bar line). Each lane plays ONE voice at a time (a chord is one token). Fill EVERY 4-beat bar exactly (w=4 h=2 q=1 e=.5 s=.25, '.' dots), else the piece desyncs. PITCH + DUR [+ DYN] — the duration is NOT optional: a bare 'G5' (no w/h/q/e/s after it) is a bad token; write 'G5 q'.
+EVENTS (space-separated; '|' = bar line). Each lane plays ONE voice at a time (a chord is one token). Fill EVERY 4-beat bar exactly (w=4 h=2 q=1 e=.5 s=.25, '.' dots), else the piece desyncs. PITCH + DUR [+ DYN] — the duration is NOT optional: a bare 'G5' (no w/h/q/e/s after it) is a bad token; write 'G5 q'. A ':beats' number also works ('C4:8' = C4 for 8 beats, 'R:4' = 4 beats rest) — EXCEPT digit chord qualities, which stay chords ('C4:5' is a power chord, 'G2:7' a seventh, never beats). If both appear ('C4:2 w'), the letter wins.
 RHYTHM VOCABULARY — build every melodic bar from these cells (they always sum tastefully; free rhythms must still total exactly 4 beats): q q h | e e q h | q e e q q | h q q | w | e e e e q q | q q q e e. Pick a different cell per bar and per section; two adjacent bars sharing a cell need different pitches or octave shifts.
   note:  C4 q, F#5 e, Bb3 h, A0 w (scientific pitch)
   chord: C:maj A3:min G:7 D:maj7 E:min7 A:sus4 B:dim (opt octave, opt 7th).
@@ -341,4 +366,4 @@ motif, bridge lifts into the second voice's lead, outro resolves to the tonic):
   [RHYTHM]
   RD e R e RD e RD e R e RD e R e | BD e R e SN e R e HH e R e |
 
-✗ ANTI-EXAMPLE (renders broken — never do this): one [MELODY piano] lane for a 'bossa with nice rhythm' ask (no HARMONY, no drums = thin, silent-band); prose chords like 'D minor q' (write 'D3:min7 w' — or the accepted guitar form 'Dm4 w', one token, never a phrase); prose tokens like '(Verse begins)' or bare labels like 'Intro:' / '--- DRONE ---' without a leading '#' (they become bad tokens, desync bars, or kill the render entirely); a 21-bar structure that loses half its notes and ships 32s when ~60s was asked; one 2-bar vamp looped for all 20 bars (monotony); the same melody under all four section labels (that is a motif, not a song — INTRO/VERSE/BRIDGE/OUTRO must each do their job); a 'duet' where MELODY plays every bar and MELODY2 appears twice (lane hogging — see LEAD-SHARING); re-declaring [MELODY]/[HARMONY]/[BASS]/[RHYTHM] under every @section (16 ghost lanes stacking over each other — one header per voice, rests elsewhere); block chords voiced on sax/trumpet/flute (monophonic winds play lines, never chords); bare R used as a separator between chords ('G2:7 R q' is still broken — chord AND rest each need durations: 'G2:7 w R q'; R is a timed event, never punctuation); the literal word ROLE as a header ('[ROLE piano]' — ROLE is a placeholder, write the real role: '[MELODY piano]'); ':velocity' note suffixes ('C3:1 q' — no such syntax exists; write 'C3 q', loud/soft via f/m/p/! or vol=).
+✗ ANTI-EXAMPLE (renders broken — never do this): one [MELODY piano] lane for a 'bossa with nice rhythm' ask (no HARMONY, no drums = thin, silent-band); prose chords like 'D minor q' (write 'D3:min7 w' — or the accepted guitar form 'Dm4 w', one token, never a phrase); prose tokens like '(Verse begins)' or bare labels like 'Intro:' / '--- DRONE ---' without a leading '#' (they become bad tokens, desync bars, or kill the render entirely); a 21-bar structure that loses half its notes and ships 32s when ~60s was asked; one 2-bar vamp looped for all 20 bars (monotony); the same melody under all four section labels (that is a motif, not a song — INTRO/VERSE/BRIDGE/OUTRO must each do their job); a 'duet' where MELODY plays every bar and MELODY2 appears twice (lane hogging — see LEAD-SHARING); re-declaring [MELODY]/[HARMONY]/[BASS]/[RHYTHM] under every @section (16 ghost lanes stacking over each other — one header per voice, rests elsewhere); block chords voiced on sax/trumpet/flute (monophonic winds play lines, never chords); bare R used as a separator between chords ('G2:7 R q' is still broken — chord AND rest each need durations: 'G2:7 w R q'; R is a timed event, never punctuation); the literal word ROLE as a header ('[ROLE piano]' — ROLE is a placeholder, write the real role: '[MELODY piano]').

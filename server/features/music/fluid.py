@@ -98,6 +98,16 @@ def voice_soundfont_map():
                 for p in programs:
                     m[p] = path
                 break
+    # Generic GM-kit drums ("drum" voice, no named kit): MuseScore_General's
+    # kit hits harder (measured crest 12.5 vs GeneralUser's 7.1 on the same
+    # groove) — route there when present. Explicit FLUID_SOUNDFONT_MAP
+    # "drum" below still wins; named kits (tabla/…) are unaffected.
+    if "drum" not in m:
+        for path in sorted(glob.glob(os.path.join(_SF_DIR, "*.sf[23]"))):
+            if fnmatch.fnmatch(os.path.basename(path).lower(),
+                               "musescore_general.sf3"):
+                m["drum"] = path
+                break
     raw = os.environ.get("FLUID_SOUNDFONT_MAP")
     if raw:
         try:

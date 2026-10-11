@@ -654,7 +654,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 ctype, _ = mimetypes.guess_type(fpath)
                 self.send_response(200)
                 self.send_header("Content-Type", ctype or "application/octet-stream")
-                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+                if os.path.basename(fpath) in (
+                    "icon.svg",
+                    "favicon-32.png",
+                    "apple-touch-icon.png",
+                ):
+                    # Favicons must refresh promptly; never immutable (see nginx
+                    # public /ai/icon.* locations — a stale blank icon sticks).
+                    self.send_header("Cache-Control", "public, max-age=3600")
+                else:
+                    self.send_header("Cache-Control", "public, max-age=31536000, immutable")
                 self.end_headers()
                 with open(fpath, "rb") as f:
                     self._safe_write(f.read())

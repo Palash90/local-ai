@@ -385,6 +385,35 @@ server {
         proxy_set_header X-Forwarded-Host $host;
     }
 
+    # Normalize /ai -> /ai/ so relative ./icon.svg etc. never resolve to /icon.svg
+    location = /ai {
+        return 301 /ai/;
+    }
+
+    # Favicons / PWA icons: deliberately NOT behind auth_request (same precedent
+    # as /s/ and /api/public/). Icons are public bytes; putting them behind
+    # auth_request meant a post-SSO fetch racing the fresh session cookie got a
+    # 302 login HTML page instead of image bytes, leaving a blank favicon.
+    # No-cache (not immutable) so a fixed icon is picked up immediately.
+    location = /ai/icon.svg {
+        proxy_pass http://127.0.0.1:3001/icon.svg;
+        proxy_set_header Host $http_host;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "public, max-age=3600";
+    }
+    location = /ai/favicon-32.png {
+        proxy_pass http://127.0.0.1:3001/favicon-32.png;
+        proxy_set_header Host $http_host;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "public, max-age=3600";
+    }
+    location = /ai/apple-touch-icon.png {
+        proxy_pass http://127.0.0.1:3001/apple-touch-icon.png;
+        proxy_set_header Host $http_host;
+        proxy_hide_header Cache-Control;
+        add_header Cache-Control "public, max-age=3600";
+    }
+
     # 1. Polu's AI Assistant
     location /ai/ {
         auth_request /ak-auth-ai;

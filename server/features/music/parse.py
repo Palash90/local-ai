@@ -84,7 +84,24 @@ CHORD_SYM_RE = re.compile(
     re.IGNORECASE)
 DUR_ONLY_RE = re.compile(r"^([whqes]\.?)$", re.IGNORECASE)
 DUR_DYN_RE = re.compile(r"^([whqes]\.?)([fmp!]?)$", re.IGNORECASE)
+# 'C4:16' / 'R:8' — the model reads colon-digits as beats. Accept pure-digit
+# suffixes as beat counts, EXCEPT the all-digit chord qualities (5/56/7/9:
+# 'C4:5' stays a power chord, 'G2:7' a seventh — backward compatible).
+_COLON_BEATS_RE = re.compile(r"^([A-G][#b]?-?\d+|R):(\d+)$", re.IGNORECASE)
+_DIGIT_QUALS = frozenset({"5", "56", "7", "9"})
+# Same beats-dialect for drum bols: 'DHA:4' = DHA for 4 beats. Bols can
+# never be chords, so no quality carve-out is needed here.
+_BOL_BEATS_RE = re.compile(
+    r"^((?:BD|KC|BD1|KICK|SN|SD|RIM|CLAP|ESN|HH|HC|PEDAL|OHH|OH|CH|LT|MT|"
+    r"HT|LFT|HFT|TOM|CR|CY|CR2|CHIN|SPL|RDB|RIDE|RD|RDC|CB|COWB|TAM|VB|AG|"
+    r"AGH|CONG|CGA|CGH|CGO|BOG|BOGL|TBL|TBLL|KA|KE|MAR|CAB|CLV|WBH|WBL|GUI|"
+    r"GUIR|CUIC|TRIG|WHIS|TRI|DHA|DHIN|NA|TIN|GHE|TA|R)):(\d+)$",
+    re.IGNORECASE)
 NOTE_SYM_RE = re.compile(r"^([A-G][#b]?-?\d+|R)$", re.IGNORECASE)
+# Volume shorthand models keep writing instead of vol=NN: 'v8' after a
+# header or in a note line. Single digit scales x10 (v8 -> 80, tracker
+# style); 2-3 digits are literal (v85 -> 85), clamped to 100.
+_VOL_SHORT_RE = re.compile(r"^v(\d{1,3})$", re.IGNORECASE)
 BRACKET_RE = re.compile(r"^\[([^\]]*)\]\s*(.*)$")
 ATTR_RE = re.compile(r"([A-Za-z]+)=(\S+)")
 TEMPO_RE = re.compile(r"^@tempo\s+(\d+)\b", re.IGNORECASE)
@@ -95,12 +112,23 @@ _COMMENT_RE = re.compile(r"\s+#.*$")
 
 def _strip_comment(raw):
     return _COMMENT_RE.sub("", raw)
+
+
+def _vol_short(tok):
+    """'v8' -> 80, 'v85' -> 85, 'v100' -> 100, else None."""
+    m = _VOL_SHORT_RE.match(tok)
+    if not m:
+        return None
+    n = int(m.group(1))
+    return max(0, min(100, n * 10 if n < 10 else n))
 # @section <name> [bars=N] [energy=0..1] [repeat=N]  -> a named block on the
 # shared song-form timeline. Segments tile sequentially from bar 1 across every
 # lane, so a chorus can lift the whole band's dynamics without touching notes.
 SECTION_DEF_RE = re.compile(
     r"^@section\s+([A-Za-z_][\w-]*)\s*(.*)$", re.IGNORECASE)
 SECTION_ATTR_RE = re.compile(r"(\w+)=(\S+)")
+# '@section intro:4, main:12' — name:bars pairs on one line.
+SECTION_COLON_RE = re.compile(r"([A-Za-z_][\w-]*)\s*:\s*(\d+)")
 
 # GM percussion key map for a [DRUMS]/[RHYTHM] lane (channel 9 note numbers).
 # Aliases are kept short + mnemonic so they are easy to write and LLM-legible.
@@ -243,8 +271,36 @@ def _parse_sections(text):
         name = m.group(1).lower()
         # The DSL doc writes the optional arg bracketed ([repeat=2]); strip
         # the brackets so it parses instead of silently defaulting to 1.
+        rest = (m.group(2) or "").strip()
         attrs = {k.lower(): v for k, v in
-                 SECTION_ATTR_RE.findall(m.group(2).replace("[", " ").replace("]", " "))}
+                 SECTION_ATTR_RE.findall(rest.replace("[", " ").replace("]", " "))}
+        # Colon dialect models reach for naturally: '@section intro:4,
+        # main:12' declares BOTH sections on one line (bars after ':').
+        # Same colon-beats convention as notes; pairs win per-line, and
+        # line-level attrs (energy=/repeat=) apply to each pair.
+        _full = (name + " " + rest).strip()
+        _pairs = SECTION_COLON_RE.findall(_full)
+        if _pairs:
+            try:
+                rep = max(1, int(attrs.get("repeat", 1)))
+            except ValueError:
+                rep = 1
+            try:
+                energy = max(0.0, min(1.0, float(attrs.get("energy", 0.7))))
+            except ValueError:
+                energy = 0.7
+            for _pn, _pb in _pairs:
+                try:
+                    nbars = max(1, int(_pb))
+                except ValueError:
+                    nbars = 8
+                for _ in range(rep):
+                    structure.append(
+                        {"name": _pn.lower(), "bars": nbars,
+                         "energy": energy, "start_bar": bar})
+                    for _b in range(nbars):
+                        bar += 1
+            continue
         try:
             nbars = max(1, int(attrs.get("bars", 8)))
         except ValueError:
@@ -356,6 +412,29 @@ def _variation_pass(sections, structure, bar_energy, errors):
                              "start": b * 4 + pos, "dur": 1.0,
                              "vel": _stroke_vel(note, pos)})
             x["events"] = sorted(keep, key=lambda e: e["start"])
+    # Anti-machine-gun: identical bars looped N times read as "dum dum dum".
+    # Dynamics rotation (all drum lanes, like _humanize — rhythm untouched,
+    # so composed grooves stay intact) plus one dropped offbeat per 4th bar
+    # on tiled lanes only (rhythm change is safe there: the bar repeats).
+    for x in sections:
+        if not x.get("drum"):
+            continue
+        for b in range(grid_bars):
+            bevs = [e for e in x["events"]
+                    if _in_bar(e, b) and e["type"] != "rest"]
+            if not bevs:
+                continue
+            _rot = (1.0, 0.88, 0.94, 1.08)[b % 4]
+            for e in bevs:
+                if "vel" in e:
+                    e["vel"] = max(28, min(127, int(e["vel"] * _rot)))
+            if b % 4 == 3 and any(x is r for r in rhy):
+                _off = [e for e in bevs
+                        if abs((e["start"] - b * 4) % 1.0) > 1e-9]
+                if _off and len(bevs) - len(_off) >= 2:
+                    _drop = {id(e) for e in _off[-1:]}
+                    x["events"] = [e for e in x["events"]
+                                   if id(e) not in _drop]
     # Alternate-cycle call/response on repeated melody/harmony bars — but
     # ONLY within the same section: a reprise across sections (verse 1 ->
     # verse 2, bridge returns) is song form and stays whole, while the same
@@ -457,6 +536,9 @@ def parse_score(text, tempo=120):
     structure, bar_energy = _parse_sections(text)
     for lineno, raw in enumerate((text or "").splitlines(), 1):
         line = _strip_comment(raw).strip()
+        # Commas are prose habit, not DSL ('C4 q, E4 q'): drop them so
+        # list-punctuated lanes parse instead of erroring every token.
+        line = line.replace(",", " ")
         if not line or line.startswith("#") or line.startswith("@"):
             continue
         m = BRACKET_RE.match(line)
@@ -469,6 +551,11 @@ def parse_score(text, tempo=120):
             leftovers = []
             for w in words:
                 u = w.upper()
+                _vs = _vol_short(w)
+                if _vs is not None:
+                    if "vol" not in attrs:
+                        attrs["vol"] = str(_vs)
+                    continue
                 if u in DRUM_STYLES:
                     if u != "KIT":
                         kit = u
@@ -540,10 +627,12 @@ def parse_score(text, tempo=120):
                     f"line {lineno}: lane '{label}' has no instrument"
                     " — e.g. [MELODY santoor vol=90]")
             try:
-                default_v = 80 if drum else DEFAULT_VOL.get(program, 100)
+                # Drums sit UNDER the band, not in front of it: default 70
+                # (measured drum-stem RMS ≈ full pitched stack before this).
+                default_v = 70 if drum else DEFAULT_VOL.get(program, 100)
                 vol = max(0, min(100, int(attrs.get("vol", default_v))))
             except ValueError:
-                vol = 80 if drum else DEFAULT_VOL.get(program, 100)
+                vol = 70 if drum else DEFAULT_VOL.get(program, 100)
             cur = {"name": name, "program": 0 if drum else program, "vol": vol,
                    "drum": drum, "kit": kit, "role": role, "instr": instr,
                    "events": [], "cursor": 0.0}
@@ -570,6 +659,10 @@ def parse_score(text, tempo=120):
                 i += 1
                 if not tok:
                     continue
+                _vs = _vol_short(tok)
+                if _vs is not None:
+                    cur["vol"] = _vs
+                    continue
                 # a dynamic may be attached to the pitch (accent "!") OR to the
                 # duration ("q!"); accept "C4! q", "C4 q!", "C4q!".
                 lead_dyn = None
@@ -584,6 +677,65 @@ def parse_score(text, tempo=120):
                     # drop it and let the duration merge below. Glued
                     # 'C4:w' keeps its dedicated error (ambiguous chord?).
                     tok = tok[:-1]
+                _bb = _BOL_BEATS_RE.match(tok)
+                if _bb and cur["drum"]:
+                    if i < len(toks) and DUR_DYN_RE.match(toks[i]):
+                        # 'DHA:4 w': letter wins, bols were never chords.
+                        tok = _bb.group(1)
+                    else:
+                        # Standalone: 'DHA:4' = DHA for 4 beats.
+                        try:
+                            _nbeats = float(_bb.group(2))
+                            if not 0 < _nbeats <= 256:
+                                raise ValueError(
+                                    f"bad beat count {_bb.group(2)!r}")
+                            _hit = _bb.group(1).upper()
+                            if _hit == "R":
+                                cur["events"].append(
+                                    {"type": "rest", "start": cur["cursor"],
+                                     "dur": _nbeats})
+                            else:
+                                _ev = {"type": "note",
+                                       "midi": DRUM_MAP[_hit],
+                                       "start": cur["cursor"], "dur": _nbeats,
+                                       "vel": _stroke_vel(DRUM_MAP[_hit],
+                                                          cur["cursor"])}
+                                if lead_dyn is not None:
+                                    _ev["vel"] = lead_dyn
+                                cur["events"].append(_ev)
+                            cur["cursor"] += _nbeats
+                        except ValueError as e:
+                            errors.append(f"line {lineno}: {e}")
+                        continue
+                _cb = _COLON_BEATS_RE.match(tok)
+                if (_cb and _cb.group(2) not in _DIGIT_QUALS
+                        and i < len(toks) and DUR_DYN_RE.match(toks[i])):
+                    # 'C4:2 w': documented letter-duration wins; the digits
+                    # were octave/velocity noise. Digit qualities ('C4:5 w')
+                    # keep the chord path below — never strip those.
+                    tok = _cb.group(1)
+                elif (_cb and _cb.group(2) not in _DIGIT_QUALS
+                        and (not cur["drum"] or _cb.group(1).upper() == "R")):
+                    # Standalone beats: 'C4:16' = 16 beats, 'R:8' = 8 rests.
+                    try:
+                        _nbeats = float(_cb.group(2))
+                        if not 0 < _nbeats <= 256:
+                            raise ValueError(f"bad beat count {_cb.group(2)!r}")
+                        if _cb.group(1).upper() == "R":
+                            cur["events"].append({"type": "rest",
+                                                  "start": cur["cursor"],
+                                                  "dur": _nbeats})
+                        else:
+                            _ev = {"type": "note",
+                                   "midi": note_to_midi(_cb.group(1)),
+                                   "start": cur["cursor"], "dur": _nbeats}
+                            if lead_dyn is not None:
+                                _ev["vel"] = lead_dyn
+                            cur["events"].append(_ev)
+                        cur["cursor"] += _nbeats
+                    except ValueError as e:
+                        errors.append(f"line {lineno}: {e}")
+                    continue
                 if (CHORD_SYM_RE.match(tok) and i < len(toks)
                         and toks[i].lower() in ARP_FLAGS):
                     tok = tok + toks[i]
@@ -617,6 +769,21 @@ def parse_score(text, tempo=120):
                                                             cur["cursor"])
                                 cur["events"].append(ev)
                             cur["cursor"] += beats
+                            continue
+                        # Merged pitch+duration ('D1q') or bare pitch in a
+                        # drum lane slips past the unmerged pitch guard
+                        # below — refuse here so 'D1 q' rhythms fail loud
+                        # instead of rendering sub-bass mud through the kit
+                        # map (MIDI 26 lands far outside Tabla.sf2's 60-82).
+                        if (TOKEN_RE.match(tok)
+                                or (NOTE_SYM_RE.match(tok)
+                                    and tok.upper() != "R")):
+                            errors.append(
+                                f"line {lineno}: {tok!r} is a pitch but lane "
+                                f"'{cur.get('name')}' is DRUMS — rhythm lanes "
+                                "take hit syllables (DHA GHE NA TIN TA DHIN "
+                                "KA with w/h/q/e/s), e.g. 'DHA q GHE q'; "
+                                "move pitches to a MELODY/HARMONY lane")
                             continue
                     cm = CHORD_RE.match(tok)
                     tm = TOKEN_RE.match(tok)
@@ -698,17 +865,6 @@ def parse_score(text, tempo=120):
                                     f"line {lineno}: {tok!r} missing a duration — "
                                     "every pitch needs w/h/q/e/s (e.g. "
                                     f"'{tok} q')")
-                        elif re.match(r"^[A-G][#b]?-?\d+:\d+!?$",
-                                       tok, re.IGNORECASE):
-                            # Hallucinated :velocity syntax ('C3:1 q') — no
-                            # such thing; the model fixates on this, so name
-                            # the fix explicitly instead of 'bad token'.
-                            errors.append(
-                                f"line {lineno}: {tok!r} uses a :velocity suffix"
-                                " that does not exist — write the pitch with"
-                                f" octave+duration ('{tok.split(':')[0]} q'),"
-                                " loud/soft via f/m/p/! suffix ('C4 q!') or"
-                                " lane mix via vol=NN")
                         elif re.match(r"^([SGMPDN])(\d+!?)$",
                                       tok, re.IGNORECASE):
                             # Swar syllable with an octave but no pitch

@@ -780,6 +780,23 @@ def _event_post(ev_type, task_id, **data):
     M._event_queue.put((ev_type, task_id, data))
 
 
+def _looks_like_thinking_spill(content):
+    """A final 'answer' that is actually leaked internal monologue.
+
+    Signature (observed 2026-10-07, task 718bb0db): the reasoning budget
+    cut thinking off mid-sentence, the model kept going — in the CONTENT
+    channel — so the reply starts mid-sentence (lowercase first char) and
+    is peppered with discourse restart markers no finished answer uses.
+    Both signals required: short lowercase openers ('here's your track')
+    are normal prose and must never trip this."""
+    c = (content or "").strip()
+    if len(c) < 200 or not c[:1].islower():
+        return False
+    markers = sum(c.count(m) for m in
+                  ("Wait,", "Actually,", "Hmm,", "Let me think"))
+    return markers >= 3
+
+
 def _tool_json_fix_note(tools_used):
     """Steering note for a malformed tool-call JSON retry.
 
@@ -790,15 +807,15 @@ def _tool_json_fix_note(tools_used):
     if "generate_music" in (tools_used or []):
         return (
             "Your last tool call was rejected: your score ran past the "
-            "output limit and was cut off mid-string. "
-            "You wrote every bar of every lane — stop. "
-            "Re-emit ONE tool call with a score of at "
-            "most 1100 characters: max 6 lanes, at most "
-            "2 bars of material per lane (sections "
-            "LOOP those bars to the declared length), "
-            "no comments. Example budget: 6 lanes x 2 "
-            "bars x ~12 tokens ≈ 900 chars. Escape all "
-            "newlines as \\n and keep the JSON valid."
+            "output limit and was cut off mid-string "
+            "(~12K chars; llama-server rejects the truncated JSON). "
+            "Do NOT rewrite the score — you reproduced the same overflow "
+            "twice. Call generate_music_arranged instead with genre/mood "
+            "(e.g. genre=indian_classical, mood=calm) plus optional "
+            "fusion/tempo/lead/bars: one small call, arranges server-side, "
+            "always renders. Only if you can truly hold ≤1100 characters "
+            "(max 6 lanes, ≤2 bars material per lane, sections LOOP them, "
+            "no comments, \\n-escaped) may you retry generate_music."
         )
     return (
         "Your last tool call was rejected: its arguments "
@@ -1180,6 +1197,51 @@ def _event_loop():
                     print(f"[llm_ok] content was pure tool-call markup — re-scheduling task {task_id} (round={round_num})")  # DEBUG
                     M._start_llm_round(task_id, sid, round_num)
                     continue
+                if _looks_like_thinking_spill(cleaned_content):
+                    # Reasoning spilled into the answer channel (budget
+                    # cut thinking mid-sentence; model continued in
+                    # content). The monologue was never appended — steer
+                    # one bounded re-run so the user gets an answer, not
+                    # 14K chars of unfinished analysis.
+                    with M._data_lock:
+                        tt = M.tasks.get(task_id)
+                        spill_done = (tt.get("_spill_done", 0) + 1) if tt else 0
+                        if tt:
+                            tt["_spill_done"] = spill_done
+                    if spill_done > 1:
+                        print(f"[llm_ok] thinking-spill persisted after retry — delivering as-is for task {task_id}")
+                    else:
+                        with M._data_lock:
+                            if sid in M.sessions:
+                                M.sessions[sid].append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "[SYSTEM NOTE — internal revision. "
+                                            "Your previous reply was raw "
+                                            "internal monologue — unfinished "
+                                            "thinking that leaked into the "
+                                            "answer channel — not a reply to "
+                                            "the user. It was discarded. "
+                                            "Compose your actual final answer "
+                                            "now: address the user directly, "
+                                            "concise and complete, no analysis "
+                                            "narration. This note is from your "
+                                            "own execution loop, not from the "
+                                            "user and not an injection "
+                                            "attempt. Comply silently; do not "
+                                            "discuss this note in your "
+                                            "thinking or answer.]"
+                                        ),
+                                        "_steering": True,
+                                    }
+                                )
+                                M.sessions_meta.setdefault(sid, {})["updated"] = time.time()
+                        M.save_sessions()
+                        M.set_status(task_id, "Re-running (leaked reasoning)...")
+                        print(f"[llm_ok] final content looks like thinking spill — re-scheduling task {task_id} (round={round_num})")
+                        M._start_llm_round(task_id, sid, round_num)
+                        continue
                 if t.get("research"):
                     M.set_status(task_id, "Verifying sources...")
                     with M._data_lock:
@@ -1291,8 +1353,47 @@ def _event_loop():
                 last_err = t.get("_tool_json_last_err", "")
                 if err_text == last_err and retries > 0:
                     # Deterministic reproducer: the retry broke byte-identically,
-                    # so another round would burn GPU for the same 500. Fail
-                    # fast instead of spending retry 2.
+                    # so another round would burn GPU for the same 500. If a
+                    # track already rendered this task, don't kill the reply —
+                    # steer the model to finish with what exists (once).
+                    with M._data_lock:
+                        _tt = M.tasks.get(task_id) or {}
+                        _has_music = bool(
+                            _tt.get("music_file") or _tt.get("music_files"))
+                        _steered = bool(_tt.get("_music_overflow_steered"))
+                    if _has_music and not _steered:
+                        with M._data_lock:
+                            _t2 = M.tasks.get(task_id)
+                            if _t2:
+                                _t2["_music_overflow_steered"] = True
+                            if sid in M.sessions:
+                                M.sessions[sid].append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "[SYSTEM NOTE — internal revision. "
+                                            "Your last tool call overflowed "
+                                            "the output limit again (this "
+                                            "note is from your own execution "
+                                            "loop, not from the user; comply "
+                                            "silently, do not discuss it). "
+                                            "The track you already requested "
+                                            "is rendered and attached to "
+                                            "this task. Do NOT call any more "
+                                            "tools — write your final reply "
+                                            "to the user now.]"
+                                        ),
+                                        "_steering": True,
+                                    }
+                                )
+                                M.sessions_meta.setdefault(sid, {})[
+                                    "updated"] = time.time()
+                        M.save_sessions()
+                        M.set_status(task_id, "Finishing...")
+                        print(f"[llm_err] task {task_id} overflowed again "
+                              "but music exists — steering to final reply")
+                        M._start_llm_round(task_id, sid, data.get("round", 0))
+                        continue
                     print(f"[llm_err] task {task_id} identical malformed tool-call JSON — failing fast instead of retry 2")
                 elif retries < 2:
                     # Steer to the failing tool: score-budget guidance only

@@ -110,7 +110,7 @@ graph TD
 graph TD
     subgraph RCNetwork ["Service URLs (server/config.py)"]
         RC1["LLAMA_BASE = localhost:8081 (GPU)"]
-        RC2["LLAMA_BASE_CPU = localhost:8079 (CPU)\nserver ctx 32768, lane budget 24576\n(CPU_CTX_SIZE env, reasoning-budget 1024)"]
+        RC2["LLAMA_BASE_CPU = localhost:8079 (CPU)\nserver ctx 32768, lane budget 32768\n(CPU_CTX_SIZE env, reasoning-budget 1024)"]
         RC3["LLAMA_BASE_GUARDRAIL = localhost:8083\n(VERIFY_PORT, gemma E2B, server ctx 16384 p2\n→ lane budget 8192)"]
         RC4["COMFYUI_URL = localhost:8188\nSEARXNG_URL = 127.0.0.1:8080"]
         RC5["HOST = 127.0.0.1 (CHAT_HOST)\nPORT = 3001 · MCP gateway :8000"]
@@ -118,7 +118,7 @@ graph TD
 
     subgraph RCLimits ["Limits and Pools (features/state.py)"]
         RL1["MAX_QUEUE_SIZE = 15 (per lane)"]
-        RL2["MAX_INPUT_TOKENS = 24576\nAUTO_COMPACT_THRESHOLD = 70%"]
+        RL2["MAX_INPUT_TOKENS = 32768 (all chat lanes 32K; guardrail judges stay 8K)\nAUTO_COMPACT_THRESHOLD = 70%"]
         RL3["MAX_TOOL_ROUNDS = default 10 /\nresearch 50 (UI research toggle)"]
         RL4["_llm_pools: gpu 1 / cpu 1 / guardrail 1\n(CPU_PARALLEL_SLOTS = 1)"]
         RL5["_tool_pools: gpu 2 / cpu 2 / guardrail 2"]

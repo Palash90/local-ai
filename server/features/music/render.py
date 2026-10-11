@@ -5,6 +5,11 @@ import os
 
 MUSIC_DIR_DEFAULT = os.path.expanduser("~/local-ai-files/music")
 
+# Hard budget for MODEL-written scores (strict path only): a score bigger
+# than this refused deterministically instead of rendering a 40-minute
+# ramble — prompt guidance alone is probabilistic and models ignore it.
+MAX_MODEL_SCORE_CHARS = 1400
+
 
 def _lane_view(s):
     """Human-facing instrument label for a rendered lane. Intentionally
@@ -46,6 +51,24 @@ def render_score(score_text, tempo=120, title="music", user="local",
 
     tempo = parse_tempo(score_text, tempo)
     sections, errors, structure = parse_score(score_text, tempo)
+    if strict:
+        if not (score_text or "").strip():
+            return json.dumps({
+                "ok": False,
+                "error": "empty score — nothing to render. Write note "
+                         "tokens under at least one [LANE] header, or call "
+                         "generate_music_arranged.",
+                "errors": []})
+        if len(score_text) > MAX_MODEL_SCORE_CHARS:
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    f"score is {len(score_text)} characters — hard budget "
+                    f"is {MAX_MODEL_SCORE_CHARS}. Trim MATERIAL (note "
+                    "lines), never directives or lane headers: write 1-2 "
+                    "bars per lane and let @section loops stretch them, "
+                    "then resubmit the full trimmed score."),
+                "errors": []})
     if strict and errors:
         # Pre-render validation (LLM-written scores only): refuse before
         # FluidSynth so a broken score never becomes a partial "incomplete
@@ -62,6 +85,16 @@ def render_score(score_text, tempo=120, title="music", user="local",
                 "score: " + "; ".join(top)),
             "errors": top})
     n = sum(len(s["events"]) for s in sections)
+    if strict and structure:
+        # Contract: written material lives inside the @section grid.
+        # Notes past the grid are runaway repetition (observed: 595
+        # melody lines against a 16-bar form) — clip so the duration is
+        # the song form, not the model's stamina.
+        _grid_end = sum(sg["bars"] for sg in structure) * 4.0
+        for s in sections:
+            s["events"] = [e for e in s["events"]
+                           if e["start"] < _grid_end]
+        n = sum(len(s["events"]) for s in sections)
     if not sections or n == 0:
         return json.dumps({"ok": False, "error": "no notes parsed",
                            "errors": errors})
